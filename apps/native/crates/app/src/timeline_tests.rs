@@ -112,6 +112,24 @@ pub(crate) fn stage(cx: &mut TestAppContext, layers: usize) -> Stage {
     stage_project(cx, crate::v4_view_tests::project_json(layers))
 }
 pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
+    stage_with(cx, project, false)
+}
+/// The panel in a cached slot, as a dock holds it: a frame that renders no
+/// view replays the panel's last one.
+struct Docked {
+    child: Entity<SurfaceView>,
+}
+impl gpui::Render for Docked {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div().size_full().child(
+            self.child
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let rig = crate::v4_view_tests::rig_project("timeline", &project);
     let first = publication(&rig);
     let natives = Natives::default();
@@ -135,7 +153,20 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
         .borrow_mut()
         .insert("timeline".into(), surface.clone().into());
     let outline = natives.outline.clone();
-    let (view, vcx) = window(cx, &rig, first, natives);
+    let (view, vcx) = if docked {
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let child =
+                cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
+            Docked { child }
+        });
+        let vcx = vcx.clone();
+        vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
+    } else {
+        window(cx, &rig, first, natives)
+    };
     outline.bind(view.downgrade());
     let mut stage = Stage {
         rig,
@@ -1105,6 +1136,47 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
     assert_eq!(selected.len(), 61, "{selected:?}");
     assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
     assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
+}
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render and the written view's
+    // publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 2).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(

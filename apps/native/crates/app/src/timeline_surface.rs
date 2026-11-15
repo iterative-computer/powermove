@@ -302,6 +302,12 @@ pub struct TimelineSurface {
     scene: Option<Arc<Scene>>,
     graph: Option<Arc<Graph>>,
     frame: Option<Arc<Frame>>,
+    /// The rows a viewport past each edge, prepared for the view of the
+    /// `frame` they follow: what the rows' scroll layer records.
+    rows: Option<(Arc<Frame>, Arc<Frame>)>,
+    /// The rows' driven scroll layer (P-SCROLL-LAYER): its offset is the
+    /// vertical scroll, so a wheel step replays the rows drawn shifted.
+    rows_handle: ScrollHandle,
     /// The clip under the pointer and the pointer's x in the panel: its strip
     /// draws hovered, with the trim grip inside the nearer edge.
     hover_clip: Option<(String, f64)>,
@@ -404,6 +410,8 @@ impl TimelineSurface {
             scene: None,
             graph: None,
             frame: None,
+            rows: None,
+            rows_handle: ScrollHandle::new(),
             bounds: Bounds::default(),
             body: Bounds::default(),
             lit: None,
@@ -679,6 +687,10 @@ impl TimelineSurface {
     }
     /// The ruler and the rows: the body less the bottom bar, which a body
     /// too short for both gives up.
+    /// The bottom bar's height under the tracks (none in a panel too short).
+    fn bar_of(body: Bounds<Pixels>, t: &Tokens) -> f32 {
+        f32::from(body.size.height - Self::above_bar(body, t).size.height)
+    }
     fn above_bar(body: Bounds<Pixels>, t: &Tokens) -> Bounds<Pixels> {
         let bar = px(t.metrics.ruler);
         if body.size.height < bar * 4. {
@@ -847,15 +859,64 @@ impl TimelineSurface {
     /// publishes to every panel, so it waits until the gesture rests.
     fn changed_while_hot(&mut self, cx: &mut Context<Self>) {
         self.changed(false, cx);
+        self.persist_when_idle(true, cx);
+    }
+    /// A vertical wheel step: the rows' layer and the outline's replay what
+    /// they drew at the new scroll when they recorded that far (the ruler, the
+    /// bar and the overlays stand still), else the timeline draws again.
+    fn scrolled_while_hot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.step_rows(window, cx) {
+            // The layers draw the view once the steps stop.
+            self.persist_when_idle(false, cx);
+        } else {
+            self.changed_while_hot(cx);
+        }
+    }
+    /// The rows' step with no render: the frame hit-testing reads is
+    /// prepared for the new scroll; the rows drawn stay as recorded. False
+    /// when either layer has to draw (rows past its recording, a gesture or a
+    /// graph on screen, the layer off).
+    fn step_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.gesture, Gesture::Idle)
+            || self.graph_region().is_some()
+            || self.media_over.is_some()
+            || self.effect_over.is_some()
+            || self.tip.is_some()
+        {
+            return false;
+        }
+        let y = self.view.scroll_y as f32;
+        if !window.step_scroll_layer(&self.rows_handle, point(px(0.), px(-y)), cx)
+            || !self.outline.step(y, self.visible_rows(), window, cx)
+        {
+            return false;
+        }
+        self.frame = None;
+        let bounds = self.bounds;
+        self.prepared(bounds, cx);
+        true
+    }
+    /// Writes the view once the gesture rests, drawing it again too unless
+    /// its scroll layers do (`draw`).
+    fn persist_when_idle(&mut self, draw: bool, cx: &mut Context<Self>) {
         self.idle_persist = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(crate::gizmo::NAVIGATION_IDLE)
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.idle_persist = None;
-                s.changed(true, cx);
+                if draw {
+                    s.changed(true, cx);
+                } else {
+                    s.persist(cx);
+                }
             });
         }));
+    }
+    fn persist(&mut self, cx: &mut Context<Self>) {
+        self.queue.retain(|j| !matches!(j, Job::Persist(_)));
+        self.queue.push_back(Job::Persist(self.view));
+        self.pump(cx);
     }
     fn changed(&mut self, persist: bool, cx: &mut Context<Self>) {
         self.frame = None;
@@ -866,9 +927,7 @@ impl TimelineSurface {
             cx,
         );
         if persist {
-            self.queue.retain(|j| !matches!(j, Job::Persist(_)));
-            self.queue.push_back(Job::Persist(self.view));
-            self.pump(cx);
+            self.persist(cx);
         }
         cx.notify();
     }
@@ -1047,9 +1106,6 @@ impl TimelineSurface {
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             let _span = crate::diag::span("timeline.prepare");
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
-            if let Some(frame) = self.frame.clone() {
-                self.ask_painters(&frame, cx);
-            }
             self.tell_service(cx);
         }
         if moved {
@@ -1063,6 +1119,32 @@ impl TimelineSurface {
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
     /// `keySelectionActive`, and each visible row's layer with its top and
     /// bottom in window points (`layerAtPoint`).
+    /// The rows the scroll layer records: a viewport past each edge (none
+    /// under a graph, where the rows do not scroll as a layer), prepared again
+    /// only when the view's frame was. Clip painters are asked for these
+    /// clips, so rows a step brings in arrive decorated.
+    fn rows_frame(&mut self, cx: &mut Context<Self>) -> Option<Arc<Frame>> {
+        let base = self.frame.clone()?;
+        if let Some((of, rows)) = &self.rows
+            && Arc::ptr_eq(of, &base)
+        {
+            return Some(rows.clone());
+        }
+        let reach = if self.graph_region().is_some() {
+            0.
+        } else {
+            (base.viewport.height - self.tokens.metrics.ruler as f64).max(0.)
+        };
+        let rows = self
+            .scene
+            .as_ref()?
+            .prepare_reaching(base.viewport, &self.tokens, reach)
+            .ok()
+            .map(Arc::new)?;
+        self.ask_painters(&rows, cx);
+        self.rows = Some((base, rows.clone()));
+        Some(rows)
+    }
     fn service_facts(&self) -> serde_json::Value {
         use pm_panel_timeline::{RowId, v4::parse_row};
         let b = self.bounds;
@@ -2227,7 +2309,7 @@ impl TimelineSurface {
         self.pump(cx);
         true
     }
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(window.line_height());
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
         let (x, y) = self.local(event.position);
@@ -2267,6 +2349,8 @@ impl TimelineSurface {
         } else {
             self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
             self.clamp_scroll();
+            self.scrolled_while_hot(window, cx);
+            return;
         }
         self.changed_while_hot(cx);
     }
@@ -3242,6 +3326,15 @@ impl Render for TimelineSurface {
         // leaves the frame it prepared here for the clips' accessible elements.
         let shown: Shown = Rc::default();
         let prepared = shown.clone();
+        let ruler = self.tokens.metrics.ruler;
+        let rows_ruler = ruler;
+        let layout_bar = Self::bar_of(self.body, &self.tokens);
+        let fixed_tokens = self.tokens.clone();
+        let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
+        self.rows_handle
+            .set_offset(point(px(0.), px(-(self.view.scroll_y as f32))));
+        let rows_weak = this.clone();
+        let rows_tokens = self.tokens.clone();
         div()
             .id("native-timeline")
             .relative()
@@ -3354,6 +3447,13 @@ impl Render for TimelineSurface {
                         let frame = weak
                             .update(cx, |s, cx| {
                                 s.body = bounds;
+                                if Self::bar_of(bounds, &s.tokens) != layout_bar {
+                                    // The rows' layer stood over another bar.
+                                    let again = cx.entity().downgrade();
+                                    cx.defer(move |cx| {
+                                        let _ = again.update(cx, |_, cx| cx.notify());
+                                    });
+                                }
                                 s.prepared(Self::above_bar(bounds, &s.tokens), cx)
                             })
                             .ok()
@@ -3362,153 +3462,160 @@ impl Render for TimelineSurface {
                         frame
                     },
                     move |bounds, frame, window, cx| {
-                        if let Some(frame) = frame {
-                            // The outline row owns the keyframe toggle; the scene's
-                            // copy would sit stale beneath it.
-                            // Under a graph, the tracks stop at its top: the graph
-                            // gets the plain material with a hairline over it.
-                            let above = region.map(|r| {
-                                Bounds::from_corners(
-                                    bounds.origin,
-                                    point(bounds.right(), bounds.origin.y + px(r.y as f32)),
-                                )
-                            });
-                            let started = crate::diag::enabled().then(std::time::Instant::now);
-                            let cull = Cull::new(bounds.size);
-                            // The skimmer's timecode stands in the ruler: a time
-                            // label it would cut through is left out, not
-                            // half-covered (it is the time under the pointer).
-                            let chip = skimmer.as_ref().map(|(x, code)| {
-                                let m = tokens.metrics;
-                                let run = TextRun {
-                                    len: code.len(),
-                                    font: window.text_style().font(),
-                                    color: rgb_to_hsla(rgba((tokens.colors.text << 8) | 0xff)),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                    letter_spacing: None,
+                        let Some(frame) = frame else {
+                            return;
+                        };
+                        // Under a graph, the tracks stop at its top: the graph
+                        // gets the plain material with a hairline over it.
+                        let above = region.map(|r| {
+                            Bounds::from_corners(
+                                bounds.origin,
+                                point(bounds.right(), bounds.origin.y + px(r.y as f32)),
+                            )
+                        });
+                        // The skimmer's timecode stands in the ruler: a time
+                        // label it would cut through is left out, not
+                        // half-covered (it is the time under the pointer).
+                        let chip = skimmer.as_ref().map(|(x, code)| {
+                            let m = fixed_tokens.metrics;
+                            let run = TextRun {
+                                len: code.len(),
+                                font: window.text_style().font(),
+                                color: rgb_to_hsla(rgba((fixed_tokens.colors.text << 8) | 0xff)),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                                letter_spacing: None,
+                            };
+                            let text = window.text_system().shape_line(
+                                code.clone().into(),
+                                px(fixed_tokens.typography.minimum),
+                                &[run],
+                            );
+                            let left = x + (m.border * 2.) as f64;
+                            let gutter = (m.gap + m.border * 2.) as f64;
+                            (left, left + f32::from(text.width) as f64 + gutter)
+                        });
+                        // The ground and the ruler with its grid; the rows'
+                        // layer draws over them.
+                        let fixed = &frame.ops[..frame.fixed];
+                        let cull = Cull::new(bounds.size);
+                        paint_ops(fixed, bounds.origin, column, above, &cull, chip, &fixed_tokens, window, cx);
+                        // The column's edge through the ruler's band (the
+                        // rows' layer draws the rest of it).
+                        if let Some(edge) = frame.ops.last().filter(|o| o.id == "column-edge") {
+                            let band = Bounds::new(
+                                bounds.origin,
+                                size(bounds.size.width, px(fixed_tokens.metrics.ruler)),
+                            );
+                            window.with_content_mask(
+                                Some(ContentMask {
+                                    bounds: band,
+                                    fade_out: Default::default(),
+                                }),
+                                |w| paint(edge, bounds.origin, &fixed_tokens, w, cx),
+                            );
+                        }
+                    },
+                )
+                .size_full(),
+            )
+            // The rows (strips, keys, lanes, the outline column's fills) in
+            // a layer the wheel moves: a step inside what it recorded
+            // replays it shifted, with no render (P-SCROLL-LAYER).
+            .child(
+                div()
+                    .id("timeline-rows")
+                    .absolute()
+                    .top(px(ruler))
+                    .left_0()
+                    .right_0()
+                    .bottom(px(layout_bar))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.rows_handle)
+                    .scroll_layer_driven()
+                    .child(
+                        canvas(
+                            move |_, _, cx| {
+                                rows_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
+                            },
+                            move |bounds, frame, window, cx| {
+                                let Some(frame) = frame else {
+                                    return;
                                 };
-                                let text = window.text_system().shape_line(
-                                    code.clone().into(),
-                                    px(tokens.typography.minimum),
-                                    &[run],
+                                // The rows were prepared for their view: its
+                                // top is the ruler's above the content's
+                                // scroll.
+                                let v = frame.viewport;
+                                let origin = point(
+                                    bounds.origin.x,
+                                    bounds.origin.y + px(v.scroll_y as f32 - rows_ruler),
                                 );
-                                let left = x + (m.border * 2.) as f64;
-                                let gutter = (m.gap + m.border * 2.) as f64;
-                                (left, left + f32::from(text.width) as f64 + gutter)
-                            });
-                            for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
-                                if cull.skip(op) {
-                                    continue;
-                                }
-                                if let Some((left, right)) = chip
-                                    && op.id.starts_with("time:")
-                                    && op.bounds.x < right
-                                    && op.bounds.x + op.bounds.width > left
-                                {
-                                    // The label is centred in its step: its
-                                    // text, not its box, decides.
-                                    let text = op.text.clone().unwrap_or_default();
-                                    let run = TextRun {
-                                        len: text.len(),
-                                        font: window.text_style().font(),
-                                        color: rgb_to_hsla(rgba((tokens.colors.muted << 8) | 0xff)),
-                                        background_color: None,
-                                        underline: None,
-                                        strikethrough: None,
-                                        letter_spacing: None,
-                                    };
-                                    let half = f32::from(
-                                        window
-                                            .text_system()
-                                            .shape_line(text.into(), px(op.font_size as f32), &[run])
-                                            .width,
-                                    ) as f64
-                                        / 2.;
-                                    let centre = op.bounds.x + op.bounds.width / 2.;
-                                    if centre - half < right && centre + half > left {
-                                        continue;
-                                    }
-                                }
-                                // The time grid and the markers' lines run
-                                // on through the graph: it reads the same time.
-                                let through = op.id.starts_with("grid:")
-                                    || op.id.starts_with("marker-guide:");
-                                // A track op (a strip may start before the
-                                // view) is placed by its clip, which starts
-                                // at the layer column.
-                                let left = op.clip.map_or(op.bounds.x, |c| c.x.max(op.bounds.x));
-                                match above.filter(|_| !through) {
-                                    // Wholly under the graph: not painted.
-                                    Some(mask)
-                                        if left >= column - 1.
-                                            && bounds.origin.y + px(op.bounds.y as f32)
-                                                >= mask.bottom() => {}
-                                    Some(mask) if left >= column - 1. => window
-                                        .with_content_mask(
-                                            Some(ContentMask {
-                                                bounds: mask,
-                                                fade_out: Default::default(),
-                                            }),
-                                            |w| paint(op, bounds.origin, &tokens, w, cx),
-                                        ),
-                                    _ => paint(op, bounds.origin, &tokens, window, cx),
-                                }
-                            }
-                            if let Some(started) = started {
-                                let ms = started.elapsed().as_secs_f64() * 1000.;
-                                if ms < 4. {
-                                    // Every paint is counted: none may run
-                                    // on a playback tick.
-                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":frame.ops.len()}));
-                                } else {
-                                    let keys = frame.ops.iter().filter(|o| o.shape.starts_with("diamond") || o.shape == "keyframe.hold").count();
-                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":frame.ops.len(),"keys":keys,"h":f32::from(bounds.size.height),
-                                        "visible":frame.ops.iter().filter(|o| o.bounds.y < f64::from(f32::from(bounds.size.height)) && o.bounds.y + o.bounds.height > 0. && o.bounds.x < f64::from(f32::from(bounds.size.width)) && o.bounds.x + o.bounds.width > 0.).count()}));
-                                }
-                            }
-                            if let Some(r) = region {
-                                let (edge, alpha) = tokens.line();
-                                window.paint_quad(
-                                    PaintQuad::new(Bounds::new(
-                                        bounds.origin + point(px(r.x as f32), px(r.y as f32)),
-                                        size(px(r.width as f32), px(tokens.metrics.border)),
-                                    ))
-                                    .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
-                                );
-                            }
-                            if let Some((id, x)) = &hover_clip
-                                && let Some(op) = frame
-                                    .ops
-                                    .iter()
-                                    .find(|o| o.id.strip_prefix("clip:") == Some(id.as_str()))
-                            {
-                                // Its rim and grip stay inside the tracks (a strip
-                                // may run on out of view) and above a graph.
-                                let clip = op.clip.map(|c| {
-                                    Bounds::new(
-                                        bounds.origin + point(px(c.x as f32), px(c.y as f32)),
-                                        size(px(c.width as f32), px(c.height as f32)),
+                                let above = region.map(|r| {
+                                    Bounds::from_corners(
+                                        origin,
+                                        point(origin.x + px(v.width as f32), origin.y + px(r.y as f32)),
                                     )
                                 });
-                                let mask = match (clip, above) {
-                                    (Some(c), Some(a)) => Some(c.intersect(&a)),
-                                    (c, a) => c.or(a),
-                                };
-                                window.with_content_mask(
-                                    mask.map(|bounds| ContentMask {
-                                        bounds,
-                                        fade_out: Default::default(),
-                                    }),
-                                    |w| strip_hover(op, *x, bounds.origin, &tokens, w),
-                                );
-                            }
-                            for op in
-                                pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
-                            {
-                                paint(&op, bounds.origin, &tokens, window, cx);
-                            }
+                                let started = crate::diag::enabled().then(std::time::Instant::now);
+                                let cull = Cull::reaching(v.width, v.height, v.height);
+                                let ops = &frame.ops[frame.fixed..];
+                                paint_ops(ops, origin, column, above, &cull, None, &rows_tokens, window, cx);
+                                if let Some(started) = started {
+                                    let ms = started.elapsed().as_secs_f64() * 1000.;
+                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":ops.len()}));
+                                }
+                                if let Some((id, x)) = &hover_clip
+                                    && let Some(op) = frame
+                                        .ops
+                                        .iter()
+                                        .find(|o| o.id.strip_prefix("clip:") == Some(id.as_str()))
+                                {
+                                    // Its rim and grip stay inside the tracks (a strip
+                                    // may run on out of view) and above a graph.
+                                    let clip = op.clip.map(|c| {
+                                        Bounds::new(
+                                            origin + point(px(c.x as f32), px(c.y as f32)),
+                                            size(px(c.width as f32), px(c.height as f32)),
+                                        )
+                                    });
+                                    let mask = match (clip, above) {
+                                        (Some(c), Some(a)) => Some(c.intersect(&a)),
+                                        (c, a) => c.or(a),
+                                    };
+                                    window.with_content_mask(
+                                        mask.map(|bounds| ContentMask {
+                                            bounds,
+                                            fade_out: Default::default(),
+                                        }),
+                                        |w| strip_hover(op, *x, origin, &rows_tokens, w),
+                                    );
+                                }
+                                for op in
+                                    pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
+                                {
+                                    paint(&op, origin, &rows_tokens, window, cx);
+                                }
+                            },
+                        )
+                        .w_full()
+                        .h(px(content)),
+                    ),
+            )
+            // The graph, the bottom bar and the marquee, over the rows.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        if let Some(r) = region {
+                            let (edge, alpha) = tokens.line();
+                            window.paint_quad(
+                                PaintQuad::new(Bounds::new(
+                                    bounds.origin + point(px(r.x as f32), px(r.y as f32)),
+                                    size(px(r.width as f32), px(tokens.metrics.border)),
+                                ))
+                                .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
+                            );
                         }
                         for op in graph.iter().flatten() {
                             paint(op, bounds.origin, &tokens, window, cx);
@@ -3570,6 +3677,9 @@ impl Render for TimelineSurface {
                         });
                     },
                 )
+                .absolute()
+                .top_0()
+                .left_0()
                 .size_full(),
             )
             // Over the canvas.
@@ -3725,6 +3835,81 @@ fn follow_page(x: f64, width: f64) -> Option<f64> {
         None
     }
 }
+/// Ops as the timeline's canvas paints them: the keyframe toggles are left
+/// to the outline rows, a ruler label the skimmer's timecode (`chip`, its
+/// span) would cut through is left out, and under a graph a track op is
+/// masked to the tracks `above` it.
+#[allow(clippy::too_many_arguments)]
+fn paint_ops(
+    ops: &[Op],
+    origin: Point<Pixels>,
+    column: f64,
+    above: Option<Bounds<Pixels>>,
+    cull: &Cull,
+    chip: Option<(f64, f64)>,
+    tokens: &Tokens,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for op in ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
+        if cull.skip(op) {
+            continue;
+        }
+        if let Some((left, right)) = chip
+            && op.id.starts_with("time:")
+            && op.bounds.x < right
+            && op.bounds.x + op.bounds.width > left
+        {
+            // The label is centred in its step: its
+            // text, not its box, decides.
+            let text = op.text.clone().unwrap_or_default();
+            let run = TextRun {
+                len: text.len(),
+                font: window.text_style().font(),
+                color: rgb_to_hsla(rgba((tokens.colors.muted << 8) | 0xff)),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+                letter_spacing: None,
+            };
+            let half = f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.into(), px(op.font_size as f32), &[run])
+                    .width,
+            ) as f64
+                / 2.;
+            let centre = op.bounds.x + op.bounds.width / 2.;
+            if centre - half < right && centre + half > left {
+                continue;
+            }
+        }
+        // The time grid and the markers' lines run
+        // on through the graph: it reads the same time.
+        let through = op.id.starts_with("grid:")
+            || op.id.starts_with("marker-guide:");
+        // A track op (a strip may start before the
+        // view) is placed by its clip, which starts
+        // at the layer column.
+        let left = op.clip.map_or(op.bounds.x, |c| c.x.max(op.bounds.x));
+        match above.filter(|_| !through) {
+            // Wholly under the graph: not painted.
+            Some(mask)
+                if left >= column - 1.
+                    && origin.y + px(op.bounds.y as f32)
+                        >= mask.bottom() => {}
+            Some(mask) if left >= column - 1. => window
+                .with_content_mask(
+                    Some(ContentMask {
+                        bounds: mask,
+                        fade_out: Default::default(),
+                    }),
+                    |w| paint(op, origin, tokens, w, cx),
+                ),
+            _ => paint(op, origin, tokens, window, cx),
+        }
+    }
+}
 /// What the timeline's paint can leave out without changing a pixel: ops
 /// wholly off the canvas, and keyframe glyphs the scene marked covered by an
 /// identical one on the same device pixel (`Op::covered`). Dense keys (a
@@ -3732,13 +3917,21 @@ fn follow_page(x: f64, width: f64) -> Option<f64> {
 /// a few hundred columns. Hit-testing keeps every op.
 struct Cull {
     width: f64,
-    height: f64,
+    top: f64,
+    bottom: f64,
 }
 impl Cull {
     fn new(size: Size<Pixels>) -> Self {
+        let (width, height) = (f64::from(f32::from(size.width)), f64::from(f32::from(size.height)));
+        Self::reaching(width, height, 0.)
+    }
+    /// The canvas and `reach` above and below it (rows a scroll layer
+    /// records past its edges).
+    fn reaching(width: f64, height: f64, reach: f64) -> Self {
         Self {
-            width: f64::from(f32::from(size.width)),
-            height: f64::from(f32::from(size.height)),
+            width,
+            top: -reach,
+            bottom: height + reach,
         }
     }
     fn skip(&self, op: &Op) -> bool {
@@ -3747,9 +3940,9 @@ impl Cull {
         let b = op.bounds;
         op.covered
             || b.x >= self.width + MARGIN
-            || b.y >= self.height + MARGIN
+            || b.y >= self.bottom + MARGIN
             || b.x + b.width <= -MARGIN
-            || b.y + b.height <= -MARGIN
+            || b.y + b.height <= self.top - MARGIN
     }
 }
 /// A strip's rim (pm-design `Strip`): a ring of light inside the edge,

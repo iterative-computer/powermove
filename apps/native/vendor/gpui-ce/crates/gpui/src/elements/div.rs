@@ -1866,6 +1866,18 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// A [`Self::scroll_layer`] whose offset its owner moves (a panel that
+    /// scrolls itself and draws parts of it elsewhere): it handles no wheel
+    /// of its own, the owner sets the offset on the tracked handle and steps
+    /// it with [`crate::Window::step_scroll_layer`], and it is recorded on
+    /// every draw (it never rests: the owner's other redraws would keep it
+    /// resting when the wheel starts).
+    fn scroll_layer_driven(mut self) -> Self {
+        self.interactivity().scroll_layer = true;
+        self.interactivity().scroll_layer_driven = true;
+        self
+    }
+
     /// Set the overflow x and y to scroll.
     fn overflow_scroll(mut self) -> Self {
         self.interactivity().base_style.overflow.x = Some(Overflow::Scroll);
@@ -2636,6 +2648,7 @@ impl Element for Div {
         }
 
         let layer_cell = self.interactivity.scroll_layer_cell();
+        let driven = self.interactivity.scroll_layer_driven;
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2682,7 +2695,7 @@ impl Element for Div {
                         let layer = scroll_layer_reach(layer_cell, style, bounds);
                         window.with_element_offset(scroll_offset, |window| {
                             let layer = layer.and_then(|(offset, reach)| {
-                                window.begin_scroll_layer(&offset, reach)
+                                window.begin_scroll_layer(&offset, reach, driven)
                             });
                             if let Some(inline) = request_layout.standalone_inline_mut() {
                                 inline.record_paragraph_origins(window);
@@ -2870,6 +2883,8 @@ pub struct Interactivity {
     /// offset, so a step that only moves it replays the recorded content
     /// shifted (`crate::scroll_layer`).
     pub(crate) scroll_layer: bool,
+    /// Its owner moves the offset (`scroll_layer_driven`).
+    pub(crate) scroll_layer_driven: bool,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
@@ -4176,6 +4191,9 @@ impl Interactivity {
         window: &mut Window,
         _cx: &mut App,
     ) {
+        if self.scroll_layer_driven {
+            return;
+        }
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let ongoing_scroll = self.ongoing_scroll.clone();
             let overflow = style.overflow;
@@ -5282,6 +5300,11 @@ impl ScrollHandle {
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
         state.scroll_to_bottom = true;
+    }
+
+    /// The cell holding the offset (a scroll layer's key).
+    pub(crate) fn offset_cell(&self) -> Rc<RefCell<Point<Pixels>>> {
+        self.0.borrow().offset.clone()
     }
 
     /// Set the offset explicitly. The offset is the distance from the top left of the
