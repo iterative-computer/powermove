@@ -438,6 +438,92 @@ fn cached_panel_does_not_rerender_for_a_parent_frame(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(child.read_with(&vcx, |v, _| v.renders), first + 1);
 }
+/// A wheel step on a panel's scroller (PM-311) moves its rows without the
+/// panel rendering again: the pointer lands on the row drawn under it, a step
+/// past what was recorded renders, and the panel renders once the steps stop.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"style":{"width":100,"height":100}}),
+        &[],
+    );
+    for i in 0..20u64 {
+        ops.extend(node_ops(
+            2 + i,
+            1,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &["pointerdown"],
+        ));
+    }
+    let surface = synthetic(&rig, ops);
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        Slot { child }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let row = |vcx: &mut VisualTestContext, i: u64| bounds(vcx, &format!("row-{i}")).origin.y;
+    let top = row(&mut vcx, 0);
+    let at = point(px(50.), top + px(55.));
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.run_until_parked();
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    wheel(&mut vcx, -30.);
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
+    // 55 + 30 lands in row 4 (80..100) now.
+    events(&view, &mut vcx);
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(events(&view, &mut vcx), vec![(6, "pointerdown".to_owned())]);
+    // Another step, then the steps stop: the panel renders once, its rows
+    // where they were shown.
+    vcx.executor().advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    wheel(&mut vcx, -20.);
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
+    vcx.executor().advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered + 1);
+    assert_eq!(row(&mut vcx, 4), top + px(30.));
+    // A step past what was recorded (one height each way) renders at once.
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    wheel(&mut vcx, -150.);
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered + 1);
+    assert_eq!(row(&mut vcx, 10), top + px(200. - 200.));
+}
+/// A panel in a 100 pt slot, as a dock gives one.
+struct Slot {
+    child: Entity<SurfaceView>,
+}
+impl Render for Slot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(100.)).child(
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().size(px(100.))),
+        )
+    }
+}
 struct Host {
     child: Entity<SurfaceView>,
 }

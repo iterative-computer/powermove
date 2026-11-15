@@ -290,6 +290,8 @@ pub struct NativeControl {
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    /// Where the slot was painted inside a scroll layer, to follow it.
+    layer: Rc<crate::layer_stage::LayerStage>,
 }
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
@@ -693,6 +695,7 @@ impl NativeControl {
             stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
             host_revision: None,
+            layer: Rc::default(),
         }
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
@@ -753,8 +756,13 @@ impl NativeControl {
         };
         v.currentEditor().is_some()
     }
-    pub fn keep(&self) {
-        self.slot.keep();
+    /// Stages the slot again on a frame whose cached paint did not run: as
+    /// last painted, or shifted with the scroll layer it is in.
+    pub fn keep(&self, window: &Window) {
+        match self.layer.kept(window) {
+            Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
+            None => self.slot.keep(),
+        }
     }
     /// A push button's title follows the panel (Export's action names the
     /// chosen format); its width follows the new title.
@@ -869,6 +877,7 @@ impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let focus = self.focus.clone();
+        let layer = self.layer.clone();
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -883,19 +892,9 @@ impl Render for NativeControl {
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    let to_rect = |b: Bounds<Pixels>| {
-                        NSRect::new(
-                            NSPoint::new(
-                                f32::from(b.origin.x) as f64,
-                                f32::from(b.origin.y) as f64,
-                            ),
-                            NSSize::new(
-                                f32::from(b.size.width) as f64,
-                                f32::from(b.size.height) as f64,
-                            ),
-                        )
-                    };
-                    slot.stage(to_rect(bounds), to_rect(window.content_mask().bounds));
+                    let (bounds, clip) =
+                        layer.painted(bounds, window.content_mask().bounds, window);
+                    slot.stage(ns_rect(bounds), ns_rect(clip));
                     if focus.get()
                         && let Some(window) = native.window()
                     {
@@ -1175,4 +1174,14 @@ impl PopupRows {
             let _: () = msg_send![&*self.target, act: &*self.popup];
         }
     }
+}
+/// GPUI top-left points as an AppKit rectangle (the slot flips them).
+pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
+    NSRect::new(
+        NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
+        NSSize::new(
+            f32::from(b.size.width) as f64,
+            f32::from(b.size.height) as f64,
+        ),
+    )
 }
