@@ -40,7 +40,6 @@ pub struct Outline {
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
     surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
-    pub layer_dragged: Cell<bool>,
 }
 impl Outline {
     pub fn bind_surface(&self, surface: WeakEntity<crate::timeline_surface::TimelineSurface>) {
@@ -65,19 +64,8 @@ impl Outline {
     /// A layer name pressed: the surface may lift it into a reorder (the
     /// row still takes the click).
     fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
-        self.layer_dragged.set(false);
         if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
             surface.update(cx, |s, _| s.press_layer_row(layer.into(), at));
-        }
-    }
-    fn move_layer(&self, event: &MouseMoveEvent, window: &mut Window, cx: &mut App) {
-        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
-            surface.update(cx, |s, cx| s.move_layer_row(event, window, cx));
-        }
-    }
-    fn release_layer(&self, cx: &mut App) {
-        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
-            surface.update(cx, |s, cx| s.release_layer_row(cx));
         }
     }
     pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
@@ -166,8 +154,6 @@ struct Capture {
     /// Where the press was: an item that drags lifts once the pointer has
     /// moved past the drag threshold from here.
     origin: Point<Pixels>,
-    /// Native layer reorder owns this captured pointer, including its moves.
-    layer_drag: bool,
 }
 /// A scroller anchored at its end (`metadata.scrollAnchor: "end"`): the
 /// panel hears when the reader scrolls away from the end and back (a
@@ -1980,19 +1966,11 @@ impl SurfaceView {
         }
     }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let layer = self
-            .prepared
-            .node(id)
-            .and_then(|n| n.timeline_layer_drag.clone());
-        if let Some(layer) = &layer {
-            self.natives.outline.press_layer(layer, event.position, cx);
-        }
         let button = button_code(event.button);
         self.capture = Some(Capture {
             target: id,
             button,
             origin: event.position,
-            layer_drag: layer.is_some(),
         });
         let detail = self.detail(
             event.position,
@@ -2313,7 +2291,7 @@ impl SurfaceView {
                     }
                 });
                 let moved = weak.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
@@ -2335,14 +2313,6 @@ impl SurfaceView {
                         let Some(capture) = v.capture else {
                             return;
                         };
-                        // A row reorder is native. Forward its captured moves before
-                        // generic panel capture can consume them; native listener
-                        // ordering may change when a cached surface is repainted.
-                        if capture.layer_drag {
-                            v.natives.outline.move_layer(event, window, cx);
-                            cx.stop_propagation();
-                            return;
-                        }
                         // A press on an item that drags (`onDragStart`) gives
                         // the pointer up past the threshold: the move goes on
                         // to the item, which lifts it (GPUI's drag).
@@ -2424,9 +2394,6 @@ impl SurfaceView {
         let Some(capture) = self.capture.take() else {
             return;
         };
-        if capture.layer_drag {
-            self.natives.outline.release_layer(cx);
-        }
         if self
             .prepared
             .node(capture.target)
@@ -3507,17 +3474,7 @@ impl SurfaceView {
                 )
             );
         if !disabled && (clickable || events.double_click) {
-            let node_layer_drag = node.timeline_layer_drag.is_some();
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
-                // Releasing a reorder back over its header must not also
-                // select/rename it. Esc keeps this suppressed until the next press.
-                if node_layer_drag
-                    && matches!(event, ClickEvent::Mouse(_))
-                    && v.natives.outline.layer_dragged.get()
-                {
-                    cx.stop_propagation();
-                    return;
-                }
                 // A node that only takes double-clicks (a layer's name) leaves
                 // a single click to what it sits in (its row selects).
                 let double = events.double_click && event.click_count() == 2;
@@ -3662,33 +3619,6 @@ impl SurfaceView {
                 cx.new(|_| drag.clone())
             });
         }
-        // A button inside a layer header owns its press as well as its
-        // click. Stopping only the click is too late: the row would already
-        // have armed a reorder while the button was held.
-        let row_control = clickable && node.timeline_layer_drag.is_none() && {
-            let mut parent = node.parent;
-            let mut in_layer = false;
-            while let Some(id) = parent {
-                let Some(ancestor) = self.prepared.node(id) else {
-                    break;
-                };
-                if ancestor.timeline_layer_drag.is_some() {
-                    in_layer = true;
-                    break;
-                }
-                parent = ancestor.parent;
-            }
-            in_layer
-        };
-        if row_control && !events.pointer() && node.timeline_parent_pick.is_none() {
-            element = element.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |v, _: &MouseDownEvent, window, cx| {
-                    v.focus_pressed(id, window, cx);
-                    cx.stop_propagation();
-                }),
-            );
-        }
         if node.number.is_some() {
             element = element
                 .on_scroll_wheel(
@@ -3711,6 +3641,13 @@ impl SurfaceView {
                     cx.stop_propagation();
                 });
         }
+        if let Some(layer) = node.timeline_layer_drag.clone() {
+            let outline = self.natives.outline.clone();
+            element =
+                element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                    outline.press_layer(&layer, event.position, cx)
+                });
+        }
         if let Some((layer, path)) = node.timeline_scrub.clone() {
             let outline = self.natives.outline.clone();
             element = element.cursor_col_resize().on_mouse_down(
@@ -3722,7 +3659,7 @@ impl SurfaceView {
                 },
             );
         }
-        if events.pointer() || node.timeline_layer_drag.is_some() {
+        if events.pointer() {
             element = element.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, event: &MouseDownEvent, window, cx| {
@@ -3732,9 +3669,7 @@ impl SurfaceView {
                         v.focus_pressed(id, window, cx);
                     }
                     v.press(id, event, cx);
-                    if events.pointer() {
-                        cx.stop_propagation();
-                    }
+                    cx.stop_propagation();
                 }),
             );
         }

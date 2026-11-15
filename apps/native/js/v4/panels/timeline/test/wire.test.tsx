@@ -172,10 +172,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     overflow: "hidden",
   });
   expect(switches.props.style).toMatchObject({ flexShrink: 0 });
-  // The whole header is a source; interactive children keep their own pointer handlers.
-  expect(row.props.metadata).toMatchObject({
-    timelineLayerDrag: { layer: "headline" },
-  });
+  // v1: the name is the reorder handle (the native surface lifts it).
   expect(
     byId(root, "timeline:name:layer:headline").props.metadata,
   ).toMatchObject({
@@ -559,52 +556,5 @@ test("effect headings validate without editable controls and static layers hide 
   expect(byId(root, `timeline:disclosure:${staticLayer.id}`)).toBeUndefined();
   expect(byId(root, `timeline:heading:${heading.id}`).props.label).toBe("Blur");
   for (const result of replay(commits)) expect(result.accepted).toBe(true);
-  await root.dispose();
-});
-
-test("reorder sources belong to layer headers and pause during inline rename", async () => {
-  const { root } = recorder();
-  const header = layer();
-  await root.render(
-    <TimelinePanel
-      frame={frame({ window: { total: 1, first: 0, rows: [header] } })}
-      send={() => {}}
-    />,
-  );
-  for (const id of ["disclosure", "parent", "visibility"])
-    expect(
-      (
-        byId(root, `timeline:${id}:${header.id}`).props.metadata as Record<
-          string,
-          unknown
-        >
-      )?.timelineLayerDrag,
-    ).toBeUndefined();
-  await root.render(
-    <TimelinePanel
-      frame={frame({
-        window: {
-          total: 1,
-          first: 0,
-          rows: [
-            {
-              ...header,
-              nameEditor: { value: header.label, binding: "rename" },
-            },
-          ],
-        },
-      })}
-      send={() => {}}
-    />,
-  );
-  expect(
-    (
-      byId(root, `timeline:row:${header.id}`).props.metadata as Record<
-        string,
-        unknown
-      >
-    ).timelineLayerDrag,
-  ).toBeUndefined();
-  expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
   await root.dispose();
 });
