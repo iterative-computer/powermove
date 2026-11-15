@@ -302,3 +302,21 @@ mod anatomy_tests {
         assert!(dots.iter().all(|d| (d.center[1]-58.).abs() <= 1.));
     }
 }
+
+/// Geometry is shared with the actual control's 38–82% track.
+pub fn ink_track(width: f32, fraction: f32, age: f32, reduced: bool) -> [f32; 2] {
+    let inner = (width - 32.).max(0.);
+    let grow = if reduced { 1. } else { ink_ease(age / 0.28) };
+    [16. + inner * 0.38, inner * 0.44 * fraction.clamp(0., 1.) * grow]
+}
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+    #[test]
+    fn ink_ends_at_the_value_fraction_inside_the_control_track() {
+        let [x, w] = ink_track(300., 0.5, 0.28, false);
+        assert!((x - 117.84).abs() < 0.001);
+        assert!((w - 58.96).abs() < 0.001);
+        assert_eq!(ink_track(300., 0.5, 0., true), ink_track(300., 0.5, 0.28, true));
+    }
+}

@@ -88,6 +88,7 @@ fn build_surface(
     rect: pm_shell::layout::Rect,
     t: &pm_design::Tokens,
     playing: bool,
+    fraction: f32,
     _window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
@@ -98,7 +99,7 @@ fn build_surface(
     }).detach();
     let age = state.started.elapsed().as_secs_f32();
     let elapsed = state.changed.elapsed().as_secs_f32();
-    build_frame(state, rect, t, playing, age, elapsed)
+    build_frame(state, rect, t, playing, age, elapsed, fraction)
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
@@ -109,6 +110,7 @@ fn build_frame(
     playing: bool,
     age: f32,
     elapsed: f32,
+    fraction: f32,
 ) -> AnyElement {
     let light = t.scheme == pm_design::Scheme::Light;
     let reduced = t.accessibility.reduce_motion;
@@ -155,9 +157,10 @@ fn build_frame(
                     }
                 }
                 if state.stage == panel_build::Stage::Ink {
-                    let progress = if reduced { 1. } else { panel_build::ink_ease(elapsed / 0.28) };
+                    let [x, width] = panel_build::ink_track(size[0], fraction, elapsed, reduced);
                     let color = panel_build::ink_color(elapsed, light, reduced);
-                    paint(12., (y-3.).max(0.), (size[0]-24.).max(0.)*progress, 6., 3., color, dim * panel_build::reveal(elapsed, reduced));
+                    let alpha = dim * (1. - panel_build::fade(elapsed - 0.58, 0.3));
+                    paint(x, y-1., width, 2., 1., color, alpha);
                 }
             });
         }).w_full().h_full()).into_any_element()
@@ -787,7 +790,11 @@ fn render(
     let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
     let build = v.panel_builds.get(id).cloned();
     let overlay = build.as_ref().filter(|b| b.stage != panel_build::Stage::Ready || b.changed.elapsed().as_secs_f32() < 0.36)
-        .map(|b| build_surface(b.clone(), rect, &t, v.running(), window, cx));
+        .map(|b| {
+            let control = &def["controls"][b.row];
+            let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
+            build_surface(b.clone(), rect, &t, v.running(), control_fraction(control, &current), window, cx)
+        });
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -1359,7 +1366,7 @@ mod panel_build_capture {
                 body = body.child(slider_control(control, &control["def"], &self.tokens)
                     .opacity(control_opacity(Some(&self.state), index, self.tokens.accessibility.reduce_motion)));
             }
-            body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed))
+            body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed, super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"])))
 
         }
     }
