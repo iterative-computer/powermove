@@ -25,7 +25,7 @@ pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["system"] }
-gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture"] }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture", "headless-support"] }
 metal = "0.33"
 foreign-types = "0.5"
 objc2 = "0.6"
@@ -119,8 +119,8 @@ path = "../../../../engine/crates/pm-render"
 [dev-dependencies.pm-kernel]
 path = "../kernel"
 features = ["fault-injection"]
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["headless-support"] }
 gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
 
 # The exact pure composer-focus test also runs from the app workspace.

@@ -76,6 +76,7 @@ mod panel_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod project_capture_tests;
 mod panel_library;
+mod panel_library_preview;
 mod ghost;
 mod panels;
 #[cfg(test)]

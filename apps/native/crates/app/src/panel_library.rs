@@ -203,7 +203,7 @@ fn pack_rows(widths: &[f32], width: f32, gap: f32) -> Vec<Vec<usize>> {
     }
     rows
 }
-fn panel_size(id: &str) -> (f32, f32) {
+pub(super) fn panel_size(id: &str) -> (f32, f32) {
     match id {
         "timeline" => (960., 360.),
         "inspector" | "layer-effects" => (320., 600.),
@@ -223,10 +223,185 @@ pub struct PanelLibrary {
     motion: pm_shell::motion::Motion<u64>,
     focus: std::collections::HashMap<String, FocusHandle>,
     focused: Option<String>,
+    scroll: ScrollHandle,
+    packing: std::cell::RefCell<std::collections::HashMap<String, Vec<Vec<usize>>>>,
+    previews: std::collections::HashMap<String, std::sync::Arc<Image>>,
+    preview_stamp: Vec<(String, u64)>,
+    preview_task: Option<Task<()>>,
+    preview_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     fixture: Option<(Vec<PanelCard>, Vec<WorkspaceCard>)>,
 }
 impl PanelLibrary {
+    // Geometry is independent of scroll position. Keep the small packed-row
+    // model until width/data changes, rather than repacking on every wheel frame.
+    fn rows(&self, widths: &[f32], width: f32) -> Vec<Vec<usize>> {
+        let key = format!("{width}:{widths:?}");
+        let mut cache = self.packing.borrow_mut();
+        if !cache.contains_key(&key) {
+            if cache.len() >= 8 {
+                cache.clear();
+            }
+            cache.insert(key.clone(), pack_rows(widths, width, 16.));
+        }
+        cache[&key].clone()
+    }
+    fn refresh_previews(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        let e = editor.read(cx);
+        let mut stamp: Vec<_> = e
+            .builtins
+            .views
+            .iter()
+            .map(|(id, view)| {
+                (
+                    format!("{id}@{}", view.read(cx).publication.generation),
+                    view.read(cx).shown(),
+                )
+            })
+            .collect();
+        if let Some(p) = &e.published {
+            stamp.push((format!("document-{}", p.snapshot.doc_id), p.revision()));
+        }
+        if self.preview_task.is_some() && stamp == self.preview_stamp {
+            return;
+        }
+        self.preview_stamp = stamp;
+        let (panels, _) = cards(e, None);
+        let kernel = e.kernel.clone();
+        let project = e.session.as_ref().map(|s| s.project.clone());
+        let dir = crate::media::cache_root(&e.profile).join("panel-covers-v1");
+        let tokens = self.tokens.clone();
+        self.preview_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.preview_cancel = Default::default();
+        let cancel = self.preview_cancel.clone();
+        let publications = e
+            .builtins
+            .views
+            .iter()
+            .map(|(id, view)| (id.clone(), view.read(cx).publication.clone()))
+            .collect();
+        let web: Vec<_> = panels
+            .iter()
+            .filter_map(|card| {
+                let page = e.extensions.page_of(&card.id)?;
+                let host = e.host.borrow();
+                let bodies = host.native_panels.borrow();
+                let (_, body) = bodies.iter().find(|(id, _)| id == &card.id)?;
+                let ticket = page
+                    .borrow()
+                    .capture_rect_png(pm_compat_host::Rect::new(
+                        body.x as f64,
+                        body.y as f64,
+                        body.w as f64,
+                        body.h as f64,
+                    ))
+                    .ok()?;
+                Some((card.id.clone(), ticket))
+            })
+            .collect();
+        let visible_bodies: Vec<_> = self
+            .shell
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map(|shell| {
+                e.builtins
+                    .views
+                    .keys()
+                    .filter_map(|id| {
+                        let mut body = shell.read(cx).panel_rect(id)?;
+                        body.y += self.tokens.metrics.header;
+                        body.h = (body.h - self.tokens.metrics.header).max(0.);
+                        Some((id.clone(), body))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source_window = e
+            .builtins
+            .views
+            .iter()
+            .find(|(id, _)| id.as_str() != "agent")
+            .map(|(_, view)| view.read(cx).library_window());
+        let drawn = source_window.and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    let frame = window.render_to_image().ok()?;
+                    let (w, h) = (frame.width(), frame.height());
+                    Some((frame.into_raw(), w, h, window.scale_factor()))
+                })
+                .ok()
+                .flatten()
+        });
+        let panels = if drawn.is_some() {
+            panels
+                .into_iter()
+                .filter(|card| !visible_bodies.iter().any(|(id, _)| id == &card.id))
+                .collect()
+        } else {
+            panels
+        };
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            let images = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut images = crate::panel_library_preview::capture(
+                        kernel,
+                        project,
+                        panels,
+                        publications,
+                        tokens,
+                        dir,
+                        cancel.clone(),
+                    );
+                    if let Some((frame, w, h, scale)) = drawn {
+                        for (id, rect) in visible_bodies {
+                            if let Some(png) = crate::panel_library_preview::crop_drawn(
+                                &id, &frame, w, h, scale, rect,
+                            ) {
+                                images.insert(id, png);
+                            }
+                        }
+                    }
+                    for (id, ticket) in web {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        while !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            && std::time::Instant::now() < deadline
+                        {
+                            if let Some(result) = ticket.try_take() {
+                                if let Ok(png) = result {
+                                    if let Some(png) =
+                                        crate::panel_library_preview::fit_web(&id, png)
+                                    {
+                                        images.insert(id, png);
+                                    }
+                                }
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                    images
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.previews = images
+                    .into_iter()
+                    .map(|(id, png)| {
+                        (
+                            id,
+                            std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, png)),
+                        )
+                    })
+                    .collect();
+                cx.notify();
+            });
+        }));
+    }
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
         &mut self.motion
     }
@@ -235,6 +410,7 @@ impl PanelLibrary {
             kit::key("library-page-fade"),
             pm_design::motion::Animated::unit(0.),
         );
+        self.scroll.set_offset(point(px(0.), px(0.)));
         self.page = page;
         self.query.clear();
         if let Some(search) = &self.search {
@@ -427,6 +603,28 @@ impl PanelLibrary {
                     })
                     .child(card.title.clone()),
             )
+            .children(self.previews.get(&card.id).map(|image| {
+                let fade = if t.accessibility.reduce_motion {
+                    1.
+                } else {
+                    kit.animate(
+                        kit::key(&format!("preview-{}", card.id)),
+                        1.,
+                        Some(pm_design::motion::Preset::Show),
+                    )
+                };
+                div()
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .corner(t, t.radius.lg)
+                    .child(
+                        img(ImageSource::Image(image.clone()))
+                            .size_full()
+                            .object_fit(ObjectFit::Fill)
+                            .opacity(fade),
+                    )
+            }))
             .child(
                 div()
                     .absolute()
@@ -686,8 +884,15 @@ impl PanelLibrary {
             .into_any_element()
     }
 }
+impl Drop for PanelLibrary {
+    fn drop(&mut self) {
+        self.preview_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 impl Render for PanelLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_previews(cx);
         self.motion.frame(window);
         let t = self.tokens.clone();
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
@@ -803,10 +1008,13 @@ impl Render for PanelLibrary {
             )
             .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
         );
-        let width = (f32::from(window.viewport_size().width) - m.settings_sidebar - 48.).max(200.);
+        let width =
+            (f32::from(window.viewport_size().width) - m.settings_sidebar - 2. * (m.inset + m.gap))
+                .max(200.);
         let scale = shelf_scale(width);
         let mut shelf = div()
             .id("library-shelf")
+            .flex_none()
             .role(Role::List)
             .aria_label(self.page.title())
             .flex()
@@ -823,7 +1031,7 @@ impl Render for PanelLibrary {
                     if books.is_empty() && source != Origin::Store {
                         continue;
                     }
-                    let mut section = div().flex().flex_col().gap(px(12.));
+                    let mut section = div().flex_none().flex().flex_col().gap(px(12.));
                     if origin.is_none() {
                         section = section.child(
                             div()
@@ -842,10 +1050,15 @@ impl Render for PanelLibrary {
                     if source == Origin::Store && self.query.trim().is_empty() {
                         widths.push(180.);
                     }
-                    for row in pack_rows(&widths, width, 16.) {
+                    for row in self.rows(&widths, width) {
                         section = section.child(
-                            div().flex().items_end().gap(px(16.)).mb(px(24.)).children(
-                                row.into_iter().map(|i| {
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_end()
+                                .gap(px(16.))
+                                .mb(px(24.))
+                                .children(row.into_iter().map(|i| {
                                     if i < books.len() {
                                         self.panel_card(books[i], &kit, scale, width, cx)
                                     } else {
@@ -879,8 +1092,7 @@ impl Render for PanelLibrary {
                                             .child(div().h(px(42.)))
                                             .into_any_element()
                                     }
-                                }),
-                            ),
+                                })),
                         );
                     }
                     shelf = shelf.child(section);
@@ -890,9 +1102,9 @@ impl Render for PanelLibrary {
             Page::Workspaces(builtin) => {
                 let shown = shown_workspaces(&workspaces, builtin, &self.query);
                 let widths = vec![cover_size((400., 250.), scale, width).0; shown.len()];
-                for row in pack_rows(&widths, width, 16.) {
+                for row in self.rows(&widths, width) {
                     shelf = shelf.child(
-                        div().flex().items_end().gap(px(16.)).children(
+                        div().flex_none().flex().items_end().gap(px(16.)).children(
                             row.into_iter()
                                 .map(|i| self.workspace_card(&shown[i], &kit, scale, width, cx)),
                         ),
@@ -971,8 +1183,10 @@ impl Render for PanelLibrary {
         } else {
             div()
                 .id("library-body")
+                .min_h(px(0.))
                 .flex_1()
                 .overflow_y_scroll()
+                .track_scroll(&self.scroll)
                 .px(px(m.inset + m.gap))
                 .pb(px(m.inset))
                 .opacity(fade)
@@ -1160,6 +1374,16 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 if let Some(shell) = &shell {
                     cx.observe(shell, |_, _, cx| cx.notify()).detach();
                 }
+                for view in editor
+                    .read(cx)
+                    .builtins
+                    .views
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    cx.observe(&view, |_, _, cx| cx.notify()).detach();
+                }
                 let search = cx.new(|cx| {
                     let mut field = pm_shell::text::TextField::new(
                         pm_shell::text::TextKind::Primary,
@@ -1194,6 +1418,12 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     motion: Default::default(),
                     focus: Default::default(),
                     focused: None,
+                    scroll: ScrollHandle::new(),
+                    packing: Default::default(),
+                    previews: Default::default(),
+                    preview_stamp: Default::default(),
+                    preview_task: None,
+                    preview_cancel: Default::default(),
                     #[cfg(test)]
                     fixture: None,
                 }
@@ -1373,6 +1603,12 @@ mod capture_tests {
                                 motion: Default::default(),
                                 focus: Default::default(),
                                 focused: None,
+                                scroll: ScrollHandle::new(),
+                                packing: Default::default(),
+                                previews: Default::default(),
+                                preview_stamp: Default::default(),
+                                preview_task: None,
+                                preview_cancel: Default::default(),
                                 fixture: Some((cards, workspaces)),
                             })
                         })
@@ -1385,6 +1621,54 @@ mod capture_tests {
                         .unwrap()
                         .save(format!("{dir}/after-{name}-{}x{}.png", w as u32, h as u32))
                         .unwrap();
+                    // Capture real accepted panel surfaces through the same
+                    // production headless path, using a synthetic document.
+                    if w == 900. && name == "dark" {
+                        let rig = crate::v4_view_tests::rig("timeline", 8);
+                        let cards = super::panel_cards(
+                            &pm_shell::layout::Panels::new(Vec::new()),
+                            &[],
+                            |_| false,
+                        );
+                        let images = crate::panel_library_preview::capture(
+                            rig.kernel.clone(),
+                            Some(crate::v4_view_tests::PROJECT.into()),
+                            cards,
+                            Default::default(),
+                            pm_design::Tokens::new(scheme, Default::default()),
+                            std::path::PathBuf::from(&dir).join("fixture-cache"),
+                            Default::default(),
+                        );
+                        assert!(
+                            images.contains_key("timeline"),
+                            "real timeline cover must load"
+                        );
+                        window
+                            .update(&mut cx, |view, _, cx| {
+                                view.previews = images
+                                    .into_iter()
+                                    .map(|(id, png)| {
+                                        (
+                                            id,
+                                            std::sync::Arc::new(gpui::Image::from_bytes(
+                                                gpui::ImageFormat::Png,
+                                                png,
+                                            )),
+                                        )
+                                    })
+                                    .collect();
+                                cx.notify();
+                            })
+                            .unwrap();
+                        for _ in 0..20 {
+                            cx.run_until_parked();
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        cx.capture_screenshot(window.into())
+                            .unwrap()
+                            .save(format!("{dir}/with-previews-dark-900x600.png"))
+                            .unwrap();
+                    }
                     window
                         .update(&mut cx, |view, _, cx| {
                             view.set_page(super::Page::Workspaces(None), cx)
@@ -1404,5 +1688,141 @@ mod capture_tests {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scrolling_tests {
+    use super::*;
+    fn fixture(cx: &mut Context<PanelLibrary>) -> PanelLibrary {
+        let panels = (0..29)
+            .map(|i| PanelCard {
+                id: format!("panel-{i}"),
+                title: format!("Panel {i}"),
+                origin: Origin::BuiltIn,
+                open: false,
+            })
+            .collect();
+        let workspaces = (0..46)
+            .map(|i| WorkspaceCard {
+                id: format!("workspace-{i}"),
+                name: format!("Workspace {i}"),
+                builtin: true,
+                panels: 4,
+                active: i == 0,
+            })
+            .collect();
+        let _ = cx;
+        PanelLibrary {
+            editor: None,
+            shell: None,
+            page: Page::Panels(None),
+            query: String::new(),
+            search: None,
+            tokens: pm_design::Tokens::new(
+                pm_design::Scheme::Dark,
+                pm_design::Accessibility {
+                    reduce_motion: true,
+                    ..Default::default()
+                },
+            ),
+            motion: Default::default(),
+            focus: Default::default(),
+            focused: None,
+            scroll: ScrollHandle::new(),
+            packing: Default::default(),
+            previews: Default::default(),
+            preview_stamp: Default::default(),
+            preview_task: None,
+            preview_cancel: Default::default(),
+            fixture: Some((panels, workspaces)),
+        }
+    }
+    #[gpui::test]
+    fn library_scroll_wheel_trackpad_momentum_clamping_and_sidebar(cx: &mut TestAppContext) {
+        let (view, vcx) = cx.add_window_view(|_, cx| fixture(cx));
+        let mut vcx = vcx.clone();
+        vcx.simulate_resize(size(px(900.), px(600.)));
+        vcx.run_until_parked();
+        for page in [Page::Panels(None), Page::Workspaces(None)] {
+            view.update(&mut vcx, |v, cx| v.set_page(page, cx));
+            vcx.run_until_parked();
+            let handle = view.read_with(&vcx, |v, _| v.scroll.clone());
+            assert!(
+                handle.max_offset().y > px(500.),
+                "packed shelves must have their full height"
+            );
+            let cache_size = view.read_with(&vcx, |v, _| v.packing.borrow().len());
+            for delta in [
+                ScrollDelta::Lines(point(0., -3.)),
+                ScrollDelta::Pixels(point(px(0.), px(-42.5))),
+                ScrollDelta::Pixels(point(px(0.), px(-12.))),
+                ScrollDelta::Pixels(point(px(0.), px(-3.))),
+            ] {
+                let before = handle.offset().y;
+                vcx.simulate_event(ScrollWheelEvent {
+                    position: point(px(600.), px(300.)),
+                    delta,
+                    touch_phase: TouchPhase::Moved,
+                    ..Default::default()
+                });
+                vcx.run_until_parked();
+                assert!(
+                    handle.offset().y < before,
+                    "each input including momentum advances monotonically"
+                );
+            }
+            let before = handle.offset();
+            vcx.simulate_event(ScrollWheelEvent {
+                position: point(px(60.), px(300.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
+                ..Default::default()
+            });
+            vcx.run_until_parked();
+            assert_eq!(
+                handle.offset(),
+                before,
+                "sidebar must not scroll the shelves"
+            );
+            for delta in [-100000., 100000.] {
+                vcx.simulate_event(ScrollWheelEvent {
+                    position: point(px(600.), px(300.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+                    touch_phase: TouchPhase::Ended,
+                    ..Default::default()
+                });
+                vcx.run_until_parked();
+                assert!(handle.offset().y <= px(0.) && handle.offset().y >= -handle.max_offset().y);
+            }
+            assert_eq!(
+                cache_size,
+                view.read_with(&vcx, |v, _| v.packing.borrow().len()),
+                "scrolling cannot repack rows"
+            );
+            let before = handle.offset();
+            vcx.run_until_parked();
+            assert_eq!(
+                handle.offset(),
+                before,
+                "momentum cannot continue after input ends"
+            );
+        }
+    }
+    #[gpui::test]
+    fn library_releases_cover_images_and_cancels_capture_on_close(cx: &mut TestAppContext) {
+        let image = std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new()));
+        let weak = std::sync::Arc::downgrade(&image);
+        let cancel = {
+            let view = cx.new(fixture);
+            view.update(cx, |v, _| {
+                assert!(v.previews.get("timeline").is_none());
+                v.previews.insert("timeline".into(), image);
+                assert!(v.previews.get("timeline").is_some());
+                v.preview_cancel.clone()
+            })
+        };
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

@@ -25,13 +25,9 @@ default = ["font-kit", "wayland", "x11", "windows-manifest", "image-default-form
 # texture surfaces.
 custom-gpu = []
 wgpu-surfaces = []
-test-support = [
-  "leak-detection",
-  "collections/test-support",
-  "wayland",
-  "x11",
-  "proptest",
-]
+# Offscreen rendering without entity leak tracking in the shipping app.
+headless-support = ["collections/test-support", "wayland", "x11", "proptest"]
+test-support = ["headless-support", "leak-detection"]
 bench-support = ["profiler", "dep:criterion"]
 # Preserve the published feature name while consumers migrate to `bench-support`.
 bench = ["bench-support"]
