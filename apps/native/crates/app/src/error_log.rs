@@ -10,7 +10,11 @@ use pm_services::{
     diagnostics::{CrashRecord, Diagnostics, Level, LogRedactor},
     storage::ServiceStorage,
 };
-use pm_shell::tokens;
+use pm_shell::{
+    kit::{Button, Kit, Recipes},
+    motion::Motion,
+    tokens,
+};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -29,6 +33,7 @@ const RUNNING: &str = "app.session.running";
 
 #[derive(Clone, Debug)]
 pub struct Entry {
+    pub level: Level,
     pub at: SystemTime,
     pub source: String,
     pub message: String,
@@ -58,6 +63,7 @@ impl Log {
             return;
         }
         self.entries.push(Entry {
+            level: Level::Error,
             at: SystemTime::now(),
             source: source.into(),
             message: message.into(),
@@ -161,6 +167,7 @@ fn worker(profile: &Path, rx: mpsc::Receiver<Persist>, rows: async_channel::Send
         .unwrap_or_default()
         .into_iter()
         .map(|row| Entry {
+            level: row.level,
             at: UNIX_EPOCH + Duration::from_millis(row.at_ms),
             source: row.code.replace('-', " "),
             message: row.text,
@@ -248,8 +255,11 @@ impl Global for AppLog {}
 pub fn shared(cx: &mut App) -> Shared {
     cx.default_global::<AppLog>().0.clone()
 }
-struct ErrorLogWindow(Shared);
+struct ErrorLogWindow(Shared, Motion<u64>);
 impl ErrorLogWindow {
+    fn motion(&mut self) -> &mut Motion<u64> {
+        &mut self.1
+    }
     /// A diagnostics bundle: levels, codes and crash kinds, never row text.
     fn save_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ns) = crate::platform::ns_window(window) else {
@@ -273,117 +283,90 @@ impl ErrorLogWindow {
     }
 }
 impl Render for ErrorLogWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.1.frame(window);
         let t = tokens();
-        let (c, m) = (&t.colors, &t.metrics);
-        let empty = self.0.borrow().entries.is_empty();
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .tab_index(0)
-                .px(px(m.inset))
-                .h(px(m.row))
-                .flex()
-                .items_center()
-                .rounded(px(m.control_radius))
-                .bg(rgb(c.panel_secondary))
-                .child(label)
-        };
-        let footer = div()
-            .flex()
-            .flex_none()
-            .justify_end()
-            .gap(px(m.gap))
-            .p(px(m.inset))
-            .child(
-                button("save-diagnostics", "Save Diagnostics…")
-                    .on_click(cx.listener(|v, _, window, cx| v.save_diagnostics(window, cx))),
+        let kit = Kit::new(&t, &self.1, Self::motion, window, cx);
+        let mut footer = vec![
+            kit.button(
+                "save-diagnostics",
+                "Save Diagnostics…",
+                Button::Neutral,
+                None,
+                None,
             )
-            .when(!empty, |f| {
-                f.child(
-                    button("clear-log", "Clear Log").on_click(cx.listener(|v, _, _, cx| {
+            .on_click(cx.listener(|v, _, window, cx| v.save_diagnostics(window, cx)))
+            .into_any_element(),
+        ];
+        let log = self.0.borrow();
+        if !log.entries.is_empty() {
+            footer.push(
+                kit.button("clear-log", "Clear Log", Button::Destructive, None, None)
+                    .on_click(cx.listener(|v, _, _, cx| {
                         v.0.borrow_mut().clear();
                         cx.notify();
-                    })),
-                )
-            });
-        let log = self.0.borrow();
+                    }))
+                    .into_any_element(),
+            );
+        }
         let mut body = div()
             .id("error-log")
-            .flex_1()
-            .min_h(px(0.))
+            .size_full()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .p(px(m.inset))
-            .bg(rgb(c.panel))
-            .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
-            .font_family(pm_design::TEXT_FONT);
+            .overflow_y_scroll();
         if log.entries.is_empty() {
-            body = body
-                .items_center()
-                .justify_center()
-                .gap(px(m.gap))
-                // The empty-state anatomy every panel uses: heading, then a
-                // reading line in `secondary`.
-                .child(
-                    div()
-                        .text_size(px(t.typography.heading))
-                        .font_weight(FontWeight(t.typography.semibold_weight))
-                        .child(LOG_EMPTY_TITLE),
-                )
-                .child(
-                    div()
-                        .text_size(px(t.typography.reading))
-                        .text_color(rgb(c.secondary))
-                        .child(LOG_EMPTY_LINE),
-                );
+            body = body.items_center().justify_center().child(kit.empty_state(
+                "checkmark.seal",
+                LOG_EMPTY_TITLE,
+                LOG_EMPTY_LINE,
+            ));
         }
         for entry in log.entries.iter().rev() {
             body = body.child(
                 div()
                     .flex()
-                    .gap(px(m.inset))
-                    .p(px(m.gap / 2.))
+                    .gap(px(t.space.md))
+                    .py(px(t.space.md))
+                    .child(kit.symbol(
+                        match entry.level {
+                            Level::Warn => "exclamationmark.triangle.fill",
+                            Level::Info => "info.circle",
+                            _ => "xmark.octagon.fill",
+                        },
+                        t.metrics.symbol_panel,
+                        pm_shell::symbol::Weight::Regular,
+                        match entry.level {
+                            Level::Warn => t.colors.warning,
+                            Level::Info => t.colors.secondary,
+                            _ => t.colors.danger,
+                        },
+                    ))
                     .child(
                         div()
-                            .flex_none()
-                            .w(px(m.settings_sidebar))
-                            .text_color(rgb(c.secondary))
-                            .child(format!("{} · {}", age(entry.at), entry.source)),
-                    )
-                    .child(entry.message.clone()),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(t.space.xs))
+                            .child(
+                                div()
+                                    .text_role(&t, pm_design::Text::Body)
+                                    .child(entry.message.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_role(&t, pm_design::Text::Caption)
+                                    .text_color(rgb(t.colors.muted))
+                                    .child(format!("{} · {}", entry.source, age(entry.at))),
+                            ),
+                    ),
             );
         }
-        // A seamless title band over the window's own material, as Settings
-        // and Export (`metrics.titlebar`).
-        // The title sits centred in the band, as macOS draws window titles.
-        let band = div()
-            .flex()
-            .flex_none()
-            .h(px(m.titlebar))
-            .items_center()
-            .justify_center()
-            .text_size(px(t.typography.title))
-            .font_weight(FontWeight(t.typography.medium_weight))
-            .text_color(rgb(c.secondary))
-            .child(LOG_TITLE);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(band)
-            .bg(rgb(c.panel))
-            .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
-            .font_family(pm_design::TEXT_FONT)
-            .child(body)
-            .child(footer)
+        kit.utility_window(LOG_TITLE, None, vec![], body.into_any_element(), footer)
     }
 }
+
 pub fn open(log: Shared, cx: &mut App) {
     if let Some(window) = cx
         .windows()
@@ -405,7 +388,7 @@ pub fn open(log: Shared, cx: &mut App) {
                 point(px(t.metrics.toolbar), px(t.metrics.toolbar)),
                 size(px(t.metrics.settings_width), px(t.metrics.settings_height)),
             )))),
-        |_, cx| cx.new(|_| ErrorLogWindow(log)),
+        |_, cx| cx.new(|_| ErrorLogWindow(log, Motion::default())),
     );
 }
 #[cfg(test)]
@@ -416,6 +399,9 @@ mod tests {
     fn stored_rows_use_codes_and_hide_the_home_folder() {
         assert_eq!(code("Media Offline"), "Media-Offline");
         assert_eq!(code("Open"), "Open");
+        let mut log = Log::default();
+        log.push("Media Offline", "Locate the original file.");
+        assert_eq!(log.entries[0].source, "Media Offline");
         let mut home = Home(Some("/Users/someone".into()));
         assert_eq!(
             home.redact("“/Users/someone/Film.pmv” couldn’t be opened."),
@@ -440,5 +426,31 @@ mod tests {
         log.push("Editor", "Two");
         log.push("Editor", "One");
         assert_eq!(log.entries.len(), 3);
+    }
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_error_log() {
+    for empty in [false, true] {
+        crate::utility_capture_tests::capture(
+            if empty {
+                "error-log-empty"
+            } else {
+                "error-log"
+            },
+            |_, cx| {
+                cx.new(|_| {
+                    let mut log = Log::default();
+                    if !empty {
+                        log.push(
+                            "Media Offline",
+                            "An original file couldn’t be found. Locate it to continue.",
+                        );
+                    }
+                    ErrorLogWindow(Rc::new(RefCell::new(log)), Motion::default())
+                })
+            },
+        );
     }
 }

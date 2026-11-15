@@ -763,6 +763,139 @@ impl Kit {
                     .child(keys.to_string())
             }))
     }
+    /// Shared chrome for secondary windows. Content is inset 24 pt; callers
+    /// supply rows, actions and content so commands stay owned by the view.
+    pub fn utility_window(
+        &self,
+        title: &str,
+        sidebar: Option<AnyElement>,
+        actions: Vec<AnyElement>,
+        content: AnyElement,
+        footer: Vec<AnyElement>,
+    ) -> Div {
+        let t = &self.t;
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(t.colors.window))
+            .text_color(rgb(t.colors.text))
+            .text_role(t, Text::Body)
+            .font_family(pm_design::TEXT_FONT)
+            .children(sidebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.utility_toolbar(title, actions))
+                    .child(self.utility_content().child(content))
+                    .when(!footer.is_empty(), |d| {
+                        d.child(self.utility_footer().children(footer))
+                    }),
+            )
+    }
+    pub fn utility_toolbar(&self, title: &str, actions: Vec<AnyElement>) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(t.space.md))
+            .min_h(px(t.metrics.toolbar))
+            .px(px(t.space.xxl))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_role(t, Text::Heading)
+                    .child(title.to_owned()),
+            )
+            .children(actions)
+    }
+    pub fn utility_content(&self) -> Div {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .p(px(self.t.space.xxl))
+    }
+    pub fn utility_sidebar(&self) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(t.metrics.settings_sidebar))
+            .h_full()
+            .p(px(t.space.md))
+            .gap(px(t.space.hair))
+            .bg(rgb(t.colors.panel))
+            .elevated(t, Elevation::Well)
+    }
+    pub fn utility_footer(&self) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_none()
+            .justify_end()
+            .items_center()
+            .gap(px(t.space.md))
+            .px(px(t.space.xxl))
+            .py(px(t.space.lg))
+    }
+    /// The same source-list row in Home and utility windows.
+    pub fn nav_row(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: String,
+        count: Option<usize>,
+        selected: bool,
+    ) -> Stateful<Div> {
+        let t = &self.t;
+        self.row(id, selected)
+            .text_size(px(t.typography.reading))
+            .role(Role::Button)
+            .aria_label(match count {
+                Some(n) => format!("{label}, {n}"),
+                None => label.clone(),
+            })
+            .child(self.symbol(
+                symbol,
+                t.metrics.symbol_panel,
+                Weight::Regular,
+                if selected {
+                    t.colors.text
+                } else {
+                    t.colors.muted
+                },
+            ))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .children(count.map(|n| {
+                div()
+                    .flex_none()
+                    .text_role(t, Text::Caption)
+                    .font_features(tabular())
+                    .text_color(rgb(t.colors.muted))
+                    .child(n.to_string())
+            }))
+    }
+    pub fn vertical_separator(&self) -> Div {
+        div()
+            .flex_none()
+            .w(px(1. / self.scale))
+            .bg(ink(self.t.colors.text, self.t.translucency.hover))
+    }
+    /// A physical-pixel hairline, shared by grouped rows.
+    pub fn separator(&self) -> Div {
+        div()
+            .flex_none()
+            .h(px(1. / self.scale))
+            .bg(ink(self.t.colors.text, self.t.translucency.hover))
+    }
     /// A Settings-anatomy card: rows grouped on a soft fill, no outline.
     pub fn card(&self) -> Div {
         let t = &self.t;
@@ -836,33 +969,7 @@ impl Kit {
     /// A centred empty state: one quiet glyph, a title, one line, and the
     /// caller may append a single action.
     pub fn empty_state(&self, symbol: &str, title: &str, detail: &str) -> Div {
-        let t = &self.t;
-        let c = &t.colors;
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(t.space.xs))
-            .child(div().mb(px(t.space.md)).child(self.symbol(
-                symbol,
-                28.,
-                Weight::Regular,
-                c.faint,
-            )))
-            .child(
-                div()
-                    .text_role(t, Text::Heading)
-                    .text_color(rgb(c.text))
-                    .child(title.to_string()),
-            )
-            .child(
-                div()
-                    .max_w(px(t.metrics.sheet_width - 2. * t.metrics.sheet_inset))
-                    .text_center()
-                    .text_role(t, Text::Reading)
-                    .text_color(rgb(c.muted))
-                    .child(detail.to_string()),
-            )
+        empty_state_at_scale(&self.t, self.scale, symbol, title, detail)
     }
     /// A toast or inline banner: a raised strip with a state glyph.
     pub fn banner(&self, symbol: &str, tint: u32, text: impl Into<SharedString>) -> Div {
@@ -961,4 +1068,47 @@ pub static GALLERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// Tabular figures for counts, sizes and times.
 pub fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Shared empty-state anatomy for callers without a frame's Kit.
+pub fn empty_state(t: &Tokens, symbol: &str, title: &str, detail: &str) -> Div {
+    empty_state_at_scale(t, 2., symbol, title, detail)
+}
+fn empty_symbol(scale: f32, name: &str, points: f32, weight: Weight, color: u32) -> AnyElement {
+    match rasterize(name, points, weight, color, scale) {
+        Some(image) => img(ImageSource::Render(image))
+            .flex_none()
+            .size(px(points))
+            .into_any_element(),
+        None => div().size(px(points)).into_any_element(),
+    }
+}
+fn empty_state_at_scale(t: &Tokens, scale: f32, symbol: &str, title: &str, detail: &str) -> Div {
+    let c = &t.colors;
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(t.space.xs))
+        .child(div().mb(px(t.space.md)).child(empty_symbol(
+            scale,
+            symbol,
+            28.,
+            Weight::Regular,
+            c.faint,
+        )))
+        .child(
+            div()
+                .text_role(t, Text::Heading)
+                .text_color(rgb(c.text))
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .max_w(px(t.metrics.sheet_width - 2. * t.metrics.sheet_inset))
+                .text_center()
+                .text_role(t, Text::Reading)
+                .text_color(rgb(c.muted))
+                .child(detail.to_string()),
+        )
 }

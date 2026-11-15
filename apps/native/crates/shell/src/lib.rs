@@ -51,3 +51,6 @@ pub use native::{
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,
 };
+
+#[cfg(all(test, target_os = "macos"))]
+mod utility_capture_tests;

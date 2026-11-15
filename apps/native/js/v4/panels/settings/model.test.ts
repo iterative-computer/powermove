@@ -133,7 +133,10 @@ test("search spans details, option labels, transcription and extension details",
   expect(model.visibleSections).toEqual(["transcription"]);
   await model.search("no-fixture-match");
   expect(model.matches.count).toBe(0);
-  expect(effects.at(-1)).toEqual(["announce", "No settings found"]);
+  expect(effects.at(-1)).toEqual([
+    "announce",
+    "No Results. Try a different search.",
+  ]);
 });
 test("worker search retains previous results and drops stale completion", async () => {
   const { model } = fixture();

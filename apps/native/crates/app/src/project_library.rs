@@ -637,32 +637,8 @@ impl ProjectLibrary {
         count: Option<usize>,
         selected: bool,
     ) -> Stateful<Div> {
-        let t = &kit.t;
-        let (c, m) = (&t.colors, &t.metrics);
-        kit.row(id, selected)
+        kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
-            .text_size(px(t.typography.reading))
-            .role(Role::Button)
-            .aria_label(match count {
-                Some(n) => format!("{label}, {n}"),
-                None => label.clone(),
-            })
-            .child(kit.symbol(
-                symbol,
-                m.symbol_panel,
-                Weight::Regular,
-                if selected { c.text } else { c.muted },
-            ))
-            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
-            .children(count.map(|n| {
-                div()
-                    .flex_none()
-                    .text_role(t, Text::Caption)
-                    .font_features(kit::tabular())
-                    // On system glass: a step that reads over any desktop.
-                    .text_color(rgb(c.muted))
-                    .child(n.to_string())
-            }))
     }
     /// Opens or closes a button menu; it enters on the `Enter` spring.
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {

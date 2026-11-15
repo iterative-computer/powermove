@@ -1733,30 +1733,12 @@ fn positioned(r: Rect) -> Div {
 /// Centred empty state (language §9/§14): `heading` + one `reading` line.
 /// Callers may append one action.
 pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
-    let (c, ty) = (&t.colors, t.typography);
-    div()
+    crate::kit::empty_state(t, "tray", heading, line)
         .w_full()
-        .flex()
-        .flex_col()
-        .items_center()
         .justify_center()
-        .gap(px(t.metrics.border * 2.))
-        .px(px(t.metrics.inset))
-        .child(
-            div()
-                .text_size(px(ty.heading))
-                .font_weight(FontWeight(ty.semibold_weight))
-                .text_color(rgb(c.secondary))
-                .child(heading.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(ty.reading))
-                .text_color(rgb(c.muted))
-                .text_center()
-                .child(line.to_string()),
-        )
+        .px(px(t.space.xxl))
 }
+
 pub use crate::kit::tooltip;
 impl Editor {
     /// Home fills the window below the toolbar: no docks, no viewer slot,
