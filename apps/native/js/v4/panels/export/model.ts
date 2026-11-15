@@ -377,8 +377,24 @@ export class ExportModel {
       this.current.capabilities[this.options.format].available
     );
   }
+  /** Export pressed (or Return) while its plan was still out: it starts the
+   * moment the plan returns, with the settings it shows. A press is never
+   * lost to a plan in flight. */
+  startWanted = false;
+  /** Export could start once the plan in flight returns. */
+  get canPress() {
+    return (
+      !!this.current.project &&
+      !this.locked &&
+      !this.error &&
+      !this.planningError &&
+      !this.fault &&
+      !this.startWanted &&
+      this.current.capabilities[this.options.format].available
+    );
+  }
   get actionLabel() {
-    return actions[this.options.format];
+    return this.startWanted ? "Preparing…" : actions[this.options.format];
   }
   subscribe(listener: () => void) {
     this.listeners.add(listener);
@@ -537,6 +553,8 @@ export class ExportModel {
         this.planningError =
           error instanceof Error ? error.message : String(error);
         this.readyPlanVersion = -1;
+        // The plan failed: a held press does not start; the sheet says why.
+        this.startWanted = false;
         this.changed();
       }
       throw error;
@@ -552,6 +570,11 @@ export class ExportModel {
     this.planningError = undefined;
     this.fault = undefined;
     this.changed();
+    if (this.startWanted) {
+      this.startWanted = false;
+      if (this.canExport) await this.start();
+      else this.changed();
+    }
   }
   async choosePreset(id: string) {
     if (this.locked) return;
@@ -602,7 +625,13 @@ export class ExportModel {
     }
   }
   async start() {
-    if (!this.canExport) return;
+    if (!this.canExport) {
+      if (this.canPress && this.readyPlanVersion !== this.planVersion) {
+        this.startWanted = true;
+        this.changed();
+      }
+      return;
+    }
     this.busy = true;
     this.current.run = { phase: "choosingDestination" };
     this.changed();
@@ -625,6 +654,7 @@ export class ExportModel {
     }
   }
   async cancel() {
+    this.startWanted = false;
     if (this.current.run.phase === "idle") {
       this.open = false;
       this.changed();

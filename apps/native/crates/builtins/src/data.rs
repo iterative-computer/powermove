@@ -509,6 +509,12 @@ impl Backend {
             Ok(v) => (Some(v), None),
             Err(e) => (None, Some(e)),
         };
+        // Traced runs: when a panel's request is answered (its queue waits on it).
+        if crate::tracing() {
+            crate::trace(
+                json!({"panel": self.panel_id, "replied": operation_name(&request.operation), "id": request.request_id, "accepted": error.is_none()}),
+            );
+        }
         tx.try_send(HostAck {
             version: HOST_API_VERSION,
             realm: request.realm,
@@ -575,6 +581,16 @@ impl Backend {
             self.reply(item.request, item.reply, result)?;
         }
         Ok(())
+    }
+}
+/// A request's kind for the traces: a command by its name.
+fn operation_name(operation: &HostOperation) -> String {
+    match operation {
+        HostOperation::Command { command, .. } => command.clone(),
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v["type"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "?".into()),
     }
 }
 /// A mark of what the timeline's own chrome shows of its saved view: the
@@ -647,13 +663,22 @@ impl KernelData for Data {
             return Err("built-in retired".into());
         }
         b.sync()?;
+        if crate::tracing() {
+            crate::trace(
+                json!({"panel": b.panel_id, "request": operation_name(&request.operation), "id": request.request_id}),
+            );
+        }
         let revision = b.published().as_ref().map_or(0, |p| p.revision());
         let needs_current = match &request.operation {
             HostOperation::Edit { .. } => true,
-            HostOperation::Command { command, .. } => !matches!(
-                command.as_str(),
-                "profile.get" | "panel.agent.read" | "export.plan" | "panel.project"
-            ),
+            // The Export sheet's commands edit no document (Cancel, above
+            // all, must reach a running export whatever changed meanwhile).
+            HostOperation::Command { command, .. } => {
+                !(matches!(
+                    command.as_str(),
+                    "profile.get" | "panel.agent.read" | "panel.project"
+                ) || command.starts_with("export."))
+            }
             _ => false,
         };
         if needs_current && request.expected_revision != revision {

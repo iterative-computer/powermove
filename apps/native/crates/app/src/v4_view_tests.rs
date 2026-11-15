@@ -1018,6 +1018,86 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
     });
 }
 
+/// Cancel reaches the app however the export began: Export Video, the
+/// refusal naming offline clips, Export Without Them, then Cancel while it
+/// renders sends `export.cancel` (the sheet closed and the export ran on).
+#[gpui::test]
+fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let rig = rig_project(
+        "export",
+        r##"{"id":"integration","name":"Strips","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","exportDefaults":{"format":"mp4"},"assets":{"a0":{"id":"a0","kind":"video","dur":10}},"comps":{},"layers":[]}"##,
+    );
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    let mut sent: Vec<String> = Vec::new();
+    // Publications to the sheet, the host's platform requests answered as
+    // the app answers them, until `operation` is asked for.
+    let mut until_asked = |vcx: &mut VisualTestContext, operation: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            for p in rig.runtime.take_publications() {
+                view.update(vcx, |v, cx| v.publish(p, cx));
+            }
+            vcx.run_until_parked();
+            for r in rig.runtime.take_platform_requests() {
+                sent.push(r.operation.clone());
+                rig.runtime.platform_reply(r.id, Ok(Value::Null));
+            }
+            if sent.iter().any(|s| s == operation) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{operation} never asked; asked {sent:?}; errors {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // Clicks a control once it is painted (publications keep arriving).
+    let click = |vcx: &mut VisualTestContext, id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let b = loop {
+            for p in rig.runtime.take_publications() {
+                view.update(vcx, |v, cx| v.publish(p, cx));
+            }
+            vcx.run_until_parked();
+            if let Some(b) = vcx.debug_bounds(Box::leak(id.to_owned().into_boxed_str())) {
+                break b;
+            }
+            assert!(Instant::now() < deadline, "{id} never painted");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        vcx.simulate_click(b.center(), Modifiers::none());
+        vcx.run_until_parked();
+    };
+    click(&mut vcx, "export.start");
+    until_asked(&mut vcx, "export.begin");
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"failed","message":"1 clip is offline: a.mov. Relink the originals, or export without them.","offline":true}))
+            .unwrap(),
+    );
+    until_asked(&mut vcx, "export.begin");
+    click(&mut vcx, "export.without");
+    until_asked(&mut vcx, "export.without");
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"rendering","frame":12,"total":300,"elapsed":2}))
+            .unwrap(),
+    );
+    until_asked(&mut vcx, "export.without");
+    click(&mut vcx, "export.cancel");
+    until_asked(&mut vcx, "export.cancel");
+}
+
 #[gpui::test]
 fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
