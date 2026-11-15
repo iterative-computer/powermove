@@ -205,7 +205,16 @@ export type EffectParamDefinition = ParameterPresentation & (
  * shader with `void main` when `rawShader` is true (legacy positional u_p<i>
  * uniforms remain supported for raw shaders).
  */
+/** Positions are layer-local pixels. Scalar bindings name existing numeric params. */
+export interface ViewerPointBinding { x: string; y: string }
+export type ViewerHandle =
+  | { kind: 'point'; point: ViewerPointBinding }
+  | { kind: 'line'; start: ViewerPointBinding; end: ViewerPointBinding; stops?: string; radial?: string }
+  | { kind: 'angle'; center: ViewerPointBinding; angle: string }
+  | { kind: 'radius'; center: ViewerPointBinding; radius: string }
+  | { kind: 'rect'; start: ViewerPointBinding; end: ViewerPointBinding };
 export interface EffectDefinition {
+  viewerHandles?: ViewerHandle[];
   id: string;
   label: string;
   group: string;

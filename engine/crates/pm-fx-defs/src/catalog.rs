@@ -49,6 +49,7 @@ impl EffectCatalog {
             revisions: BTreeMap::new(),
         };
         for definition in definitions {
+            crate::handles::parse(definition.metadata.get("viewerHandles"), &definition.params).map_err(CatalogError)?;
             let id = definition.id.clone();
             let version = effect_version(definition.metadata.get("version"))?;
             if result.current.insert(id.clone(), version).is_some() {

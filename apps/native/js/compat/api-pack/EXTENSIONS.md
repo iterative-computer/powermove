@@ -1008,3 +1008,43 @@ Project agents can manage media directly, without generating a recovery extensio
 Paths must be absolute local paths. Imports read native file chunks, accept files up to 512 MiB and do not silently download cloud placeholders. Both import tools verify durable storage and live availability before returning success. Failed replacements leave the original intact. Retry only failed assets; media bytes never belong in extension source.
 
 Replacement and management use normal editor Undo. They are preserved if the agent run stops and cannot be restored with `rollback_changes`, because snapshot rollback cannot restore retained media runtime versions. Importing media follows normal import behavior: media survives timeline Undo. Planning runs can list media but cannot mutate it; app runs without an attached project receive none of these tools.
+
+### Viewer handles
+
+Effect definitions can declare `viewerHandles`. These bind the existing numeric
+parameter keys, so the same channels appear in Properties, animation and undo.
+Coordinates are **layer-local pixels**; the viewer applies parent/layer transforms,
+composition zoom and pan. Handles stay 10 screen points across and hide on playback.
+
+```ts
+viewerHandles: [
+  { kind: 'line', start: { x: 'startX', y: 'startY' },
+    end: { x: 'endX', y: 'endY' }, radial: 'rampShape' },
+  { kind: 'point', point: { x: 'centerX', y: 'centerY' } },
+  { kind: 'radius', center: { x: 'centerX', y: 'centerY' }, radius: 'size' },
+  { kind: 'angle', center: { x: 'centerX', y: 'centerY' }, angle: 'rotation' },
+  { kind: 'rect', start: { x: 'left', y: 'top' }, end: { x: 'right', y: 'bottom' } },
+]
+```
+
+`radial` is optional: a value greater than 0.5 shows the radius circle. Angles
+are degrees. Radius is a distance in local pixels. Rectangles have two opposite
+corner bindings. Shift snaps a line endpoint or angle to 45 degree increments.
+Every drag is one undo item. Animated channels get a key at the playhead.
+The user owns the gesture: agents must wait for it to finish and must respect
+hand-edit intent markers when generating later changes.
+
+Declare these on the definition passed to `api.effects.register`, including from
+compat extensions and agent-published extensions. The extension package manifest
+continues to identify the package and entry point; handles belong to each effect's
+parameter schema, rather than the package as a whole. `validate_effect` checks the
+bindings. Unknown fields, missing params and nonnumeric bindings are rejected.
+
+For an authored shader layer, put the same array in `d.viewerHandles` and bind the
+names of annotated `@param` uniforms, such as `{kind:'point',point:{x:'uX',y:'uY'}}`.
+The viewer writes the normal `u.uX` and `u.uY` animation channels.
+
+The schema reserves a line's optional `stops` binding for a `gradientStops`
+parameter. Stop collection editing and shader transport are not yet exposed by
+this viewer implementation; do not advertise stop swatches or a colour picker
+in an authored effect until that transport is available.
