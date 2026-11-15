@@ -545,7 +545,12 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         .push(entity.downgrade());
     entity.update(cx, |v, cx| {
         v.close_window = Some(window.window_handle());
-        cx.observe_window_activation(window, |v, window, _| {
+        cx.observe_window_activation(window, |v, window, cx| {
+            if !window.is_window_active()
+                && let Some(g) = v.builtins.gizmos.clone()
+            {
+                g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            }
             // The key window is where MCP acts.
             if window.is_window_active() {
                 v.mcp.activate_window(v.window_key);
@@ -948,6 +953,9 @@ impl Controller {
         .detach();
     }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+        }
         let kernel = self.kernel.clone();
         let session = self.session.clone();
         // A discarded close has already released its session; its project

@@ -2807,3 +2807,22 @@ fn ortho_and_roll_from_camera_view_leave_the_shot_untouched(cx: &mut TestAppCont
         assert_eq!(stored(&s, "cam"), before);
     }
 }
+
+#[gpui::test]
+fn switching_to_2d_ends_fly_and_releases_its_shortcut_capture(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "camera", cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}
+
+#[gpui::test]
+fn toggling_to_2d_during_fly_uses_the_view_on_screen(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}
