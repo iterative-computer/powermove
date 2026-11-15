@@ -148,10 +148,7 @@ fn build_frame(
                 }
                 if state.stage == panel_build::Stage::Ink {
                     let progress = if reduced { 1. } else { panel_build::ink_ease(elapsed / 0.28) };
-                    let dry = panel_build::ink_ease((elapsed - 0.28) / 0.3);
-                    let target = if light { 17. } else { 242. };
-                    let channel = |a: f32| (a + (target-a)*dry) as u32;
-                    let color = (channel(240.) << 16) | (channel(88.) << 8) | channel(10.);
+                    let color = panel_build::ink_color(elapsed, light, reduced);
                     paint(12., (y-3.).max(0.), (size[0]-24.).max(0.)*progress, 6., 3., color, dim * panel_build::reveal(elapsed, reduced));
                 }
             });

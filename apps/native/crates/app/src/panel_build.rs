@@ -247,3 +247,23 @@ mod wiring_tests {
         assert_eq!(s.stage, Stage::Ready);
     }
 }
+
+/// Reduced motion cross-fades the final ink; it never grows or heats a fill.
+pub fn ink_color(elapsed: f32, light: bool, reduced: bool) -> u32 {
+    let dry = if reduced { 1. } else { ink_ease((elapsed - 0.28) / 0.3) };
+    let target = if light { 17. } else { 242. };
+    let channel = |a: f32| (a + (target-a)*dry).round() as u32;
+    (channel(240.) << 16) | (channel(88.) << 8) | channel(10.)
+}
+
+#[cfg(test)]
+mod ink_tests {
+    use super::*;
+    #[test]
+    fn reduced_motion_uses_final_ink_at_full_reveal() {
+        assert_eq!(ink_color(0.2, false, true), 0xf2f2f2);
+        assert_eq!(ink_color(0.2, true, true), 0x111111);
+        assert_eq!(ink_color(0., false, false), 0xf0580a);
+        assert_eq!(ink_color(0.58, false, false), 0xf2f2f2);
+    }
+}
