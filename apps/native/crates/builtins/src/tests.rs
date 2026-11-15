@@ -5780,3 +5780,176 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
         assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
     }
 }
+
+#[test]
+fn composition_tab_closing_preserves_the_last_tab() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "tabs".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "timeline", false).unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(frame["tabs"][0]["showClose"], false);
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tab","id":"c","close":true}),
+        )
+        .unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 1);
+    assert!(
+        backend
+            .native_command(
+                "panel.timeline",
+                &json!({"type":"tabMenu","id":"missing","action":"closeOthers"})
+            )
+            .is_err()
+    );
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tabMenu","id":"c","action":"settings"}),
+        )
+        .unwrap();
+    assert!(
+        backend
+            .native
+            .platform
+            .iter()
+            .any(|(_, action)| action["kind"] == "compositionSettings" && action["id"] == "c")
+    );
+}
+
+#[test]
+fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "tabs".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "timeline", false).unwrap();
+    backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Create {
+                            comp_id: "logo".into(),
+                            settings: Default::default(),
+                        }
+                        .into(),
+                        pm_kernel::CompCommand::Open {
+                            comp_id: "logo".into(),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 2);
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Create {
+                            comp_id: "spinner".into(),
+                            settings: Default::default(),
+                        }
+                        .into(),
+                        pm_kernel::CompCommand::Open {
+                            comp_id: "spinner".into(),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    let document = kernel.published("synthetic").unwrap().snapshot.doc_id;
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::OpenComposition {
+                    comp_id: "logo".into(),
+                    document,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 3);
+    let menu = backend
+        .native_command(
+            "panel.timeline.menu",
+            &json!({"type":"tabContext","id":"logo"}),
+        )
+        .unwrap();
+    if let crate::models::NativeCommand::Value(menu) = menu {
+        assert!(
+            menu.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["label"] == "Close Others")
+        );
+    }
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tab","id":"logo","close":true}),
+        )
+        .unwrap();
+    assert!(
+        backend
+            .native
+            .platform
+            .iter()
+            .any(|(_, action)| action["kind"] == "openComposition" && action["id"] == "spinner")
+    );
+    let pending = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(pending["tabs"].as_array().unwrap().len(), 2);
+    assert_eq!(pending["tabs"][1]["id"], "spinner");
+    assert_eq!(pending["tabs"][0]["id"], "c");
+}

@@ -632,7 +632,6 @@ pub enum Action {
     ToggleGuides,
     ToggleSafeAreas,
     Transport(TransportAction),
-    OpenComposition(String),
     WorkIn,
     WorkOut,
     ResetWork,

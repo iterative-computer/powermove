@@ -525,11 +525,15 @@ test("group children retain the number column and shift right at depths 0/1/2", 
       />,
     );
     const indents = [...root.host.nodes.values()].filter(
-      (n) => n.props.metadata?.timelineIndent !== undefined,
+      (n) =>
+        (n.props.metadata as Record<string, unknown> | undefined)
+          ?.timelineIndent !== undefined,
     );
     expect(indents.length).toBe(1);
     const spacers = indents[0].children.filter(
-      (n) => n.props.style?.width?.token === "metrics.timeline_indent",
+      (n) =>
+        (n.props.style as Record<string, { token?: string }> | undefined)?.width
+          ?.token === "metrics.timeline_indent",
     );
     expect(spacers.length).toBe(depth);
     expect(spacers.length * 12).toBe([0, 12, 24][depth]);

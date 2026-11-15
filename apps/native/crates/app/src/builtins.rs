@@ -1564,6 +1564,9 @@ impl Controller {
                                 .unwrap_or_default();
                             self.host.borrow().send_command(name, args);
                         }
+                        Some("compositionSettings") => {
+                            self.composition_sheet(true, request.input["id"].as_str().map(str::to_owned), cx);
+                        }
                         Some("openComposition") => {
                             self.open_builtin_composition(
                                 request.input["id"].as_str().unwrap_or(""),
