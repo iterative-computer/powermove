@@ -1103,3 +1103,31 @@ fn property_value_typing_updates_selected_keys_with_one_undo() {
         Some(90.)
     );
 }
+
+#[test]
+fn delete_groups_expanded_property_click_exits_empty_key_mode() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    c.model.key_selection_active = true;
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a:[]"),"open":true}),
+    )
+    .unwrap();
+    let property = v4::row_id(&RowId::Property {
+        layer_id: "a:[]".into(),
+        channel: "opacity".into(),
+    });
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":property,"modifiers":{}}),
+    )
+    .unwrap();
+    assert!(!c.model.key_selection_active);
+    dispatch(&mut c, json!({"type":"command","command":"delete"})).unwrap();
+    assert!(c.model.index.layer("a:[]").is_none());
+}

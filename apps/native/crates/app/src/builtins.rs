@@ -2199,6 +2199,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
+            E::Status(message) => {
+                v.message = message;
+                cx.notify();
+            }
             E::Seek(time) => v.seek(time),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),

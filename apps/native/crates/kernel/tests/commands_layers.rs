@@ -469,14 +469,12 @@ fn delete_skips_locked_layers_and_unparents_children() {
         "locked layers are skipped"
     );
     assert!(get(&layer(&s, "box"), &["parent"]).is_null());
-    let e = refused(
+    run(
         &mut s,
         LayerCommand::Delete {
             layer_ids: vec!["locked".into()],
         },
-        Origin::Interface,
     );
-    assert_eq!(e.to_string(), "All targeted layers are locked: “Locked”");
     s.undo().unwrap();
     assert_eq!(ids(&s), ids(&store()));
 }
@@ -1153,4 +1151,136 @@ fn anchor_distribute_parented_3d_on_both_axes() {
         }
         assert_eq!(s.history().len(), 1);
     }
+}
+
+fn delete_groups_store() -> DocumentStore {
+    DocumentStore::new_untitled(
+        parse(
+            r#"{"id":"P","w":200,"h":100,"fps":30,"dur":10,"assets":{},"layers":[
+      {"id":"g","type":"group","name":"Group","p":{}},
+      {"id":"nested","type":"group","group":"g","p":{}},
+      {"id":"child","type":"shape","group":"nested","p":{}},
+      {"id":"other","type":"group","p":{}},
+      {"id":"sibling","type":"shape","group":"other","p":{}},
+      {"id":"locked","type":"shape","name":"Locked","lock":true,"p":{}},
+      {"id":"pre","type":"precomp","d":{"comp":"C2"},"p":{}}
+    ],"comps":{"C2":{"id":"C2","w":200,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"inside","type":"group","p":{}},{"id":"inner","type":"shape","group":"inside","p":{}}
+    ]}}}"#,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn delete_groups_overlaps_different_parents_and_precomp_restore_in_one_undo() {
+    for targets in [
+        vec!["g", "nested", "child", "g"],
+        vec!["nested", "sibling"],
+        vec!["g", "inside", "inner"],
+        vec!["pre", "inside", "g"],
+        vec!["stale-after-undo", "g", "child"],
+    ] {
+        let mut s = delete_groups_store();
+        let before = s.root().unwrap().to_value();
+        run(
+            &mut s,
+            LayerCommand::Delete {
+                layer_ids: targets.iter().map(|id| (*id).into()).collect(),
+            },
+        );
+        for id in &targets {
+            assert!(
+                pm_kernel::model::find_layer(s.root().unwrap(), id).is_none(),
+                "{id} survived {targets:?}"
+            );
+        }
+        s.undo().unwrap();
+        assert_eq!(s.root().unwrap().to_value(), before, "{targets:?}");
+        s.redo().unwrap();
+        s.undo().unwrap();
+        assert_eq!(s.root().unwrap().to_value(), before);
+    }
+}
+
+#[test]
+fn delete_groups_skips_locked_instead_of_rejecting_the_selection() {
+    let mut s = delete_groups_store();
+    let before = s.root().unwrap().to_value();
+    run(
+        &mut s,
+        LayerCommand::Delete {
+            layer_ids: vec!["g".into(), "locked".into()],
+        },
+    );
+    assert!(!ids(&s).contains(&"g".into()));
+    assert!(ids(&s).contains(&"locked".into()));
+    s.undo().unwrap();
+    assert_eq!(s.root().unwrap().to_value(), before);
+}
+
+#[test]
+fn delete_groups_transformed_group_with_locked_child_is_skipped_with_world_pose_unchanged() {
+    let mut project = parse(PROJECT).unwrap();
+    let layers = project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    // An actual translated, rotated, nonuniformly scaled group.
+    layers[0]
+        .as_object_mut()
+        .unwrap()
+        .insert("type", Value::String("group".into()));
+    for (path, value) in [
+        ("position.x", 230.),
+        ("position.y", 80.),
+        ("rotation", 35.),
+        ("scale.x", 170.),
+        ("scale.y", 65.),
+    ] {
+        layers[0]
+            .as_object_mut()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("v", Value::Number(value));
+    }
+    layers[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("group", Value::String("top".into()));
+    layers[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("lock", Value::Bool(true));
+    let mut s = DocumentStore::new_untitled(project);
+    let before = s.root().unwrap().to_value();
+    let group = layer(&s, "top");
+    let child = layer(&s, "box");
+    let pose = s.queries().world_matrix(None, "box", 0.).unwrap();
+    run(
+        &mut s,
+        LayerCommand::Delete {
+            layer_ids: vec!["top".into(), "box".into(), "clip".into()],
+        },
+    );
+    assert_eq!(layer(&s, "top"), group);
+    assert_eq!(layer(&s, "box"), child);
+    assert_eq!(s.queries().world_matrix(None, "box", 0.).unwrap(), pose);
+    assert!(
+        !ids(&s).contains(&"clip".into()),
+        "unrelated editable layers still delete"
+    );
+    assert_eq!(s.history().len(), 1);
+    s.undo().unwrap();
+    assert_eq!(s.root().unwrap().to_value(), before);
 }

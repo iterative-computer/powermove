@@ -212,6 +212,7 @@ pub async fn dispatch(
                     }
                 }
                 RowId::Property { layer_id, channel } => {
+                    client.model.key_selection_active = false;
                     client.model.graph_focus = Some((layer_id.clone(), channel.clone()));
                     vec![
                         pm_kernel::SelectionCall::Layers {
