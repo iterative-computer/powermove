@@ -174,3 +174,27 @@ mod draw_tests {
         assert!(draw_dots([f32::NAN, 80.], 1., None, false, false, false).is_empty());
     }
 }
+
+/// Slot-local event clock, retained across GPUI renders.
+#[derive(Clone, Debug)]
+pub struct State {
+    pub stage: Stage,
+    pub started: std::time::Instant,
+    pub changed: std::time::Instant,
+    pub row: usize,
+}
+impl Default for State {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self { stage: Stage::Wake, started: now, changed: now, row: 0 }
+    }
+}
+impl State {
+    pub fn event(&mut self, event: &str, row: usize) {
+        if let Some(stage) = stage(event) {
+            self.stage = stage;
+            self.row = row;
+            self.changed = std::time::Instant::now();
+        }
+    }
+}

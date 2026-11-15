@@ -101,6 +101,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
@@ -831,6 +832,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),
             captions: Default::default(),

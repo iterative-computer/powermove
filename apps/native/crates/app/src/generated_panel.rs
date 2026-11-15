@@ -12,7 +12,7 @@
 //! sheet or menu edits the layer its control targeted when it opened. A
 //! binding V2 can't write yet shows disabled with why.
 #[path = "panel_build.rs"]
-mod panel_build;
+pub(crate) mod panel_build;
 
 use crate::session::Controller;
 use gpui::{prelude::*, *};
@@ -52,6 +52,64 @@ pub fn panel(
 ) -> Option<AnyElement> {
     let (_, _, def) = section(v, id)?;
     Some(render(v, id, &def, rect, window, cx))
+}
+
+/// The canvas owns no hit targets or focus handles. Every primitive is clipped
+/// to the reserved body, so the viewer and neighbouring panels stay untouched.
+fn build_surface(
+    state: panel_build::State,
+    rect: pm_shell::layout::Rect,
+    t: &pm_design::Tokens,
+    playing: bool,
+    _window: &Window,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
+    let light = t.scheme == pm_design::Scheme::Light;
+    let reduced = t.accessibility.reduce_motion;
+    let row_height = t.metrics.row;
+    let height = (rect.h - t.metrics.header).max(0.);
+    let dim = panel_build::playback(playing).0;
+    let entity = cx.entity().downgrade();
+    cx.spawn(async move |_, cx| {
+        cx.background_executor().timer(std::time::Duration::from_millis(if playing { 33 } else { 16 })).await;
+        let _ = entity.update(cx, |_, cx| cx.notify());
+    }).detach();
+    div().w_full().h(px(height)).overflow_hidden().rounded(px(8.))
+        .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let age = state.started.elapsed().as_secs_f32();
+            let elapsed = state.changed.elapsed().as_secs_f32();
+            let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
+            let y = ((state.row as f32 + 0.5) * row_height).min((size[1] - 8.).max(0.));
+            window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
+                window.paint_quad(PaintQuad::new(bounds).corner_radii(px(8.)).background(rgb(if light { 0xfafafa } else { 0x1c1c1c })));
+                let mut paint = |x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, alpha: f32| {
+                    let b = Bounds::new(bounds.origin + point(px(x), px(y)), gpui::size(px(w), px(h)));
+                    window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
+                };
+                for dot in panel_build::draw_dots(size, age, Some(y), light, reduced, playing) {
+                    paint(dot.center[0] - dot.radius, dot.center[1] - dot.radius,
+                        dot.radius * 2., dot.radius * 2., dot.radius,
+                        if dot.orange { 0xf0580a } else if light { 0x000000 } else { 0xffffff }, dot.alpha);
+                }
+                if !reduced {
+                    let x = 12. + (size[0] - 24.).max(0.) * panel_build::ink_ease((elapsed % 1.).min(1.));
+                    // Concentric normal-blend quads form a quiet, bounded halo.
+                    for radius in [24., 16., 8., 3.] {
+                        if panel_build::inside_slot([x-radius, y-radius], size, 8.) && panel_build::inside_slot([x+radius, y+radius], size, 8.) {
+                            paint(x-radius, y-radius, radius*2., radius*2., radius, 0xf0580a, dim * if light { 0.055 } else { 0.09 });
+                        }
+                    }
+                }
+                if state.stage == panel_build::Stage::Ink {
+                    let progress = if reduced { 1. } else { panel_build::ink_ease(elapsed / 0.28) };
+                    let dry = panel_build::ink_ease((elapsed - 0.28) / 0.3);
+                    let target = if light { 17. } else { 242. };
+                    let channel = |a: f32| (a + (target-a)*dry) as u32;
+                    let color = (channel(240.) << 16) | (channel(88.) << 8) | channel(10.);
+                    paint(12., (y-3.).max(0.), (size[0]-24.).max(0.)*progress, 6., 3., color, dim * panel_build::reveal(elapsed, reduced));
+                }
+            });
+        }).w_full().h_full()).into_any_element()
 }
 
 /// What a control reads and writes.
@@ -633,6 +691,9 @@ fn render(
     use pm_shell::kit::ink;
     let t = v.host.borrow().tokens.clone();
     let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
+    if let Some(build) = v.panel_builds.get(id).filter(|b| b.stage != panel_build::Stage::Ready) {
+        return build_surface(build.clone(), rect, &t, v.running(), window, cx);
+    }
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
