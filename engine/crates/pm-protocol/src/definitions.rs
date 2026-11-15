@@ -81,7 +81,6 @@ pub enum Layer3dRole {
     tag = "type"
 )]
 pub enum ParamSpec {
-    GradientStops { key: String, default: Vec<GradientStop> },
     Number {
         key: String,
         default: f64,
@@ -100,15 +99,10 @@ pub enum ParamSpec {
     },
 }
 
-/// Straight RGBA, normalized to 0..1, at a normalized ramp position.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GradientStop { pub position: f64, pub color: [f64;4] }
-
 impl ParamSpec {
     pub fn key(&self) -> &str {
         match self {
-            ParamSpec::GradientStops { key, .. }
-            | ParamSpec::Number { key, .. }
+            ParamSpec::Number { key, .. }
             | ParamSpec::Color { key, .. }
             | ParamSpec::Toggle { key, .. } => key,
         }
@@ -234,9 +228,6 @@ impl Validate for DefinitionSnapshot {
                 ParamSpec::Color { default, .. } => ensure(valid_hex_color(default), C, || {
                     format!("parameter {:?} default must be #rrggbb", param.key())
                 })?,
-                ParamSpec::GradientStops { default, .. } => ensure(
-                    (2..=16).contains(&default.len()) && default.iter().all(|s| s.position.is_finite() && (0. ..=1.).contains(&s.position) && s.color.iter().all(|v| v.is_finite() && (0. ..=1.).contains(v))), C,
-                    || format!("parameter {:?} requires 2..16 finite RGBA stops",param.key()))?,
                 ParamSpec::Toggle { .. } => {}
             }
         }
@@ -681,39 +672,5 @@ pub(crate) mod tests {
         assert_eq!(snapshot.definitions.len(), 1);
         assert_eq!(snapshot.missing.len(), 2);
         assert_eq!(set.generation(), Some(seq(10)));
-    }
-}
-
-#[cfg(test)]
-mod gradient_stop_protocol_tests {
-    use super::*;
-    #[test]
-    fn stop_collection_roundtrips_and_rejects_invalid_defaults() {
-        let mut d = super::tests::effect("agentRamp");
-        d.params = vec![ParamSpec::GradientStops {
-            key: "stops".into(),
-            default: vec![
-                GradientStop {
-                    position: 0.,
-                    color: [0., 0., 0., 1.],
-                },
-                GradientStop {
-                    position: 1.,
-                    color: [1.; 4],
-                },
-            ],
-        }];
-        assert!(d.validate().is_ok());
-        let raw = serde_json::to_value(&d).unwrap();
-        assert_eq!(raw["params"][0]["type"], "gradientStops");
-        assert_eq!(
-            serde_json::from_value::<DefinitionSnapshot>(raw).unwrap(),
-            d
-        );
-        let ParamSpec::GradientStops { default, .. } = &mut d.params[0] else {
-            unreachable!()
-        };
-        default[0].color[3] = 2.;
-        assert!(d.validate().is_err());
     }
 }

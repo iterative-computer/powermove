@@ -1200,7 +1200,6 @@
       "id": "gradient",
       "label": "Gradient Ramp",
       "group": "Generate",
-      "viewerHandles": [{"kind":"line","start":{"x":"startX","y":"startY"},"end":{"x":"endX","y":"endY"},"radial":"rampShape"}],
       "params": [
         {
           "k": "startX",

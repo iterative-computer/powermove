@@ -890,14 +890,12 @@ impl Controller {
             return;
         };
         let mut mounted = false;
-        let mut effect_controls_changed=false;
         for id in runtime.take_cleared_overlays() {
             if let Some(overlays) = &self.builtins.overlays {
                 overlays.update(cx, |o, cx| o.clear(&id, cx));
             }
         }
         for p in runtime.take_publications() {
-            effect_controls_changed |= matches!(p.panel.as_str(),"layer-effects"|"inspector");
             if p.panel.ends_with(pm_builtins::VIEWER_OVERLAY) {
                 if let Some(overlays) = &self.builtins.overlays {
                     let runtime = runtime.clone();
@@ -911,10 +909,6 @@ impl Controller {
                 self.builtins.pending.insert(p.panel.clone(), p);
                 mounted = true;
             }
-        }
-        // Effect selection/disclosure is panel UI state, not a document edit.
-        if effect_controls_changed && let Some(gizmos)=&self.builtins.gizmos {
-            gizmos.update(cx,|g,cx|g.refresh(cx));
         }
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
@@ -2397,10 +2391,6 @@ impl crate::gizmo::Host for ControllerDelegate {
         if let Some(shell) = shell {
             let _ = shell.update(cx, |shell, cx| shell.focus_canvas(window, cx));
         }
-    }
-
-    fn effect_visible(&self, layer: &str, effect: &str, cx: &App) -> Option<bool> {
-        self.0.upgrade().and_then(|c| c.read(cx).builtins.runtime.as_ref()?.viewer_effect_visible(layer, effect))
     }
 
     fn drop_project_items(&self, cx: &mut App) {

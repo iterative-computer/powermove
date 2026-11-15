@@ -10,7 +10,6 @@ pub mod grade;
 pub mod graph;
 pub mod inputs;
 pub mod spatial;
-pub mod handles;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

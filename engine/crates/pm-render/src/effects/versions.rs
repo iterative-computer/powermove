@@ -33,7 +33,6 @@ fn snapshot(def: &Definition, source: &str, id: &str) -> DefinitionSnapshot {
             .params
             .iter()
             .map(|p| match p.kind.as_deref() {
-                Some("gradientStops") => ParamSpec::GradientStops { key:p.k.clone(), default:serde_json::from_value(p.def.clone()).expect("validated gradient stops") },
                 Some("color") => ParamSpec::Color {
                     key: p.k.clone(),
                     default: p.def.as_str().unwrap_or("#000000").into(),

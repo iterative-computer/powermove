@@ -542,7 +542,6 @@ pub(crate) fn make_layer(
     let mut layer = Value::Object(l);
     if layer_type == "shader" {
         super::shader::sync(&mut layer);
-        super::shader::validate_handles(&layer)?;
     }
     Ok(layer)
 }

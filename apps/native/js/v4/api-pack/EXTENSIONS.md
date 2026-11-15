@@ -54,9 +54,7 @@ when available, and say honestly what you could not check.
   extension API, documented in `v3/EXTENSIONS.md` with its types in `v3/`
   (Svelte panels, effects, transitions, layer types, commands, keybindings,
   menus, themes, status items). They load and publish the same way. Use them
-  for effects: v4 has no registration API for those yet. Effect definitions can
-  declare `viewerHandles` for points, lines, angles, radii and rectangles; see
-  **Viewer handles** in `v3/EXTENSIONS.md` for bindings and shader-layer examples.
+  for effects: v4 has no registration API for those yet.
 - `replaces`: built-in ids this extension draws in place of (forks).
 - Credentials never go in source: declare `vars` and read them at runtime.
 

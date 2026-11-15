@@ -10,7 +10,7 @@ fn pinned_main_has_every_family_and_full_historical_revisions() {
     // unclipped revisions, Levels and Levels (Individual Controls) with their
     // clip switches off, Duotone and Posterize grading faint pixels, and
     // Color Wheels, Color Curves and Color Space Transform.
-    assert_eq!(main_catalog().definitions().count(), 66);
+    assert_eq!(main_catalog().definitions().count(), 65);
     assert_eq!(main_catalog().current_definitions().count(), 46);
     assert_eq!(main_effects().blobs.len(), 22);
     let raw: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
@@ -102,7 +102,7 @@ fn older_art_keeps_its_shader_and_parameter_schema() {
         }
         // Main's newest is 2; Levels has a revision 3 made here (its clip
         // switches start off).
-        let newest = if matches!(id, "levels" | "gradient") { 3 } else { 2 };
+        let newest = if id == "levels" { 3 } else { 2 };
         assert_eq!(main_catalog().current(id), main_catalog().get(id, newest));
         assert!(main_catalog().get(id, newest + 1).is_none());
         assert!(
@@ -343,16 +343,4 @@ fn unclipped_revisions_keep_the_pinned_shaders_as_history() {
     let colour = &main_catalog().current("color").unwrap().frag;
     assert!(!colour.contains("clamp(x,0.,8.)"));
     assert!(colour.contains("pm_e_dec"));
-}
-
-#[test]
-fn gradient_stop_revision_retains_two_colour_history() {
- let current=main_catalog().current("gradient").unwrap();
- assert_eq!(current.metadata["version"],json!(3));
- assert!(current.params.iter().any(|p|p.k=="stops" && p.kind.as_deref()==Some("gradientStops")));
- assert_eq!(current.metadata["viewerHandles"][0]["stops"],json!("stops"));
- assert!(current.frag.contains("pm_stops(t)"));
- let old=main_catalog().get("gradient",2).unwrap();
- assert!(old.params.iter().any(|p|p.k=="startColor"));
- assert!(!old.frag.contains("pm_stops(t)"));
 }

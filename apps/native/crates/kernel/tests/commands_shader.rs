@@ -128,38 +128,3 @@ fn inspector_annotations_keep_main_number_semantics_utf16_and_regex_quirks() {
     assert_eq!(defs[2].get("def"), parse(r##""#ab\ud800""##).ok().as_ref());
     assert_eq!(defs[3].get("def"), Some(&Value::Bool(true)));
 }
-
-#[test]
-fn shader_viewer_handle_bindings_validate_on_creation_and_content_edits() {
-    let mut store = DocumentStore::new_untitled(
-        parse(r#"{"id":"P","w":640,"h":360,"fps":30,"dur":5,"layers":[],"comps":{}}"#).unwrap(),
-    );
-    let mut request = add();
-    request.content=parse(r#"{"code":"uniform float uX; // @param 20\nuniform float uY; // @param 20","viewerHandles":[{"kind":"point","point":{"x":"uX","y":"uY"}}]}"#).unwrap().as_object().unwrap().clone();
-    store
-        .execute(
-            LayerCommand::Add(Box::new(request)).into(),
-            Origin::Interface,
-        )
-        .unwrap();
-    let before = layer(&store);
-    let invalid = parse(r#"{"viewerHandles":[{"kind":"point","point":{"x":"missing","y":"uY"}}]}"#)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .clone();
-    assert!(
-        store
-            .execute(
-                ContentCommand::Set {
-                    layer_id: "S".into(),
-                    patch: invalid,
-                    time: 0.
-                }
-                .into(),
-                Origin::Interface
-            )
-            .is_err()
-    );
-    assert_eq!(layer(&store), before);
-}
