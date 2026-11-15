@@ -1404,6 +1404,39 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
     );
 }
+/// A tooltip shown before a press that changes its words (a disclosure's
+/// Expand becomes Collapse when the panel republishes) says the new words
+/// while the pointer stays.
+#[gpui::test]
+fn a_shown_tooltip_follows_its_nodes_title(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |title: &str| {
+        let mut ops = node_ops(1, 0, "div", json!({"style":{"width":200,"height":200}}), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "button",
+            json!({"title":title,"data-pm-component":"toolbar-item","label":title,
+                "metadata":{"symbol":"chevron.right"}}),
+            &["click"],
+        ));
+        ops
+    };
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, tree("Expand Layer")), Default::default());
+    vcx.run_until_parked();
+    let tokens = view.read_with(&vcx, |v, _| v.tokens().clone());
+    let tip = vcx.update(|_, cx| {
+        cx.new(|_| {
+            crate::v4_view::Tooltip::following(view.downgrade(), 2, "Expand Layer".into(), tokens)
+        })
+    });
+    view.update(&mut vcx, |v, cx| v.publish(synthetic(&rig, tree("Collapse Layer")), cx));
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    let shown = vcx.update(|_, cx| tip.update(cx, |t, cx| t.current_title(cx)));
+    assert_eq!(shown.as_ref(), "Collapse Layer");
+}
 /// A section heading pressed closes its group in the next frame, before the
 /// panel's script has answered; the publication that agrees takes over, and
 /// expanding shows the open chevron at once while the content follows.

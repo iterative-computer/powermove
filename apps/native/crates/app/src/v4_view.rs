@@ -2886,9 +2886,10 @@ impl SurfaceView {
         // covers its neighbours.
         if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
+            let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
-                let (title, tokens) = (title.clone(), tokens.clone());
-                cx.new(|_| Tooltip { title, tokens }).into()
+                let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
+                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
             });
         }
         element
@@ -3399,12 +3400,42 @@ impl Render for SurfaceView {
             .child(Self::tracking(cx, self.origin.clone()))
     }
 }
-struct Tooltip {
+pub(crate) struct Tooltip {
     title: SharedString,
     tokens: pm_design::Tokens,
+    /// The node it describes: its title is read again at each draw, so a
+    /// press that changes it (a disclosure's Expand to Collapse, applied when
+    /// the panel republishes) never leaves the old words up while hovered.
+    source: Option<(WeakEntity<SurfaceView>, Id)>,
+}
+impl Tooltip {
+    /// A tooltip for node `id` of `view`, showing `title` until it changes.
+    pub(crate) fn following(
+        view: WeakEntity<SurfaceView>,
+        id: Id,
+        title: SharedString,
+        tokens: pm_design::Tokens,
+    ) -> Self {
+        Self {
+            title,
+            tokens,
+            source: Some((view, id)),
+        }
+    }
+    /// Its node's title now (the last one, when the node has none left).
+    pub(crate) fn current_title(&mut self, cx: &App) -> SharedString {
+        if let Some(title) = self.source.as_ref().and_then(|(view, id)| {
+            view.upgrade()
+                .and_then(|view| view.read(cx).tooltip_title(*id))
+        }) {
+            self.title = title;
+        }
+        self.title.clone()
+    }
 }
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.current_title(cx);
         let t = &self.tokens;
         // Line 1 names the thing (with its shortcut); an optional line 2,
         // after a newline, says what it does (HIG help tags), in secondary.
