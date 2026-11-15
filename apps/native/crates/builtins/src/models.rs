@@ -996,19 +996,20 @@ impl Backend {
         let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
         if args["type"] == "graphOptions" {
             // The curves the graph shows decide Fit and Merge, as on the
-            // graph's own menu (v1's options menu has both).
+            // graph's own menu: v1 lists both always, dimmed when they do not
+            // apply (Merge wants two curves or more).
             let series = client.model.graph_series().0.len();
             let context = pm_panel_timeline::Context::Graph { series };
             let rows: Vec<Value> = client
                 .model
                 .menu(&context)
                 .into_iter()
-                .filter(|item| item.enabled)
                 .map(|item| {
                     json!({
                         "id": item.id,
                         "label": pm_panel_timeline::menu_label(item.id),
                         "checked": item.checked,
+                        "enabled": item.enabled,
                         "intent": {"type":"graphMenu","action":item.id},
                     })
                 })
