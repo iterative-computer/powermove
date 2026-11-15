@@ -527,7 +527,9 @@ impl Panel {
             .archive
             .thread_mut(id)
             .ok_or_else(|| Error::UnknownId(id.into()))?;
-        let touched = record["composerCitations"] != json!(citations)
+        let touched = record["composerCitations"]
+            .as_array()
+            .map_or(!citations.is_empty(), |saved| saved != &citations)
             || record["composerDraft"].as_str() != Some(&draft)
             || record["conversation"].as_array().map(Vec::len) != Some(conversation.len());
         record["composerCitations"] = json!(citations);
