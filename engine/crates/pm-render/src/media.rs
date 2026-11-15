@@ -1603,6 +1603,7 @@ impl MediaCache {
             return Ok(t.clone());
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        let _span = pm_perf::Span::new(pm_perf::Counter::ImageMicros);
         #[cfg(test)]
         if FAIL_DECODE.with(|f| f.get()) {
             return Err(MediaFailure::Failed(format!(
