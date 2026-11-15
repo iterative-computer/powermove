@@ -1083,6 +1083,8 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
+        let surface = view.clone();
+        view.update(cx, |v, _| v.scrolls_in(&handle));
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self
@@ -1113,6 +1115,11 @@ impl Controller {
                 .h(px(body))
                 .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
                     v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                    // A panel that leaves rows out draws again as its body
+                    // scrolls, so they come back before they show (`v4_cull`).
+                    if surface.read(cx).culls() {
+                        surface.update(cx, |_, cx| cx.notify());
+                    }
                     // The thumb goes once the scrolling has stopped.
                     cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
