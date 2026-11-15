@@ -235,6 +235,7 @@ pub(crate) unsafe fn platform_input_from_native(
                 let phase = match native_event.phase() {
                     NSEventPhase::MayBegin | NSEventPhase::Began => TouchPhase::Started,
                     NSEventPhase::Ended => TouchPhase::Ended,
+                    NSEventPhase::Cancelled => TouchPhase::Cancelled,
                     _ => TouchPhase::Moved,
                 };
 
@@ -254,6 +255,7 @@ pub(crate) unsafe fn platform_input_from_native(
                 let phase = match native_event.phase() {
                     NSEventPhase::MayBegin | NSEventPhase::Began => TouchPhase::Started,
                     NSEventPhase::Ended => TouchPhase::Ended,
+                    NSEventPhase::Cancelled => TouchPhase::Cancelled,
                     _ => TouchPhase::Moved,
                 };
 
@@ -269,6 +271,7 @@ pub(crate) unsafe fn platform_input_from_native(
                 };
 
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    is_momentum: native_event.momentumPhase() != NSEventPhase::None,
                     position: point(
                         px(native_event.locationInWindow().x as f32),
                         window_height - px(native_event.locationInWindow().y as f32),

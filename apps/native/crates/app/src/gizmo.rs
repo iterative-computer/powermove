@@ -46,6 +46,51 @@ pub enum Navigate {
 /// How long pointer navigation rests before it is written. Every write publishes
 /// to all panels, so a hot gesture only moves local state.
 pub const NAVIGATION_IDLE: Duration = Duration::from_millis(150);
+/// One input owner per gesture; AppKit can interleave scroll and magnify.
+#[derive(Default)]
+pub(crate) struct ZoomInput {
+    pinch_until: Option<std::time::Instant>,
+}
+impl ZoomInput {
+    fn owns_pinch(&self) -> bool {
+        self.pinch_until.is_some_and(|until| std::time::Instant::now() < until)
+    }
+    pub(crate) fn pinch(&mut self, event: &PinchEvent) -> Option<Navigate> {
+        self.pinch_until = Some(std::time::Instant::now() + NAVIGATION_IDLE);
+        if event.phase == TouchPhase::Cancelled || !event.delta.is_finite() || event.delta == 0. {
+            return None;
+        }
+        Some(Navigate::Zoom {
+            factor: (event.delta as f64).exp(),
+            at: event.position,
+        })
+    }
+    pub(crate) fn wheel(&self, event: &ScrollWheelEvent) -> Option<Navigate> {
+        if event.is_momentum
+            || self
+                .pinch_until
+                .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return None;
+        }
+        let m = event.modifiers;
+        if !(m.control || m.platform || m.alt || matches!(event.delta, ScrollDelta::Lines(_))) {
+            return None;
+        }
+        // Electron normalises a wheel line to 40 px; trackpads already report points.
+        let dy = match event.delta {
+            ScrollDelta::Lines(d) => d.y as f64 * 40.,
+            ScrollDelta::Pixels(d) => f32::from(d.y) as f64,
+        };
+        if !dy.is_finite() || dy == 0. || event.touch_phase == TouchPhase::Cancelled {
+            return None;
+        }
+        Some(Navigate::Zoom {
+            factor: (dy * 0.006).exp().clamp(0.5, 2.),
+            at: event.position,
+        })
+    }
+}
 /// The viewer's zoom and pan. The pointer owns them from its first event until
 /// their write lands: publications in between carry older values.
 #[derive(Debug)]
@@ -321,6 +366,7 @@ impl Job {
     }
 }
 pub struct GizmoSurface {
+    zoom_input: ZoomInput,
     /// The layer a click would select under the pointer, outlined
     /// (viewer.ts hoverTargetId): its id and composition corners.
     hover_box: Option<(String, [[f64; 2]; 4])>,
@@ -600,6 +646,7 @@ impl GizmoSurface {
         host: Rc<dyn Host>,
     ) -> Self {
         Self {
+            zoom_input: ZoomInput::default(),
             hover_box: None,
             hover_out: false,
             hover_next: None,
@@ -1486,6 +1533,9 @@ impl GizmoSurface {
         .detach();
     }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        if event.is_momentum || self.zoom_input.owns_pinch() {
+            return;
+        }
         // Flying: the wheel changes speed, a notch (or ~20 pt) a step.
         if self.studio_flying() {
             let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
@@ -1502,11 +1552,8 @@ impl GizmoSurface {
         let delta = event.delta.pixel_delta(line);
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
-        if m.control || m.platform || matches!(event.delta, ScrollDelta::Lines(_)) {
-            // Responsive, reversible, bounded for coarse wheels (viewer.ts).
-            let factor = (dy * 0.006).exp().clamp(0.5, 2.);
-            let at = event.position;
-            self.host.navigate(Navigate::Zoom { factor, at }, cx);
+        if let Some(change) = self.zoom_input.wheel(event) {
+            self.host.navigate(change, cx);
             self.draw(cx);
         } else if m.shift {
             // A plain two-finger scroll leaves the view where it is.
@@ -2830,11 +2877,14 @@ impl Render for GizmoSurface {
                 }),
             )
             .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
+                let change = s.zoom_input.pinch(event);
                 if s.studio_pinch(event.delta as f64, cx) {
                     return;
                 }
-                let (factor, at) = (1. + event.delta as f64, event.position);
-                s.host.navigate(Navigate::Zoom { factor, at }, cx);
+                let Some(change) = change else {
+                    return;
+                };
+                s.host.navigate(change, cx);
                 s.draw(cx);
             }))
             .child(

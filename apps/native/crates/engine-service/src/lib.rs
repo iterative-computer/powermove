@@ -469,6 +469,7 @@ impl ViewerStatus {
 }
 struct View {
     config: ViewerConfig,
+    retired_presenters: Vec<usize>,
     stamp: Stamp,
     content: u64,
     dirty: bool,
@@ -1089,6 +1090,19 @@ impl Viewer {
             })
         })
     }
+    /// Retarget a settled raster without exposing its drawable until complete.
+    pub fn retarget(&self, layer: metal::MetalLayer) -> Result<()> {
+        self.edit(|v| {
+            if let Some(old) = &v.config.layer {
+                v.retired_presenters.push(foreign_types::ForeignType::as_ptr(old) as usize);
+            }
+            v.config.layer = Some(layer);
+            v.stamp.generation += 1;
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
     pub fn configure(&self, output: Output) -> Result<()> {
         output.validate()?;
         self.edit(|v| {
@@ -1641,6 +1655,7 @@ impl EngineService {
         state.views.insert(
             id,
             View {
+                retired_presenters: Vec::new(),
                 config,
                 stamp,
                 content,
@@ -2416,6 +2431,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
         }
         let mut state = shared.state.lock().unwrap();
+        for v in state.views.values_mut() {
+            for retired in v.retired_presenters.drain(..) {
+                engine.forget_presenter(retired);
+            }
+        }
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
         while i < flights.len() {

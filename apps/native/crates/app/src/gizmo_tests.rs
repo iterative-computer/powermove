@@ -2193,6 +2193,7 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     // A trackpad's two-finger scroll orbits.
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        is_momentum: false,
         position: at,
         delta: gpui::ScrollDelta::Pixels(point(px(60.), px(-20.))),
         modifiers: Modifiers::none(),
@@ -2211,6 +2212,7 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
         (gpui::ScrollDelta::Lines(point(0., 3.)), Modifiers::none()),
     ] {
         s.vcx.simulate_event(gpui::ScrollWheelEvent {
+            is_momentum: false,
             position: at,
             delta,
             modifiers: m,
@@ -2425,12 +2427,14 @@ fn dump_light_overlays(cx: &mut TestAppContext) {
     in_3d(&mut s, cx);
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        is_momentum: false,
         position: at,
         delta: gpui::ScrollDelta::Pixels(point(px(140.), px(-40.))),
         modifiers: Modifiers::none(),
         touch_phase: gpui::TouchPhase::Moved,
     });
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        is_momentum: false,
         position: at,
         delta: gpui::ScrollDelta::Lines(point(0., 4.)),
         modifiers: Modifiers::none(),
@@ -2487,6 +2491,7 @@ fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext)
     in_3d(&mut s, cx);
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        is_momentum: false,
         position: at,
         delta: gpui::ScrollDelta::Pixels(point(px(40.), px(-10.))),
         modifiers: Modifiers::none(),
@@ -2616,6 +2621,7 @@ fn in_3d(s: &mut Stage, cx: &mut TestAppContext) {
 fn scroll(s: &mut Stage, cx: &mut TestAppContext, delta: gpui::ScrollDelta, m: Modifiers) {
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        is_momentum: false,
         position: at,
         delta,
         modifiers: m,
@@ -2841,4 +2847,76 @@ fn toggling_to_2d_during_fly_uses_the_view_on_screen(cx: &mut TestAppContext) {
     s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}
+
+/// Recorded-event regressions: accumulation, window-point anchor, Fit exit and limits.
+#[gpui::test]
+fn viewer_zoom_synthetic_sequences(_: &mut TestAppContext) {
+    use crate::gizmo::{ViewPlacement, ZoomInput};
+    use gpui::{PinchEvent, ScrollDelta, ScrollWheelEvent, TouchPhase};
+    let at = point(px(731.25), px(419.5));
+    let center = point(px(518.), px(303.));
+    let mut view = ViewPlacement::default();
+    view.scale.set(0.74); // Fit as displayed before the first input.
+    let original = [(731.25 - 518.) / 0.74, (419.5 - 303.) / 0.74];
+    let assert_anchor = |v: &ViewPlacement| {
+        assert!((518. + v.pan[0] + original[0] * v.scale.get() - 731.25).abs() < 0.5);
+        assert!((303. + v.pan[1] + original[1] * v.scale.get() - 419.5).abs() < 0.5);
+    };
+    let mut input = ZoomInput::default();
+    for delta in [0.01, 0.02, 0.03, 0.04, -0.01, -0.02, -0.03] {
+        let before = view.scale.get();
+        let event = PinchEvent {
+            position: at,
+            delta,
+            phase: TouchPhase::Moved,
+            ..Default::default()
+        };
+        view.navigate(input.pinch(&event).unwrap(), center, 8.);
+        assert_eq!(view.scale.get() > before, delta > 0.);
+        assert!(view.zoom.is_some(), "first zoom leaves Fit");
+        assert_anchor(&view);
+        let duplicate = ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
+            modifiers: Modifiers {
+                platform: true,
+                ..Modifiers::none()
+            },
+            ..Default::default()
+        };
+        assert!(
+            input.wheel(&duplicate).is_none(),
+            "magnify owns the gesture"
+        );
+    }
+    let input = ZoomInput::default();
+    let mut wheel = ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(5.))),
+        modifiers: Modifiers {
+            alt: true,
+            ..Modifiers::none()
+        },
+        ..Default::default()
+    };
+    for _ in 0..20 {
+        let before = view.scale.get();
+        view.navigate(input.wheel(&wheel).unwrap(), center, 8.);
+        assert!(view.scale.get() > before);
+        assert_anchor(&view);
+    }
+    wheel.touch_phase = TouchPhase::Ended;
+    wheel.is_momentum = true;
+    for _ in 0..20 {
+        assert!(input.wheel(&wheel).is_none());
+    }
+    wheel.is_momentum = false;
+    wheel.touch_phase = TouchPhase::Moved;
+    for dy in [10000., 10000., -10000., -10000.] {
+        wheel.delta = ScrollDelta::Pixels(point(px(0.), px(dy)));
+        view.navigate(input.wheel(&wheel).unwrap(), center, 0.8);
+        assert!((0.05..=0.8).contains(&view.scale.get()));
+        assert_anchor(&view);
+    }
 }
