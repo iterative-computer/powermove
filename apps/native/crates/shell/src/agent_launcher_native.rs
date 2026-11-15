@@ -44,6 +44,7 @@ define_class!(
         }
         #[unsafe(method(mouseEntered:))]
         fn entered(&self, _: &NSEvent) {
+            self.paint();
             if let Some(t) = self.ivars().hover.borrow_mut().take() { t.invalidate(); }
             let weak = objc2::rc::Weak::new(self);
             let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| { if let Some(button)=weak.load() {button.show_tasks();} });
@@ -459,7 +460,12 @@ pub(super) fn image(model: &Launcher, time: u64, t: &Tokens) -> Retained<NSImage
         if !reduced && let Some(at) = model.receiving_at {
             let x = time.saturating_sub(at) as f64 / 420.;
             if x < 1. {
-                ink.colorWithAlphaComponent((1. - x) * 0.28).setStroke();
+                let bump = if x < 0.35 {
+                    crate::agent_launcher::ease_out(x / 0.35)
+                } else {
+                    1. - crate::agent_launcher::ease_out((x - 0.35) / 0.65)
+                };
+                ink.colorWithAlphaComponent(bump * 0.28).setStroke();
                 let p = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
                     NSPoint::new(1., 1.),
                     NSSize::new(22., 22.),

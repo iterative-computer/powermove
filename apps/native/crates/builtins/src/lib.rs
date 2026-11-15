@@ -966,9 +966,9 @@ impl Builtins {
         let state = agent.shared();
         let panel = &state.panel;
         let mut revision = 0;
-        let tasks = panel
-            .summaries()
-            .into_iter()
+        let mut summaries = panel.summaries();
+        summaries.sort_by_key(|thread| thread.id != panel.active_id());
+        let tasks = summaries.into_iter()
             .filter_map(|t| {
                 let s = panel.session(&t.id).ok()?;
                 revision += s.trace.rows.len() as u64 + s.conversation.len() as u64;
@@ -984,7 +984,11 @@ impl Builtins {
     }
     pub fn agent_launcher_switch(&self, id: &str) -> std::result::Result<(), String> {
         let (agent, link) = self.agent_state()?;
-        agent.shared().panel.switch(id).map_err(|e| e.to_string())?;
+        {
+            let mut state = agent.shared();
+            if state.panel.active_id() == id { return Ok(()); }
+            state.panel.switch(id).map_err(|e| e.to_string())?;
+        }
         link.publish_now();
         Ok(())
     }
