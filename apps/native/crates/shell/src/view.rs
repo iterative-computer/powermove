@@ -4245,7 +4245,11 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use gpui::{Modifiers, MouseButton, point, px};
-        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        // Exercise input recovery at rest, independently of layout animation.
+        let tokens = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility {
+            reduce_motion: true,
+            ..Default::default()
+        });
         let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
         cx.run_until_parked();
         let none = Modifiers::none();
