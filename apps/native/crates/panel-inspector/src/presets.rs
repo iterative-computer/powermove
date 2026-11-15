@@ -111,6 +111,7 @@ impl Inspector {
                             .flatten()
                             .map(|(k, _)| {
                                 let mut p = Map::new();
+                                p.insert("key", k.clone().into());
                                 p.insert(
                                     "label",
                                     self.effect_catalog
@@ -147,6 +148,20 @@ impl Inspector {
         animated: bool,
         time: f64,
     ) -> Result<Value, InspectorError> {
+        self.capture_preset_parameters(layer, name, effects, paths, None, animated, time)
+    }
+    /// None preserves whole-effect capture for existing callers; Some limits each
+    /// selected effect to the explicitly chosen instance.parameter addresses.
+    pub fn capture_preset_parameters(
+        &mut self,
+        layer: &str,
+        name: &str,
+        effects: &[String],
+        paths: &[String],
+        selected: Option<&[String]>,
+        animated: bool,
+        time: f64,
+    ) -> Result<Value, InspectorError> {
         if name.trim().is_empty() || name.trim().chars().count() > 80 || !time.is_finite() {
             return Err(InspectorError::InvalidInput);
         }
@@ -165,6 +180,9 @@ impl Inspector {
             }
             let mut parameters = Map::new();
             for (key, channel) in fx.get("p").and_then(Value::as_object).into_iter().flatten() {
+                if selected.is_some_and(|paths| !paths.contains(&format!("{id}.{key}"))) {
+                    continue;
+                }
                 parameters.insert(
                     key.clone(),
                     self.capture_preset_channel(

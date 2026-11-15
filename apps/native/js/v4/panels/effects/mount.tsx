@@ -62,6 +62,9 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
             "name",
             "animated",
             ...choices.effects.map((f: any) => `fx.${f.id}`),
+            ...choices.effects.flatMap((f: any) =>
+              f.parameters.map((p: any) => `parameter.${f.id}.${p.key}`),
+            ),
             ...choices.properties.map((p: any) => `property.${p.path}`),
           ])}
           hint={hint}

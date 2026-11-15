@@ -26,6 +26,48 @@ export function PresetSheet({
     hint.effects ??
       (hint.properties?.length ? [] : choices.effects.map((f: any) => f.id)),
   );
+  const [parameters, setParameters] = useState<string[]>(
+    choices.effects.flatMap((f: any) =>
+      effects.includes(f.id)
+        ? f.parameters.map((p: any) => `${f.id}.${p.key}`)
+        : [],
+    ),
+  );
+  const effectState = (f: any) => {
+    const count = f.parameters.filter((p: any) =>
+      parameters.includes(`${f.id}.${p.key}`),
+    ).length;
+    return {
+      checked: f.parameters.length
+        ? count === f.parameters.length
+        : effects.includes(f.id),
+      mixed: count > 0 && count < f.parameters.length,
+    };
+  };
+  const toggleEffect = (f: any) => {
+    const on = !effectState(f).checked;
+    setEffects(
+      on
+        ? [...effects.filter((id) => id !== f.id), f.id]
+        : effects.filter((id) => id !== f.id),
+    );
+    setParameters([
+      ...parameters.filter(
+        (key) => !f.parameters.some((p: any) => key === `${f.id}.${p.key}`),
+      ),
+      ...(on ? f.parameters.map((p: any) => `${f.id}.${p.key}`) : []),
+    ]);
+  };
+  const toggleParameter = (f: any, key: string) => {
+    const next = toggle(parameters, `${f.id}.${key}`);
+    setParameters(next);
+    setEffects([
+      ...effects.filter((id) => id !== f.id),
+      ...(f.parameters.some((p: any) => next.includes(`${f.id}.${p.key}`))
+        ? [f.id]
+        : []),
+    ]);
+  };
   const [properties, setProperties] = useState<string[]>(hint.properties ?? []);
   const [animated, setAnimated] = useState(true);
   const toggle = (values: string[], id: string) =>
@@ -44,7 +86,7 @@ export function PresetSheet({
           name.trim() &&
           effects.length + properties.length
         )
-          save({ name, effects, properties, animated });
+          save({ name, effects, properties, parameters, animated });
       }}
       style={{
         display: "flex",
@@ -112,21 +154,31 @@ export function PresetSheet({
               <Checkbox
                 label={f.label}
                 binding={bindings[`fx.${f.id}`]!}
-                value={effects.includes(f.id)}
-                onChange={() => setEffects(toggle(effects, f.id))}
+                value={effectState(f).checked}
+                mixed={effectState(f).mixed}
+                onChange={() => toggleEffect(f)}
               />
               <text>{f.label}</text>
             </div>
             {expanded.includes(f.id)
               ? f.parameters.map((p: any) => (
-                  <text
+                  <div
                     style={{
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
                       paddingLeft: token("metrics.inset"),
                       color: token("colors.secondary"),
                     }}
                   >
-                    {p.label}
-                  </text>
+                    <Checkbox
+                      label={p.label}
+                      binding={bindings[`parameter.${f.id}.${p.key}`]!}
+                      value={parameters.includes(`${f.id}.${p.key}`)}
+                      onChange={() => toggleParameter(f, p.key)}
+                    />
+                    <text>{p.label}</text>
+                  </div>
                 ))
               : null}
           </div>
@@ -160,7 +212,9 @@ export function PresetSheet({
           label="Save"
           role="default"
           disabled={!name.trim() || !(effects.length + properties.length)}
-          onClick={() => save({ name, effects, properties, animated })}
+          onClick={() =>
+            save({ name, effects, properties, parameters, animated })
+          }
         >
           Save
         </PushButton>
