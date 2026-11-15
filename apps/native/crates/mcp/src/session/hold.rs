@@ -245,6 +245,7 @@ impl McpSession {
                     }
                     let _ = events.recv_timeout(Duration::from_millis(50));
                 }
+                host.wait_if_paused(&project);
                 let mut automation = worker
                     .host
                     .lock()

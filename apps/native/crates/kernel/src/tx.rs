@@ -1587,6 +1587,28 @@ impl Project {
                 }
             }
             HistoryCall::Undo => return self.step(caller, txid, Direction::Undo),
+            HistoryCall::Redo if !self.agent_turns.is_empty() => {
+                let record = self.store.history().records()[..self.store.history().applied()]
+                    .iter()
+                    .rev()
+                    .find(|r| {
+                        r.origin == Origin::Interface
+                            && r.label.starts_with("Undo ")
+                            && self.record_writers.contains_key(&r.id)
+                    });
+                if let Some(record) = record {
+                    let id = record.id;
+                    let label = format!("Redo {}", record.label.trim_start_matches("Undo "));
+                    let owner = self
+                        .record_writers
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(caller.writer);
+                    self.undo_writer(caller, owner, false, &label, Some(id))
+                } else {
+                    Reply::Bool(false)
+                }
+            }
             HistoryCall::Redo => return self.step(caller, txid, Direction::Redo),
             HistoryCall::UndoIfTop { entry } => {
                 if self.store.history().peek_undo().map(|r| r.id) != Some(entry) {
@@ -1622,7 +1644,7 @@ impl Project {
         let mut current = historical.clone();
         let mut inverse = Vec::new();
         let mut conflicts = 0;
-        let mut blocked: Vec<Vec<PathPart>> = Vec::new();
+        let mut blocked: Vec<Op> = Vec::new();
         let outcome: Result<(), String> = (|| {
             for record in records.iter().rev() {
                 let after = historical.clone();
@@ -1644,25 +1666,43 @@ impl Project {
                     .iter()
                     .map(|p| rebase_probe(after.as_ref(), current.as_ref(), p))
                     .collect::<Result<Vec<_>, _>>()?;
-                let paths: Vec<_> = forward.iter().map(|o| o.path().to_vec()).collect();
-                let already_blocked = paths
+                let allowed: Vec<_> = forward
                     .iter()
-                    .any(|p| blocked.iter().any(|b| p.starts_with(b) || b.starts_with(p)));
-                if already_blocked || !mapped.iter().all(|p| probe_holds(current.as_ref(), p)) {
-                    conflicts += 1;
-                    blocked.extend(paths);
-                    continue;
+                    .zip(&mapped)
+                    .map(|(op, probe)| {
+                        probe_holds(current.as_ref(), probe)
+                            && !blocked.iter().any(|bad| undo_atoms_overlap(op, bad))
+                    })
+                    .collect();
+                for (op, allowed) in forward.iter().zip(&allowed) {
+                    if !allowed {
+                        conflicts += 1;
+                        blocked.push(op.clone());
+                    }
                 }
                 let mut source = after;
                 for op in record.inverse.iter() {
-                    let mapped = rebase_op(source.as_ref(), current.as_ref(), &op)?;
+                    let relevant: Vec<_> = forward
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| undo_atoms_overlap(f, &op))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let apply = !relevant.is_empty() && relevant.iter().all(|i| allowed[*i]);
+                    let rebased = if apply {
+                        Some(rebase_op(source.as_ref(), current.as_ref(), &op)?)
+                    } else {
+                        None
+                    };
                     source = crate::document::apply_one(source, &op, revision)
                         .map_err(|e| e.to_string())?
                         .0;
-                    current = crate::document::apply_one(current, &mapped, revision)
-                        .map_err(|e| e.to_string())?
-                        .0;
-                    inverse.push(mapped);
+                    if let Some(mapped) = rebased {
+                        current = crate::document::apply_one(current, &mapped, revision)
+                            .map_err(|e| e.to_string())?
+                            .0;
+                        inverse.push(mapped);
+                    }
                 }
             }
             let document = Document::from_root(current.clone(), revision);
@@ -2739,6 +2779,28 @@ fn array_ids(root: Option<&Node>, array: &[PathPart]) -> Vec<JsString> {
             .filter_map(|i| i.get("id").and_then(crate::model::string_of).cloned())
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+// Structural edits address array element IDs, so preserving one edited
+// layer does not prevent undoing a different layer inserted in the same batch.
+fn undo_atoms_overlap(a: &Op, b: &Op) -> bool {
+    let identity = |op: &Op| -> Option<JsString> {
+        match op {
+            Op::Insert { value, .. } => value.get("id").and_then(Value::as_js_string).cloned(),
+            Op::Delete { id, .. } => Some(id.clone()),
+            _ => None,
+        }
+    };
+    if let (Some(aid), Some(bid)) = (identity(a), identity(b)) {
+        return a.path() == b.path() && aid == bid;
+    }
+    match (a, b) {
+        (Op::Order { path: a, .. }, Op::Order { path: b, .. }) => a == b,
+        (Op::Order { .. }, _) | (_, Op::Order { .. }) => false,
+        (Op::Leaf(_), Op::Insert { .. } | Op::Delete { .. })
+        | (Op::Insert { .. } | Op::Delete { .. }, Op::Leaf(_)) => false,
+        _ => a.path().starts_with(b.path()) || b.path().starts_with(a.path()),
     }
 }
 

@@ -1091,3 +1091,52 @@ fn coedit_command_z_during_a_run_skips_agent_steps() {
         Some(&Value::Number(70.))
     );
 }
+
+#[test]
+fn coedit_keep_mine_undoes_independent_values_inside_one_segment() {
+    let root = common::TempDir::new("coedit-partial-inverse");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    call(
+        &mut k,
+        agent,
+        Call::Transact {
+            label: Some("Agent values".into()),
+            body: vec![
+                Command::SetStaticOpacity {
+                    layer_id: "l".into(),
+                    value: 70.,
+                },
+                Command::SetLayerVisible {
+                    layer_id: "l".into(),
+                    visible: false,
+                },
+            ]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, Caller::native(), 33.);
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: true,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
+    assert_eq!(
+        layer.get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(33.))
+    );
+    assert_ne!(layer.get("on"), Some(&Value::Bool(false)));
+}
