@@ -144,48 +144,9 @@ export const newLayerItems = [
   null,
   "Import Media…",
 ];
-export function rowMenu(row: Row): MenuItem[] {
-  const enabled = !row.locked && !row.disabled;
-  return [
-    {
-      label: "Add Keyframe at Playhead",
-      action: "add-key",
-      enabled: enabled && !!row.animation,
-    },
-    {
-      label: "Remove Animation",
-      action: "remove-animation",
-      enabled: enabled && !!row.animation && row.animation !== "static",
-    },
-    {
-      label: row.expression ? "Edit Expression…" : "Add Expression…",
-      action: "edit-expression",
-      enabled: enabled && !!row.animation,
-      separatorBefore: true,
-    },
-    {
-      label: "Remove Expression",
-      action: "remove-expression",
-      enabled: enabled && !!row.expression,
-    },
-    { label: "Reset", action: "reset", enabled, separatorBefore: true },
-    {
-      label: "Show in Graph Editor",
-      action: "show-graph",
-      enabled: !!row.animation,
-    },
-    ...(row.linked === undefined
-      ? []
-      : [
-          {
-            label: "Link Scale Axes",
-            action: "link" as RowAction,
-            enabled,
-            checked: row.linked,
-          },
-        ]),
-  ];
-}
+export { rowMenu } from "./property-menu";
+import { rowMenu } from "./property-menu";
+
 function activate(event: SurfaceEvent, run: () => void) {
   if (event.key === "Enter" || event.key === " ") {
     event.stopPropagation();

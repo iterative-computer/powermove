@@ -1880,6 +1880,7 @@ pub fn precompose_draft(published: &Published) -> Option<PrecomposeDraft> {
         can_leave,
         leave: false,
         adjust_duration: false,
+        size_to_selection: false,
         open_after: false,
     })
 }
@@ -1913,6 +1914,7 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
                     PrecomposeMode::MoveAll
                 },
                 adjust_duration: draft.adjust_duration && !leave,
+                size_to_selection: draft.size_to_selection && !leave,
                 time,
             }
             .into(),

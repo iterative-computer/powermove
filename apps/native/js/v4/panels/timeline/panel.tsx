@@ -148,6 +148,12 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 id={`timeline:tab:${tab.id}`}
                 label={tab.name}
                 title={tab.name}
+                onPointerDown={(event) => {
+                  if (event.button === 2) {
+                    event.stopPropagation();
+                    send({ type: "tabContext", id: tab.id });
+                  }
+                }}
                 role="tab"
                 tabIndex={tab.active ? 0 : -1}
                 aria-selected={tab.active}
@@ -171,6 +177,14 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
               >
                 {tab.name}
               </UI.ToolbarItem>
+              <Icon
+                id={`timeline:tab-menu:${tab.id}`}
+                label={`${tab.name} menu`}
+                symbol="ellipsis"
+                quiet
+                send={send}
+                intent={{ type: "tabContext", id: tab.id }}
+              />
               {f.tabs.length > 1 && tab.showClose && (
                 <Icon
                   id={`timeline:tab-close:${tab.id}`}
@@ -191,7 +205,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
-            data-pm-variant="glass"
+            data-pm-variant="plate"
             value={f.mode}
             options={[
               { id: "Layers", label: "Layers" },

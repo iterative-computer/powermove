@@ -6,6 +6,8 @@ export interface ViewerModel {
   project: string;
   composition: string | null;
   name: string;
+  compositions?: Array<{ id: string; name: string; parents: string[] }>;
+  trail?: { ids: string[]; index: number };
   fit: boolean;
   shownZoom: number;
   quality: "auto" | "1" | "0.5" | "0.25";

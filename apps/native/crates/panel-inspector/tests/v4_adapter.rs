@@ -288,3 +288,65 @@ fn v4_link_action_refuses_non_scale_handles() {
     let scale = f.handle("a", "scale.x");
     f.action(&scale, V4Action::LinkScale, 1.);
 }
+
+#[test]
+fn property_menu_dimension_switch_is_undoable_and_rejects_other_properties() {
+    let mut f = Fixture::new();
+    f.select(&["a"]);
+    let position = f.handle("a", "position.x");
+    f.action(&position, V4Action::SeparateDimensions, 0.);
+    assert_eq!(
+        f.model.layer("a").unwrap().get("separateDimensions"),
+        Some(&Value::Bool(true))
+    );
+    f.action(&position, V4Action::SeparateDimensions, 0.);
+    assert_eq!(
+        f.model.layer("a").unwrap().get("separateDimensions"),
+        Some(&Value::Bool(false))
+    );
+    f.run(Request::new(
+        Caller::native(),
+        Call::History(HistoryCall::Undo),
+    ));
+    assert_eq!(
+        f.model.layer("a").unwrap().get("separateDimensions"),
+        Some(&Value::Bool(true))
+    );
+    f.run(Request::new(
+        Caller::native(),
+        Call::History(HistoryCall::Redo),
+    ));
+    assert_eq!(
+        f.model.layer("a").unwrap().get("separateDimensions"),
+        Some(&Value::Bool(false))
+    );
+    let opacity = f.handle("a", "opacity");
+    assert!(
+        f.adapter
+            .action(
+                &mut f.model,
+                Caller::native(),
+                &opacity,
+                V4Action::SeparateDimensions,
+                0.
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn property_menu_easing_applies_to_all_keys() {
+    let mut f = Fixture::new();
+    f.select(&["a"]);
+    let handle = f.handle("a", "opacity");
+    f.action(&handle, V4Action::AddKey, 0.);
+    f.action(&handle, V4Action::AddKey, 2.);
+    f.action(&handle, V4Action::Ease("linear".into()), 1.);
+    let layer = f.model.layer("a").unwrap();
+    let prop = layer.get("p").unwrap().get("opacity").unwrap();
+    let keys = prop.get("kf").and_then(Value::as_array).unwrap();
+    assert_eq!(keys.len(), 2);
+    for key in keys {
+        assert_eq!(key.get("outInterp").and_then(Value::as_str), Some("bezier"));
+    }
+}

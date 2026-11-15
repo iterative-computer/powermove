@@ -593,3 +593,30 @@ test("2D | 3D leads the bar: it switches the shot and the scene, and hides witho
   expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
   await flat.dispose();
 });
+
+test("nested composition breadcrumbs navigate ancestors and retain the way back down", async () => {
+  const seen: [string, unknown][] = [];
+  const state = fixture();
+  state.model!.compositions = [
+    { id: "main", name: "Main", parents: [] },
+    { id: "logo", name: "Logo", parents: ["main"] },
+    { id: "spinner", name: "Spinner", parents: ["logo"] },
+  ];
+  state.model!.composition = "logo";
+  state.model!.trail = { ids: ["main", "logo", "spinner"], index: 1 };
+  const { root, commits } = recorder();
+  await root.render(<ViewerPanel state={state} actions={{ ...actions, drive: (id, argument) => { seen.push([id, argument]); } }} />);
+  const nodes = root.inspect().nodes;
+  expect(nodes.find(n => n.props.id === "viewer.path")?.props.label).toBe("Composition path");
+  for (const id of ["main", "spinner"]) {
+    const crumb = nodes.find(n => n.props.id === `viewer.crumb.${id}`)!;
+    expect(crumb).toBeDefined();
+    await root.drive(crumb.id, "click", {});
+  }
+  expect(seen).toEqual([["viewer.composition.open", "main"], ["viewer.composition.open", "spinner"]]);
+  const report = replay(commits).at(-1);
+  expect(report.accepted).toBe(true);
+  expect(report.wireDiagnostics).toEqual([]);
+  expect(report.focusOrder.map((id: number) => report.nodes[id].props.id)).not.toContain("viewer.crumb.logo");
+  await root.dispose();
+});

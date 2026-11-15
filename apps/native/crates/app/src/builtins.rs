@@ -1515,16 +1515,13 @@ impl Controller {
         if pm_kernel::model::comp_node(root, Some(id)).is_none() {
             return;
         }
-        let mut value = root.to_value();
-        if let Some(object) = value.as_object_mut() {
-            object.insert("compId", pm_model::Value::from(id));
+        if let Some(viewer) = &self.viewer {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
         }
         self.call(
-            pm_kernel::Call::Restore {
-                project: value,
-                label: "Open Composition".into(),
-                expected_revision: p.revision(),
-                expected_document: p.snapshot.doc_id,
+            pm_kernel::Call::OpenComposition {
+                comp_id: id.into(),
+                document: p.snapshot.doc_id,
             },
             cx,
         );
@@ -1566,6 +1563,9 @@ impl Controller {
                                 .cloned()
                                 .unwrap_or_default();
                             self.host.borrow().send_command(name, args);
+                        }
+                        Some("compositionSettings") => {
+                            self.composition_sheet(true, request.input["id"].as_str().map(str::to_owned), cx);
                         }
                         Some("openComposition") => {
                             self.open_builtin_composition(

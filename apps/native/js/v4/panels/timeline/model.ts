@@ -151,6 +151,8 @@ export type Intent =
   | { type: "graphOptions" }
   | { type: "timeEdit" }
   | { type: "tab"; id: string; close: boolean }
+  | { type: "tabMenu"; id: string; action: string }
+  | { type: "tabContext"; id: string }
   | { type: "selectRow"; id: string; modifiers: Modifiers }
   | { type: "disclosure"; id: string; open: boolean; all?: boolean }
   | { type: "rename"; id: string }

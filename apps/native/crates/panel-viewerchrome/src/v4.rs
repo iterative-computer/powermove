@@ -7,6 +7,13 @@ use pm_model::{Map, Value};
 pub const CHANNEL: &str = "viewer.chrome";
 pub const COMMAND: &str = "viewer.chrome.drive";
 
+fn node_text(node: &Node) -> Option<&str> {
+    match node.kind() {
+        NodeKind::String(text) => text.as_str(),
+        _ => None,
+    }
+}
+
 /// One instance per panel/realm generation, retired with that generation.
 /// `m.viewer_3d_collapse`: below this stage width the 3D group becomes one
 /// pull-down (3d-studio.md §2). A test keeps it equal to the token.
@@ -109,6 +116,47 @@ impl Session {
                 .unwrap_or(Value::Null),
         );
         value.insert("name", Value::String(title));
+        // Only composition identities, names and links cross the chrome boundary.
+        let mut compositions = Vec::new();
+        if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+            let mut parents: std::collections::HashMap<String, Vec<Value>> = Default::default();
+            for (id, comp) in comps.iter() {
+                for layer in pm_kernel::model::layers_of(comp) {
+                    if layer.get("type").and_then(node_text) != Some("precomp") {
+                        continue;
+                    }
+                    if let Some(child) = layer
+                        .get("d")
+                        .and_then(|d| d.get("comp"))
+                        .and_then(node_text)
+                    {
+                        let list = parents.entry(child.to_owned()).or_default();
+                        let parent = Value::from(id.to_string_lossy());
+                        if !list.contains(&parent) {
+                            list.push(parent);
+                        }
+                    }
+                }
+            }
+            for (id, comp) in comps.iter() {
+                let name = id.to_string_lossy();
+                let mut entry = Map::new();
+                entry.insert("id", Value::from(name.as_str()));
+                entry.insert(
+                    "name",
+                    comp.get("name")
+                        .map(Node::to_value)
+                        .unwrap_or(Value::from("Composition")),
+                );
+                entry.insert(
+                    "parents",
+                    Value::Array(parents.remove(&name).unwrap_or_default()),
+                );
+                compositions.push(Value::Object(entry));
+            }
+        }
+        value.insert("compositions", Value::Array(compositions));
+
         value.insert("fit", Value::Bool(model.chrome.navigation.fit));
         value.insert("shownZoom", Value::Number(shown));
         value.insert("quality", Value::from(model.chrome.quality.id()));
@@ -146,10 +194,11 @@ impl Session {
                     "compact",
                     // The bar spans every pane: 2 and 4 views are two columns.
                     Value::Bool({
-                        let columns = match model.ui.viewer.get("studioViews").and_then(Value::as_str) {
-                            Some("2" | "4") => 2.,
-                            _ => 1.,
-                        };
+                        let columns =
+                            match model.ui.viewer.get("studioViews").and_then(Value::as_str) {
+                                Some("2" | "4") => 2.,
+                                _ => 1.,
+                            };
                         viewport.stage.width * columns < VIEWER_3D_COLLAPSE
                     }),
                 );
@@ -208,6 +257,9 @@ mod collapse_tests {
     #[test]
     fn the_collapse_width_is_the_token() {
         let t = pm_design::Tokens::new(Default::default(), Default::default());
-        assert_eq!(super::VIEWER_3D_COLLAPSE, t.metrics.viewer_3d_collapse as f64);
+        assert_eq!(
+            super::VIEWER_3D_COLLAPSE,
+            t.metrics.viewer_3d_collapse as f64
+        );
     }
 }

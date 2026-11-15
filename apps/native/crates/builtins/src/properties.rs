@@ -45,14 +45,23 @@ impl Properties {
     /// every channel of the row.
     fn expression(
         &mut self,
-        model: &Inspector,
+        model: &mut Inspector,
         row: &str,
         bindings: Vec<Binding>,
         source: Option<String>,
+        time: f64,
     ) -> Result<Option<Value>, String> {
         let Some(source) = source else {
             return Ok(None);
         };
+        let mut runtime_error = None;
+        for binding in &bindings {
+            if let Some(id) = binding.property_id() {
+                runtime_error = runtime_error.or(model
+                    .expression_error(&id, time)
+                    .map_err(|e| e.to_string())?);
+            }
+        }
         let key = format!("expr.{row}");
         let handle = match self.handles.get(&key) {
             Some(handle) => handle.clone(),
@@ -65,7 +74,8 @@ impl Properties {
                 handle
             }
         };
-        let error = pm_kernel::commands::properties::expression_diagnostic(&source);
+        let error = runtime_error
+            .or_else(|| pm_kernel::commands::properties::expression_diagnostic(&source));
         Ok(Some(
             json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
         ))
@@ -397,6 +407,7 @@ impl Properties {
                         id,
                         vec![field.binding.clone()],
                         state.expression.clone(),
+                        time,
                     )?
                 {
                     row["expression"] = expression;
@@ -504,6 +515,16 @@ impl Properties {
                     }
                     if !axes.is_empty() {
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                        if id == "position" {
+                            row["separateDimensions"] = json!(
+                                model
+                                    .layer(&layer)
+                                    .map_err(|e| e.to_string())?
+                                    .get("separateDimensions")
+                                    .and_then(pm_model::Value::as_bool)
+                                    .unwrap_or(false)
+                            );
+                        }
                         if id == "scale" {
                             row["linked"] = json!(
                                 model
@@ -514,7 +535,9 @@ impl Properties {
                                     .unwrap_or(true)
                             );
                         }
-                        if let Some(expression) = self.expression(model, id, bound, expression)? {
+                        if let Some(expression) =
+                            self.expression(model, id, bound, expression, time)?
+                        {
                             row["expression"] = expression;
                         }
                         rows.push(row);
@@ -2488,6 +2511,8 @@ impl Properties {
                 Some("reset") => V4Action::Reset(None),
                 Some("remove-expression") => V4Action::Expression(None),
                 Some("link") => V4Action::LinkScale,
+                Some("separate-dimensions") => V4Action::SeparateDimensions,
+                Some(action) if action.starts_with("ease:") => V4Action::Ease(action[5..].into()),
                 Some("show-graph") => V4Action::ShowGraph,
                 _ => return Err("Unknown property action".into()),
             }
