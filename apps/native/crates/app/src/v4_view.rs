@@ -133,6 +133,7 @@ struct ScrubDrag {
     id: Id,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
+    motion: pm_surface::kit::NumericMotion,
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
@@ -213,6 +214,9 @@ pub struct SurfaceView {
     targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
+    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool)>,
+    wheel_tick: u64,
+    wheel_lifted: bool,
     scrub_ops: VecDeque<ScrubOp>,
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
@@ -263,6 +267,8 @@ pub struct SurfaceView {
     pub renders: usize,
     #[cfg(test)]
     pub log: Vec<(Id, String, EventDetail)>,
+    #[cfg(test)]
+    number_edit_request: Option<Id>,
     pub error: Option<String>,
 }
 impl SurfaceView {
@@ -306,6 +312,9 @@ impl SurfaceView {
             targets: Default::default(),
             capture: None,
             scrub: None,
+            wheel_scrub: None,
+            wheel_tick: 0,
+            wheel_lifted: false,
             scrub_ops: VecDeque::new(),
             dragging: None,
             list_widths: HashMap::new(),
@@ -334,6 +343,8 @@ impl SurfaceView {
             renders: 0,
             #[cfg(test)]
             log: vec![],
+            #[cfg(test)]
+            number_edit_request: None,
             error: None,
         };
         this.reconcile(window, cx);
@@ -467,6 +478,7 @@ impl SurfaceView {
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
+            self.wheel_finish(false, cx);
             self.restart();
         }
         self.table = compiled.table;
@@ -1321,6 +1333,34 @@ impl SurfaceView {
         self.scrub.is_some()
     }
     #[cfg(test)]
+    pub fn wheel_reading(&self) -> Option<f64> {
+        self.scrub_shown.map(|(_, value)| value)
+    }
+    #[cfg(test)]
+    pub fn number_edit_requested(&self, semantic: &str) -> bool {
+        self.number_edit_request == Some(self.prepared.semantics[semantic])
+    }
+    #[cfg(test)]
+    pub fn numeric_facts(&self, semantic: &str) -> crate::v4_compile::NumberFacts {
+        self.prepared
+            .node(self.prepared.semantics[semantic])
+            .unwrap()
+            .number
+            .unwrap()
+    }
+    #[cfg(test)]
+    pub fn number_containing(&self, part: &str) -> Option<String> {
+        self.prepared
+            .nodes
+            .values()
+            .find(|n| {
+                n.number.is_some()
+                    && n.binding.is_some()
+                    && n.semantic.as_deref().is_some_and(|s| s.contains(part))
+            })
+            .and_then(|n| n.semantic.as_ref().map(|s| s.to_string()))
+    }
+    #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {
         let mut numbers: Vec<_> = self
             .prepared
@@ -1815,7 +1855,127 @@ impl SurfaceView {
         );
         self.pointer(id, "pointerdown", detail, cx);
     }
-    fn scrub_press(&mut self, id: Id, event: &MouseDownEvent, window: &mut Window) {
+    fn wheel_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if let Some((_, _, bound)) = self.wheel_scrub.take() {
+            if bound {
+                self.scrub_ops.push_back(ScrubOp::Finish(commit));
+                self.scrub_pump(cx);
+            }
+        }
+    }
+    fn wheel_number(
+        &mut self,
+        id: Id,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_surface::kit::{HORIZONTAL_SCRUB_REST, HorizontalScrub};
+        if event.touch_phase == TouchPhase::Started {
+            self.wheel_lifted = false;
+        }
+        if matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.wheel_lifted = true;
+            if self.wheel_scrub.is_some() {
+                window.prevent_default();
+                cx.stop_propagation();
+                if event.touch_phase == TouchPhase::Cancelled {
+                    self.wheel_finish(false, cx);
+                }
+            }
+            return;
+        }
+        let delta = match event.delta {
+            ScrollDelta::Pixels(p) => (-f32::from(p.x) as f64, -f32::from(p.y) as f64),
+            ScrollDelta::Lines(p) => (-p.x as f64 * 16., -p.y as f64 * 16.),
+        };
+        if self.wheel_lifted && matches!(event.delta, ScrollDelta::Pixels(_)) {
+            if delta.0.abs() > delta.1.abs() || self.wheel_scrub.is_some() {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.scrub.is_some() {
+            return;
+        }
+        let Some(node) = self.prepared.node(id) else {
+            return;
+        };
+        let Some(n) = node.number else {
+            return;
+        };
+        if node.disabled
+            || self
+                .fields
+                .get(&id)
+                .is_some_and(|f| f.read(cx).is_editing())
+        {
+            return;
+        }
+        let binding = node.binding.clone().filter(|_| !node.local_change);
+        let active = self
+            .wheel_scrub
+            .as_ref()
+            .filter(|(target, _, _)| *target == id);
+        if !active.map_or_else(
+            || HorizontalScrub::new(n.value).accepts(delta.0, delta.1, event.modifiers.control),
+            |(_, w, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
+        ) {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        if active.is_none() {
+            self.wheel_finish(true, cx);
+            self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
+            if binding.is_some() {
+                self.scrub_ops.push_back(ScrubOp::Begin);
+            }
+        }
+        if delta.0 == 0. {
+            return;
+        }
+        let value = self.wheel_scrub.as_mut().unwrap().1.sample(
+            delta.0,
+            n.step,
+            n.speed,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            (n.min, n.max),
+        );
+        self.scrub_shown = Some((id, value));
+        if let Some(binding) = binding {
+            self.scrub_ops
+                .push_back(ScrubOp::Value(binding, json!(value)));
+            self.scrub_pump(cx);
+        } else {
+            self.change(id, json!(value), cx);
+        }
+        if let Some(field) = self.fields.get(&id) {
+            field.update(cx, |f, cx| f.set_value(&n.text(value), cx));
+        }
+        self.wheel_tick += 1;
+        let tick = self.wheel_tick;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HORIZONTAL_SCRUB_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.wheel_tick == tick {
+                    v.wheel_finish(true, cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn scrub_press(
+        &mut self,
+        id: Id,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.wheel_finish(true, cx);
         let Some(node) = self.prepared.node(id) else {
             return;
         };
@@ -1828,6 +1988,13 @@ impl SurfaceView {
             id,
             start: event.position,
             number,
+            motion: pm_surface::kit::NumericMotion::new(
+                (
+                    f32::from(event.position.x) as f64,
+                    f32::from(event.position.y) as f64,
+                ),
+                number.value,
+            ),
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
@@ -1841,29 +2008,28 @@ impl SurfaceView {
         let Some(drag) = &mut self.scrub else {
             return;
         };
-        let delta = event.position - drag.start;
-        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        let n = drag.number;
+        let Some(value) = drag.motion.sample(
+            (
+                f32::from(event.position.x) as f64,
+                f32::from(event.position.y) as f64,
+            ),
+            relative_scrub_motion(),
+            threshold as f64,
+            n.step,
+            n.speed,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            (n.min, n.max),
+        ) else {
+            return;
+        };
         if !drag.active {
-            if dx.hypot(dy) < threshold {
-                return;
-            }
             drag.active = true;
             if drag.binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Begin);
             }
         }
-        let n = drag.number;
-        let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
-            start: n.value,
-            delta: (dx as f64, dy as f64),
-            step: n.step,
-            speed: n.speed,
-            shift: event.modifiers.shift,
-            alt: event.modifiers.alt,
-            bounds: (n.min, n.max),
-        }) else {
-            return;
-        };
         let id = drag.id;
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
@@ -1894,12 +2060,22 @@ impl SurfaceView {
             }
         } else if drag.grade.is_some() {
             // A press on a grading control that never moved changes nothing.
-        } else if let Some(field) = self.fields.get(&drag.id) {
-            field.update(cx, |f, cx| f.begin_editing(cx));
+        } else if commit {
+            #[cfg(test)]
+            {
+                self.number_edit_request = Some(drag.id);
+            }
+            if let Some(field) = self.fields.get(&drag.id) {
+                field.update(cx, |f, cx| f.begin_editing(cx));
+            }
         }
     }
     /// Escape during a scrub restores the value through the kernel gesture.
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.wheel_scrub.is_some() {
+            self.wheel_finish(false, cx);
+            return true;
+        }
         if self.scrub.is_none() {
             return false;
         }
@@ -1956,7 +2132,7 @@ impl SurfaceView {
                     },
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() {
+                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() {
                     v.scrub_gesture = None;
                     v.scrub_shown = None;
                 }
@@ -1972,6 +2148,22 @@ impl SurfaceView {
         canvas(
             move |bounds, _, _| origin.set(bounds.origin),
             move |_, _, window, _| {
+                let wheel = weak.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = wheel.update(cx, |v, _| {
+                            if event.touch_phase == TouchPhase::Started {
+                                v.wheel_lifted = false;
+                            }
+                            if matches!(
+                                event.touch_phase,
+                                TouchPhase::Ended | TouchPhase::Cancelled
+                            ) {
+                                v.wheel_lifted = true;
+                            }
+                        });
+                    }
+                });
                 let moved = weak.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
@@ -2355,9 +2547,7 @@ impl SurfaceView {
             // order, as on the web (a segmented control's other segments).
             let tab = node.tab_index.unwrap_or(0);
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
-            element = element
-                .track_focus(focus)
-                .tab_index(tab.max(0));
+            element = element.track_focus(focus).tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -2833,13 +3023,18 @@ impl SurfaceView {
             });
         }
         if node.number.is_some() {
-            element = element.cursor_col_resize().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
-                    v.scrub_press(id, event, window);
-                    cx.stop_propagation();
-                }),
-            );
+            element = element
+                .on_scroll_wheel(
+                    cx.listener(move |v, event, window, cx| v.wheel_number(id, event, window, cx)),
+                )
+                .cursor_col_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        v.scrub_press(id, event, window, cx);
+                        cx.stop_propagation();
+                    }),
+                );
         }
         if let Some(layer) = node.timeline_parent_pick.clone() {
             let outline = self.natives.outline.clone();
@@ -3333,11 +3528,14 @@ impl SurfaceView {
         }
         if node.number.is_some() {
             wrapper = wrapper
+                .on_scroll_wheel(
+                    cx.listener(move |v, event, window, cx| v.wheel_number(id, event, window, cx)),
+                )
                 .cursor_col_resize()
                 .capture_any_mouse_down(cx.listener(
                     move |v, event: &MouseDownEvent, window, cx| {
                         if event.button == MouseButton::Left {
-                            v.scrub_press(id, event, window);
+                            v.scrub_press(id, event, window, cx);
                             cx.stop_propagation();
                         }
                     },
@@ -3925,4 +4123,20 @@ impl SurfaceView {
             .w_full()
             .h(px(body.max(self.natural.get())))
     }
+}
+
+/// Read the same hardware-relative travel Electron obtains as movementX/Y.
+/// GPUI carries absolute positions only. Query AppKit while dispatching its
+/// current drag event, before any publication can replace the field tree.
+fn relative_scrub_motion() -> Option<(f64, f64)> {
+    #[cfg(not(test))]
+    {
+        use objc2_app_kit::{NSApplication, NSEventType};
+        let event = objc2::MainThreadMarker::new()
+            .and_then(|main| NSApplication::sharedApplication(main).currentEvent())?;
+        if event.r#type() == NSEventType::LeftMouseDragged {
+            return Some((event.deltaX(), event.deltaY()));
+        }
+    }
+    None
 }

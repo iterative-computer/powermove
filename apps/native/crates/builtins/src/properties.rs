@@ -80,7 +80,12 @@ impl Properties {
             json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
         ))
     }
-    fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
+    pub(crate) fn lease(
+        &mut self,
+        model: &Inspector,
+        id: &str,
+        binding: Binding,
+    ) -> Result<Value, String> {
         let handle = if let Some(handle) = self.handles.get(id) {
             handle.clone()
         } else {

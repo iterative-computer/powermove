@@ -22,6 +22,7 @@ export class TimelineSession {
   private cleanupPromise?: Promise<void>;
   private resourceRetirement?: Promise<void>;
   private serial = 0;
+  private bindings = new Set<string>();
   private refreshPending = false;
   private window: WindowRequest;
   private current?: TimelineFrame;
@@ -60,6 +61,28 @@ export class TimelineSession {
       await this.model.inspect(this.window),
       this.window,
     );
+    if (!this.accepting) return;
+    const next = new Set<string>();
+    for (const row of frame.window.rows) {
+      if (row.kind !== "property") continue;
+      for (const number of [
+        row.numeric,
+        ...(row.axes ?? []).map((a) => a.numeric),
+      ]) {
+        if (!number || typeof number.binding === "string") continue;
+        const { handle, channels } = number.binding;
+        if (!this.bindings.has(handle))
+          await this.host.registerBinding(handle, channels);
+        next.add(handle);
+        this.bindings.add(handle);
+      }
+    }
+    for (const handle of this.bindings) {
+      if (!next.has(handle)) {
+        await this.host.disposeBinding(handle);
+        this.bindings.delete(handle);
+      }
+    }
     if (!this.accepting) return;
     this.current = frame;
     for (const listener of this.listeners) listener(frame);
@@ -160,6 +183,14 @@ export class TimelineSession {
   }
   private async releaseResources(): Promise<void> {
     const errors: unknown[] = [];
+    for (const handle of this.bindings) {
+      try {
+        await this.host.disposeBinding(handle);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    this.bindings.clear();
     for (const cleanup of this.cleanups.splice(0).reverse()) {
       try {
         await cleanup();

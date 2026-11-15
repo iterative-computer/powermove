@@ -322,6 +322,7 @@ impl Backend {
                 row["label"] = json!(label);
                 let channels = client.model.track_channels(&layer, &path);
                 let mut values = Vec::new();
+                let mut numeric = Vec::new();
                 let mut animated = false;
                 let mut at_key = !channels.is_empty();
                 for channel in &channels {
@@ -335,6 +336,54 @@ impl Backend {
                         .binding_state(&binding, time)
                         .map_err(|e| format!("{e:?}"))?;
                     let value = wire(&state.value);
+                    let model = self.model.as_ref().ok_or("No open project")?;
+                    let number = if value.is_number() {
+                        let id = format!(
+                            "timeline:{}:{:?}:{layer}:{}",
+                            model.document_id(),
+                            model.selected_layers(),
+                            channel.path
+                        );
+                        let lease = self.native.properties.lease(model, &id, binding.clone())?;
+                        let spec = model
+                            .fields_for_layer(&layer)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|f| f.binding == binding)
+                            .and_then(|f| match f.kind {
+                                pm_panel_inspector::FieldType::Number(spec) => Some(spec),
+                                _ => None,
+                            });
+                        let mut number = json!({"binding":lease,"value":value,"step":1.,"speed":0.5,"precision":3});
+                        if let Some(spec) = spec {
+                            number["step"] = json!(spec.step);
+                            number["speed"] = json!(spec.speed);
+                            if let Some(min) = spec.min {
+                                number["min"] = json!(min);
+                            }
+                            if let Some(max) = spec.max {
+                                number["max"] = json!(max);
+                            }
+                        }
+                        match channel.path.as_str() {
+                            "opacity" => {
+                                number["min"] = json!(0.);
+                                number["max"] = json!(100.);
+                                number["unit"] = json!("%");
+                            }
+                            "position.x" | "position.y" | "position.z" | "anchor.x"
+                            | "anchor.y" | "anchor.z" => number["unit"] = json!("px"),
+                            "scale.x" | "scale.y" | "scale.z" => number["unit"] = json!("%"),
+                            "rotation" | "rotation.x" | "rotation.y" | "rotation.z" => {
+                                number["unit"] = json!("°")
+                            }
+                            _ => {}
+                        }
+                        number
+                    } else {
+                        Value::Null
+                    };
+                    numeric.push(number);
                     values.push(match value.as_f64() {
                         Some(n) => readout(n),
                         None => value.to_string(),
@@ -347,8 +396,10 @@ impl Backend {
                     channels
                         .iter()
                         .zip(values.iter())
-                        .map(|(channel, value)| {
-                            let mut axis = json!({"path":channel.path,"readout":value});
+                        .zip(numeric.iter())
+                        .map(|((channel, value), numeric)| {
+                            let mut axis =
+                                json!({"path":channel.path,"readout":value,"numeric":numeric});
                             if self.native.timeline_editor
                                 == Some(TimelineEditor::Property(
                                     layer.clone(),
