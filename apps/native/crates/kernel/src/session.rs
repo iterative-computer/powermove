@@ -1367,10 +1367,14 @@ impl Kernel {
     ) -> Result<(), KernelFailure> {
         let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
         let mut meta = p.session.unwrap_or(Value::Null);
-        // A copy that named the original's file would reopen as that file.
+        // A copy that named the original's file would reopen as that file;
+        // one that kept the record of what a copy stands in for would be
+        // taken up in that copy's place (`copy_of`, `copy_of_entry`). A
+        // duplicate is a project of its own.
         if let Value::Object(m) = &mut meta {
             m.remove("file");
             m.remove("embeddedMedia");
+            m.remove("copyOf");
         }
         let ws = p.workspace.unwrap_or(Value::Null);
         let history = p.history.unwrap_or(Value::Null);
@@ -2177,6 +2181,16 @@ impl Kernel {
             recovery_file,
             from_other,
         } = prepared;
+        // The library project this open read, decided before a recovery
+        // replaces the source: who keeps the session's journal follows what
+        // was opened (`journal_id`), for the recovered session and every
+        // save after it, not what the recovery made of it.
+        let opened_library = match &source {
+            OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
+                Some((lib.id.clone(), entry_of_copy(lib.session.as_ref()).is_some()))
+            }
+            _ => None,
+        };
         let setting_aside = matches!(
             choice,
             Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
@@ -2347,12 +2361,9 @@ impl Kernel {
         // original app's library) keeps it under the id it opened with, and
         // so does that copy when the project's next open takes it up again
         // (PM-379): the next open reads that id (PM-360).
-        let journal_id = match (&destination, &source) {
-            (
-                Destination::Library(slot),
-                OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. },
-            ) if *slot != id
-                && (lib.id != *slot || entry_of_copy(lib.session.as_ref()).is_some()) =>
+        let journal_id = match (&destination, &opened_library) {
+            (Destination::Library(slot), Some((lib, copy_of_entry)))
+                if *slot != id && (lib != slot || *copy_of_entry) =>
             {
                 id.clone()
             }
