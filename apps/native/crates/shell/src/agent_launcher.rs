@@ -80,7 +80,8 @@ impl Launcher {
                 || (self.tone() == Tone::Attention
                     && self.running_count() > 0
                     && self.attention_unseen())
-                || self.done_at.is_some_and(|at| now.saturating_sub(at) < 360)
+                || (self.tone() == Tone::Done
+                    && self.done_at.is_some_and(|at| now.saturating_sub(at) < 360))
                 || self
                     .receiving_at
                     .is_some_and(|at| now.saturating_sub(at) < 420))
@@ -212,10 +213,10 @@ mod tests {
                 panel_open: true,
                 ..Default::default()
             },
-            2500,
+            2200,
         );
         assert_eq!(l.tone(), Tone::Idle);
-        assert!(!l.requests_frames(2500, false));
+        assert!(!l.requests_frames(2200, false));
     }
     #[test]
     fn attention_pulse_stops_when_seen() {
