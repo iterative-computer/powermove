@@ -148,6 +148,11 @@ fn trim_hit_tests_use_authored_edges_and_ignore_gutter_ruler_and_offscreen_edges
     assert_eq!(f.hit_clip(end, y), Some(("selected", Some(Edge::Out))));
     assert_eq!(f.hit_clip(end + 4., y), Some(("selected", Some(Edge::Out))));
     assert_eq!(f.hit_clip(end + 6., y), None);
+    // v1's reach inside the strip: 5 points in from its drawn end (the strip
+    // stops `strip_gap / 2` short of the layer's out point).
+    let drawn = end - t.strip_gap() as f64 / 2.;
+    assert_eq!(f.hit_clip(drawn - 4.9, y), Some(("selected", Some(Edge::Out))));
+    assert_eq!(f.hit_clip(drawn - 5.5, y), Some(("selected", None)));
     assert_eq!(f.hit_clip(t.metrics.layer_column as f64 - 1., y), None);
     assert_eq!(f.hit_clip(end, 3.), None);
     assert_eq!(
