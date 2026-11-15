@@ -36,9 +36,11 @@ impl RevealState {
         self.layers
             .get(layer)
             .and_then(|d| d.paths.as_ref())
-            .map_or(!channel.keys.is_empty(), |paths| {
-                paths.iter().any(|p| p == "*" || p == &channel.path)
-            })
+            .map_or(
+                !channel.keys.is_empty()
+                    || channel.expression.as_ref().is_some_and(|e| !e.as_bytes().is_empty()),
+                |paths| paths.iter().any(|p| p == "*" || p == &channel.path),
+            )
     }
 }
 impl TimelineModel {

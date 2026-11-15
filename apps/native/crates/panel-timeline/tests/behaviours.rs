@@ -2548,3 +2548,64 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
 }
+
+#[test]
+fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
+    let m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"a","type":"shape","collapsed":false,"p":{"opacity":{"v":100,"kf":[]},"position.y":{"v":0,"kf":[{"i":"k","t":0,"v":0}]},"rotation":{"v":0,"kf":[],"expr":"time*10"},"anchor.x":{"v":0,"kf":[],"expr":""}},"fx":[{"id":"blur","type":"Blur","p":{"radius":{"v":10,"kf":[{"i":"r","t":0,"v":10}]},"quality":{"v":1,"kf":[]}}},{"id":"empty","type":"Glow","p":{"amount":{"v":0,"kf":[]}}}]}]}"#).unwrap());
+    let paths: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paths, ["position.y", "rotation", "blur.radius"]);
+    assert_eq!(
+        m.rows()
+            .iter()
+            .filter(|r| matches!(r.id, RowId::Effect { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(m.rows().last().unwrap().depth, 2);
+    let frame = v4::project_window(&m, 0, 20).unwrap();
+    assert_eq!(frame["window"]["rows"][3]["kind"], "heading");
+    assert_eq!(frame["window"]["rows"][3]["label"], "Blur");
+}
+
+#[test]
+fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
+    let (_actor, mut c) = client();
+    assert!(!c.model.layer_disclosable("c"));
+    c.model.toggle_disclosure("c").unwrap();
+    let property = RowId::Property {
+        layer_id: "c".into(),
+        channel: "opacity".into(),
+    };
+    let targets = vec![("c".into(), "opacity".into())];
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    assert!(c.model.layer_disclosable("c"));
+    c.model.editing_property = Some(("c".into(), "opacity".into()));
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    c.model.editing_property = None;
+    c.model.rebuild_rows();
+    assert!(c.model.row_position(&property).is_none());
+    assert!(!c.model.layer_disclosable("c"));
+}
+
+#[test]
+fn explicit_reveal_all_is_preserved_by_normal_and_cascade_twirls() {
+    let mut m = model(fixture());
+    m.reveal_property('*', false, 100, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.layer_disclosable("c"));
+    m.toggle_disclosure("c").unwrap();
+    m.toggle_disclosure("c").unwrap();
+    assert_eq!(m.reveal.layers["c"].paths, Some(vec!["*".into()]));
+    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id=="c" && channel=="opacity")));
+}

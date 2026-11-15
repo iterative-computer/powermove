@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
     Layer(String),
+    Effect { layer_id: String, effect: String },
     Property { layer_id: String, channel: String },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

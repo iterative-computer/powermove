@@ -1161,7 +1161,7 @@ impl TimelineSurface {
                 };
                 let layer = match parse_row(&row.id) {
                     Ok(RowId::Layer(id)) => id,
-                    Ok(RowId::Property { layer_id, .. }) => layer_id,
+                    Ok(RowId::Property { layer_id, .. } | RowId::Effect { layer_id, .. }) => layer_id,
                     Err(_) => continue,
                 };
                 let at = |v: f64| ((y + ruler + v - self.view.scroll_y) * 100.).round() / 100.;
@@ -1409,7 +1409,7 @@ impl TimelineSurface {
         let row = scene.row_at(y - ruler + self.view.scroll_y)?;
         let layer = match v4::parse_row(&row.id).ok()? {
             RowId::Layer(id) => id,
-            RowId::Property { layer_id, .. } => layer_id,
+            RowId::Property { layer_id, .. } | RowId::Effect { layer_id, .. } => layer_id,
         };
         let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
         Some((layer, ruler + top - self.view.scroll_y))
@@ -3475,6 +3475,7 @@ impl ModelPresenter for Presenter {
         match row {
             RowId::Layer(id) => id.clone(),
             RowId::Property { channel, .. } => channel.clone(),
+            RowId::Effect { effect, .. } => effect.clone(),
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {

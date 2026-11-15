@@ -736,9 +736,28 @@ const TimelineRow = memo(
     single: boolean;
     key?: string;
   }) {
+    const [hover, setHover] = useState(false);
+    if (published.kind === "heading")
+      return (
+        <div
+          id={`timeline:heading:${published.id}`}
+          role="row"
+          label={published.label}
+          style={{
+            ...line,
+            height: t("metrics.property_row"),
+            paddingLeft: `${published.depth * 16 + 12}px`,
+          }}
+        >
+          <text
+            style={{ color: t("colors.muted"), fontSize: t("typography.body") }}
+          >
+            {published.label}
+          </text>
+        </div>
+      );
     let clickModifiers: Modifiers = {};
     // Hover is the pointer's, local to the row: switches show without a host trip.
-    const [hover, setHover] = useState(false);
     const row =
       hover && !published.hovered ? { ...published, hovered: true } : published;
     return (

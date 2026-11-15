@@ -87,6 +87,8 @@ pub enum GraphDisplay {
 pub struct TimelineModel {
     pub index: Arc<TimelineIndex>,
     pub selection: Selection,
+    /// Transient value field; never persisted as a reveal request.
+    pub editing_property: Option<(String, String)>,
     pub mode: TimelineMode,
     pub graph_mode: GraphMode,
     pub graph_display: GraphDisplay,
@@ -240,15 +242,15 @@ impl TimelineModel {
                 }
                 let visible = (joined_position
                     && Some(channel.path.as_str()) == first_position
-                    && position.iter().any(|c| self.reveal.visible(&layer.id, c)))
-                    || self.reveal.visible(&layer.id, channel)
+                    && position.iter().any(|c| self.property_visible(&layer.id, c)))
+                    || self.property_visible(&layer.id, channel)
                     || (has_scale
                         && channel.path == "scale.x"
                         && layer
                             .channels
                             .iter()
                             .find(|c| c.path == "scale.y")
-                            .is_some_and(|c| self.reveal.visible(&layer.id, c)));
+                            .is_some_and(|c| self.property_visible(&layer.id, c)));
                 if visible {
                     properties.push(
                         if joined_position && Some(channel.path.as_str()) == first_position {
@@ -281,17 +283,36 @@ impl TimelineModel {
                     depth,
                 });
                 if !collapsed || !query.is_empty() {
+                    let mut effect_section = None;
                     for path in if !query.is_empty() && !matching.is_empty() {
                         matching
                     } else {
                         properties
                     } {
+                        let effect = layer
+                            .effects
+                            .iter()
+                            .find(|(id, _)| path.starts_with(&format!("{id}.")));
+                        if let Some((id, _)) = effect {
+                            if effect_section.as_ref() != Some(id) {
+                                self.rows.push(Row {
+                                    id: RowId::Effect {
+                                        layer_id: layer.id.clone(),
+                                        effect: id.clone(),
+                                    },
+                                    depth: depth + 1,
+                                });
+                                effect_section = Some(id.clone());
+                            }
+                        } else {
+                            effect_section = None;
+                        }
                         self.rows.push(Row {
                             id: RowId::Property {
                                 layer_id: layer.id.clone(),
                                 channel: path,
                             },
-                            depth: depth + 1,
+                            depth: depth + if effect.is_some() { 2 } else { 1 },
                         });
                     }
                 }
@@ -384,7 +405,9 @@ impl TimelineModel {
         let (series, _) = self.graph_series();
         series
             .iter()
-            .filter_map(|(layer, path)| Some((self.index.layer(layer)?, self.index.channel(layer, path)?)))
+            .filter_map(|(layer, path)| {
+                Some((self.index.layer(layer)?, self.index.channel(layer, path)?))
+            })
             .flat_map(|(layer, channel)| channel.keys.iter().map(|k| layer.from + k.time))
             .fold(None, |span: Option<(f64, f64)>, t| {
                 Some(span.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
@@ -453,7 +476,10 @@ impl TimelineModel {
         // shows X and Y, Scale both of its axes).
         let track = ["position", "scale"]
             .into_iter()
-            .find(|t| path.strip_prefix(t).is_some_and(|rest| rest.starts_with('.')))
+            .find(|t| {
+                path.strip_prefix(t)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
             .unwrap_or(path.as_str());
         let series = self
             .track_channels(&layer, track)
@@ -626,6 +652,34 @@ impl TimelineModel {
         ]
     }
 
+    pub fn property_visible(&self, layer: &str, channel: &Channel) -> bool {
+        self.reveal.visible(layer, channel)
+            || self
+                .editing_property
+                .as_ref()
+                .is_some_and(|(l, p)| l == layer && p == &channel.path)
+    }
+    pub fn layer_disclosable(&self, id: &str) -> bool {
+        self.index.layer(id).is_some_and(|l| {
+            l.kind == "group"
+                || l.channels.iter().any(|c| {
+                    (l.three_d
+                        || ![
+                            "perspective",
+                            "position.z",
+                            "anchor.z",
+                            "scale.z",
+                            "rotation.x",
+                            "rotation.y",
+                            "orientation.x",
+                            "orientation.y",
+                            "orientation.z",
+                        ]
+                        .contains(&c.path.as_str()))
+                        && self.property_visible(id, c)
+                })
+        })
+    }
     pub fn toggle_disclosure(&mut self, id: &str) -> Result<(), ModelError> {
         let l = self
             .index
