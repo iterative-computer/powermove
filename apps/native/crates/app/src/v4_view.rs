@@ -3175,8 +3175,7 @@ impl SurfaceView {
         }
         element
     }
-    /// The node holding keyboard focus (tests).
-    #[cfg(test)]
+    /// The node holding keyboard focus, including inline action transitions.
     pub(crate) fn focused_node(&self, window: &Window) -> Option<Id> {
         self.focus
             .iter()
