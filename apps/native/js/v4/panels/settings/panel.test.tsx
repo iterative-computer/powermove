@@ -569,3 +569,43 @@ test("frozen-contract native key delivery never requests retroactive cancellatio
   root.dispose();
   f.model.dispose();
 });
+
+test("a search matching hundreds of commands lists a page the host takes: forty rows a section and the rest counted", async () => {
+  const { model } = fixture();
+  model.show();
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    id: `command${i}`,
+    menu: ["File", "Edit", "Layer", "Playback"][i % 4],
+    label: `Play Command ${i}`,
+    keys: [`⌥⌘${i % 10}`],
+    chords: [],
+    changed: i % 3 === 0,
+    fixed: false,
+    recording: false,
+  }));
+  model.publish({
+    ...model.publication,
+    revision: 2,
+    shortcuts: { preset: "after-effects", changed: true, rows, conflicts: [] },
+  });
+  const { root, commits } = recorder();
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  await model.search("p");
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  const nodes = root.inspect().nodes;
+  const shown = nodes.filter((n) =>
+    String(n.props.id ?? "").startsWith("settings.shortcut."),
+  );
+  expect(shown).toHaveLength(40);
+  expect(
+    nodes.some(
+      (n) =>
+        n.text === "360 more in Shortcuts. Keep typing to narrow the search.",
+    ),
+  ).toBe(true);
+  // Every commit fits the host's argument quota (1 MiB) with room.
+  for (const commit of commits)
+    expect(JSON.stringify(commit).length).toBeLessThan(512 * 1024);
+  root.dispose();
+  model.dispose();
+});

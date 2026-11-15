@@ -697,6 +697,18 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
     </>
   );
 }
+/** A search lists at most this many matching rows of a section, so that
+ * one letter matching hundreds of commands stays one page the host takes;
+ * the rest are counted under them. */
+const SEARCH_ROWS = 40;
+function More({ count, title }: { count: number; title: string }) {
+  if (count <= 0) return null;
+  return (
+    <text role="status" style={{ ...help, paddingLeft: t("metrics.inset") }}>
+      {`${count} more in ${title}. Keep typing to narrow the search.`}
+    </text>
+  );
+}
 /** Settings › Shortcuts: every command with its keys, grouped by its menu;
  * Change… takes the next key pressed (Escape cancels), and keys two
  * commands share are listed with the order they are tried in. */
@@ -704,9 +716,10 @@ function Shortcuts({ model }: { model: SettingsModel }) {
   const page = model.publication.shortcuts;
   if (!page) return null;
   const query = model.query.trim();
-  const rows = page.rows.filter(
+  const matching = page.rows.filter(
     (row) => !query || model.matches.rows.has(`shortcut.${row.id}`),
   );
+  const rows = query ? matching.slice(0, SEARCH_ROWS) : matching;
   const menus = [...new Set(rows.map((row) => row.menu))];
   const shared = new Map(
     page.conflicts.flatMap((c) => c.labels.map((label) => [label, c])),
@@ -791,6 +804,7 @@ function Shortcuts({ model }: { model: SettingsModel }) {
           ))}
         </Group>
       )}
+      <More count={matching.length - rows.length} title="Shortcuts" />
     </>
   );
 }
@@ -884,11 +898,12 @@ function SectionContent({
   window,
 }: SettingsPanelProps & { section: Section }) {
   const copy = sectionCopy[section];
-  const rows = model.rows.filter(
+  const matching = model.rows.filter(
     (row) =>
       row.section === section &&
       (!model.query.trim() || model.matches.rows.has(row.id)),
   );
+  const rows = model.query.trim() ? matching.slice(0, SEARCH_ROWS) : matching;
   const groups = [...new Set(rows.map((row) => row.group))];
   const speech = model.publication.speech.filter(
     (item) =>
@@ -935,6 +950,7 @@ function SectionContent({
             ))}
         </Group>
       ))}
+      <More count={matching.length - rows.length} title={copy.title} />
       {section === "memory" && <MemoryNotes model={model} />}
       {section === "transcription" && speech.length > 0 && (
         <Group title="Models">
