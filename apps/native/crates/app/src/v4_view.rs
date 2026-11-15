@@ -2230,19 +2230,24 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            // A wheel step only moves the content (a native view inside
-            // draws on its own and keeps the full redraw).
-            // Nor does one whose content fits it while it leaves rows out
-            // (`v4_cull`: a page in a body that scrolls around it): a wheel
-            // step the layer replays carries its offset past its range until
-            // the next layout, showing rows that are not built. A scroller
-            // that scrolls keeps the layer: what it records past its edges
-            // (one viewport) is what the culling builds.
+            // A wheel step only moves the content, in the Project panel: the
+            // one long list the layer made faster (PM-311). Elsewhere it gained
+            // nothing measurable and held hover and AppKit controls a frame
+            // behind the content (PM-389, PM-390). A native view inside draws
+            // on its own and keeps the full redraw. Nor does one whose content
+            // fits it while it leaves rows out (`v4_cull`: a page in a body
+            // that scrolls around it): a step the layer replays carries its
+            // offset past its range until the next layout, showing rows that
+            // are not built. A scroller that scrolls keeps the layer: what it
+            // records past its edges (one viewport) is what the culling builds.
             let fits = self
                 .scrolls
                 .get(&id)
                 .is_some_and(|s| s.max_offset().y <= px(0.));
-            if !self.holds_native(id) && !(fits && self.culls_in(id)) {
+            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+                && !self.holds_native(id)
+                && !(fits && self.culls_in(id))
+            {
                 element = element.scroll_layer();
             }
             if follows {
