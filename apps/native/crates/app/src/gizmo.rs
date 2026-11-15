@@ -2962,7 +2962,7 @@ fn snapping_suspended(enabled: bool, command_held: bool) -> bool { !enabled || c
 #[cfg(test)]
 mod snapping_toggle_tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn toggle_and_temporary_suspend_compose() {
         assert!(!snapping_suspended(true, false));
         assert!(snapping_suspended(true, true));

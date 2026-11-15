@@ -365,7 +365,7 @@ impl Rulers {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn locking_cancels_drag_and_preserves_guides() {
         let mut rulers = Rulers::default();
         rulers.guides.push(RulerGuide { axis: Axis::Horizontal, at: 42. });
