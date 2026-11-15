@@ -138,6 +138,7 @@ impl Layout {
         next.docks[d].groups.insert(
             g + usize::from(!top),
             crate::layout::Group {
+                flex_basis: None,
                 tabs: vec![new.into()],
                 active: 0,
                 collapsed: false,
@@ -233,12 +234,14 @@ mod tests {
                     collapsed: false,
                     groups: vec![
                         Group {
+                            flex_basis: None,
                             tabs: vec!["assets".into()],
                             active: 0,
                             collapsed: false,
                             size: Some(300.),
                         },
                         Group {
+                            flex_basis: None,
                             tabs: vec!["inspector".into()],
                             active: 0,
                             collapsed: false,
@@ -251,6 +254,7 @@ mod tests {
                     size: None,
                     collapsed: false,
                     groups: vec![Group {
+                        flex_basis: None,
                         tabs: vec!["viewer".into()],
                         active: 0,
                         collapsed: false,
