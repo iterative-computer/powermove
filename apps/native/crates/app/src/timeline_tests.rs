@@ -154,6 +154,8 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
 impl Stage {
     /// Worker jobs and repaints quiesce, and JS publications reach the host.
     pub fn idle(&mut self, cx: &mut TestAppContext) {
+        // The mock platform has no display link; deliver its pending frame.
+        self.vcx.update(|window, cx| window.simulate_next_frame(cx));
         let surface = self.surface.clone();
         settle(cx, |cx| surface.read_with(cx, |s, _| s.idle()));
         self.vcx.run_until_parked();
