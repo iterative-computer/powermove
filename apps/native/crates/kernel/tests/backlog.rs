@@ -59,10 +59,10 @@ fn selection_history_is_ephemeral_and_preserves_redo() {
     call(
         &mut k,
         "P",
-        SelectionCall::Layers {
+        SelectionCall::Preview(vec![SelectionCall::Layers {
             ids: vec![layer.clone()],
             add: false,
-        },
+        }]),
     );
     let after = k.project("P").unwrap().store().selection().clone();
     let revision = k.project("P").unwrap().store().revision();

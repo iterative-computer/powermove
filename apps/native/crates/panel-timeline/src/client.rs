@@ -109,7 +109,15 @@ impl TimelineClient {
             return Err(ClientError::OriginMismatch);
         }
         let document = plan.expected_document.unwrap_or(self.model.index.doc_id);
+        let revision = self.model.index.revision;
         for call in plan.calls {
+            // Selection caused by a document edit belongs to that edit.
+            let call = match call {
+                Call::Selection(selection) if self.model.index.revision != revision => {
+                    pm_kernel::SelectionCall::Preview(vec![selection]).into()
+                }
+                call => call,
+            };
             self.call_document(call, document).await?;
         }
         Ok(plan.effects)
