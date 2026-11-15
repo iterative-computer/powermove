@@ -2201,10 +2201,16 @@ impl MediaCache {
                 }
                 None => Want::Exact,
             };
-            let fetched = self
+            let Some(fetched) = self
                 .viewer
-                .fetch(&src, instance, n, want)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                .fetch_ready(&src, instance, n, want)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+            else {
+                // The cold layer has not landed yet. Count it explicitly
+                // as unavailable rather than calling the frame exact.
+                self.stand_ins.push(usize::MAX);
+                return Ok(None);
+            };
             if !fetched.exact {
                 self.stand_ins.push(fetched.shown);
             }

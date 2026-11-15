@@ -320,6 +320,10 @@ impl Controller {
     /// The pro media worker moved: renditions change the catalog; every
     /// change redraws the Project panel's status and the tasks window.
     pub(crate) fn pro_media_changed(&mut self, renditions: bool, cx: &mut Context<Self>) {
+        if let (Some(session), Some(p)) = (&self.session, &self.published) {
+            self.pro_media
+                .prioritize(&session.project, &p.snapshot, self.time());
+        }
         if renditions {
             let before = self.media.clone();
             self.decorate_media(cx);

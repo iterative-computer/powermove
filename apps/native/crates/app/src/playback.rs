@@ -244,6 +244,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { vsync=Some(target); let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
+                if status.frame.as_ref().is_some_and(|f| v.published.as_ref().is_some_and(|p| f.stamp.doc_id == p.snapshot.doc_id) && f.gpu_ok && f.completion_host_seconds.is_some()) { v.pro_media.first_frame_ready(); }
                 let next_studio_status=(status.refine_progress,status.export_estimate.clone());
                 if studio_status.as_ref()!=Some(&next_studio_status) {
                     studio_status=Some(next_studio_status);

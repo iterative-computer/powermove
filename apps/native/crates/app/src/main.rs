@@ -197,6 +197,9 @@ mod lane_bundle_tests {
 fn main() -> Result<()> {
     diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--cold-playback-bench") {
+        return pro_media::cold_playback_bench();
+    }
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
