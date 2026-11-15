@@ -86,8 +86,8 @@ pub fn snap(
 ) -> ([f64; 2], Vec<Guide>) {
     snap_with_rulers(moving, targets, &[], threshold, axes)
 }
-/// Ruler guides are targets on their own axis only. A projected target
-/// keeps the feedback line attached to the dragged point on the guide.
+/// Ruler guides are targets on their own axis only. Their feedback endpoint
+/// stays at the ruler origin so moving along a guide does not repeat haptics.
 pub fn snap_with_rulers(
     moving: &[[f64; 2]],
     targets: &[[f64; 2]],
@@ -104,7 +104,7 @@ pub fn snap_with_rulers(
                     crate::viewer_rulers::Axis::Horizontal => 1,
                 };
                 (guide_axis == axis && guide.at.is_finite()).then(|| {
-                    let mut point = m;
+                    let mut point = [0., 0.];
                     point[axis] = guide.at;
                     point
                 })
@@ -202,7 +202,12 @@ mod ruler_snap_tests {
         }];
         let (delta, guides) = snap_with_rulers(&[[10., 13.]], &[], &rulers, DISTANCE, [true, true]);
         assert_eq!(delta, [4., 0.]);
-        assert_eq!(guides, vec![([14., 13.], [14., 13.])]);
+        assert_eq!(guides, vec![([14., 13.], [14., 0.])]);
+        let (_, moved) = snap_with_rulers(&[[10., 20.]], &[], &rulers, DISTANCE, [true, true]);
+        assert_eq!(
+            guides[0].1, moved[0].1,
+            "staying on a guide keeps its haptic target"
+        );
     }
     #[test]
     fn guides_use_eight_screen_points_at_each_zoom() {
