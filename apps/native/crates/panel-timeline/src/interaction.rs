@@ -1035,6 +1035,7 @@ pub struct DragSample {
 }
 #[derive(Clone, Debug)]
 pub struct Drag {
+    work_duration: f64,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1323,6 +1324,7 @@ impl Drag {
             speed_eases,
             kind,
             start: index.clone(),
+            work_duration: index.duration,
             snap: DirectionalSnap::default(),
             fixed: None,
             anchors,
@@ -1825,7 +1827,8 @@ impl Drag {
                 let (a, b) = match self.kind {
                     DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b),
                     DragKind::WorkOut => {
-                        let end = (b + delta).max(a + frame).min(duration);
+                        let end = (b + delta).max(a + frame);
+                        self.work_duration = self.work_duration.max(end);
                         (a, end)
                     }
                     _ => {
@@ -1836,7 +1839,8 @@ impl Drag {
                 out.push(
                     CompCommand::Set {
                         patch: Box::new(CompPatch {
-                            duration: None,
+                            duration: matches!(self.kind, DragKind::WorkOut)
+                                .then_some(self.work_duration),
                             work_area: Some((a, b)),
                             ..Default::default()
                         }),
