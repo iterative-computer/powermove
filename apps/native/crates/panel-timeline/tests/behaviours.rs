@@ -2863,7 +2863,7 @@ fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
                     let mut drag = Drag::begin(&m, kind.clone()).unwrap();
                     let direction = if target < anchor { -1. } else { 1. };
                     let overshoot = if inside {
-                        acquire * 0.5
+                        (acquire * 0.5).min(0.001)
                     } else {
                         release + 2. / pps
                     };
