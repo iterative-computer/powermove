@@ -208,7 +208,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   await root.dispose();
 });
 
-test("an empty composition: the layer area holds a centred, inset invitation; the tab sits at a control's height", async () => {
+test("an empty composition: the layer area holds a centred, inset invitation; the tab uses its dedicated pill height", async () => {
   const { root } = recorder();
   const actions: Intent[] = [];
   await root.render(
@@ -238,12 +238,12 @@ test("an empty composition: the layer area holds a centred, inset invitation; th
   expect(actions).toEqual([{ type: "import" }]);
   // The empty block is not a row of the outline.
   expect(byId(root, "timeline:tracks").children.length).toBe(0);
-  // The composition tab: centred in the bar at a control's height.
+  // The composition tab: centred in the bar at its dedicated pill height.
   expect(byId(root, "timeline:tabs").props.style).toMatchObject({
     alignItems: "center",
   });
   expect(byId(root, "timeline:tab:launch").props.style).toMatchObject({
-    height: { token: "metrics.control" },
+    height: { token: "metrics.comp_tab_height" },
   });
   await root.dispose();
 });
