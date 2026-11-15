@@ -687,3 +687,17 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
   check(replay(f.commits));
   await f.root.dispose();
 });
+
+test("project-file exports keep one queue below the current export block", async () => {
+  const seed = initial();
+  seed.options.format = "json";
+  seed.run = { phase: "preparing" };
+  const f = await mounted(seed);
+  expect(
+    [...f.root.host.nodes.values()].filter(
+      (n) => n.props.id === "export.queue",
+    ),
+  ).toHaveLength(1);
+  check(replay(f.commits));
+  await f.root.dispose();
+});

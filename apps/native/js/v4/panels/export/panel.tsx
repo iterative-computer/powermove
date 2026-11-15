@@ -283,7 +283,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
-      {s.run.phase === "done" || model.kind === "project" ? queue : null}
+      {!progressSheet && (s.run.phase === "done" || model.kind === "project")
+        ? queue
+        : null}
       {s.run.phase === "done" ? (
         <div role="status" id="export.completed" style={body}>
           <text style={text}>Export complete</text>
