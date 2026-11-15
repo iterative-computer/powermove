@@ -196,6 +196,7 @@ pub struct PanelLibrary {
     search: Option<Entity<pm_shell::text::TextField>>,
     tokens: pm_design::Tokens,
     motion: pm_shell::motion::Motion<u64>,
+    frame_kit: Option<Kit>,
 }
 impl PanelLibrary {
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> { &mut self.motion }
@@ -244,58 +245,48 @@ impl PanelLibrary {
             .children(detail.map(|s| div().truncate().text_role(t,Text::Caption).text_color(rgb(t.colors.muted)).child(s)))
     }
     fn workspace_card(&self, card: &WorkspaceCard, cx: &mut Context<Self>) -> AnyElement {
-        let t = &self.tokens;
-        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
-        let summary = if card.active {
-            "Active".to_owned()
-        } else if card.panels == 1 {
-            "1 panel".to_owned()
-        } else {
-            format!("{} panels", card.panels)
-        };
-        let activate = format!("workspace:{}", card.id);
-        let (id, name) = (card.id.clone(), card.name.clone());
-        div()
-            .id(SharedString::from(format!("library-workspace-{}", card.id)))
-            .role(Role::ListItem)
-            .aria_label(format!("{}, {summary}", card.name))
-            .flex()
-            .flex_col()
-            .gap(px(m.gap))
-            .flex_none()
-            .w(px(m.thumbnail_min * 1.5))
-            .p(px(m.gap))
-            .rounded(px(m.control_radius))
-            .bg(rgb(c.panel_secondary))
-            .hover_style(|s| s.bg(rgb(c.hover)))
-            .child(div().truncate().child(card.name.clone()))
-            .child(
-                div()
-                    .text_size(px(ty.reading))
-                    .text_color(rgb(c.secondary))
-                    .child(summary),
-            )
-            .on_click(cx.listener(move |v, _, _, cx| v.send(activate.clone(), cx)))
-            .when(!card.builtin, |d| {
-                // Delete, after S012's alert, as the Workspaces panel does.
-                d.on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |v, _: &MouseDownEvent, _, cx| {
-                        if let Some(editor) = v.editor.upgrade() {
-                            let (id, name) = (id.clone(), name.clone());
-                            editor.update(cx, |e, cx| e.confirm_workspace_delete(id, name, cx));
-                        }
-                    }),
-                )
-            })
-            .into_any_element()
+        let kit = self.frame_kit.as_ref().expect("frame kit");
+        let t=&kit.t; let c=&t.colors;
+        let w=200.; let h=125.;
+        let layout = self.editor.upgrade().and_then(|e| e.read(cx).workspace_store().get(&card.id).map(workspace::layout));
+        let mut map = div().size_full().flex().gap(px(4.)).p(px(6.));
+        if let Some(layout) = layout {
+            for dock in &layout.docks {
+                let mut col=div().h_full().flex().flex_col().gap(px(4.));
+                col=if dock.size.is_some() {col.w(px(w*0.22))} else {col.flex_1()};
+                for group in &dock.groups {
+                    let id=group.active();
+                    col=col.child(div().flex_1().min_h(px(0.)).overflow_hidden().flex().items_center().justify_center().gap(px(4.))
+                        .rounded(px((t.radius.lg-6.).max(0.))).bg(kit::ink(c.text,t.translucency.hover))
+                        .child(kit.symbol(pm_shell::symbol::panel_symbol(id),14.,Weight::Regular,c.secondary))
+                        .child(div().truncate().text_role(t,Text::Caption).text_color(rgb(c.secondary)).child(id.to_owned())));
+                }
+                map=map.child(col);
+            }
+        }
+        let activate=format!("workspace:{}",card.id);
+        let key=kit::key(&format!("workspace-cover-{}",card.id));
+        let (id,name)=(card.id.clone(),card.name.clone());
+        let cover=div().id(SharedString::from(format!("library-workspace-{}",card.id))).relative()
+            .role(Role::Button).aria_label(format!("Activate {}",card.name))
+            .w(px(w)).h(px(h)).corner(t,t.radius.lg).bg(rgb(c.panel)).elevated(t,pm_design::Elevation::Raised)
+            .when(card.active,|d| d.shadow(vec![BoxShadow { color:rgb(c.accent).into(),offset:point(px(0.),px(0.)),blur_radius:px(0.),spread_radius:px(2.),inset:true }]))
+            .child(map)
+            .when(!card.builtin,|d| d.child(div().absolute().top(px(8.)).right(px(8.)).opacity(kit.hovered(key))
+                .child(kit.icon_button(format!("workspace-delete-{}",card.id),"trash",format!("Delete {}",card.name),false)
+                .bg(rgb(c.floating)).on_click(cx.listener(move |v,_,_,cx| {cx.stop_propagation();if let Some(e)=v.editor.upgrade(){e.update(cx,|e,cx|e.confirm_workspace_delete(id.clone(),name.clone(),cx));}})))))
+            .on_click(cx.listener(move |v,_,_,cx|v.send(activate.clone(),cx)));
+        div().w(px(w)).flex_none().flex().flex_col().child(kit.track_hover(cover,key))
+            .child(self.ledge(kit,card.name.clone(),Some(if card.active {"Active".into()} else {format!("{} panels",card.panels)}),w)).into_any_element()
     }
+
 }
 impl Render for PanelLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
         let t = self.tokens.clone();
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
+        self.frame_kit = Some(Kit::new(&t, &self.motion, Self::motion, window, cx));
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
         let (ground, ground_alpha) = t.ground();
         let (panels, workspaces) = self
@@ -389,14 +380,15 @@ impl Render for PanelLibrary {
             }
         };
         let body = if empty {
-            let (heading, line) = if self.query.trim().is_empty() {
-                ("Nothing on This Shelf Yet", "")
-            } else {
-                ("No Results", "There’s nothing here.")
-            };
-            pm_shell::view::empty_state(&t, heading, line)
-                .flex_1()
-                .into_any_element()
+            let (symbol,heading,detail)=if !self.query.trim().is_empty() {
+                ("magnifyingglass","No Results",format!("Nothing matches “{}”.",self.query))
+            } else {match self.page {
+                Page::Panels(Some(Origin::Yours)) => ("wand.and.stars","No Panels Yet","Panels you make with the agent appear here.".into()),
+                Page::Panels(Some(Origin::Store)) => ("basket","Nothing from the Store",String::new()),
+                Page::Workspaces(Some(false)) => ("rectangle.3.group","No Saved Workspaces",String::new()),
+                _ => ("square.grid.2x2","No Panels Yet",String::new()),
+            }};
+            kit.empty_state(symbol,heading,&detail).flex_1().into_any_element()
         } else {
             div()
                 .id("library-body")
@@ -423,6 +415,7 @@ impl Render for PanelLibrary {
                     .gap(px(m.inset))
                     .h(px(m.toolbar))
                     .px(px(m.inset + m.gap))
+                    .when(matches!(self.page,Page::Workspaces(_)),|d|d.child(kit.button("library-save","Save Current as New",kit::Button::Neutral,Some("plus"),None).on_click(cx.listener(|v,_,_,cx|v.send("layout:save".into(),cx)))))
                     .child(
                         div()
                             .text_size(px(ty.heading))
@@ -478,6 +471,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 appears_transparent: true,
                 ..Default::default()
             }))
+            .window_min_size(Some(size(px(720.),px(400.))))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                 point(px(m.toolbar), px(m.toolbar)),
                 size(
@@ -527,6 +521,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     search: Some(search),
                     tokens,
                     motion: Default::default(),
+                    frame_kit: None,
                 }
             })
         },
