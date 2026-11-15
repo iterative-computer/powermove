@@ -1396,31 +1396,49 @@ impl Drag {
             _ => "Work area",
         }
     }
+    /// Electron draws a guide for strip latches only. Key proximity locks have
+    /// no guide, and work-area edits remain frame-only.
+    pub fn snap_target(&self) -> Option<f64> {
+        self.snap.lock.map(|lock| lock.target)
+    }
     pub fn commands(&mut self, sample: DragSample) -> Result<Vec<Command>, ModelError> {
         finite(sample.time_delta)?;
         finite(sample.value_delta)?;
         finite(sample.playhead)?;
-        let snapping = self
-            .track_snap
-            .map_or(sample.modifiers.shift, |on| on != sample.modifiers.shift);
+        let is_key = matches!(
+            self.kind,
+            DragKind::Keys { .. } | DragKind::GraphKeys { .. }
+        );
+        let snapping = !(matches!(self.kind, DragKind::GraphKeys { .. })
+            && sample.time_delta == 0.)
+            && self
+                .track_snap
+                .map_or(sample.modifiers.shift, |on| on != sample.modifiers.shift);
         if snapping && self.fixed.is_none() {
             self.fixed = Some(snap_targets(
                 &self.start,
                 self.moving_layers(),
                 self.moving_keys(),
+                is_key,
             ));
         }
         let mut targets = self.fixed.clone().unwrap_or_default();
-        targets.push(Target {
-            time: sample.playhead,
-            edge: None,
-            weight: 1.5,
-        });
-        targets.push(Target {
-            time: sample.playhead + 1. / self.start.fps,
-            edge: Some(Edge::Out),
-            weight: 1.5,
-        });
+        if is_key {
+            // Electron keys prefer the playhead on equal distances. They do not
+            // offer the strip-only exclusive out-edge at playhead + one frame.
+            targets.insert(0, Target::at(sample.playhead));
+        } else {
+            targets.push(Target {
+                time: sample.playhead,
+                edge: None,
+                weight: 1.5,
+            });
+            targets.push(Target {
+                time: sample.playhead + 1. / self.start.fps,
+                edge: Some(Edge::Out),
+                weight: 1.5,
+            });
+        }
         let resolved = if matches!(
             self.kind,
             DragKind::Keys { .. } | DragKind::GraphKeys { .. }
@@ -1904,6 +1922,9 @@ impl Scrub {
         );
         Ok(HostEffect::Seek(delta))
     }
+    pub fn snap_target(&self) -> Option<f64> {
+        self.snap.lock.map(|lock| lock.target)
+    }
     pub fn targets_loaded(&self) -> bool {
         self.targets.is_some()
     }
@@ -1916,6 +1937,7 @@ fn snap_targets(
     index: &TimelineIndex,
     moving_layers: &[String],
     moving_keys: &[String],
+    keys: bool,
 ) -> Vec<Target> {
     let mut out: Vec<_> = [0., index.duration, index.work[0], index.work[1]]
         .into_iter()
@@ -1926,17 +1948,15 @@ fn snap_targets(
         if moving_layers.contains(&l.id) {
             continue;
         }
-        if l.duration > 0. {
+        if keys || l.duration > 0. {
             out.extend([Target::at(l.from), Target::at(l.from + l.duration)]);
         }
-        if moving_layers.is_empty() {
+        if keys {
             for c in &l.channels {
                 for k in &c.keys {
                     if !moving_keys.contains(&k.id) {
                         let time = l.from + k.time;
-                        if time >= 0. && time <= index.duration {
-                            out.push(Target::at(time));
-                        }
+                        out.push(Target::at(time));
                     }
                 }
             }
