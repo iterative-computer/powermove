@@ -1421,6 +1421,10 @@ impl SurfaceView {
             }
         }
     }
+    /// Whether a native view draws anywhere in the panel.
+    pub(crate) fn has_native(&self) -> bool {
+        self.prepared.nodes.values().any(|n| n.native.is_some())
+    }
     /// Whether a native view (the timeline, the viewer's gizmos) draws
     /// inside this node: its content is not drawn by the panel's scene.
     fn holds_native(&self, id: Id) -> bool {
@@ -3867,9 +3871,14 @@ impl SurfaceView {
     /// The style of a scrolling body's content (`panel_body`): the panel at
     /// least `body` tall, and as tall as it last measured.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
-        self.fit.set(body);
         gpui::StyleRefinement::default()
             .w_full()
-            .h(px(body.max(self.natural.get())))
+            .h(px(self.body_height(body)))
+    }
+    /// The panel's height in a body that scrolls: its content, at least
+    /// the body's slot.
+    pub(crate) fn body_height(&self, body: f32) -> f32 {
+        self.fit.set(body);
+        body.max(self.natural.get())
     }
 }

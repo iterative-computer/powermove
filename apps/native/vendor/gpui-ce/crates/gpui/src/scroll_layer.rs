@@ -65,6 +65,8 @@ pub(crate) struct ScrollLayer {
     pub hitbox_range: Range<usize>,
     /// False when something inside can't be shifted (see the module docs).
     pub shiftable: bool,
+    /// What made it unshiftable, for the draw trace.
+    pub why: &'static str,
     /// The frame that last drew the layer.
     pub frame: u64,
     /// Bumped by every offset-only step; the settle timer acts only on the last.

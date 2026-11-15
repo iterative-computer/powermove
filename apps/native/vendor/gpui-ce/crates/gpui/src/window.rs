@@ -3957,8 +3957,7 @@ impl Window {
             .scroll_layers
             .iter()
             .filter(|(_, l)| {
-                l.shiftable
-                    && l.frame == previous
+                l.frame == previous
                     && range.start <= l.hitbox_range.start
                     && l.hitbox_range.end <= range.end
             })
@@ -3977,7 +3976,15 @@ impl Window {
                 .hitboxes
                 .extend(self.rendered_frame.hitboxes[at..start].iter().cloned());
             let begin = self.next_frame.hitboxes.len();
-            self.next_frame.hitboxes.extend(layer.shifted_hitboxes());
+            if layer.shiftable {
+                self.next_frame.hitboxes.extend(layer.shifted_hitboxes());
+            } else {
+                self.next_frame.hitboxes.extend(
+                    self.rendered_frame.hitboxes[start..layer.hitbox_range.end]
+                        .iter()
+                        .cloned(),
+                );
+            }
             at = layer.hitbox_range.end;
             layer.hitbox_range = begin..self.next_frame.hitboxes.len();
         }
@@ -4015,6 +4022,7 @@ impl Window {
                 hitboxes: Vec::new(),
                 hitbox_range: 0..0,
                 shiftable: true,
+                why: "",
                 frame,
                 generation: 0,
             });
@@ -4027,6 +4035,7 @@ impl Window {
         layer.hitbox_range = start..start;
         layer.frame = frame;
         layer.shiftable = true;
+        layer.why = "";
         self.scroll_layer_pending_deferred.push(deferred);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
@@ -4051,6 +4060,7 @@ impl Window {
         // A popover or tooltip drawn from inside is placed for this offset.
         if self.next_frame.deferred_draws.len() != deferred {
             layer.shiftable = false;
+            layer.why = "deferred draw";
         }
     }
 
@@ -4087,8 +4097,12 @@ impl Window {
             return;
         };
         // Text being typed inside places its editor for this offset.
-        if typing || !ops.iter().all(crate::scroll_layer::shiftable) {
+        if typing {
             layer.shiftable = false;
+            layer.why = "text input";
+        } else if !ops.iter().all(crate::scroll_layer::shiftable) {
+            layer.shiftable = false;
+            layer.why = "transformed glyph";
         }
         layer.ops = ops;
         let scene = &mut self.next_frame.scene;
@@ -4140,7 +4154,8 @@ impl Window {
             return refused("unrecorded");
         };
         if !layer.shiftable {
-            return refused("unshiftable");
+            let why = layer.why;
+            return refused(why);
         }
         if layer.view != view || self.dirty_views.contains(&view) {
             return refused("view");
@@ -4234,9 +4249,13 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
             |key| {
-                let layer = layers.get_mut(&key).filter(|l| l.shiftable)?;
+                let layer = layers.get_mut(&key)?;
                 layer.frame = frame;
-                Some(layer.shifted_ops(scale_factor).collect())
+                // One that can't shift keeps what the last frame drew (its
+                // offset hasn't moved: its steps draw the view again).
+                layer
+                    .shiftable
+                    .then(|| layer.shifted_ops(scale_factor).collect())
             },
         );
     }
