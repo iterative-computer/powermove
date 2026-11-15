@@ -238,7 +238,7 @@ fn window_edges_dock_where_no_dock_stands_and_overshooting_still_counts() {
     let t = tokens();
     let bounds = SIZES[1];
     let mut l = Layout::preset("design");
-    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline"] {
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline", "agent"] {
         l.close_panel(id).unwrap();
     }
     let g = l.geometry(bounds, &t);

@@ -133,8 +133,8 @@ fn tab_drop_inserts_at_index_and_same_group_reorders() {
         ["assets", "fxbrowser", "layer-effects"]
     );
     assert_eq!(l.docks[0].groups[0].active(), "fxbrowser");
-    // The right dock lost its second group.
-    assert_eq!(l.docks[3].groups.len(), 1);
+    // Properties and Agent remain after Effects moves.
+    assert_eq!(l.docks[3].groups.len(), 2);
     // Same group: insertion slot semantics on both sides of the source.
     l.move_panel_to(
         "assets",

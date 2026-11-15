@@ -551,6 +551,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -562,7 +584,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -574,7 +596,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -1170,6 +1192,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -1181,7 +1225,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -1193,7 +1237,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -1995,6 +2039,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -2006,7 +2072,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -2018,7 +2084,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -2833,6 +2899,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -2844,7 +2932,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -2856,7 +2944,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -3671,6 +3759,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -3682,7 +3792,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -3694,7 +3804,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -4506,6 +4616,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -4517,7 +4649,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -4529,7 +4661,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -5580,6 +5712,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -5591,7 +5745,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -5603,7 +5757,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -6457,6 +6611,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -6468,7 +6644,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -6480,7 +6656,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -7301,6 +7477,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -7312,7 +7510,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -7324,7 +7522,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -8427,6 +8625,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -8438,7 +8658,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -8450,7 +8670,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -9252,6 +9472,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -9263,7 +9505,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -9275,7 +9517,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -18427,6 +18669,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "type": "button",
                         },
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": true,
                             "data-pm-component": "toolbar-item",
@@ -18437,9 +18701,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "requiredSymbol": "point.topleft.down.to.point.bottomright.curvepath",
                             },
                             "style": {
-                              "background": {
-                                "token": "colors.selected_fill",
-                              },
                               "color": {
                                 "token": "colors.text",
                               },
@@ -18453,7 +18714,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Hide Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -19282,6 +19543,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "type": "button",
                         },
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": true,
                             "data-pm-component": "toolbar-item",
@@ -19292,9 +19575,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "requiredSymbol": "point.topleft.down.to.point.bottomright.curvepath",
                             },
                             "style": {
-                              "background": {
-                                "token": "colors.selected_fill",
-                              },
                               "color": {
                                 "token": "colors.text",
                               },
@@ -19308,7 +19588,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Hide Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -20120,6 +20400,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -20131,7 +20433,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -20143,7 +20445,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -20860,6 +21162,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -20871,7 +21195,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -20883,7 +21207,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -21770,6 +22094,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -21781,7 +22127,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -21793,7 +22139,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },
@@ -22603,6 +22949,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Graph",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.reading",
+                                  },
+                                },
+                              },
+                              "type": "text",
+                            },
+                          ],
                           "props": {
                             "aria-pressed": false,
                             "data-pm-component": "toolbar-item",
@@ -22614,7 +22982,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.secondary",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -22626,7 +22994,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.symbol_panel",
                               },
                             },
-                            "title": "Graph Editor",
+                            "title": "Show Graph Editor (⇧F3)",
                           },
                           "type": "button",
                         },

@@ -51,7 +51,11 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
         let clip = f.ops.iter().find(|o| o.id == "clip:selected").unwrap();
         assert_eq!(clip.detail["from"], 0.125);
         assert_eq!(clip.detail["duration"], 5.375);
-        assert_eq!(clip.bounds.x, t.metrics.layer_column as f64); // sticky visible edge
+        // A strip that starts before the view runs on past its edge and is
+        // cut straight there (no rounded end where it does not end).
+        let column = t.metrics.layer_column as f64;
+        assert!(clip.bounds.x < column - clip.radius);
+        assert_eq!(clip.clip.unwrap().x, column);
         // The body is the layer's strip in its selected state: its own hue
         // with a bright rim inside the edge, never an accent fill or ring.
         let material = t.strip(t.colors.labels.teal, pm_design::StripState::Selected);
@@ -75,9 +79,10 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
             .unwrap();
         // The name starts clear of the trim grip inside the strip's edge.
         let grip = t.trim_grip();
+        // The name stays in sight at the view's edge.
         assert_eq!(
             content.bounds.x,
-            clip.bounds.x + (grip.inset + grip.width + t.space.xs) as f64
+            column + (grip.inset + grip.width + t.space.xs) as f64
         );
     }
 }
@@ -516,11 +521,14 @@ fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
     );
     let bars = wave.detail["bars"].as_array().unwrap();
     let inset = 2. * t.metrics.border as f64;
-    assert_eq!(
-        bars.len(),
-        (body.bounds.width - 2. * inset).floor() as usize
+    // The waveform fills the strip's part in view.
+    let clip = body.clip.unwrap();
+    let (x0, x1) = (
+        body.bounds.x.max(clip.x),
+        (body.bounds.x + body.bounds.width).min(clip.x + clip.width),
     );
-    assert_eq!(wave.bounds.x, body.bounds.x + inset);
+    assert_eq!(bars.len(), (x1 - x0 - 2. * inset).floor() as usize);
+    assert_eq!(wave.bounds.x, x0 + inset);
     assert!(
         bars.iter().all(|b| b.as_f64() == Some(0.25)),
         "trimmed peaks only"
