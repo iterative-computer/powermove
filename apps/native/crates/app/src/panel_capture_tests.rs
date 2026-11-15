@@ -132,6 +132,7 @@ impl gpui::Render for Frame {
 #[test]
 #[ignore = "writes PNGs; set PM_AGENT_STATES and PM_PANEL_CAPTURE"]
 fn capture_agent_states() {
+    let timeline = std::env::var_os("PM_COMP_TAB_STATES").is_some();
     let Ok(states) = std::env::var("PM_AGENT_STATES") else {
         return;
     };
@@ -156,9 +157,13 @@ fn capture_agent_states() {
         for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = (tokens.metrics.agent_width, tokens.metrics.agent_height);
+                let (w, h) = if timeline {
+                    (900., 200.)
+                } else {
+                    (tokens.metrics.agent_width, tokens.metrics.agent_height)
+                };
                 let first = pm_builtins::Publication {
-                    panel: "agent".into(),
+                    panel: if timeline { "timeline" } else { "agent" }.into(),
                     generation: 1,
                     surface: surface.clone(),
                 };
@@ -179,7 +184,18 @@ fn capture_agent_states() {
                 let window = cx
                     .open_window(size(px(w), px(h)), |window, cx| {
                         let view = cx.new(|cx| {
-                            SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
+                            let mut view = SurfaceView::new(
+                                runtime,
+                                first,
+                                tokens,
+                                Natives::default(),
+                                window,
+                                cx,
+                            );
+                            if timeline {
+                                view.capture_composition_tab_hover(name.contains("-hover"));
+                            }
+                            view
                         });
                         cx.new(|_| Frame { view, fill })
                     })
@@ -190,7 +206,11 @@ fn capture_agent_states() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
-                    .save(format!("{dir}/agent-{name}-{scheme_name}.png"))
+                    .save(if timeline {
+                        format!("{dir}/{name}-{scheme_name}.png")
+                    } else {
+                        format!("{dir}/agent-{name}-{scheme_name}.png")
+                    })
                     .unwrap();
             });
         }

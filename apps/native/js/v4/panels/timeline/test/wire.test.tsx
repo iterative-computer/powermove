@@ -73,7 +73,6 @@ test("one track-area focus stop, non-focusable rows, conditional graph menu and 
   // the layer column (play, time, graph switch), then the tracks.
   expect(focusIds(root, replay(commits).at(-1).focusOrder)).toEqual([
     "timeline:tab:launch",
-    "timeline:tab-menu:launch",
     "P0-0:Layers",
     "timeline:play",
     "timeline:time",

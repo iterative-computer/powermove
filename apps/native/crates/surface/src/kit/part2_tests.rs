@@ -1073,3 +1073,27 @@ fn review_banner_symbols_use_severity_and_dark_palette_only_over_media() {
         }
     }
 }
+
+#[test]
+fn compact_composition_tab_hit_targets_are_scoped_to_the_tab_recipe() {
+    let t = tokens();
+    for (metadata, role, hit, valid) in [
+        (json!({}), "button", 16., false),
+        (json!({"compositionTabClose":{}}), "button", 16., true),
+        (json!({"compositionTabClose":{}}), "button", 15., false),
+        (json!({"compositionTab":true}), "tab", 22., true),
+        (json!({"compositionTab":true}), "tab", 21., false),
+    ] {
+        let s = surface(
+            Component::ToolbarItem,
+            json!({"metadata":metadata,"role":role}),
+        );
+        let layout = Layout::from([(1, accesskit::Rect::new(0., 0., hit, hit))]);
+        let diagnostics = validate_panel(&s, &t, &layout);
+        assert_eq!(
+            diagnostics.iter().any(|d| d.code == "smallHitTarget"),
+            !valid,
+            "{diagnostics:?}"
+        );
+    }
+}

@@ -266,6 +266,19 @@ pub struct SurfaceView {
     pub error: Option<String>,
 }
 impl SurfaceView {
+    /// Seed a synthetic hover for headless captures without OS input.
+    #[cfg(test)]
+    pub(crate) fn capture_composition_tab_hover(&mut self, hovered: bool) {
+        if !hovered { return; }
+        let tabs = || self.publication.surface.nodes().values()
+            .filter(|n| n.props.get("role").and_then(Value::as_str) == Some("tab"));
+        let id = tabs().find(|n| n.props.get("aria-selected") == Some(&Value::Bool(false)))
+            .or_else(|| tabs().next()).map(|n| n.id);
+        if let Some(id) = id {
+            self.motion.hovers.hover(id, true, &self.table.tokens);
+        }
+    }
+
     pub fn new(
         runtime: Arc<Builtins>,
         publication: Publication,
@@ -2335,6 +2348,36 @@ impl SurfaceView {
                 .absolute()
                 .size_full(),
             );
+        }
+        if let Some(close) = self
+            .publication
+            .surface
+            .node(id)
+            .and_then(|n| n.props.get("metadata"))
+            .and_then(|m| m.get("compositionTabClose"))
+        {
+            let active = close["active"].as_bool().unwrap_or(false);
+            let shown = close["visible"].as_bool().unwrap_or(active);
+            let mut values = self.motion.values.borrow_mut();
+            let value = values
+                .entry(id)
+                .or_insert_with(|| pm_design::motion::Animated::unit(if active { 1. } else { 0. }));
+            let target = if shown { 1. } else { 0. };
+            if value.target[0] != target {
+                value.to(
+                    target,
+                    self.table.tokens.spring(if shown {
+                        pm_design::motion::Preset::HoverIn
+                    } else {
+                        pm_design::motion::Preset::HoverOut
+                    }),
+                );
+            }
+            let amount = value.get().clamp(0., 1.);
+            if value.moving() {
+                window.request_animation_frame();
+            }
+            element = element.opacity(amount);
         }
         // A floating surface springs in when it appears and out while its
         // panel keeps it for the exit (`pmKit.closing`): opacity, and a
