@@ -270,6 +270,10 @@ impl Controller {
                 observe(&runtime, json!({"phase":"preparing"})).await;
             }
             while resources.pending && !job.cancel.load(Ordering::Acquire) {
+                if queue_id.is_some_and(|id| queue_store.lock().unwrap().cancelled(id)) {
+                    job.cancel.store(true, Ordering::Release);
+                    break;
+                }
                 let text = crate::extensions::starts_once_loaded("Export", &resources);
                 let _ = this.update(cx, |v, cx| {
                     if (shown.is_empty() || v.message == shown) && v.message != text {
@@ -1145,7 +1149,10 @@ fn plain_failure(message: &str) -> String {
 
 impl Frozen {
     fn record(&self) -> Value {
-        json!({"name":self.publication.snapshot.root().and_then(|r|r.get("name")).and_then(crate::node_string).unwrap_or("Untitled"),
+        let root = self.publication.snapshot.root();
+        let comp = root.and_then(|r| pm_kernel::model::comp_node(r, self.publication.snapshot.open_comp().as_deref()));
+        let name = comp.and_then(|c| c.get("name")).or_else(||root.and_then(|r| r.get("name"))).and_then(crate::node_string).unwrap_or("Untitled");
+        json!({"name":name,
             "project": self.publication.project, "document": pm_model::json::to_canonical_string(&self.publication.snapshot.document.to_value().unwrap()),
             "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
             "resources":self.resources, "playhead":self.playhead, "destination":self.destination,
@@ -1192,5 +1199,32 @@ impl Controller {
             _ => {}
         }
         self.publish_render_queue();
+    }
+}
+
+#[cfg(test)]
+mod frozen_queue_tests {
+    use super::*;
+    #[test]
+    fn queued_input_restores_its_own_composition_options_media_and_destination() {
+        let rig = crate::v4_view_tests::rig("export", 2);
+        let publication = rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
+        let mut options = Options::new(640, 360, 30.);
+        options.format = Format::Json;
+        let mut media = pm_engine_service::MediaCatalog::default();
+        media.originals.insert("clip".into(), PathBuf::from("/media/clip.mov"));
+        let frozen = Frozen { publication:publication.clone(), queue:None, options,
+            media, resources:Arc::default(), playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
+            replace:false, without_offline:false };
+        let record = frozen.record();
+        let mut changed = (*publication).clone();
+        changed.snapshot.document = Arc::new(pm_model::Document::new(Some(pm_model::json::parse(r#"{"name":"Other project","layers":[]}"#).unwrap()), 99));
+        let restored = Frozen::restore(&record, &changed, 42).unwrap();
+        assert_eq!(restored.publication.snapshot.document.to_value(), publication.snapshot.document.to_value());
+        assert_eq!(restored.options.format, Format::Json);
+        assert_eq!(restored.media.originals, frozen.media.originals);
+        assert_eq!(restored.destination, frozen.destination);
+        assert_eq!(restored.playhead, 1.25);
+        assert_eq!(restored.queue, Some(42));
     }
 }
