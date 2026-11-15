@@ -8,6 +8,13 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+fn animation_now() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
 fn timer(
     delay: f64,
     repeats: bool,
@@ -119,7 +126,10 @@ impl AgentButton {
             return;
         }
         *self.ivars().tokens.borrow_mut() = tokens;
-        self.ivars().model.borrow_mut().update(snapshot, now());
+        self.ivars()
+            .model
+            .borrow_mut()
+            .update(snapshot, animation_now());
         if self.ivars().model.borrow().snapshot.panel_open
             || self.ivars().model.borrow().running_count() == 0
         {
@@ -127,7 +137,7 @@ impl AgentButton {
         }
         self.paint();
         let active = self.ivars().model.borrow().requests_frames(
-            now(),
+            animation_now(),
             self.ivars().tokens.borrow().accessibility.reduce_motion,
         );
         if !active {
@@ -151,7 +161,7 @@ impl AgentButton {
                 };
                 button.paint();
                 if !button.ivars().model.borrow().requests_frames(
-                    now(),
+                    animation_now(),
                     button.ivars().tokens.borrow().accessibility.reduce_motion,
                 ) {
                     unsafe {
@@ -165,7 +175,7 @@ impl AgentButton {
     fn paint(&self) {
         let model = self.ivars().model.borrow();
         let t = self.ivars().tokens.borrow();
-        let mark = image(&model, now(), &t);
+        let mark = image(&model, animation_now(), &t);
         let image_size_changed = self.image().is_none_or(|old| old.size() != mark.size());
         self.setImage(Some(&mark));
         let title = match model.tone() {
