@@ -92,7 +92,8 @@ export function EffectsPanel({
           id={ids.search}
           label="Search effects"
           title="Search effects"
-          metadata={{ placeholder: "Search", search: true }}
+          metadata={{ placeholder: "Search effects and presets", search: true }}
+          attr={{ symbol: "magnifyingglass" }}
           binding={bindings.search}
           value={model.query}
           disabled={model.installedCount() === 0}
@@ -133,6 +134,28 @@ export function EffectsPanel({
           }}
         />
       </div>
+      {model.deletedPresetName ? (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            padding: token("metrics.inset"),
+            background: token("colors.field"),
+            borderRadius: token("metrics.control_radius"),
+            gap: token("metrics.gap"),
+          }}
+        >
+          <text>Deleted “{model.deletedPresetName}”</text>
+          <PushButton
+            label="Undo delete preset"
+            onClick={() => void model.presetAction?.("preset:", "undo")}
+          >
+            Undo
+          </PushButton>
+        </div>
+      ) : null}
       {model.error ? (
         <text
           role="status"
@@ -243,16 +266,6 @@ export function EffectsPanel({
                   }}
                 >
                   <text style={groupTextStyle}>{row.name}</text>
-                  {row.name === "My Presets" ? (
-                    <PushButton
-                      label="Undo Delete Preset"
-                      onClick={() =>
-                        void model.presetAction?.("preset:", "undo")
-                      }
-                    >
-                      Undo Delete
-                    </PushButton>
-                  ) : null}
                 </TreeItem>
               );
             const { item } = row;
@@ -300,29 +313,33 @@ export function EffectsPanel({
                 }}
               >
                 {/* Symbols, native drag capsules and focus rings need kit APIs; no glyph substitute. */}
-                {item.kind === "preset" && selected ? (
-                  <div>
-                    <TextField
-                      label="Preset name"
-                      binding={model.presetRenameBinding}
-                      value={item.label}
-                      onChange={(e) =>
-                        void model.presetAction?.(
-                          item.id,
-                          "rename",
-                          String(e.value ?? ""),
-                        )
-                      }
-                    />
-                    <PushButton
-                      label="Delete Preset"
-                      onClick={() =>
-                        void model.presetAction?.(item.id, "delete")
-                      }
-                    >
-                      Delete
-                    </PushButton>
-                  </div>
+                {item.kind === "preset" ? (
+                  <ToolbarItem
+                    label="Animation preset"
+                    disabled
+                    attr={{ symbol: "square.stack" }}
+                  />
+                ) : null}
+                {item.kind === "preset" && model.renamingPreset === item.id ? (
+                  <TextField
+                    label="Preset name"
+                    binding={model.presetRenameBinding}
+                    value={item.label}
+                    onChange={(e) =>
+                      void model.presetAction?.(
+                        item.id,
+                        "rename",
+                        String(e.value ?? ""),
+                      )
+                    }
+                  />
+                ) : null}
+                {item.kind === "preset" && (hovered || focused) ? (
+                  <ToolbarItem
+                    label={`More actions for ${item.label}`}
+                    attr={{ symbol: "ellipsis" }}
+                    onClick={() => void model.presetMenu?.(item.id)}
+                  />
                 ) : null}
                 <text
                   title={item.label}

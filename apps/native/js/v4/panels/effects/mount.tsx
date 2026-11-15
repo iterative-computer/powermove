@@ -51,45 +51,68 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       hint.layer = (native("effects.target") as Target | null)?.id;
     sheetOpen = true;
     await mounted.root.render(
-      <PresetSheet
-        choices={choices}
-        bindings={fields([
-          "name",
-          "animated",
-          ...choices.effects.map((f: any) => `fx.${f.id}`),
-          ...choices.properties.map((p: string) => `property.${p}`),
-        ])}
-        hint={hint}
-        cancel={() => {
-          sheetOpen = false;
-          void mounted.root.render(
-            <EffectsPanel
-              model={mounted.model}
-              bindings={fields(["search", "scope"])}
-            />,
-          );
-        }}
-        save={(value) => {
-          try {
-            native("presets.save", { ...value, layer: hint.layer });
+      <>
+        <EffectsPanel
+          model={mounted.model}
+          bindings={fields(["search", "scope"])}
+        />
+        <PresetSheet
+          choices={choices}
+          bindings={fields([
+            "name",
+            "animated",
+            ...choices.effects.map((f: any) => `fx.${f.id}`),
+            ...choices.properties.map((p: any) => `property.${p.path}`),
+          ])}
+          hint={hint}
+          cancel={() => {
             sheetOpen = false;
-            refresh();
             void mounted.root.render(
               <EffectsPanel
                 model={mounted.model}
                 bindings={fields(["search", "scope"])}
               />,
             );
-          } catch (e) {
-            report(e);
-          }
-        }}
-      />,
+          }}
+          save={(value) => {
+            try {
+              native("presets.save", { ...value, layer: hint.layer });
+              sheetOpen = false;
+              refresh();
+              void mounted.root.render(
+                <EffectsPanel
+                  model={mounted.model}
+                  bindings={fields(["search", "scope"])}
+                />,
+              );
+            } catch (e) {
+              report(e);
+            }
+          }}
+        />
+      </>,
     );
   };
   mounted.model.presetRenameBinding = fields(["rename"]).rename;
+  mounted.model.presetMenu = async (id) => {
+    const choice = await env.platform("contextMenu", [
+      { id: "rename", label: "Rename…" },
+      { id: "delete", label: "Delete" },
+    ]);
+    if (choice === "rename") {
+      mounted.model.renamingPreset = id;
+      mounted.model.notifyPresetChange();
+    }
+    if (choice === "delete") await mounted.model.presetAction?.(id, "delete");
+  };
   mounted.model.presetAction = async (id, action, name) => {
+    if (action === "delete")
+      mounted.model.deletedPresetName =
+        (native("presets.list") as any[]).find((p) => p.id === id.slice(7))
+          ?.name ?? "Preset";
     native("presets.action", { id: id.slice(7), action, name });
+    if (action === "undo") mounted.model.deletedPresetName = null;
+    mounted.model.renamingPreset = null;
     refresh();
   };
   (mounted as Mounted).publish = () => {
