@@ -150,7 +150,7 @@ pub fn draw_dots(size: [f32; 2], age: f32, row: Option<f32>, light: bool, reduce
             let pencil = row.is_some_and(|r| (center[1] - r).abs() < 3.4);
             let strength = if reduced { fade(age, 0.12) } else { wake };
             dots.push(Dot { center, radius: if pencil { 1.45 } else { 0.9 },
-                alpha: dim * if pencil { 0.38 * strength } else { if light { 0.06 } else { 0.08 } * wake },
+                alpha: dim * if pencil { 0.38 * strength } else { (if light { 0.06 } else { 0.08 }) * wake },
                 orange: pencil });
         }
     }
