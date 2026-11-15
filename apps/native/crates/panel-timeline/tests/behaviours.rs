@@ -3034,3 +3034,27 @@ fn electron_scrub_has_no_attraction_before_crossing_or_beyond_pixel_radius() {
         assert_ne!(scrub.snap_target(), Some(4.));
     }
 }
+
+#[test]
+fn electron_trim_guide_clears_when_legal_bounds_prevent_alignment() {
+    let (_actor, mut client) = client();
+    block_on(client.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    block_on(client.drag(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        acquire_tolerance: 0.1,
+        release_tolerance: 0.15,
+        playhead: 8.,
+        ..sample(7.01)
+    }))
+    .unwrap();
+    let drag = client.active_drag().unwrap();
+    assert_eq!(drag.snap_target(), Some(8.));
+    assert_eq!(drag.snap_target_in(&client.model.index), None);
+    block_on(client.finish_drag(false)).unwrap();
+}

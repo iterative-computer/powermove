@@ -1401,6 +1401,24 @@ impl Drag {
     pub fn snap_target(&self) -> Option<f64> {
         self.snap.lock.map(|lock| lock.target)
     }
+    /// Trimming can clamp at a legal source/minimum-duration boundary. Only
+    /// show the latch if an actual resulting edge still rests on its target.
+    pub fn snap_target_in(&self, index: &TimelineIndex) -> Option<f64> {
+        let target = self.snap_target()?;
+        match &self.kind {
+            DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
+                let is_in = matches!(self.kind, DragKind::TrimIn { .. });
+                ids.iter()
+                    .filter_map(|id| index.layer(id))
+                    .any(|l| {
+                        let edge = if is_in { l.from } else { l.from + l.duration };
+                        (edge - target).abs() < 1e-9
+                    })
+                    .then_some(target)
+            }
+            _ => Some(target),
+        }
+    }
     pub fn commands(&mut self, sample: DragSample) -> Result<Vec<Command>, ModelError> {
         finite(sample.time_delta)?;
         finite(sample.value_delta)?;

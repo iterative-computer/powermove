@@ -1041,7 +1041,7 @@ impl TimelineSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
-                s.snap_guide = client.active_drag().and_then(|d| d.snap_target());
+                s.snap_guide = client.active_drag().and_then(|d| d.snap_target_in(&client.model.index));
                 s.client = Some(client);
                 s.busy = false;
                 if let Some(preview) = preview {
