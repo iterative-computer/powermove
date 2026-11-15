@@ -6061,7 +6061,7 @@ fn properties_effects_stack_add_edit_and_multiselection_undo() {
         .clone();
     let send = |intent: Value| {
         let p = backend.lock().unwrap().projection().unwrap();
-        let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":"a","intent":intent});
+        let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":p["layer"],"intent":intent});
         finish(
             panels
                 .realms

@@ -86,7 +86,11 @@ impl Agent {
         };
         // These protocol fixtures exercise the Editor/app-server transport.
         // Fresh-chat Auto defaults are covered by the panel model tests.
-        panel.choose("agent-access", "editor");
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access")) {
+            panel.choose("agent-access", "editor");
+        }
         panel
     }
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
@@ -110,7 +114,11 @@ impl Agent {
         };
         // These protocol fixtures exercise the Editor/app-server transport.
         // Fresh-chat Auto defaults are covered by the panel model tests.
-        panel.choose("agent-access", "editor");
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access")) {
+            panel.choose("agent-access", "editor");
+        }
         panel
     }
     /// Sign-in status arrives from a worker; a run needs it.
