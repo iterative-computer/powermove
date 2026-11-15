@@ -153,6 +153,9 @@ fn set_content(
     if layer_type == "shader" && patch.contains_key("code") {
         super::shader::sync(&mut layer);
     }
+    if layer_type == "shader" {
+        super::shader::validate_handles(&layer)?;
+    }
     cx.put_layer(&loc, layer)
 }
 

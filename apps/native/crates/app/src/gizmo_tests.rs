@@ -2842,3 +2842,133 @@ fn toggling_to_2d_during_fly_uses_the_view_on_screen(cx: &mut TestAppContext) {
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
 }
+
+fn gradient_handle_project(animated: bool) -> String {
+    let mut p: serde_json::Value = serde_json::from_str(&project()).unwrap();
+    let keys = if animated {
+        serde_json::json!([{"i":"start","t":0,"v":20}])
+    } else {
+        serde_json::json!([])
+    };
+    p["layers"][0]["fx"] = serde_json::json!([{"id":"ramp","type":"gradient","version":2,"open":true,"on":true,"p":{
+        "startX":{"v":20,"kf":keys},"startY":{"v":20,"kf":[]},"endX":{"v":80,"kf":[]},"endY":{"v":80,"kf":[]},"rampShape":{"v":0,"kf":[]}
+    }}]);
+    p.to_string()
+}
+#[gpui::test]
+fn gradient_handle_drag_is_one_undo_and_keys_animated_params(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_handle_project(true));
+    let before = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    let points = s.surface.read_with(&s.vcx, |s, _| s.effect_points());
+    assert_eq!(points.len(), 2);
+    let at = s.point_of(points[0]);
+    s.drag(cx, at, point(px(15.), px(8.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&p);
+    assert_eq!(
+        q.queries()
+            .evaluate(None, "l0", "ramp.startX", 0.5)
+            .unwrap()
+            .as_f64(),
+        Some(35.)
+    );
+    let root = p.snapshot.root().unwrap().to_value();
+    let keys = root.get("layers").unwrap().as_array().unwrap()[0]
+        .get("fx")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .get("p")
+        .unwrap()
+        .get("startX")
+        .unwrap()
+        .get("kf")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(keys.len(), 2);
+    s.undo(cx);
+    let after = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    assert_eq!(before.get("layers"), after.get("layers"));
+}
+#[gpui::test]
+fn agent_shader_handle_drives_its_uniform(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value = serde_json::from_str(&project()).unwrap();
+    project["layers"][0]["type"] = serde_json::json!("shader");
+    project["layers"][0]["d"] = serde_json::json!({"w":100,"h":100,"code":"uniform float uX; // @param 20\nuniform float uY; // @param 20\nvoid main(){fragColor=vec4(1.);}","uniforms":{"uX":{"v":20,"kf":[]},"uY":{"v":20,"kf":[]}},"viewerHandles":[{"kind":"point","point":{"x":"uX","y":"uY"}}]});
+    let mut s = stage_on(cx, &project.to_string());
+    let points = s.surface.read_with(&s.vcx, |s, _| s.effect_points());
+    assert_eq!(points.len(), 1);
+    let at = s.point_of(points[0]);
+    s.drag(cx, at, point(px(12.), px(9.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&p);
+    assert_eq!(
+        q.queries()
+            .evaluate(None, "l0", "u.uX", 0.5)
+            .unwrap()
+            .as_f64(),
+        Some(32.)
+    );
+    s.undo(cx);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&p);
+    assert_eq!(
+        q.queries()
+            .evaluate(None, "l0", "u.uX", 0.5)
+            .unwrap()
+            .as_f64(),
+        Some(20.)
+    );
+}
+
+#[gpui::test]
+fn gradient_handle_drag_inverts_layer_rotation_and_nonuniform_scale(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&gradient_handle_project(false)).unwrap();
+    project["layers"][0]["p"]["scale.x"]["v"] = serde_json::json!(200);
+    project["layers"][0]["p"]["scale.y"]["v"] = serde_json::json!(50);
+    project["layers"][0]["p"]["rotation"]["v"] = serde_json::json!(90);
+    let mut s = stage_on(cx, &project.to_string());
+    let points = s.surface.read_with(&s.vcx, |s, _| s.effect_points());
+    let at = s.point_of(points[0]);
+    s.drag(cx, at, point(px(-5.), px(20.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut q = pm_kernel::QueryMirror::new(&p);
+    assert!(
+        (q.queries()
+            .evaluate(None, "l0", "ramp.startX", 0.5)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+            - 30.)
+            .abs()
+            < 1e-6
+    );
+    assert!(
+        (q.queries()
+            .evaluate(None, "l0", "ramp.startY", 0.5)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+            - 30.)
+            .abs()
+            < 1e-6
+    );
+}

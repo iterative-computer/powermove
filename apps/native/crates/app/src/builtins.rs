@@ -2320,6 +2320,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
+    fn effect_visible(&self, layer: &str, effect: &str, cx: &App) -> Option<bool> {
+        self.0.upgrade().and_then(|c| c.read(cx).builtins.runtime.as_ref()?.viewer_effect_visible(layer, effect))
+    }
+
     fn drop_project_items(&self, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             let at = v.time();

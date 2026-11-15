@@ -1,7 +1,7 @@
 /** Registration-time checks mirror pm-fx-defs::handles. UI declarations stay
  * on the definition; render snapshots do not need them. */
 export function validateViewerHandles(def: any): void {
-  const handles = def.viewerHandles;
+  const handles = def?.viewerHandles;
   if (handles === undefined) return;
   if (!Array.isArray(handles) || handles.length > 32)
     throw new Error('viewerHandles: expected at most 32 controls');

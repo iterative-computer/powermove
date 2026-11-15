@@ -66,6 +66,7 @@ impl EffectCatalog {
                     let old: Definition = serde_json::from_value(raw.clone()).map_err(|e| {
                         CatalogError(format!("{id}: invalid historical definition: {e}"))
                     })?;
+                    crate::handles::parse(old.metadata.get("viewerHandles"), &old.params).map_err(CatalogError)?;
                     let old_version = effect_version(old.metadata.get("version"))?;
                     if old.id != id
                         || old.metadata.get("version").is_none_or(Value::is_null)
