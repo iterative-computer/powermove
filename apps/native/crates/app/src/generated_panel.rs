@@ -189,15 +189,15 @@ fn build_frame(
                         }
                     }
                 }
-                if ink_only && !reduced && light_alpha > 0. {
-                    paint(lx-4.,ly-4.,8.,8.,4.,0xffb27a,0.3*dim*light_alpha*cooling);
-                    paint(lx-1.5,ly-1.5,3.,3.,1.5,0xfff4ea,dim*light_alpha*cooling);
-                }
                 if ink_only && state.stage == panel_build::Stage::Ink {
                     let [x, width] = panel_build::ink_track(size[0], fraction, elapsed, reduced);
                     let color = panel_build::ink_color(elapsed, light, reduced);
                     let alpha = dim * (1. - panel_build::fade(elapsed - 0.58, 0.3));
                     paint(x, y-1., width, 2., 1., color, alpha);
+                }
+                if ink_only && !reduced && light_alpha > 0. {
+                    paint(lx-4.,ly-4.,8.,8.,4.,0xffb27a,0.3*dim*light_alpha*cooling);
+                    paint(lx-1.5,ly-1.5,3.,3.,1.5,0xfff4ea,dim*light_alpha*cooling);
                 }
             });
         }).w_full().h_full()).into_any_element()
@@ -1431,12 +1431,14 @@ mod panel_build_capture {
         let dir = std::env::var("PM_PANEL_CAPTURE").expect("PM_PANEL_CAPTURE");
         std::fs::create_dir_all(&dir).unwrap();
         for (name, stage, row, elapsed, scheme, reduced) in [
-            ("sketch", panel_build::Stage::Sketch, 2, 0.12, Scheme::Dark, false),
-            ("mid-ink", panel_build::Stage::Ink, 2, 0.14, Scheme::Dark, false),
-            ("dry", panel_build::Stage::Ink, 2, 0.58, Scheme::Dark, false),
-            ("ready", panel_build::Stage::Ready, 3, 0.2, Scheme::Dark, false),
-            ("light-theme", panel_build::Stage::Ink, 2, 0.14, Scheme::Light, false),
-            ("reduced-motion", panel_build::Stage::Ink, 2, 0.2, Scheme::Dark, true),
+            ("wake", panel_build::Stage::Wake, 0, 0.12, Scheme::Dark, false),
+            ("sketch", panel_build::Stage::Sketch, 0, 0.42, Scheme::Dark, false),
+            ("ink", panel_build::Stage::Ink, 0, 0.14, Scheme::Dark, false),
+            ("cool", panel_build::Stage::Ink, 1, 0.48, Scheme::Dark, false),
+            ("rest", panel_build::Stage::Rest, 2, 2.4, Scheme::Dark, false),
+            ("ready", panel_build::Stage::Ready, 4, 0.4, Scheme::Dark, false),
+            ("light-theme", panel_build::Stage::Ink, 0, 0.14, Scheme::Light, false),
+            ("reduced-motion", panel_build::Stage::Ink, 1, 0.2, Scheme::Dark, true),
         ] {
             objc2::rc::autoreleasepool(|_| {
                 let mut cx = HeadlessAppContext::with_platform(
@@ -1452,7 +1454,9 @@ mod panel_build_capture {
                 assert_eq!(state.stage, panel_build::Stage::Sketch);
                 state.stage = stage;
                 state.row = row;
-                let count = if stage == panel_build::Stage::Ready { 5 } else { row };
+                state.changed = std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed);
+                state.pending = ((row+1)..5).collect();
+                let count = if stage == panel_build::Stage::Ready { 5 } else if stage == panel_build::Stage::Rest { row+1 } else { row };
                 for index in 0..count { state.committed.insert(index, std::time::Instant::now() - std::time::Duration::from_secs(2)); }
                 if stage == panel_build::Stage::Ink { state.committed.insert(row, std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed)); }
                 let definition = json!({"title":"Colour grade","controls":[
@@ -1462,11 +1466,13 @@ mod panel_build_capture {
                     {"type":"slider","label":"Warmth","def":5600,"min":2000,"max":8000},
                     {"type":"slider","label":"Tint","def":-4,"min":-10,"max":20}]});
                 let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
-                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed, definition })).unwrap();
+                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: if stage == panel_build::Stage::Wake { 0.12 } else { 1. }, elapsed, definition })).unwrap();
                 for _ in 0..4 { cx.run_until_parked(); }
                 cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
                 cx.run_until_parked();
                 let image = cx.capture_screenshot(window.into()).unwrap();
+                assert_eq!(image.width(), 664, "capture must be 2x");
+                assert_eq!(image.height(), 584);
                 assert!(image.pixels().any(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0), "empty {name}");
                 image.save(format!("{dir}/{name}.png")).unwrap();
                 println!("CAPTURE {dir}/{name}.png");
