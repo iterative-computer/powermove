@@ -54,10 +54,18 @@ fn at_path<'a>(root: &'a Value, path: &Value) -> Option<&'a Value> {
     Some(v)
 }
 pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
+    let view = host.view(id)?;
     let p = host.read_document(id)?;
     let selection = host.selection(id)?;
     let time = host.playhead(id);
-    let mut result = project_state_data(p, selection, time, host.revision(id)?, a)?;
+    let mut result = project_state_with_document(
+        p,
+        selection,
+        time,
+        host.revision(id)?,
+        a,
+        &view.snapshot.document,
+    )?;
     if let Some(registry) = host.media_registry.as_deref()
         && let Some(assets) = result["mediaAssets"].as_array_mut()
     {
@@ -80,9 +88,25 @@ pub fn project_state_data(
     revision: u64,
     a: &Value,
 ) -> Result<Value> {
-    let mut mirror = DocumentStore::new_untitled(model(&p));
-    let comp = mirror
-        .open_comp()
+    let document = pm_model::Document::new(
+        Some(pm_model::canonical::canonical_project(model(&p))),
+        revision,
+    );
+    project_state_with_document(p, selection, time, revision, a, &document)
+}
+fn project_state_with_document(
+    p: Value,
+    selection: Value,
+    time: f64,
+    revision: u64,
+    a: &Value,
+    document: &pm_model::Document,
+) -> Result<Value> {
+    let mut queries =
+        (a["indexOnly"] != true).then(|| pm_kernel::queries::QueryContext::new(document));
+    let comp = p["compId"]
+        .as_str()
+        .map(str::to_owned)
         .unwrap_or_else(|| format!("@root:{}", p["id"].as_str().unwrap_or("")));
     let layers = p["layers"]
         .as_array()
@@ -123,8 +147,9 @@ pub fn project_state_data(
         let mut item = json!({"index":index,"id":l["id"],"name":l["name"],"type":l["type"],"from":l["from"],"duration":l["dur"],"visible":l["on"],"locked":l["lock"],"parent":l["parent"],"group":l["group"].as_str(),"blend":l["blend"],"motionBlur":l["mblur"],"color":l["color"]});
         if !index_only {
             let entries = json_value(
-                &mirror
-                    .queries()
+                &queries
+                    .as_mut()
+                    .expect("property queries")
                     .query(&model(
                         &json!({"op":"allProps","comp":comp,"open":comp,"layer":index,"t":time}),
                     ))
@@ -142,7 +167,7 @@ pub fn project_state_data(
                     .cloned()
                     .unwrap_or(Value::Null);
                 let keys = prop["kf"].as_array().cloned().unwrap_or_default();
-                let value=json_value(&mirror.queries().query(&model(&json!({"op":"evP","comp":comp,"open":comp,"layer":index,"t":time,"key":key,"prop":prop}))).map_err(Error::kernel)?);
+                let value=json_value(&queries.as_mut().expect("property queries").query(&model(&json!({"op":"evP","comp":comp,"open":comp,"layer":index,"t":time,"key":key,"prop":prop}))).map_err(Error::kernel)?);
                 let frames=keys.iter().skip(key_offset).take(key_limit).map(|k|json!({"time":round(k["t"].as_f64().unwrap_or(0.)),"compositionTime":round(l["from"].as_f64().unwrap_or(0.)+k["t"].as_f64().unwrap_or(0.)),"value":k["v"],"hold":k["hold"]==true})).collect::<Vec<_>>();
                 props.push(json!({"path":key,"value":value,"keyframeCount":keys.len(),"nextKeyframeOffset":if key_limit>0&&key_offset.saturating_add(key_limit)<keys.len(){Some(key_offset+key_limit)}else{None},"keyframes":frames,"expression":prop["expr"].as_str().filter(|s|!s.is_empty()),"handEdited":l["locked_intent"].get(key).is_some_and(|v|!v.is_null()&&v!=&json!(false))||l["locked_intent"].get(key.split('.').next().unwrap_or("")).is_some_and(|v|!v.is_null()&&v!=&json!(false))}));
             }

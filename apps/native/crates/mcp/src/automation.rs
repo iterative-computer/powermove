@@ -351,10 +351,7 @@ impl Automation {
     pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
         let view = self.view(id)?;
         let mut project = pm_model::canonical::realize_project(
-            view.snapshot
-                .document
-                .to_value()
-                .ok_or_else(|| Error::invalid("Missing document"))?,
+            working_document(&view.snapshot)?,
         );
         if let Some(object) = project.as_object_mut() {
             object.insert("revision", pm_model::Value::Number(view.revision as f64));
@@ -1219,11 +1216,39 @@ mod layout_tests;
 /// revision.
 pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
     let mut project = json_value(&pm_model::canonical::realize_project(
-        snapshot
-            .document
-            .to_value()
-            .ok_or_else(|| Error::invalid("Missing document"))?,
+        working_document(snapshot)?,
     ));
     project["revision"] = json!(snapshot.revision);
     Ok(project)
+}
+
+// Also exclude the retired field from snapshots supplied in memory, before
+// converting any nodes to owned values (file ingress already skips it).
+fn working_document(snapshot: &pm_kernel::Snapshot) -> Result<pm_model::Value> {
+    let root = snapshot.root().ok_or_else(|| Error::invalid("Missing document"))?;
+    let pm_model::NodeKind::Object(members) = root.kind() else {
+        return Err(Error::invalid("Invalid project"));
+    };
+    let mut project = pm_model::Map::new();
+    for (key, node) in members.iter() {
+        if key.as_str() != Some("native3dHistoryArchive") {
+            project.insert(key.clone(), node.to_value());
+        }
+    }
+    Ok(pm_model::Value::Object(project))
+}
+
+#[cfg(test)]
+mod retired_archive_projection_tests {
+    #[test]
+    fn an_in_memory_snapshot_does_not_expose_the_recovery_archive() {
+        let value = pm_model::json::parse(r#"{"id":"P","w":640,"h":360,"layers":[],"native3dHistoryArchive":{"obsolete":true},"scene":{"keep":42}}"#).unwrap();
+        let snapshot = pm_kernel::Snapshot {
+            doc_id: 0, revision: 0,
+            document: std::sync::Arc::new(pm_model::Document::new(Some(value), 0)),
+        };
+        let p = super::document_json(&snapshot).unwrap();
+        assert!(p.get("native3dHistoryArchive").is_none());
+        assert_eq!(p["scene"]["keep"], 42);
+    }
 }
