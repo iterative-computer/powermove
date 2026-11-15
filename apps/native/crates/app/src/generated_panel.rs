@@ -236,7 +236,9 @@ fn slider_control(control: &Value, current: &Value, t: &pm_design::Tokens) -> Di
                 .child(div().h_full().w(relative(fraction)).rounded(px(1.)).bg(rgb(t.colors.text))))
             .child(div().absolute().left(relative(0.87)).top_0().h_full().w(relative(0.13)).flex()
                 .items_center().justify_end().text_size(px(11.)).text_color(rgb(t.colors.text))
-                .font_family(pm_design::MONO_FONT).child(text)))
+                .child(div().flex_none().whitespace_nowrap()
+                    .font_family(pm_design::TEXT_FONT).font_features(pm_shell::kit::tabular())
+                    .letter_spacing(px(0.)).child(text))))
 }
 
 fn control_fraction(control: &Value, current: &Value) -> f32 {
