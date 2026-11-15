@@ -3379,6 +3379,9 @@ impl Controller {
                 .detach();
             }
             "save" => self.save(None, cx),
+            "native.saveTake" => {
+                crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
+            }
             "saveAs" => self.save_dialog(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {

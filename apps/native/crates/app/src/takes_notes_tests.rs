@@ -141,3 +141,30 @@ fn a_project_sees_its_own_takes_including_v1_ones() {
         ["t2", "t1"]
     );
 }
+
+#[test]
+fn parity_save_take_command_saves_without_loading_panel() {
+    let profile = tempfile::tempdir().unwrap();
+    let actor = actor(profile.path());
+    let kernel = actor.handle();
+    let p = kernel.published("synthetic").unwrap();
+    assert!(
+        pm_shell::keyboard::shipped()
+            .iter()
+            .any(|b| b.command == "native.saveTake" && b.chord.is_empty())
+    );
+    assert!(
+        pm_shell::menu::palette_rows()
+            .iter()
+            .any(|(_, command, label)| command == "native.saveTake" && label == "Save Take")
+    );
+    assert!(takes_panel::dispatch("native.saveTake", || {
+        assert_eq!(takes_panel::save_default(&kernel, &p).unwrap(), "Take 1");
+    }));
+    assert_eq!(takes_panel::read(&kernel).unwrap().len(), 1);
+    assert!(takes_panel::dispatch("native.saveTake", || {
+        assert_eq!(takes_panel::save_default(&kernel, &p).unwrap(), "Take 2");
+    }));
+    assert_eq!(takes_panel::read(&kernel).unwrap().len(), 2);
+    actor.shutdown();
+}

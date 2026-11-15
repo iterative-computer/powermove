@@ -249,6 +249,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 m("save"),
                 m("saveAs"),
+                r("Save Take", "native.saveTake"),
                 sep(),
                 m("import"),
                 Item::command("Import Image Sequence…", "importSequence", ""),

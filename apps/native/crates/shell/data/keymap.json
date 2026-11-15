@@ -3089,5 +3089,15 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.saveTake",
+    "chord": "",
+    "command": "native.saveTake",
+    "args": [],
+    "priority": 0,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]
