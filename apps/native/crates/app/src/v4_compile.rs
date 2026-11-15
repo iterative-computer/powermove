@@ -221,6 +221,7 @@ pub struct NodeView {
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
+    pub outline_retained: bool,
     /// A number field's unit, drawn after the value in `muted` (language §5).
     pub unit: Option<SharedString>,
     /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
@@ -851,6 +852,7 @@ fn compile(
             .and_then(Value::as_str)
             .map(|layer| SharedString::from(layer.to_owned())),
         outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
+        outline_retained: meta.and_then(|m| m.get("nativeRetained")).and_then(Value::as_bool).unwrap_or(false),
         outline_first: meta
             .and_then(|m| m.get("nativeFirstRow"))
             .and_then(Value::as_str)

@@ -273,6 +273,14 @@ impl Backend {
             .ok_or("No open project")?
             .sync(p.clone());
         client.model.sync(&p);
+        // Retain modest outlines across scrolls. Only the native host mounts rows;
+        // wheel input must never wait for another JS publication.
+        let retained = client.model.rows().len() <= 1536;
+        let (first, visible) = if retained {
+            (0, client.model.rows().len().max(1))
+        } else {
+            (first, visible)
+        };
         let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
             .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
@@ -384,6 +392,7 @@ impl Backend {
             display.push(row);
         }
         frame["window"]["rows"] = json!(display);
+        frame["window"]["retained"] = json!(retained);
         let (timecode, spoken) = timecode(time, fps);
         frame["playing"] = json!(playing);
         frame["timecode"] = json!(timecode);

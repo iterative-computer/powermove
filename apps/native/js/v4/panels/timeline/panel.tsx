@@ -968,6 +968,7 @@ export function TimelinePanel({
                     indexDigits: f.indexDigits,
                     nativeFirstRow: f.window.rows[0]?.id ?? null,
                     nativeWindow: [f.window.first, f.window.rows.length],
+                    ...(f.window.retained === true ? { nativeRetained: true } : {}),
                   }}
                   onKeyDown={(event) => {
                     event.stopPropagation();

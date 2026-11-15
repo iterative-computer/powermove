@@ -750,6 +750,10 @@ impl Scene {
     pub fn content_height(&self) -> f64 {
         self.tops.last().copied().unwrap_or(0.)
     }
+    /// Clamp after a viewport resize or disclosure change, using visible rows.
+    pub fn clamp_scroll(&self, scroll_y: f64, height: f64) -> f64 {
+        scroll_y.clamp(0., (self.content_height() - height.max(0.)).max(0.))
+    }
     /// The row at a content-space y. Variable heights use the same index as paint.
     pub fn row_at(&self, y: f64) -> Option<&PaintRow> {
         if y < 0. {
@@ -826,6 +830,12 @@ impl Scene {
     }
     pub fn reanchor(&self, id: &str, offset: f64) -> Option<f64> {
         self.scroll_for(id).map(|y| (y + offset).max(0.))
+    }
+    /// Native outline mounting shares the track viewport, with two rows of
+    /// overscan so fractional wheel deltas never expose an unmounted row.
+    pub fn mount_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
+        let visible = self.visible_range(scroll_y, height);
+        visible.start.saturating_sub(2)..visible.end.saturating_add(2).min(self.total())
     }
     /// The rows on screen. Every scroll prepares a new frame, so rows past
     /// the viewport would only cost time (a project with baked animation

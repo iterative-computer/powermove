@@ -130,7 +130,12 @@ export interface TimelineFrame {
   timeEditor?: TextLease;
   tabs: { id: string; name: string; active: boolean; showClose: boolean }[];
   /** Already flattened/indexed by Rust. One viewport of overscan on each side. */
-  window: { total: number; first: number; rows: readonly Row[] };
+  window: {
+    total: number;
+    first: number;
+    rows: readonly Row[];
+    retained?: boolean;
+  };
   /** Derived from largest index by Rust, independent of the mounted window. */
   indexDigits: number;
   selection: { kind: "layers" | "keys"; count: number } | null;
@@ -240,7 +245,9 @@ export function checkFrame(
     ![w.total, w.first].every((n) => Number.isSafeInteger(n) && n >= 0) ||
     w.first > w.total ||
     w.rows.length > w.total - w.first ||
-    w.rows.length > request.visible * 3 ||
+    (w.retained === true
+      ? w.first !== 0 || w.rows.length !== w.total || w.total > 1536
+      : w.rows.length > request.visible * 3) ||
     !Number.isSafeInteger(frame.indexDigits) ||
     frame.indexDigits < 1 ||
     !["layers", "keys", undefined].includes(frame.selection?.kind) ||
