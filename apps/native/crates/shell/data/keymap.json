@@ -3079,5 +3079,15 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.newCamera",
+    "chord": "cmd+alt+shift+c",
+    "command": "newCamera",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

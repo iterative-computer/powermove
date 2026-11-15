@@ -1415,3 +1415,77 @@ fn linked_folder_save_reopen_resolves_in_place_without_retained_copy() {
     );
     panels.close();
 }
+
+fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
+    let desk = Desk::new(project(vec![]));
+    let before = desk.document();
+    desk.run(command, args, 0.);
+    assert_eq!(desk.layers().len(), 1);
+    let ids = desk.selected();
+    assert_eq!(ids.len(), 1);
+    let camera = pm_scene3d::from_model(&layer_of(&desk.published(), &ids[0])).unwrap();
+    assert_eq!(camera["name"], "Camera");
+    assert_eq!(camera["threeD"], true);
+    assert_eq!(camera["d"]["definition"], "powermove.3d.camera");
+    for (key, expected) in [("position.x", 3.), ("position.y", 2.), ("position.z", 6.)] {
+        assert_eq!(camera["p"][key]["v"].as_f64(), Some(expected));
+    }
+    assert_eq!(
+        camera["d"]["data"]["camera"]["p"]["fov"]["v"].as_f64(),
+        Some(45.)
+    );
+    let published = desk.published();
+    let scene = pm_kernel::commands::scene3d::resolve_scene(&published.snapshot, None, 0.).unwrap();
+    assert_eq!(scene.camera_id.as_deref(), Some(ids[0].as_str()));
+    assert!(pm_panel_studio3d::properties::scene_summary(&published).unwrap().is_some());
+    desk.undo();
+    assert!(desk.layers().is_empty());
+    assert_eq!(desk.document(), before);
+}
+#[test]
+fn camera_entry_layer_new() {
+    assert!(
+        pm_shell::menu::menus()
+            .iter()
+            .find(|(label, _)| *label == "Layer")
+            .unwrap()
+            .1
+            .iter()
+            .any(|i| i.label == "New" && i.command == "newLayers")
+    );
+    let row = pm_shell::menu::new_layers()
+        .into_iter()
+        .find(|i| i.label == "Camera")
+        .unwrap();
+    assert_camera_entry(&row.command, &row.args);
+}
+#[test]
+fn camera_entry_toolbar() {
+    let (command, _) = pm_shell::ADD
+        .iter()
+        .find(|(_, label)| *label == "New Camera")
+        .unwrap();
+    assert_camera_entry(command, &[]);
+}
+#[test]
+fn camera_entry_viewer() {
+    let menu = crate::builtins::viewer_new_menu();
+    assert_eq!(menu.label, "New");
+    let row = menu.children.iter().find(|i| i.label == "Camera").unwrap();
+    assert_camera_entry(&row.command, &[]);
+}
+#[test]
+fn camera_entry_timeline() {
+    let menu = crate::timeline_surface::empty_new_menu();
+    assert_eq!(menu["label"], "New");
+    let rows = vec![menu];
+    let row = crate::v4_native::menu_item(&rows, 1).unwrap();
+    assert_eq!(row["label"], "Camera");
+    assert_camera_entry(row["command"].as_str().unwrap(), &[]);
+}
+#[test]
+fn camera_entry_shortcut() {
+    let (command, args) = crate::layer_commands::commands_tests::dispatch("cmd+alt+shift+c");
+    assert_eq!(command, "newCamera");
+    assert_camera_entry(&command, &args);
+}

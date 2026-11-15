@@ -2437,17 +2437,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
                 let entries = vec![
-                    pm_shell::MenuEntry::submenu(
-                        "New",
-                        vec![
-                            pm_shell::MenuEntry::item("Solid", "newSolid"),
-                            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
-                            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
-                            pm_shell::MenuEntry::item("Null Object", "newNull"),
-                            pm_shell::MenuEntry::separator(),
-                            pm_shell::MenuEntry::item("Composition…", "newComposition"),
-                        ],
-                    ),
+                    viewer_new_menu(),
                     // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
                     pm_shell::MenuEntry::submenu(
                         "Add 3D Layer",
@@ -3424,4 +3414,19 @@ mod quick_look_tests {
             [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
         );
     }
+}
+
+pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
+    pm_shell::MenuEntry::submenu(
+        "New",
+        vec![
+            pm_shell::MenuEntry::item("Solid", "newSolid"),
+            pm_shell::MenuEntry::item("Camera", "newCamera"),
+            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+            pm_shell::MenuEntry::item("Null Object", "newNull"),
+            pm_shell::MenuEntry::separator(),
+            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+        ],
+    )
 }

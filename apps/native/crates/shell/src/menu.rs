@@ -66,12 +66,13 @@ impl Item {
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
 pub const DISPLAY_ONLY: [&str; 4] = ["Layer", "Timeline", "tools", "view3d"];
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 6] = [
+pub const SUBMENUS: [&str; 7] = [
     "openRecent",
     "workspaces",
     "panels",
     "tools",
     "new3d",
+    "newLayers",
     "view3d",
 ];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
@@ -148,8 +149,11 @@ pub fn view3d() -> Vec<Item> {
     })
     .collect()
 }
-/// Items of Layer ▸ Add 3D Layer (3d-studio.md §7, plus environments) (command `new3d`, argument = kind). Empty labels
-/// are separators. Kinds match pm-panel-studio3d's `new_menu` and `NATURE`.
+/// Direct layer creation actions in Layer ▸ New.
+pub fn new_layers() -> Vec<Item> {
+    vec![Item::command("Camera", "newCamera", "cmd+alt+shift+c")]
+}
+/// Items of Layer ▸ Add 3D Layer. Empty labels are separators.
 pub fn new3d() -> Vec<Item> {
     let item = |label: &str, kind: &str| {
         if label.is_empty() {
@@ -336,6 +340,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Layer",
             vec![
                 r("New Solid", "newSolid"),
+                Item::command("New", "newLayers", ""),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
                 Item::command("Add 3D Layer", "new3d", ""),

@@ -915,10 +915,11 @@ const TOOLBAR: [&str; 8] = [
 /// The toolbar's Add menu, as v1's "+" beside the tools: media, then the
 /// layers that are made by a command, not drawn with a tool. An empty row
 /// is a separator.
-pub const ADD: [(&str, &str); 5] = [
+pub const ADD: [(&str, &str); 6] = [
     ("import", "Import Media…"),
     ("", ""),
     ("newSolid", "New Solid"),
+    ("newCamera", "New Camera"),
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
@@ -5742,6 +5743,8 @@ pub fn install_menus() {
     }
     let tools_start = commands.len();
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let new_layers_start = commands.len();
+    commands.extend(menu::new_layers().into_iter().map(|i| (i.command, i.args)));
     let new3d_start = commands.len();
     commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
     let view3d_start = commands.len();
@@ -5831,6 +5834,14 @@ pub fn install_menus() {
                     delegate(&tools, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&tools));
                 }
+                "newLayers" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, t) in menu::new_layers().iter().enumerate() {
+                        sub.addItem(&row(&t.label, &t.chord, new_layers_start + i));
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "new3d" => {
                     let sub = NSMenu::new(mtm);
                     for (i, t) in menu::new3d().iter().enumerate() {
@@ -5886,7 +5897,7 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if matches!(spec.command.as_str(), "tools" | "new3d" | "view3d") {
+            if matches!(spec.command.as_str(), "tools" | "new3d" | "newLayers" | "view3d") {
                 // In an auto-enabling menu an item with no action is disabled;
                 // its submenu's own action keeps the parent enabled.
                 if let Some(sub) = item.submenu() {

@@ -2726,10 +2726,14 @@ impl TimelineSurface {
         };
         let items = self.model.menu(&context);
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
-        let rows = items
+        let mut rows: Vec<serde_json::Value> = items
             .iter()
             .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
+        let camera_index = ids.len() + 1;
+        if matches!(context, MenuContext::Empty) {
+            rows.push(empty_new_menu());
+        }
         let weak = cx.entity().downgrade();
         self.delegate.clone().extension_menu(
             locations,
@@ -2737,6 +2741,10 @@ impl TimelineSurface {
             window,
             cx,
             Box::new(move |index, cx| {
+                if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
+                    let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
+                    return;
+                }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
                     return;
                 };
@@ -5146,4 +5154,9 @@ mod edge_scroll_regression {
         assert_eq!(edge_overflow(199., 200., 1000.), -1.);
         assert_eq!(edge_overflow(1001., 200., 1000.), 1.);
     }
+}
+
+pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
+pub(crate) fn empty_new_menu() -> serde_json::Value {
+    serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
 }
