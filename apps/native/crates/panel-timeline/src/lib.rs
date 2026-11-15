@@ -642,6 +642,7 @@ impl TimelineModel {
             });
         if l.kind == "group" {
             d.group_collapsed = !d.group_collapsed;
+            d.collapsed = d.group_collapsed;
         } else {
             d.collapsed = !d.collapsed;
         }

@@ -245,7 +245,24 @@ pub async fn dispatch(
             } else {
                 current.map(|d| d.collapsed).unwrap_or(layer.collapsed)
             };
-            if open == closed {
+            if intent.get("all").and_then(Value::as_bool) == Some(true) {
+                let ids: Vec<_> = client
+                    .model
+                    .index
+                    .layers
+                    .iter()
+                    .map(|l| l.id.clone())
+                    .collect();
+                for id in ids {
+                    let layer = client.model.index.layer(&id).unwrap();
+                    let d = client.model.reveal.layers.entry(id).or_default();
+                    d.collapsed = !open;
+                    if layer.kind == "group" {
+                        d.group_collapsed = !open;
+                    }
+                }
+                client.model.rebuild_rows();
+            } else if open == closed {
                 client.model.toggle_disclosure(&id)?;
             }
             persist = true;

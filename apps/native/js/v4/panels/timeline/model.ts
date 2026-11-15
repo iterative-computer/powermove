@@ -152,7 +152,7 @@ export type Intent =
   | { type: "timeEdit" }
   | { type: "tab"; id: string; close: boolean }
   | { type: "selectRow"; id: string; modifiers: Modifiers }
-  | { type: "disclosure"; id: string; open: boolean }
+  | { type: "disclosure"; id: string; open: boolean; all?: boolean }
   | { type: "rename"; id: string }
   /** A name or time field closed: its text, or empty when cancelled. */
   | { type: "editDone"; value: string }

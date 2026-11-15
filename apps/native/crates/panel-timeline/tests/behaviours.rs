@@ -337,7 +337,7 @@ fn marquee_does_not_seek_and_preserves_additive_keys() {
     assert_eq!(c.model.selection.keys(), strings(&["a0", "b0"]));
 }
 #[test]
-fn group_disclosure_does_not_open_group_properties() {
+fn group_disclosure_opens_group_properties() {
     let mut v = fixture();
     let a = layer_mut(&mut v, 0);
     a.insert("type", Value::from("group"));
@@ -348,7 +348,7 @@ fn group_disclosure_does_not_open_group_properties() {
     m.toggle_disclosure("a").unwrap();
     assert!(m.row_position(&RowId::Layer("b".into())).is_some());
     assert!(
-        !m.rows()
+        m.rows()
             .iter()
             .any(|r| matches!(&r.id,RowId::Property { layer_id,.. } if layer_id=="a"))
     );
@@ -2530,4 +2530,21 @@ fn a_graph_marquee_that_picks_nothing_keeps_the_layers_whose_curves_show() {
     assert_eq!(c.model.selection.layers(), strings(&["a"]));
     run(&mut c, marquee.finish());
     assert_eq!(c.model.selection.layers(), strings(&["a"]));
+}
+
+#[test]
+fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
+    let mut m = model(fixture());
+    let facts = PropertyFacts::default();
+    for start in [0, 1000] {
+        m.reveal_property('u', false, start, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 100, &facts).unwrap();
+        }
+        m.reveal_property('u', false, start + 400, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 500, &facts).unwrap();
+        }
+        assert!(m.reveal.layers.values().all(|d| d.collapsed));
+    }
 }
