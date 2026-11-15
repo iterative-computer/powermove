@@ -109,13 +109,14 @@ fn joined_position_projection_and_selection_keep_all_subframe_key_identities() {
     );
     let published = actor.handle().published("synthetic").unwrap();
     assert_eq!(published.selection.keys().len(), 2);
-    for value in ["320", "180"] {
+    for value in [320., 180.] {
         assert!(
-            publication
-                .surface
-                .nodes()
-                .values()
-                .any(|n| n.text == value)
+            publication.surface.nodes().values().any(|n| {
+                n.props.get("id").and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("timeline:value:"))
+                    && n.props.get("value").and_then(Value::as_f64) == Some(value)
+            }),
+            "joined position exposes native numeric value {value}"
         );
     }
 }
