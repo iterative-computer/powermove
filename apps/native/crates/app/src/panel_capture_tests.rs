@@ -71,6 +71,10 @@ fn capture_builtin_panels() {
                     ])).unwrap();
                     while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
                 }
+                if panel == "export" {
+                    let ticket = r.runtime.show("export").unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
