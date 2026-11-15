@@ -40,12 +40,16 @@ fn rect_of(l: &Layout, bounds: Rect, id: &str) -> Rect {
         .rect
 }
 
-/// Every panel inside `bounds`, with room, and no two overlapping.
+/// Every visible panel stays in its viewport, without overlap. Side stacks
+/// may extend below it: the shell clips and scrolls those columns.
 fn sound(l: &Layout, bounds: Rect, what: &str) {
     l.validate().unwrap();
     let t = tokens();
-    let panels = l.geometry(bounds, &t).panels;
-    for p in &panels {
+    let geometry = l.geometry(bounds, &t);
+    let panels = &geometry.panels;
+    let visible = |p: &Placement| geometry.side_docks.get(&p.dock)
+        .map_or(p.rect, |viewport| p.rect.intersection(*viewport));
+    for p in panels {
         let r = p.rect;
         assert!(r.w > 1. && r.h > 1., "{what}: empty panel {r:?}");
         // A window of the default size or larger has room for every
@@ -54,6 +58,8 @@ fn sound(l: &Layout, bounds: Rect, what: &str) {
             let least = least_height(&l.docks[p.dock].groups[p.group].tabs, &t);
             assert!(r.h >= least - 0.5, "{what}: {r:?} under its least {least}");
         }
+        let r = visible(p);
+        if r.w == 0. || r.h == 0. { continue; }
         assert!(
             r.x >= bounds.x - 0.5
                 && r.y >= bounds.y - 0.5
@@ -64,7 +70,7 @@ fn sound(l: &Layout, bounds: Rect, what: &str) {
     }
     for (i, a) in panels.iter().enumerate() {
         for b in &panels[i + 1..] {
-            let (a, b) = (a.rect, b.rect);
+            let (a, b) = (visible(a), visible(b));
             let overlap_w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
             let overlap_h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
             assert!(
