@@ -3843,7 +3843,12 @@ impl Host {
     }
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
-        let mut choices = self.base_choices.clone();
+        let mut choices: Vec<_> = self
+            .base_choices
+            .iter()
+            .cloned()
+            .map(Choice::with_after_effects_terms)
+            .collect();
         choices.retain(|c| {
             !state
                 .disabled
@@ -5097,7 +5102,14 @@ impl Popup {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for i in self.model.filtered() {
             let c = &self.model.choices[i];
-            (&c.label, &c.command, &c.category, c.checked, &c.font).hash(&mut h);
+            (
+                c.display_label(&self.model.query),
+                &c.command,
+                &c.category,
+                c.checked,
+                &c.font,
+            )
+                .hash(&mut h);
         }
         self.model.unlisted().hash(&mut h);
         (self.window.frame().size.width as i64).hash(&mut h);
@@ -5203,7 +5215,8 @@ impl Popup {
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
             }
-            let title = popup_label(&c.label, t.typography.body, t.colors.text, mtm);
+            let display_label = c.display_label(&self.model.query);
+            let title = popup_label(&display_label, t.typography.body, t.colors.text, mtm);
             if let Some(family) = &c.font
                 && let Some(face) = NSFontManager::sharedFontManager(mtm)
                     .fontWithFamily_traits_weight_size(
@@ -5229,7 +5242,7 @@ impl Popup {
                 )
             };
             button.setTransparent(true);
-            button.setAccessibilityLabel(Some(&NSString::from_str(&c.label)));
+            button.setAccessibilityLabel(Some(&NSString::from_str(&display_label)));
             button.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
                 "shell.palette.{}",
                 c.command

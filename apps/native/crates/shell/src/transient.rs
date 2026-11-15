@@ -15,6 +15,7 @@ pub struct Choice {
     pub stays: bool,
     /// Electron offers layer and effect rows only for a nonempty name search.
     pub search_only: bool,
+    pub aliases: Vec<String>,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -23,6 +24,28 @@ impl Choice {
             command: command.into(),
             ..Default::default()
         }
+    }
+    pub fn with_after_effects_terms(mut self) -> Self {
+        let command = crate::menu::split_palette_command(&self.command).0;
+        self.aliases = AFTER_EFFECTS_TERMS
+            .iter()
+            .find(|(id, _)| *id == command)
+            .map(|(_, terms)| terms.iter().map(|term| (*term).to_owned()).collect())
+            .unwrap_or_default();
+        self
+    }
+    pub fn display_label(&self, query: &str) -> String {
+        let query = query.trim().to_lowercase();
+        if !query.is_empty()
+            && !self.label.to_lowercase().contains(&query)
+            && let Some(term) = self
+                .aliases
+                .iter()
+                .find(|term| term.to_lowercase().contains(&query))
+        {
+            return format!("{} — {term} in After Effects", self.label);
+        }
+        self.label.clone()
     }
     pub fn on_search(mut self) -> Self {
         self.search_only = true;
@@ -118,7 +141,21 @@ impl Picker {
                 let label = rank(&c.label, &self.query);
                 // Command ids only match literally; subsequences of ids are noise.
                 let command = c.command.to_lowercase().contains(&query).then_some(2);
-                label.into_iter().chain(command).min().map(|r| (r, i))
+                let alias = c
+                    .aliases
+                    .iter()
+                    .filter(|term| {
+                        term.to_lowercase()
+                            .contains(self.query.trim().to_lowercase().as_str())
+                    })
+                    .map(|_| 2)
+                    .min();
+                label
+                    .into_iter()
+                    .chain(command)
+                    .chain(alias)
+                    .min()
+                    .map(|r| (r, i))
             })
             .collect();
         let mut best = std::collections::HashMap::<&str, (u32, usize)>::new();
@@ -213,5 +250,52 @@ mod palette_layer_tests {
         );
         picker.search("private-id".into());
         assert!(picker.filtered().is_empty());
+    }
+}
+
+/// Ported verbatim from Electron's palette-model.ts AFTER_EFFECTS_TERMS.
+pub const AFTER_EFFECTS_TERMS: &[(&str, &[&str])] = &[
+    ("toggleContinuousRaster", &["Collapse Transformations"]),
+    ("toggle3DLayer", &["3D Layer Switch"]),
+    ("precompose", &["Nest Layers", "Precompose"]),
+    ("releasePrecomp", &["Unprecompose"]),
+    ("newNull", &["Null Object"]),
+    ("newAdjustment", &["Adjustment Layer"]),
+    ("newShape", &["Shape Layer"]),
+    ("graph", &["Speed Graph", "Value Graph"]),
+    ("easyEase", &["Keyframe Assistant"]),
+    ("split", &["Split Layer"]),
+    ("groupLayers", &["Nest"]),
+    ("compositionSettings", &["Composition Settings"]),
+    ("palette", &["Search"]),
+];
+#[cfg(test)]
+mod palette_alias_tests {
+    use super::*;
+    #[test]
+    fn every_electron_alias_finds_the_original_command_with_electron_wording() {
+        assert_eq!(AFTER_EFFECTS_TERMS.len(), 13);
+        for (command, terms) in AFTER_EFFECTS_TERMS {
+            for term in *terms {
+                let choice = Choice::new("Original label", *command).with_after_effects_terms();
+                let mut picker = Picker {
+                    choices: vec![choice],
+                    ..Default::default()
+                };
+                picker.search(term.to_uppercase());
+                assert_eq!(picker.filtered(), vec![0], "{term}");
+                assert_eq!(
+                    picker.choices[0].display_label(term),
+                    format!("Original label — {term} in After Effects")
+                );
+                assert_eq!(picker.navigate("enter").as_deref(), Some(*command));
+            }
+        }
+    }
+    #[test]
+    fn matching_command_label_keeps_its_wording() {
+        let choice = Choice::new("New Null Object", "newNull").with_after_effects_terms();
+        assert_eq!(choice.display_label("Null Object"), "New Null Object");
+        assert_eq!(choice.display_label(""), "New Null Object");
     }
 }
