@@ -436,7 +436,11 @@ impl NativeControl {
                     // never the content's own ink.
                     v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
                 }
-                v.sizeToFit();
+                // A pop-up in a row's well fills the well: its own size is
+                // never used, and measuring it is a layout pass of its own.
+                if !well {
+                    v.sizeToFit();
+                }
                 Control::Popup(v)
             }
             Kind::Segmented => {
@@ -657,6 +661,9 @@ impl NativeControl {
                 let (frame, fitting) = measured(look, sized);
                 sized.setFrameSize(frame);
                 fitting
+            }
+            None if well && matches!(kind, Kind::Popup) => {
+                NSSize::new(t.metrics.value_column as f64, t.metrics.field as f64)
             }
             None => control.view().fittingSize(),
         };
