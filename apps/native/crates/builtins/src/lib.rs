@@ -995,6 +995,22 @@ impl Builtins {
             .map(|b| b.shared().native.project.panel.selected_assets().to_vec())
             .unwrap_or_default()
     }
+    /// Selected Project items for the explicit timeline commands.
+    pub fn project_timeline_items(&self, compositions: bool) -> (Vec<String>, Vec<String>) {
+        let Ok(backend) = self.backend(PROJECT_PANEL) else {
+            return Default::default();
+        };
+        let backend = backend.shared();
+        let panel = &backend.native.project.panel;
+        if compositions {
+            match panel.selected_item() {
+                Some(pm_panel_media::ItemId::Composition(id)) => (vec![], vec![id.clone()]),
+                _ => Default::default(),
+            }
+        } else {
+            (panel.selected_assets().to_vec(), vec![])
+        }
+    }
     /// What the Project panel is dragging (its `dragstart`): the items the
     /// timeline or the viewer places when it is dropped there.
     pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {

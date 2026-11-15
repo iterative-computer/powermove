@@ -249,6 +249,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 m("save"),
                 m("saveAs"),
+                r("Save Take", "native.saveTake"),
                 sep(),
                 m("import"),
                 Item::command("Import Image Sequence…", "importSequence", ""),
@@ -538,6 +539,8 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         )
     };
     vec![
+        ("Project", Item::registered(&keymap, "Add Composition to Timeline", "native.addCompositionToTimeline", json!([]))),
+        ("Project", Item::registered(&keymap, "Add Layer from Asset", "native.addLayerFromAsset", json!([]))),
         view("Show Rulers", "viewer.rulers"),
         view("Show Grid", "viewer.grid"),
         view("Clear Guides", "viewer.clearGuides"),

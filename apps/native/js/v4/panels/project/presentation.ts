@@ -170,8 +170,8 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
       NewComposition: "New Composition…",
       ImportFiles: "Import Media…",
     }[command];
-  if ("AddAsset" in command || "NestComposition" in command)
-    return "Add to Timeline";
+  if ("AddAsset" in command) return "Add Layer from Asset";
+  if ("NestComposition" in command) return "Add Composition to Timeline";
   if ("NewCompFromAsset" in command) return "New Comp from Selection";
   if ("Replace" in command)
     return row &&
@@ -231,7 +231,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     const c = row.data.Composition;
     return [
       {
-        label: "Add to Timeline",
+        label: "Add Composition to Timeline",
         symbol: "plus",
         input: { Invoke: { NestComposition: c.id } },
         disabled: !c.can_nest,
@@ -254,7 +254,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
         input: { Invoke: { Reveal: a.id } },
       });
     result.push({
-      label: "Add to Timeline",
+      label: "Add Layer from Asset",
       symbol: "plus",
       input: { Invoke: { AddAsset: a.id } },
     });
