@@ -23,6 +23,7 @@ fn install_main_effects(
     }
     turn
 }
+#[track_caller]
 fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
