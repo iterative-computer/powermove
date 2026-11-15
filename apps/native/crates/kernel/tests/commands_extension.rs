@@ -284,3 +284,43 @@ fn absent_provider_and_invalid_initial_parameters_refuse_without_partial_layers(
     assert_eq!(document(&kernel), before);
     assert_eq!(kernel.project("P").unwrap().store().revision(), rev);
 }
+
+#[test]
+fn extension_gradient_stop_parameters_validate_and_undo() {
+    let mut kernel = kernel();
+    let definition=parse(r#"{"version":"1","params":[{"k":"opaque","type":"gradientStops","label":"Stops","def":[{"position":0,"color":[0,0,0,1]},{"position":1,"color":[1,1,1,1]}]}]}"#).unwrap();
+    kernel
+        .state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::Register {
+                registry: "layerTypes".into(),
+                entry: Registration {
+                    token: "stop-provider".into(),
+                    owner: Caller::native().writer,
+                    id: "synthetic.extension".into(),
+                    definition,
+                },
+            }],
+        })
+        .unwrap();
+    let before = document(&kernel);
+    let ack = set(
+        &mut kernel,
+        r#"{"parameters":{"opaque":[{"position":0,"color":[1,0,0,1]},{"position":1,"color":[0,0,1,0.5]}]}}"#,
+    );
+    assert!(!matches!(ack.reply, Reply::Throw(_)), "{ack:?}");
+    let after = document(&kernel);
+    assert!(matches!(
+        set(
+            &mut kernel,
+            r#"{"parameters":{"opaque":[{"position":0,"color":[1,0,0,1]}]}}"#
+        )
+        .reply,
+        Reply::Throw(_)
+    ));
+    assert_eq!(document(&kernel), after);
+    kernel
+        .handle("P", Request::new(Caller::native(), HistoryCall::Undo))
+        .unwrap();
+    assert_eq!(document(&kernel), before);
+}

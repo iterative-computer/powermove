@@ -2064,7 +2064,7 @@
     },
     {
       "name": "validate_effect",
-      "description": "Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. Catches invalid ids, duplicate/invalid parameter keys, invalid pass counts and oversized shader bodies. Does not register an effect, change the project or compile/render GLSL. After loading, verify registration and render_frames output separately.",
+      "description": "Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. Catches invalid ids, duplicate/invalid parameter keys, invalid pass counts, oversized shader bodies and invalid viewerHandles bindings. Declare viewerHandles (point, line, angle, radius, rect) on effect definitions for on-viewer parameter editing; line controls can bind a gradientStops parameter (2–16 normalized RGBA stops), available to GLSL as pm_<key>(t). See the effects authoring pack. Shader layers can declare d.viewerHandles bound to their annotated uniform keys. Does not register an effect, change the project or compile/render GLSL. After loading, verify registration and render_frames output separately.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

@@ -153,6 +153,9 @@ fn set_content(
     if layer_type == "shader" && patch.contains_key("code") {
         super::shader::sync(&mut layer);
     }
+    if layer_type == "shader" {
+        super::shader::validate_handles(&layer)?;
+    }
     cx.put_layer(&loc, layer)
 }
 
@@ -325,6 +328,12 @@ fn extension_parameter(
 ) -> Result<Value, CommandError> {
     let label = values::text(parameter, "label").unwrap_or(key);
     match values::text(parameter, "type") {
+        Some("gradientStops") => {
+            let value=value.ok_or_else(||CommandError::Invalid(format!("{label} needs gradient stops")))?;
+            let raw=serde_json::from_str(&pm_model::json::to_canonical_string(value)).map_err(|_|CommandError::Invalid(format!("{label} needs gradient stops")))?;
+            pm_fx_defs::handles::validate_stops(&raw).map_err(CommandError::Invalid)?;
+            Ok(value.clone())
+        }
         Some("color") => {
             let text = value
                 .and_then(Value::as_str)

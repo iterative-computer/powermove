@@ -1834,6 +1834,21 @@ impl Builtins {
     }
     /// v1's inspector service over this window's Effect Controls and the
     /// app's effect clipboard, callable from any thread.
+    pub fn viewer_effect_visible(&self, layer: &str, effect: &str) -> Option<bool> {
+        let entries = self.broker.entries.try_lock().ok()?;
+        let mut visible = None;
+        for panel in ["layer-effects", "inspector"] {
+            let Some(entry) = entries.get(panel) else { continue };
+            let Ok(entry) = entry.try_lock() else { continue };
+            let Ok(backend) = entry.backend.try_lock() else { continue };
+            let Some(model) = backend.model.as_ref() else { continue };
+            if model.effects.layer.as_deref() == Some(layer) && model.effects.ids.iter().any(|id| id == effect) {
+                return Some(true);
+            }
+            if let Ok(open) = model.effect_disclosure(layer, effect) { visible = Some(visible.unwrap_or(false) || open); }
+        }
+        visible
+    }
     pub fn effect_desk(&self) -> EffectDesk {
         EffectDesk(self.broker.clone())
     }
