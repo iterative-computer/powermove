@@ -926,23 +926,33 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
           }}
         >
           {model.query.trim() && model.matches.count === 0 ? (
-            // settings.md §5: centred reading text, not an empty-state title.
+            // Search uses the same empty-state copy as the native windows.
             <div
               role="status"
-              label="No settings found."
+              label="No Results. Try a different search."
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
+                flexDirection: "column",
+                gap: t("metrics.gap"),
               }}
             >
+              <text
+                style={{
+                  fontSize: t("typography.heading"),
+                  color: t("colors.text"),
+                }}
+              >
+                No Results
+              </text>
               <text
                 style={{
                   fontSize: t("typography.reading"),
                   color: t("colors.secondary"),
                 }}
               >
-                No settings found.
+                Try a different search.
               </text>
             </div>
           ) : (
