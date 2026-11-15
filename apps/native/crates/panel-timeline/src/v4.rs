@@ -279,8 +279,10 @@ pub async fn dispatch(
         }
         "graphMenu" => {
             persist = true;
+            // The curves shown decide what the menu offers (Merge wants two).
+            let series = client.model.graph_series().0.len();
             client.model.menu_action(
-                &crate::Context::Graph { series: 0 },
+                &crate::Context::Graph { series },
                 string(intent, "action")?,
                 context.time,
             )?

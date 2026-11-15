@@ -1019,3 +1019,14 @@ fn tracks_stack_like_premiere_captions_then_highest_video_down_then_audio() {
         matches!(&top.content, paint::RowContent::Track { clips } if clips.len() == 1 && clips[0].id == "top")
     );
 }
+
+#[test]
+fn the_graph_menu_fits_the_curves_shown() {
+    // The menu's rows are checked against the curves the graph shows: Fit
+    // with one curve shown (it was refused, as if none were).
+    let (_actor, mut c) = client();
+    c.model.graph_focus = Some(("a:[]".into(), "opacity".into()));
+    assert_eq!(c.model.graph_series().0.len(), 1);
+    let effects = dispatch(&mut c, json!({"type":"graphMenu","action":"graph.fit"})).unwrap();
+    assert!(effects.iter().any(|e| matches!(e, HostEffect::FitCurves(..))), "{effects:?}");
+}
