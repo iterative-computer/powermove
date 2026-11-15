@@ -14,6 +14,19 @@ type MediaProbeInputs = (
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
 );
+/// The viewer overlays a native Metal layer and must join each shell repaint,
+/// including the loading reveal, even when its panel publication is unchanged.
+/// The timeline's body can reuse its retained paint.
+pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElement {
+    if id == "viewer" {
+        view.clone().into_any_element()
+    } else {
+        view.clone()
+            .cached(StyleRefinement::default().size_full())
+            .into_any_element()
+    }
+}
+
 /// How long a panel's scroll thumb stays after the last scroll.
 const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
@@ -1077,7 +1090,7 @@ impl Controller {
                     .w_full()
                     .h(px(body))
                     .overflow_hidden()
-                    .child(view.clone().cached(StyleRefinement::default().size_full()))
+                    .child(fixed_body_view(id, &view))
                     .child(keep)
                     .into_any_element(),
             );
