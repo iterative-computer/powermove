@@ -2763,3 +2763,41 @@ fn selection_history_key_click_is_one_entry_for_layers_keys_and_channel() {
     assert_eq!(c.model.selection.channel(), Some("opacity"));
     assert!(c.model.key_selection_active);
 }
+
+#[test]
+fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
+    let (_a, mut c) = client();
+    let before = c.model.index.layer("a").unwrap().clone();
+    block_on(c.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    for delta in [0.25, 0.5, 1.] {
+        block_on(c.drag(sample(delta))).unwrap();
+        let l = c.model.index.layer("a").unwrap();
+        let times: Vec<_> = l
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| l.from + k.time)
+            .collect();
+        let expected: Vec<_> = before
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| before.from + k.time)
+            .collect();
+        assert_eq!(times, expected);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("a").unwrap().from, before.from);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, before.duration);
+}
