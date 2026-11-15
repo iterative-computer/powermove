@@ -877,6 +877,38 @@ impl DocumentStore {
         Some(id)
     }
 
+    /// Preserve user entries while grouping this turn's contiguous segments.
+    pub fn squash_segments(
+        &mut self,
+        mark: &HistoryMark,
+        owned: &std::collections::HashSet<u64>,
+        label: &str,
+    ) -> Option<Vec<u64>> {
+        if self.gesture.is_some() {
+            return None;
+        }
+        let previous = self.state_token;
+        let ids = self.history.squash_segments(mark, owned, label)?;
+        self.history_owned = true;
+        // Reuse the journal's existing history-only operations; no document
+        // mutation or replay of the user's edits is involved.
+        self.tap(|_| Tap::Clear);
+        let records = self.history.records().to_vec();
+        for record in records {
+            if record.external.is_some() {
+                self.tap(|_| Tap::PushExternal(record));
+            } else {
+                self.tap(|_| Tap::Push(record));
+            }
+        }
+        self.state_token = self.history.records().last().map_or(previous, |r| r.id);
+        if self.saved_token == previous {
+            self.saved_token = self.state_token;
+        }
+        self.emit(StoreEvent::HistoryChanged);
+        Some(ids)
+    }
+
     // ── gestures ───────────────────────────────────────────────────────────
 
     /// Starts a gesture (a scrub-drag, a slider drag). Steps publish live

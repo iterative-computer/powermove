@@ -89,6 +89,7 @@ struct Active {
     /// Private agent focus; never publish this into Interface selection.
     focus: Vec<String>,
     time: f64,
+    known_layers: std::collections::HashSet<String>,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -210,7 +211,8 @@ impl McpSession {
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
-                _ => host.open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
+                _ => host
+                    .open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
             };
         }
         let session = self
@@ -303,6 +305,36 @@ impl McpSession {
             } else {
                 crate::extensions::fork(extensions.as_ref(), id, args["forkId"].as_str(), &staging)
             };
+        }
+        if name == "run_command" {
+            let command = args["command"].as_str().unwrap_or_default();
+            if command == "transport.seek" {
+                let time = args["args"][0]
+                    .as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.)
+                    .ok_or_else(|| Error::invalid("Give a finite private evaluation time."))?;
+                self.active.as_mut().unwrap().time = time;
+                return Ok(json!({"ran":true,"scope":"agent","time":time}));
+            }
+            if command.starts_with("viewer.")
+                || command.starts_with("timeline.")
+                || command.starts_with("transport.")
+                || matches!(
+                    command,
+                    "play"
+                        | "pause"
+                        | "fitView"
+                        | "fitComposition"
+                        | "fitComp"
+                        | "selectAll"
+                        | "deselect"
+                        | "nextTab"
+                        | "previousTab"
+                )
+            {
+                return Ok(json!({"ran":false,"scope":"agent",
+                    "reason":"The user's view and transport stay where they left them. Use render_frames for private inspection."}));
+            }
         }
         if PANEL_TOOLS.contains(&name) {
             // As with the Store reads, a host without the capability says so
@@ -543,7 +575,11 @@ impl McpSession {
             return outcome.map(|(value, _)| value);
         }
         let prepared_selection = if name == "select_layers" {
-            let project = session.project.as_deref().map(|id| host.read_document(id)).transpose()?;
+            let project = session
+                .project
+                .as_deref()
+                .map(|id| host.read_document(id))
+                .transpose()?;
             let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
                 id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
             })).ok_or_else(|| Error::invalid("Select existing layer IDs from get_project_state. No selection was changed."))?;
@@ -752,14 +788,23 @@ impl McpSession {
             }
             "select_layers" => {
                 let ids = prepared_selection.unwrap();
-                Ok(
-                    {
-                        if args["add"] != true { session.focus.clear(); }
-                        for id in ids { if !session.focus.contains(&id) { session.focus.push(id); } }
-                        host.presence(&id, &session.run, crate::presence::Kind::Focus, session.focus.last().cloned());
-                        json!({"selection":{"layers":session.focus},"scope":"agent"})
-                    },
-                )
+                Ok({
+                    if args["add"] != true {
+                        session.focus.clear();
+                    }
+                    for id in ids {
+                        if !session.focus.contains(&id) {
+                            session.focus.push(id);
+                        }
+                    }
+                    host.presence(
+                        &id,
+                        &session.run,
+                        crate::presence::Kind::Focus,
+                        session.focus.last().cloned(),
+                    );
+                    json!({"selection":{"layers":session.focus},"scope":"agent"})
+                })
             }
             "save_project" => host.save_project(&id),
             "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
@@ -769,6 +814,30 @@ impl McpSession {
                     .map_or(session.baseline, |t| t.revision);
                 let revision = host.revision(&id)?;
                 if expected != revision {
+                    let current = host.read_document(&id)?;
+                    for command in args["commands"].as_array().into_iter().flatten() {
+                        let target = command["target"]
+                            .as_str()
+                            .filter(|t| !t.starts_with('$'))
+                            .or_else(|| session.focus.first().map(String::as_str));
+                        if let Some(target) = target
+                            && session.known_layers.contains(target)
+                            && !current["layers"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|l| l["id"] == target)
+                        {
+                            return Err(Error {
+                                code: "target_removed".into(),
+                                message: format!(
+                                    "The user deleted {target} while you were working. Skip it; do not recreate it unless asked. Mention the skipped target in your reply."
+                                ),
+                                backing: None,
+                            });
+                        }
+                    }
+
                     return Err(Error::conflict(format!(
                         "The project changed during the agent run (expected revision {expected}, found {revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry."
                     )));
@@ -810,16 +879,22 @@ impl McpSession {
                 } else {
                     None
                 };
-                let scene_assets = if name == "edit_3d" && (pm_scene3d::geometry::needs_geometry(args) || args["keepRealWorldScale"] == true) {
+                let scene_assets = if name == "edit_3d"
+                    && (pm_scene3d::geometry::needs_geometry(args)
+                        || args["keepRealWorldScale"] == true)
+                {
                     Some(host.scene_geometry(&id)?)
-                } else { None };
+                } else {
+                    None
+                };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         session.time,
-                        scene_assets.as_deref()
+                        scene_assets
+                            .as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
                 } else if strips.is_none() && video.is_none() {
@@ -872,15 +947,34 @@ impl McpSession {
                         self.writer,
                     )?;
                     session.focus = batch.selection;
+                    for result in &batch.results {
+                        if let Some(id) = result["data"]["id"].as_str() {
+                            session.known_layers.insert(id.into());
+                        }
+                    }
                     if ack.revision != revision {
                         for result in &batch.results {
                             let kind = match result["command"]["type"].as_str().unwrap_or("") {
-                                "add_layer" | "add_text" | "add_shape" | "add_captions" => crate::presence::Kind::Create,
+                                "add_layer" | "add_text" | "add_shape" | "add_captions" => {
+                                    crate::presence::Kind::Create
+                                }
                                 "replace_keyframes" => crate::presence::Kind::Key,
                                 "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
                                 _ => crate::presence::Kind::Set,
                             };
-                            host.presence(&id, &session.run, kind, result["data"]["id"].as_str().map(str::to_owned));
+                            host.presence_detail(
+                                &id,
+                                &session.run,
+                                kind,
+                                result["data"]["id"].as_str().map(str::to_owned),
+                                result["command"]["path"].as_str().map(str::to_owned),
+                                result["command"]["keyframes"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|k| k["time"].as_f64())
+                                    .collect(),
+                            );
                         }
                     }
                     (ack, batch.descriptions, batch.results, None)
@@ -930,8 +1024,7 @@ impl McpSession {
                     .host
                     .lock()
                     .map_err(|_| Error::unavailable("headless host stopped"))?;
-                host.active_project().as_deref() != Some(id)
-                    || host.view(id).ok().map(|view| view.document) != session.document
+                host.view(id).ok().map(|view| view.document) != session.document
             } else {
                 false
             }
@@ -1059,6 +1152,15 @@ impl McpSession {
             _ => None,
         };
         let time = project.as_deref().map_or(0., |id| host.playhead(id));
+        let known_layers = project
+            .as_deref()
+            .map(|id| host.read_document(id))
+            .transpose()?
+            .and_then(|p| p["layers"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| l["id"].as_str().map(str::to_owned))
+            .collect();
         self.active = Some(Active {
             project,
             document,
@@ -1074,6 +1176,7 @@ impl McpSession {
             external_actions: false,
             panel_actions: false,
             time,
+            known_layers,
             focus: Vec::new(),
         });
         Ok(result)
@@ -1105,12 +1208,9 @@ impl McpSession {
             let mut history_id = None;
             if !commit && changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
-            } else if changed
-                && !session.external_actions
-                && !tx.interleaved
-                && tx.revision == host.revision(&id)?
-            {
-                history_id = host.squash(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
+            } else if changed && !session.external_actions {
+                history_id =
+                    host.squash_segments(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
             }
             Ok(
                 json!({"changed":session.committed||commit&&changed,"historyId":history_id.map(|id|id.to_string())}),
@@ -1263,8 +1363,7 @@ impl Drop for McpSession {
     }
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
-    if host.view(id).ok().map(|view| view.document) != session.document
-    {
+    if host.view(id).ok().map(|view| view.document) != session.document {
         return Err(Error::conflict(
             "The bound project closed or reopened. All work was preserved. Start a new agent run in this project.",
         ));

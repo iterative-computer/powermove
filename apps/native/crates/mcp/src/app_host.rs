@@ -20,6 +20,9 @@ pub struct Host {
     pub kernel: KernelHandle,
     pub profile: PathBuf,
     windows: Mutex<Windows>,
+    presence: Mutex<
+        std::collections::HashMap<String, std::collections::VecDeque<crate::presence::Presence>>,
+    >,
     operations: Arc<AtomicBool>,
     /// The project whose open waits on a person's recovery choice.
     deciding: Mutex<Option<String>>,
@@ -96,11 +99,47 @@ impl Host {
             kernel,
             profile,
             windows: Mutex::new(windows),
+            presence: Mutex::default(),
             operations: Arc::new(AtomicBool::new(false)),
             deciding: Mutex::new(None),
             pending_opens: Mutex::default(),
             closing: AtomicBool::new(false),
         })
+    }
+    /// Presence is view-only. Hidden projects discard events; returning to a
+    /// tab never replays an old sketch. Wake the window without changing focus.
+    pub fn publish_presence(&self, event: crate::presence::Presence) {
+        let tx = {
+            let windows = self.windows.lock().unwrap();
+            windows
+                .showing(&event.project)
+                .and_then(|(id, _)| windows.slots.get(&id)?.changed.clone())
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+        let mut presence = self.presence.lock().unwrap();
+        let queue = presence.entry(event.project.clone()).or_default();
+        if let Some(old) = queue.iter_mut().find(|p| {
+            p.layer == event.layer && p.kind == event.kind && p.property == event.property
+        }) {
+            *old = event;
+        } else {
+            if queue.len() == 6 {
+                queue.pop_front();
+            }
+            queue.push_back(event);
+        }
+        drop(presence);
+        let _ = tx.try_send(());
+    }
+    pub fn take_presence(&self, project: &str) -> Vec<crate::presence::Presence> {
+        self.presence
+            .lock()
+            .unwrap()
+            .remove(project)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
     }
     /// An editor window opened. The receiver wakes when MCP changes its project.
     pub fn attach_window(&self, window: u64) -> async_channel::Receiver<()> {
@@ -266,7 +305,11 @@ impl Host {
     }
     fn finish_open(&self, id: &str, reply: ShellReply) -> Result<Value> {
         if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
-            return Ok(self.pending_opens.lock().unwrap().required(id, ticket, recovery));
+            return Ok(self
+                .pending_opens
+                .lock()
+                .unwrap()
+                .required(id, ticket, recovery));
         }
         let ShellReply::Opened {
             session,
@@ -312,19 +355,30 @@ impl Host {
         let current = {
             let windows = self.windows.lock().unwrap();
             if windows.slots.keys().any(|w| *w != WINDOWLESS) {
-                return Err(Error::invalid("Cannot close a headless host with editor windows"));
+                return Err(Error::invalid(
+                    "Cannot close a headless host with editor windows",
+                ));
             }
-            windows.slots.get(&WINDOWLESS).and_then(|s| s.session()).cloned()
+            windows
+                .slots
+                .get(&WINDOWLESS)
+                .and_then(|s| s.session())
+                .cloned()
         };
         if let Some(session) = current {
-            let p = self.kernel.published(&session.project).ok_or_else(stopped)?;
+            let p = self
+                .kernel
+                .published(&session.project)
+                .ok_or_else(stopped)?;
             let call = if p.path.is_some() && p.dirty {
                 ShellCall::DeferClose(session)
             } else {
                 ShellCall::Close(session)
             };
             match self.shell(call)? {
-                ShellReply::Closed { recovery_copy: None } => self.bind_window(WINDOWLESS, None),
+                ShellReply::Closed {
+                    recovery_copy: None,
+                } => self.bind_window(WINDOWLESS, None),
                 other => return Err(Error::kernel(other)),
             }
         }

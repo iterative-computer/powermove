@@ -248,6 +248,19 @@ pub enum HistoryCall {
         label: String,
         expected_revision: u64,
     },
+    /// Probe-check every segment of one writer's turn. With keep_mine=false
+    /// a conflict returns a confirmation fact without changing the document.
+    UndoWriter {
+        writer: Writer,
+        keep_mine: bool,
+        label: String,
+    },
+    /// Group this writer's segments without crossing another writer's entry.
+    SquashSegments {
+        mark: ActorHistoryMark,
+        label: String,
+        expected_revision: u64,
+    },
     /// `history.do` with a native body: atomic, nests into an open entry.
     Do {
         label: String,
@@ -670,6 +683,7 @@ pub struct Project {
     next_id: u64,
     mutation_serial: u64,
     mutations: VecDeque<(u64, Writer)>,
+    record_writers: HashMap<u64, Writer>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
@@ -701,6 +715,7 @@ impl Project {
             next_id: 1,
             mutation_serial: 0,
             mutations: VecDeque::new(),
+            record_writers: HashMap::new(),
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -772,7 +787,14 @@ impl Project {
             call,
         } = request;
         if outside_revision.is_some_and(|r| r != self.revision() || self.entry.is_some()) {
-            return Handled::reply(self.ack(None, None, None, Reply::Throw(KernelError::Guard("The project changed or has an open edit".into()))));
+            return Handled::reply(self.ack(
+                None,
+                None,
+                None,
+                Reply::Throw(KernelError::Guard(
+                    "The project changed or has an open edit".into(),
+                )),
+            ));
         }
         if expected_document.is_some_and(|document| document != self.store.doc_id()) {
             return Handled::reply(self.ack(
@@ -902,6 +924,14 @@ impl Project {
                 || before_mark != self.store.history_mark()
                 || before_cursor != self.store.history().applied())
         {
+            if before_mark != self.store.history_mark() {
+                if let Some(record) = self.store.history().peek_undo() {
+                    // Do not reattribute an existing foreign entry after undo.
+                    self.record_writers
+                        .entry(record.id)
+                        .or_insert(caller.writer);
+                }
+            }
             self.mutation_serial += 1;
             self.mutations
                 .push_back((self.mutation_serial, caller.writer));
@@ -1422,6 +1452,37 @@ impl Project {
                     None
                 })
             }
+            HistoryCall::UndoWriter {
+                writer: target,
+                keep_mine,
+                label,
+            } => self.undo_writer(caller, target, keep_mine, &label),
+            HistoryCall::SquashSegments {
+                mark,
+                label,
+                expected_revision,
+            } => {
+                let valid = self.entry.is_none()
+                    && self.revision() == expected_revision
+                    && mark.document == self.store.doc_id()
+                    && mark.writer == writer;
+                let owned = self
+                    .record_writers
+                    .iter()
+                    .filter_map(|(id, owner)| (*owner == writer).then_some(*id))
+                    .collect();
+                let ids = if valid {
+                    self.store.squash_segments(&mark.mark, &owned, &label)
+                } else {
+                    None
+                };
+                if let Some(ids) = &ids {
+                    for id in ids {
+                        self.record_writers.insert(*id, writer);
+                    }
+                }
+                Reply::Entry(ids.and_then(|ids| ids.last().copied()))
+            }
             HistoryCall::Do { label, body } => {
                 match self.write(writer, caller.origin, &label, &body, true) {
                     Ok((changed, folded)) => {
@@ -1504,6 +1565,101 @@ impl Project {
             }
         };
         Handled::reply(self.ack(txid, None, None, reply))
+    }
+
+    fn undo_writer(
+        &mut self,
+        caller: Caller,
+        target: Writer,
+        keep_mine: bool,
+        label: &str,
+    ) -> Reply {
+        if self.entry.is_some() {
+            return Reply::Throw(KernelError::Guard(
+                "Finish the active edit before Undo Agent Turn".into(),
+            ));
+        }
+        let records = self.store.history().records()[..self.store.history().applied()].to_vec();
+        let revision = self.revision() + 1;
+        let mut historical = self.store.current().root().cloned();
+        let mut current = historical.clone();
+        let mut inverse = Vec::new();
+        let mut conflicts = 0;
+        let mut blocked: Vec<Vec<PathPart>> = Vec::new();
+        let outcome: Result<(), String> = (|| {
+            for record in records.iter().rev() {
+                let after = historical.clone();
+                // Reconstruct after-images from the linear history even when
+                // the target turn has user entries between its segments.
+                for op in record.inverse.iter() {
+                    historical = crate::document::apply_one(historical, &op, revision)
+                        .map_err(|e| e.to_string())?
+                        .0;
+                }
+                if self.record_writers.get(&record.id) != Some(&target) {
+                    continue;
+                }
+                let forward = record.forward.to_vec();
+                let guards = probes(after.as_ref(), &forward, &[]);
+                let mapped = guards
+                    .iter()
+                    .map(|p| rebase_probe(after.as_ref(), current.as_ref(), p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let paths: Vec<_> = forward.iter().map(|o| o.path().to_vec()).collect();
+                let already_blocked = paths
+                    .iter()
+                    .any(|p| blocked.iter().any(|b| p.starts_with(b) || b.starts_with(p)));
+                if already_blocked || !mapped.iter().all(|p| probe_holds(current.as_ref(), p)) {
+                    conflicts += 1;
+                    blocked.extend(paths);
+                    continue;
+                }
+                let mut source = after;
+                for op in record.inverse.iter() {
+                    let mapped = rebase_op(source.as_ref(), current.as_ref(), &op)?;
+                    source = crate::document::apply_one(source, &op, revision)
+                        .map_err(|e| e.to_string())?
+                        .0;
+                    current = crate::document::apply_one(current, &mapped, revision)
+                        .map_err(|e| e.to_string())?
+                        .0;
+                    inverse.push(mapped);
+                }
+            }
+            let document = Document::from_root(current.clone(), revision);
+            crate::document::validate(&document, &inverse).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            return Reply::Throw(KernelError::Guard(error));
+        }
+        if conflicts > 0 && !keep_mine {
+            return Reply::Workspace(Value::Object(
+                [
+                    ("status".into(), Value::from("confirmation_required")),
+                    ("conflicts".into(), Value::Number(conflicts as f64)),
+                    ("confirm".into(), Value::from("Keep Mine and Undo Rest")),
+                ]
+                .into_iter()
+                .collect(),
+            ));
+        }
+        match self.write(
+            caller.writer,
+            Origin::Interface,
+            label,
+            &WriteBody::Ops(inverse),
+            true,
+        ) {
+            Ok((changed, _)) => {
+                self.record_writers.retain(|_, owner| *owner != target);
+                Reply::Applied {
+                    revision: self.revision(),
+                    changed,
+                }
+            }
+            Err(error) => Reply::Throw(error.into()),
+        }
     }
 
     /// `history.commit`: `false` unless the outermost commit recorded a step.

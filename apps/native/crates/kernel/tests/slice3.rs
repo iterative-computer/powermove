@@ -962,3 +962,97 @@ fn unsaved_steps_that_end_on_the_saved_document_still_ask() {
         "{reply:?}"
     );
 }
+
+#[test]
+fn coedit_undo_turn_preserves_interleaved_user_edits() {
+    let root = common::TempDir::new("coedit-undo");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    let m = mark(&mut k, agent);
+    edit(&mut k, agent, 80.);
+    edit(&mut k, agent, 70.);
+    let user = Caller::native();
+    call(
+        &mut k,
+        user,
+        Call::Transact {
+            label: Some("Rename".into()),
+            body: vec![Command::SetLayerName {
+                layer_id: "l".into(),
+                name: "Mine".into(),
+            }]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, agent, 60.);
+    let revision = k.project("p").unwrap().store().revision();
+    call(
+        &mut k,
+        agent,
+        HistoryCall::SquashSegments {
+            mark: m,
+            label: "Agent · Animate".into(),
+            expected_revision: revision,
+        },
+    );
+    let reply = call(
+        &mut k,
+        user,
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: false,
+            label: "Undo Agent · Animate".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let layers = document.get("layers").unwrap().as_array().unwrap();
+    assert_eq!(layers[0].get("name"), Some(&Value::from("Mine")));
+    assert_eq!(
+        layers[0].get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(100.))
+    );
+}
+#[test]
+fn coedit_undo_turn_confirms_and_keeps_user_values() {
+    let root = common::TempDir::new("coedit-undo-conflict");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    edit(&mut k, agent, 70.);
+    edit(&mut k, Caller::native(), 33.);
+    let revision = k.project("p").unwrap().store().revision();
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: false,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(matches!(reply, Reply::Workspace(_)), "{reply:?}");
+    assert_eq!(k.project("p").unwrap().store().revision(), revision);
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: true,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: false, .. }),
+        "{reply:?}"
+    );
+    assert_eq!(k.project("p").unwrap().store().revision(), revision);
+}

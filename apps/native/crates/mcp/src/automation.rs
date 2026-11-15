@@ -310,8 +310,13 @@ impl Automation {
             }
         }
     }
-    pub(crate) fn scene_geometry(&self, id: &str) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
-        if let Some(assets) = &self.scene3d_assets { return Ok(assets.clone()); }
+    pub(crate) fn scene_geometry(
+        &self,
+        id: &str,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        if let Some(assets) = &self.scene3d_assets {
+            return Ok(assets.clone());
+        }
         match &self.engine {
             Some(engine) => engine.scene3d_assets(&self.freeze(id)?),
             None => Ok(Arc::new(pm_scene3d::geometry::NoAssets)),
@@ -329,10 +334,44 @@ impl Automation {
         self.presence.push(tx);
         rx
     }
-    pub(crate) fn presence(&mut self, project: &str, run: &str, kind: crate::presence::Kind, layer: Option<String>) {
-        if self.presence.is_empty() { return; }
-        let event = crate::presence::Presence { project: project.into(), run: run.into(), kind, layer };
-        self.presence.retain(|tx| !matches!(tx.try_send(event.clone()), Err(mpsc::TrySendError::Disconnected(_))));
+    pub(crate) fn presence(
+        &mut self,
+        project: &str,
+        run: &str,
+        kind: crate::presence::Kind,
+        layer: Option<String>,
+    ) {
+        self.presence_detail(project, run, kind, layer, None, Vec::new());
+    }
+    pub(crate) fn presence_detail(
+        &mut self,
+        project: &str,
+        run: &str,
+        kind: crate::presence::Kind,
+        layer: Option<String>,
+        property: Option<String>,
+        times: Vec<f64>,
+    ) {
+        if self.presence.is_empty() && matches!(&self.backend, Backend::Owned(_)) {
+            return;
+        }
+        let event = crate::presence::Presence {
+            project: project.into(),
+            run: run.into(),
+            kind,
+            layer,
+            property,
+            times,
+        };
+        if let Backend::App(host) = &self.backend {
+            host.publish_presence(event.clone());
+        }
+        self.presence.retain(|tx| {
+            !matches!(
+                tx.try_send(event.clone()),
+                Err(mpsc::TrySendError::Disconnected(_))
+            )
+        });
     }
     pub fn subscribe(&mut self) -> mpsc::Receiver<AutomationEvent> {
         let (tx, rx) = mpsc::channel();
@@ -615,6 +654,32 @@ impl Automation {
             other => Err(Error::kernel(other)),
         }
     }
+    pub fn squash_segments(
+        &mut self,
+        id: &str,
+        mark: &ActorHistoryMark,
+        label: &str,
+    ) -> Result<Option<u64>> {
+        let revision = self.revision(id)?;
+        let writer = mark.writer();
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer.realm, writer.generation, Origin::Mcp),
+                    pm_kernel::HistoryCall::SquashSegments {
+                        mark: mark.clone(),
+                        label: label.into(),
+                        expected_revision: revision,
+                    },
+                ),
+            )?
+            .reply
+        {
+            Reply::Entry(entry) => Ok(entry),
+            other => Err(Error::kernel(other)),
+        }
+    }
     pub fn restore(
         &mut self,
         id: &str,
@@ -879,7 +944,9 @@ impl Automation {
                 ShellCall::Close(session.clone())
             };
             match self.shell(call)? {
-                ShellReply::Closed { recovery_copy: None } => {},
+                ShellReply::Closed {
+                    recovery_copy: None,
+                } => {}
                 other => return Err(Error::kernel(other)),
             }
             self.sessions.remove(&session.project);
