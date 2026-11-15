@@ -47,6 +47,7 @@ function Icon(props: {
   disabled?: boolean;
   active?: boolean;
   primary?: boolean;
+  square?: boolean;
   /** A row's small mark (its disclosure): the inline glyph in the muted ink. */
   quiet?: boolean;
   /** The glyph's own ink (a token name), for a mark that carries state in
@@ -78,6 +79,15 @@ function Icon(props: {
         symbolSize: t(
           props.quiet ? "metrics.symbol_inline" : "metrics.symbol_panel",
         ),
+        ...(props.square
+          ? {
+              width: t("metrics.hit"),
+              height: t("metrics.hit"),
+            }
+          : {}),
+        ...(props.square && props.active
+          ? { background: t("colors.selected_fill") }
+          : {}),
         ...(props.primary ? { color: t("colors.text") } : {}),
         ...(props.quiet ? { color: t("colors.muted") } : {}),
         ...(props.tint ? { color: t(props.tint) } : {}),
@@ -267,9 +277,6 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             intent={{ type: "graphOptions" }}
           />
         )}
-        {/* The Graph Editor switch reads as a control, not a mark: its curve
-            glyph with a "Graph" label in the text ink, lit while the graph
-            shows (a lone faint glyph here went unnoticed). */}
         <Icon
           id="timeline:graph"
           label="Graph Editor"
@@ -277,18 +284,10 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           symbol="point.topleft.down.to.point.bottomright.curvepath"
           active={graph}
           primary
+          square
           send={send}
           intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
-        >
-          <text
-            style={{
-              color: t("colors.text"),
-              fontSize: t("typography.reading"),
-            }}
-          >
-            Graph
-          </text>
-        </Icon>
+        />
         {(f.shyLayers || f.hideShy) && (
           <Icon
             id="timeline:hide-shy"
@@ -408,7 +407,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t("colors.muted"),
+              color: t(row.selected ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -417,28 +416,46 @@ function Layer({
             {String(row.index).padStart(2, "0")}
           </text>
         )}
-        {row.canOpen ? (
-          <Icon
-            id={`timeline:disclosure:${row.id}`}
-            label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-            symbol={row.expanded ? "chevron.down" : "chevron.right"}
-            quiet
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-          />
-        ) : (
-          // The disclosure column stays reserved so badges and names align.
-          <div
-            role="presentation"
-            style={{
-              width: t("metrics.hit"),
-              minWidth: t("metrics.hit"),
-              flexShrink: 0,
-              height: t("metrics.hit"),
-            }}
-          />
-        )}
+        <div
+          role="presentation"
+          metadata={{ timelineIndent: row.depth }}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            flexShrink: 0,
+          }}
+        >
+          {Array.from({ length: Math.min(4, row.depth) }, (_, depth) => (
+            <div
+              key={depth}
+              role="presentation"
+              style={{ width: t("metrics.timeline_indent"), flexShrink: 0 }}
+            />
+          ))}
+          {row.canOpen ? (
+            <Icon
+              id={`timeline:disclosure:${row.id}`}
+              label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+              symbol={row.expanded ? "chevron.down" : "chevron.right"}
+              quiet
+              tint={row.selected ? "colors.accent_text" : undefined}
+              tabIndex={-1}
+              send={send}
+              intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+            />
+          ) : (
+            // The disclosure column stays reserved so badges and names align.
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                flexShrink: 0,
+                height: t("metrics.hit"),
+              }}
+            />
+          )}
+        </div>
         <div
           role="presentation"
           attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}
@@ -460,7 +477,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t("colors.text"),
+            color: t(row.selected ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -492,6 +509,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
+              ...(row.selected ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -512,6 +530,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
+              tint={row.selected ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -739,9 +758,18 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.hovered && !row.selected
-            ? { background: t("colors.hover") }
-            : {}),
+          ...(row.selected
+            ? {
+                background: t(
+                  row.hovered
+                    ? "colors.timeline_selected_hover"
+                    : "colors.timeline_selected",
+                ),
+                color: t("colors.accent_text"),
+              }
+            : row.hovered
+              ? { background: t("colors.hover") }
+              : {}),
         }}
       >
         {row.kind === "layer" ? (

@@ -576,11 +576,7 @@ pub fn project_window(
                         json!(crate::render::display_kind(&layer.kind, definition));
                     value["labelColor"] =
                         json!(crate::render::Label::for_layer(&layer.kind, definition).name());
-                    value["index"] = if layer.group.is_some() {
-                        Value::Null
-                    } else {
-                        json!(model.index.layer_ordinal(id).map(|n| n + 1))
-                    };
+                    value["index"] = json!(model.index.layer_ordinal(id).map(|n| n + 1));
                     value["label"] = json!(layer.name.to_string_lossy());
                     value["selected"] = json!(selected.contains(id));
                     value["locked"] = json!(layer.effectively_locked);

@@ -618,20 +618,21 @@ fn work_area_keeps_at_least_one_frame() {
     assert_eq!(c.model.index.work, [1., 9.]);
 }
 #[test]
-fn work_out_drag_clamps_without_changing_composition_and_cancel_restores_it() {
+fn work_out_drag_extends_live_keeps_peak_and_undo_restores_duration() {
     let (_a, mut c) = client();
+    let layer_duration = c.model.index.layer("a").unwrap().duration;
     block_on(c.begin_drag(DragKind::WorkOut)).unwrap();
-    block_on(c.drag(sample(5.))).unwrap();
+    for (delta, end) in [(5., 14.), (2., 11.), (-3., 6.)] {
+        block_on(c.drag(sample(delta))).unwrap();
+        assert_eq!(c.model.index.duration, 14.);
+        assert_eq!(c.model.index.work, [1., end]);
+        assert_eq!(c.model.index.layer("a").unwrap().duration, layer_duration);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
     assert_eq!(c.model.index.duration, 10.);
-    assert_eq!(c.model.index.work, [1., 10.]);
-    block_on(c.drag(sample(2.))).unwrap();
-    assert_eq!(c.model.index.duration, 10.);
-    assert_eq!(c.model.index.work, [1., 10.]);
-    block_on(c.drag(sample(-3.))).unwrap();
-    assert_eq!(c.model.index.duration, 10.);
-    assert_eq!(c.model.index.work, [1., 6.]);
-    block_on(c.finish_drag(false)).unwrap();
-    assert_eq!(c.model.index.duration, 10.);
+    assert_eq!(c.model.index.work, [1., 9.]);
 }
 #[test]
 fn work_move_clamps_as_rigid_range() {

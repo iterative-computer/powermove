@@ -60,6 +60,8 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.separator` | Hairline separators and panel edges | `#DCDDDE` | `#363332` | `#86878B` | `#807E7D` |
 | `colors.success` | Completed, online, rendered | `#107A52` | `#40CF8E` | `#107A52` | `#40CF8E` |
 | `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F4` | `#1D1F25` | `#F5F5F4` |
+| `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#452818` | `#FBDFD2` | `#452818` |
+| `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#522D18` | `#FAD5C3` | `#522D18` |
 | `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#090807` | `#E6E6EA` | `#090807` |
 | `colors.viewer_grid` | The viewer's grid over the picture | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` |
 | `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
@@ -176,6 +178,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
+| `metrics.timeline_indent` | Timeline layer nesting indent per depth, capped at four levels | 12 | 12 | 12 | 12 |
 | `metrics.titlebar` | Title bar band of a plain panel window; content starts below it | 28 | 28 | 28 | 28 |
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |

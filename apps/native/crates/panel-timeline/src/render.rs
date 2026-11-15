@@ -1047,8 +1047,10 @@ impl Scene {
                 format!("row:{}", row.id),
                 "rect",
                 rect,
-                if row.selected {
-                    c.selected_fill
+                if row.selected && row.hovered {
+                    c.timeline_selected_hover
+                } else if row.selected {
+                    c.timeline_selected
                 } else {
                     c.hover
                 },

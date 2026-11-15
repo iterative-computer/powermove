@@ -11,6 +11,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
+    ("colors.timeline_selected", "Accent tint for selected timeline layer rows"),
+    ("colors.timeline_selected_hover", "Stronger accent tint for hovered selected timeline layer rows"),
     (
         "colors.window",
         "Window ground behind panels, toolbar band and status bar",
@@ -256,6 +258,7 @@ const ROLES: &[(&str, &str)] = &[
         "Space between turns in the Agent conversation",
     ),
     ("metrics.tree_indent", "Indent per outline level"),
+    ("metrics.timeline_indent", "Timeline layer nesting indent per depth, capped at four levels"),
     (
         "metrics.kind_badge",
         "Layer-kind badge square in the timeline and Project list",
