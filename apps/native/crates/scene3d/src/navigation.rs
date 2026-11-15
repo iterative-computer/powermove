@@ -33,6 +33,10 @@ pub struct Pose {
     pub position: Vec3,
     pub target: Vec3,
     pub zoom: f64,
+    #[serde(default)]
+    pub ortho: bool,
+    #[serde(default)]
+    pub roll: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Lens {
@@ -95,6 +99,7 @@ impl Pose {
             .iter()
             .chain(self.target.iter())
             .all(|x| x.is_finite())
+            || !self.roll.is_finite()
             || !self.zoom.is_finite()
             || self.zoom <= 0.
         {
@@ -114,6 +119,7 @@ pub fn orbit(start: Pose, dx: f64, dy: f64) -> Pose {
     };
     let phi = (phi - dy * 0.008).clamp(0.01, std::f64::consts::PI - 0.01);
     Pose {
+        ortho: false,
         position: add(
             start.target,
             [
@@ -125,8 +131,21 @@ pub fn orbit(start: Pose, dx: f64, dy: f64) -> Pose {
         ..start
     }
 }
+pub fn view_lens(pose: Pose, lens: Lens) -> Lens {
+    if pose.ortho {
+        if let Lens::Perspective { fov, aspect, .. } = lens {
+            let height =
+                2. * length(sub(pose.position, pose.target)) * (fov.to_radians() / 2.).tan();
+            return Lens::Orthographic {
+                width: height * aspect,
+                height,
+            };
+        }
+    }
+    lens
+}
 pub fn pan(start: Pose, dx: f64, dy: f64, lens: Lens, height: f64, right: Vec3, up: Vec3) -> Pose {
-    let scale = match lens {
+    let scale = match view_lens(start, lens) {
         Lens::Perspective { fov, .. } => {
             2. * length(sub(start.position, start.target)) * (fov.to_radians() / 2.).tan()
                 / start.zoom
@@ -142,7 +161,7 @@ pub fn pan(start: Pose, dx: f64, dy: f64, lens: Lens, height: f64, right: Vec3, 
 }
 pub fn dolly(start: Pose, delta: f64, lens: Lens) -> Pose {
     let factor = (delta * 0.005).clamp(-2., 2.).exp();
-    match lens {
+    match view_lens(start, lens) {
         Lens::Orthographic { .. } => Pose {
             zoom: (start.zoom / factor).clamp(0.01, 1000.),
             ..start
@@ -172,7 +191,7 @@ pub const ORBIT_STEP: f64 = 15.;
 /// `notches` steps closer (negative: further), toward the view centre.
 pub fn zoom_step(start: Pose, notches: f64, lens: Lens) -> Pose {
     let factor = ZOOM_STEP.powf(notches.clamp(-20., 20.));
-    match lens {
+    match view_lens(start, lens) {
         Lens::Orthographic { .. } => Pose {
             zoom: (start.zoom * factor).clamp(0.01, 1000.),
             ..start
@@ -224,6 +243,8 @@ pub fn side_view(start: Pose, side: Side) -> Pose {
         Side::Bottom => [0., -c, s],
     };
     Pose {
+        ortho: true,
+        roll: 0.,
         position: add(start.target, mul(dir, d)),
         ..start
     }
@@ -258,8 +279,10 @@ pub fn frame(start: Pose, b: Bounds, lens: Lens) -> Pose {
     } else {
         normalize(o)
     };
-    match lens {
+    match view_lens(start, lens) {
         Lens::Orthographic { width, height } => Pose {
+            ortho: start.ortho,
+            roll: start.roll,
             position: add(target, mul(dir, length(o).max(1.))),
             target,
             zoom: width.min(height) / 2. / (radius * 1.25),

@@ -3017,5 +3017,57 @@
     "in_fields": false,
     "repeat": true,
     "loose": false
+  },
+  {
+    "id": "native.view.persp",
+    "chord": "5",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "persp"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.persp",
+    "chord": "numpad5",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "persp"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.roll-left",
+    "chord": "shift+numpad4",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "roll-left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.roll-right",
+    "chord": "shift+numpad6",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "roll-right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
   }
 ]

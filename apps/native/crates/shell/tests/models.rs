@@ -92,7 +92,7 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 283);
+    assert_eq!(bindings.len(), 287);
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
@@ -475,4 +475,41 @@ fn the_palette_opens_inside_its_key_press_so_no_typing_is_lost() {
     // the palette's field is first responder before the next key is read.
     assert!(pm_shell::opens_in_place("palette"));
     assert!(!pm_shell::opens_in_place("save"));
+}
+
+#[test]
+fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
+    let items = menu::view3d();
+    for (group, value) in [
+        ("nav", "left"),
+        ("nav", "right"),
+        ("nav", "bottom"),
+        ("nav", "top"),
+        ("nav", "front"),
+        ("nav", "back"),
+        ("look", "camera"),
+        ("nav", "selected"),
+        ("nav", "persp"),
+        ("nav", "roll-left"),
+        ("nav", "roll-right"),
+    ] {
+        assert!(
+            items.iter().any(|i| i.command == "studio.view"
+                && i.args == vec![serde_json::json!(group), serde_json::json!(value)]),
+            "{group}/{value}"
+        );
+    }
+    let bindings = shipped();
+    let grave = bindings.iter().find(|b| b.chord == "`").unwrap();
+    assert_eq!(grave.command, "maximizePanel");
+    for (chord, value) in [
+        ("numpad5", "persp"),
+        ("5", "persp"),
+        ("shift+numpad4", "roll-left"),
+        ("shift+numpad6", "roll-right"),
+    ] {
+        assert!(bindings.iter().any(|b| b.chord == chord
+            && b.command == "studio.view"
+            && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
+    }
 }

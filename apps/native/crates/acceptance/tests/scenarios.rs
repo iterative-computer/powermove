@@ -220,6 +220,30 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
         "studio.view",
         r#"["look","toggle"]"#,
     ),
+    (
+        "native.view.persp",
+        "5",
+        "studio.view",
+        r#"["nav","persp"]"#,
+    ),
+    (
+        "native.view.numpad.persp",
+        "numpad5",
+        "studio.view",
+        r#"["nav","persp"]"#,
+    ),
+    (
+        "native.view.roll-left",
+        "shift+numpad4",
+        "studio.view",
+        r#"["nav","roll-left"]"#,
+    ),
+    (
+        "native.view.roll-right",
+        "shift+numpad6",
+        "studio.view",
+        r#"["nav","roll-right"]"#,
+    ),
     ("native.fly", "shift+`", "studio.view", r#"["fly",""]"#),
     (
         "native.view.front",
@@ -407,7 +431,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
 fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 283);
+    assert_eq!(shipped.len(), 287);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {

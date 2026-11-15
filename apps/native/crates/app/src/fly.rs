@@ -123,8 +123,13 @@ impl Fly {
     /// The view now: where it stands and what it looks at.
     pub fn pose(&self) -> Pose {
         Pose {
+            ortho: false,
+            roll: 0.,
             position: self.position,
-            target: add(self.position, mul(forward(self.pitch, self.yaw), self.focus)),
+            target: add(
+                self.position,
+                mul(forward(self.pitch, self.yaw), self.focus),
+            ),
             zoom: self.start.zoom,
         }
     }
@@ -134,14 +139,26 @@ impl Fly {
 mod tests {
     use super::*;
     fn start() -> Pose {
-        Pose { position: [0., 0., 10.], target: [0., 0., 0.], zoom: 1. }
+        Pose {
+            ortho: false,
+            roll: 0.,
+            position: [0., 0., 10.],
+            target: [0., 0., 0.],
+            zoom: 1.,
+        }
     }
     fn close(a: Vec3, b: Vec3) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9)
     }
     #[test]
     fn entering_keeps_the_view_exactly() {
-        let f = Fly::new(Pose { position: [3., 2., 6.], target: [0.5, 0.2, -1.], zoom: 1. });
+        let f = Fly::new(Pose {
+            ortho: false,
+            roll: 0.,
+            position: [3., 2., 6.],
+            target: [0.5, 0.2, -1.],
+            zoom: 1.,
+        });
         let p = f.pose();
         assert!(close(p.position, [3., 2., 6.]));
         assert!(close(p.target, [0.5, 0.2, -1.]), "{:?}", p.target);
@@ -164,12 +181,21 @@ mod tests {
     }
     #[test]
     fn climbing_is_world_vertical_even_looking_down() {
-        let mut f = Fly::new(Pose { position: [0., 5., 5.], target: [0., 0., 0.], zoom: 1. });
+        let mut f = Fly::new(Pose {
+            ortho: false,
+            roll: 0.,
+            position: [0., 5., 5.],
+            target: [0., 0., 0.],
+            zoom: 1.,
+        });
         f.held.up = true;
         let at = f.position;
         f.tick(0.1);
         let d = sub(f.position, at);
-        assert!(d[0].abs() < 1e-12 && d[2].abs() < 1e-12 && d[1] > 0., "{d:?}");
+        assert!(
+            d[0].abs() < 1e-12 && d[2].abs() < 1e-12 && d[1] > 0.,
+            "{d:?}"
+        );
     }
     #[test]
     fn the_pointer_steers_harder_further_out_and_not_in_the_dead_zone() {

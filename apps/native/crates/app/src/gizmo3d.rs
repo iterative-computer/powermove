@@ -289,9 +289,20 @@ impl State {
             scene.shot
         })
     }
+    fn nav_lens(&self, scene: &Scene) -> Lens {
+        if self.cam_nav.is_some() {
+            scene.lens
+        } else {
+            scene.editor_lens
+        }
+    }
     fn eye(&self) -> Option<Eye> {
         let scene = self.scene.as_ref()?;
-        Some(scene.eye(self.view()))
+        let mut eye = scene.eye(self.free_look.then(|| self.view()).flatten());
+        if self.cam_nav.is_some() {
+            eye.lens = scene.lens;
+        }
+        Some(eye)
     }
     /// Unlocked selected items the current tool can move.
     fn movable(&self) -> Vec<Item> {
@@ -333,10 +344,30 @@ impl GizmoSurface {
     /// The viewer worker sees this viewer's Free View, or the shot.
     pub(super) fn studio_push_view(&mut self, cx: &mut Context<Self>) {
         let view = if self.studio.free_look {
-            self.studio.free.map(|v| FreeView {
-                eye: v.position,
-                target: v.target,
-                zoom: v.zoom,
+            self.studio.free.map(|v| {
+                // Camera-view navigation retains the shot's fixed ortho span.
+                let shot_ortho = self.studio.cam_nav.is_some()
+                    && self
+                        .studio
+                        .scene
+                        .as_ref()
+                        .is_some_and(|s| matches!(s.lens, Lens::Orthographic { .. }));
+                let zoom = if shot_ortho {
+                    let scene = self.studio.scene.as_ref().unwrap();
+                    let Lens::Perspective { fov, .. } = scene.editor_lens else {
+                        unreachable!()
+                    };
+                    v.zoom * length(sub(v.position, v.target)) * (fov.to_radians() / 2.).tan() / 3.
+                } else {
+                    v.zoom
+                };
+                FreeView {
+                    ortho: v.ortho || shot_ortho,
+                    roll: v.roll,
+                    eye: v.position,
+                    target: v.target,
+                    zoom,
+                }
             })
         } else {
             None
@@ -662,7 +693,16 @@ impl GizmoSurface {
             return;
         };
         let from = self.studio.view().unwrap_or(scene.shot);
-        if let Some(pose) = pm_panel_studio3d::viewport::framed(&scene, from, &self.studio.selected)
+        let framing = Scene {
+            lens: if self.studio.free_look && self.studio.cam_nav.is_none() {
+                scene.editor_lens
+            } else {
+                scene.lens
+            },
+            ..(*scene).clone()
+        };
+        if let Some(pose) =
+            pm_panel_studio3d::viewport::framed(&framing, from, &self.studio.selected)
             && self.studio_nav_start(cx).is_some()
         {
             self.studio_nav_set(pose, true, cx);
@@ -761,8 +801,41 @@ impl GizmoSurface {
         if value == "camera-to-view" {
             return self.studio_camera_to_view(cx);
         }
+        if matches!(
+            value,
+            "persp"
+                | "front"
+                | "back"
+                | "left"
+                | "right"
+                | "top"
+                | "bottom"
+                | "roll-left"
+                | "roll-right"
+        ) && (!self.studio.free_look || self.studio.cam_nav.is_some())
+        {
+            let current = self.studio.view().unwrap_or(scene.shot);
+            self.studio_cam_nav_end(true, cx);
+            self.studio.free = Some(current);
+            self.studio.free_look = true;
+            self.studio.look_pending = Some(true);
+            self.studio_ui("studioLook", "free", cx);
+        }
+        let lens = self.studio.nav_lens(&scene);
         let side = |s| move |p: View| side_view(p, s);
         let step: Box<dyn Fn(View) -> View> = match value {
+            "persp" => Box::new(|p| View {
+                ortho: !p.ortho,
+                ..p
+            }),
+            "roll-left" => Box::new(|p| View {
+                roll: p.roll - ORBIT_STEP,
+                ..p
+            }),
+            "roll-right" => Box::new(|p| View {
+                roll: p.roll + ORBIT_STEP,
+                ..p
+            }),
             "front" => Box::new(side(Side::Front)),
             "back" => Box::new(side(Side::Back)),
             "right" => Box::new(side(Side::Right)),
@@ -773,9 +846,12 @@ impl GizmoSurface {
             "orbit-right" => Box::new(|p| orbit_by(p, ORBIT_STEP, 0.)),
             "orbit-up" => Box::new(|p| orbit_by(p, 0., ORBIT_STEP)),
             "orbit-down" => Box::new(|p| orbit_by(p, 0., -ORBIT_STEP)),
-            "opposite" => Box::new(|p| orbit_by(p, 180., 0.)),
-            "zoom-in" => Box::new(move |p| zoom_step(p, 1., scene.lens)),
-            "zoom-out" => Box::new(move |p| zoom_step(p, -1., scene.lens)),
+            "opposite" => Box::new(|p| View {
+                ortho: p.ortho,
+                ..orbit_by(p, 180., 0.)
+            }),
+            "zoom-in" => Box::new(move |p| zoom_step(p, 1., lens)),
+            "zoom-out" => Box::new(move |p| zoom_step(p, -1., lens)),
             "pan-left" | "pan-right" | "pan-up" | "pan-down" => {
                 let Some(frame) = self.host.frame(self.bounds, cx) else {
                     return;
@@ -791,7 +867,7 @@ impl GizmoSurface {
                 let scene = scene.clone();
                 Box::new(move |p| {
                     let (right, up) = scene.eye(Some(p)).right_up();
-                    pan(p, dx, dy, scene.lens, height, right, up)
+                    pan(p, dx, dy, lens, height, right, up)
                 })
             }
             _ => return,
@@ -1488,6 +1564,8 @@ impl GizmoSurface {
                 self.studio.light_orbit = Some(LightOrbit {
                     id: light.id,
                     start: View {
+                        ortho: false,
+                        roll: 0.,
                         position: light.pivot,
                         target,
                         zoom: 1.,
@@ -1892,9 +1970,17 @@ impl GizmoSurface {
                 Nav::Pan => {
                     let (right, up) = eye.right_up();
                     let height = frame.size[1] * frame.scale;
-                    pan(nav.start, dx, dy, scene.lens, height, right, up)
+                    pan(
+                        nav.start,
+                        dx,
+                        dy,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
                 }
-                Nav::Dolly => dolly(nav.start, dy * fine, scene.lens),
+                Nav::Dolly => dolly(nav.start, dy * fine, self.studio.nav_lens(&scene)),
             };
             self.studio_nav_set(pose, false, cx);
             return true;
@@ -2218,21 +2304,45 @@ impl GizmoSurface {
                 if m.control {
                     // Sideways: a notch up pans right, as Blender.
                     let n = if ly != 0. { ly } else { lx };
-                    pan(start, -n * height * PAN_STEP, 0., scene.lens, height, right, up)
+                    pan(
+                        start,
+                        -n * height * PAN_STEP,
+                        0.,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
                 } else if m.shift {
                     let n = if ly != 0. { ly } else { lx };
-                    pan(start, 0., n * height * PAN_STEP, scene.lens, height, right, up)
+                    pan(
+                        start,
+                        0.,
+                        n * height * PAN_STEP,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
                 } else {
-                    zoom_step(start, ly, scene.lens)
+                    zoom_step(start, ly, self.studio.nav_lens(&scene))
                 }
             }
             ScrollDelta::Pixels(_) => {
                 let d = event.delta.pixel_delta(line);
                 let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
                 if m.control || m.platform || m.alt || self.studio.tool == Tool::Zoom {
-                    dolly(start, -dy, scene.lens)
+                    dolly(start, -dy, self.studio.nav_lens(&scene))
                 } else if m.shift {
-                    pan(start, dx, dy, scene.lens, height, right, up)
+                    pan(
+                        start,
+                        dx,
+                        dy,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
                 } else {
                     orbit(start, dx, dy)
                 }
@@ -2253,14 +2363,19 @@ impl GizmoSurface {
             return true;
         };
         // Pinching out moves closer; a positive dolly moves away.
-        self.studio_nav_set(dolly(start, -delta * 400., scene.lens), true, cx);
+        self.studio_nav_set(
+            dolly(start, -delta * 400., self.studio.nav_lens(&scene)),
+            true,
+            cx,
+        );
         true
     }
     /// Tracks the handle under the pointer; `true` when it changed, so the
     /// overlay redraws with that handle in text colour.
     pub(super) fn studio_hover(&mut self, at: [f64; 2], frame: ViewFrame) -> bool {
         let next = if self.studio.active() && !self.studio.busy() {
-            self.studio_handle(at, frame).filter(|h| *h != Handle::Plane)
+            self.studio_handle(at, frame)
+                .filter(|h| *h != Handle::Plane)
         } else {
             None
         };
@@ -2311,6 +2426,8 @@ mod light_marker_tests {
     fn eye() -> Eye {
         Eye {
             pose: View {
+                ortho: false,
+                roll: 0.,
                 position: [0., 0., 5.],
                 target: [0., 0., 0.],
                 zoom: 1.,

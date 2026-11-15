@@ -666,6 +666,8 @@ impl Session {
         };
         lens.validate()?;
         let start = self.free_pose.unwrap_or(Pose {
+            ortho: false,
+            roll: 0.,
             position: resolved
                 .camera_position
                 .unwrap_or([n("x")?, n("y")?, n("z")?]),

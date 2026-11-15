@@ -3,6 +3,8 @@
 use pm_scene3d::navigation::*;
 fn pose() -> Pose {
     Pose {
+        ortho: false,
+        roll: 0.,
         position: [3., 2., 6.],
         target: [0.5, 0., -1.],
         zoom: 1.,
@@ -84,4 +86,34 @@ fn numpad_views_look_at_the_centre_from_their_side_at_the_same_distance() {
     let bottom = normalize(sub(side_view(p, Side::Bottom).position, p.target));
     assert!(top[1] > 0.999 && bottom[1] < -0.999);
     assert!(top[2] > 0. && bottom[2] > 0.);
+}
+
+#[test]
+fn axis_views_enter_ortho_and_both_orbit_paths_restore_perspective() {
+    for side in [
+        Side::Front,
+        Side::Back,
+        Side::Right,
+        Side::Left,
+        Side::Top,
+        Side::Bottom,
+    ] {
+        let p = side_view(pose(), side);
+        assert!(p.ortho);
+        assert!(!orbit(p, 10., 0.).ortho);
+        assert!(!orbit_by(p, 15., 0.).ortho);
+    }
+}
+
+#[test]
+fn ortho_toggle_preserves_target_plane_framing_and_zoom_changes_span() {
+    let p = pose();
+    let o = Pose { ortho: true, ..p };
+    let Lens::Orthographic { height, .. } = view_lens(o, lens()) else {
+        panic!()
+    };
+    assert!((height - 2. * dist(p) * (45f64.to_radians() / 2.).tan()).abs() < 1e-9);
+    let z = zoom_step(o, 1., lens());
+    assert_eq!(z.position, o.position);
+    assert!((z.zoom / o.zoom - 1.2).abs() < 1e-9);
 }

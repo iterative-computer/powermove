@@ -2754,3 +2754,56 @@ fn numpad_view_keys_set_the_editor_view(cx: &mut TestAppContext) {
     assert!((reach(f) / reach(view(&s)) - 1.2).abs() < 1e-6);
     assert_eq!(applied(&s), h, "the 3D view writes nothing");
 }
+
+#[gpui::test]
+fn ortho_toggle_auto_perspective_and_roll_are_editor_only(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    in_3d(&mut s, cx);
+    let h = applied(&s);
+    let key = |s: &mut Stage, v: &str| {
+        s.surface
+            .update(&mut s.vcx, |g, cx| g.studio_setting("nav", v, cx));
+    };
+    let a = view(&s);
+    key(&mut s, "persp");
+    assert!(view(&s).ortho);
+    assert_eq!(view(&s).position, a.position);
+    key(&mut s, "persp");
+    assert_eq!(view(&s), a);
+    key(&mut s, "front");
+    assert!(view(&s).ortho);
+    key(&mut s, "opposite");
+    assert!(view(&s).ortho);
+    key(&mut s, "orbit-right");
+    assert!(!view(&s).ortho);
+    key(&mut s, "roll-left");
+    assert_eq!(view(&s).roll, -15.);
+    key(&mut s, "roll-right");
+    assert_eq!(view(&s).roll, 0.);
+    key(&mut s, "front");
+    scroll(
+        &mut s,
+        cx,
+        gpui::ScrollDelta::Pixels(point(px(20.), px(0.))),
+        Modifiers::none(),
+    );
+    assert!(!view(&s).ortho);
+    assert_eq!(applied(&s), h);
+}
+
+#[gpui::test]
+fn ortho_and_roll_from_camera_view_leave_the_shot_untouched(cx: &mut TestAppContext) {
+    for value in ["persp", "front", "roll-left", "roll-right"] {
+        let mut s = studio_stage(cx);
+        let h = applied(&s);
+        let before = stored(&s, "cam");
+        s.surface
+            .update(&mut s.vcx, |g, cx| g.studio_setting("nav", value, cx));
+        assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        assert_eq!(applied(&s), h);
+        assert_eq!(stored(&s, "cam"), before);
+    }
+}
