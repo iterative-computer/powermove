@@ -707,6 +707,7 @@ pub struct MacDomHost {
     bridge: Retained<Bridge>,
     web: Retained<WKWebView>,
     slot: Retained<SlotView>,
+    ground: Retained<objc2_quartz_core::CAShapeLayer>,
     activity: Option<Activity>,
     job_count: u32,
     /// Where the page's own content may show, when narrower than the
@@ -830,6 +831,11 @@ impl MacDomHost {
         }
         refuse_drags(&web);
         let slot = SlotView::new(mtm, frame);
+        slot.setWantsLayer(true);
+        let ground = objc2_quartz_core::CAShapeLayer::new();
+        if let Some(layer) = slot.layer() {
+            layer.addSublayer(&ground);
+        }
         slot.addSubview(&web);
         slot.setAccessibilityElement(true);
         slot.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
@@ -843,6 +849,7 @@ impl MacDomHost {
             bridge,
             web,
             slot,
+            ground,
             activity: None,
             job_count: 0,
             content: None,
@@ -1087,8 +1094,26 @@ impl MacDomHost {
             return Err(Error::InvalidGeometry);
         }
         let mut panels = self.shared.panels.borrow_mut();
-        if panels.regions.as_ref() != Some(&regions) {
+        if panels.regions.as_ref() != Some(&regions) || panels.fill_regions.is_some() {
             panels.regions = Some(regions);
+            panels.fill_regions = None;
+            self.shared.geometry_dirty.set(true);
+        }
+        Ok(())
+    }
+    /// Show panel bodies on their ground while keeping overlay regions transparent.
+    /// The viewer stage shares the page, but must never inherit the panel fill.
+    pub fn set_regions_with_transparent_overlays(
+        &mut self,
+        panels: Vec<Rect>,
+        overlays: Vec<Rect>,
+    ) -> Result<()> {
+        if self
+            .shared
+            .panels
+            .borrow_mut()
+            .set_regions_with_transparent_overlays(panels, overlays)?
+        {
             self.shared.geometry_dirty.set(true);
         }
         Ok(())
@@ -1374,15 +1399,29 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
-        // The fill shows within the regions; the page's content only where
-        // its own mask lets it.
-        self.slot.setWantsLayer(true);
-        if let Some(layer) = self.slot.layer() {
-            let color = self.fill.map(|[r, g, b, a]| {
-                NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor()
-            });
-            layer.setBackgroundColor(color.as_deref());
+        // The page can cover both panels and the viewer. Only panel bodies
+        // receive a ground; the viewer's native surface must show through.
+        let panels = self.shared.panels.borrow();
+        let visible = panels.visible();
+        let rects = panels.fill_regions.as_deref().unwrap_or(&visible);
+        let path = CGMutablePath::new();
+        let h = self.slot.bounds().size.height;
+        for r in rects {
+            unsafe {
+                CGMutablePath::add_rect(
+                    Some(&path),
+                    std::ptr::null(),
+                    NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
+                );
+            }
         }
+        self.ground.setFrame(self.slot.bounds());
+        self.ground.setPath(Some(&path));
+        let color = self
+            .fill
+            .map(|[r, g, b, a]| NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor());
+        self.ground.setFillColor(color.as_deref());
+        drop(panels);
         self.web.setWantsLayer(true);
         if let Some(layer) = self.web.layer() {
             match &self.content {
