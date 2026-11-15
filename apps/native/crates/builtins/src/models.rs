@@ -273,6 +273,14 @@ impl Backend {
             .ok_or("No open project")?
             .sync(p.clone());
         client.model.sync(&p);
+        let editing = match &self.native.timeline_editor {
+            Some(TimelineEditor::Property(l, p)) => Some((l.clone(), p.clone())),
+            _ => None,
+        };
+        if client.model.editing_property != editing {
+            client.model.editing_property = editing;
+            client.model.rebuild_rows();
+        }
         let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
             .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
@@ -286,7 +294,7 @@ impl Backend {
             let mut row = row.clone();
             row["focused"] = json!(false);
             row["hovered"] = json!(false);
-            if row["kind"] == "track" {
+            if row["kind"] == "track" || row["kind"] == "heading" {
                 row["accessibilityLabel"] = row["label"].clone();
                 display.push(row);
                 continue;
@@ -302,7 +310,7 @@ impl Backend {
                     l.name.to_string_lossy(),
                     super::data::kind_label(&l.kind)
                 ));
-                row["canOpen"] = json!(!l.channels.is_empty() || l.kind == "group");
+                row["canOpen"] = json!(client.model.layer_disclosable(&layer));
                 row["transformable"] = json!(l.kind != "audio");
                 row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|client.model.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
                 if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
@@ -621,8 +629,9 @@ impl Backend {
                 let prepared = catalog
                     .prepare(edit.clone())
                     .map_err(|e| format!("{e:?}"))?;
-                self.native.project_reply =
-                    Some(serde_json::to_value(reply).map_err(|e| e.to_string())?);
+                let mut saved = serde_json::to_value(reply).map_err(|e| e.to_string())?;
+                saved["delete_message"] = json!(prepared.delete_message);
+                self.native.project_reply = Some(saved);
                 return Ok(NativeCommand::Kernel(project_edit_request(
                     edit,
                     &prepared,
@@ -889,7 +898,7 @@ impl Backend {
         if channels == Some(&["export".to_owned()][..]) {
             return self.export_snapshot().map(Some);
         }
-        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) {
+        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) && channels.is_none() {
             return self.inspector_snapshot().map(Some);
         }
         if matches!(query, Query::Time) {
@@ -1643,7 +1652,8 @@ impl Backend {
         let time = self.time();
         if matches!(
             command,
-            "export.begin"
+            "export.queue.add"
+                | "export.begin"
                 | "export.retry"
                 | "export.without"
                 | "export.plan"
@@ -1683,7 +1693,9 @@ impl Backend {
                 }
                 self.validate_binding_owner(handle)?;
                 // Effect Controls and the Color panel write effect parameters.
-                if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
+                if matches!(self.panel_id.as_str(), "layer-effects" | "color")
+                    || (self.panel_id == "inspector" && handle.starts_with("effect-parameter:"))
+                {
                     return self
                         .parameter_write(handle, &args["value"], time)
                         .map(NativeCommand::Kernel);
@@ -2042,6 +2054,22 @@ impl Backend {
                 self.command_reply(command)?
             }
             // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.showInFinder" => {
+                if self.native.export["run"]["phase"] != "done" {
+                    return Err("No completed export to reveal".into());
+                }
+                let path = self.native.export["run"]["path"].clone();
+                self.native.platform.push((command.into(), json!({"path":path})));
+                self.export_snapshot()?
+            }
+            "export.queue.add" | "export.queue.list" | "export.queue.render" | "export.queue.action" | "export.queue.finder" => {
+                if command == "export.queue.add" {
+                    crate::delivery::options(&args["options"])?.validate()?;
+                    self.native.export["run"] = json!({"phase":"choosingDestination"});
+                }
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
             "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?

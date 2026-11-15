@@ -16,6 +16,7 @@ path = "src/gpui_apple.rs"
 [features]
 default = []
 bench-support = ["gpui/bench-support"]
+headless-support = ["gpui/headless-support"]
 test-support = ["gpui/test-support"]
 
 [dependencies]

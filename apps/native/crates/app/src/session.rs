@@ -13,6 +13,23 @@ use pm_protocol::{
 use pm_shell::{Command as ShellCommand, Host};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
+/// Cancellation wins even if the sheet's abort callback also sent an answer.
+/// Poll both channels so Quit wakes a wait whose sheet was never visible.
+pub(crate) async fn recovery_answer<A>(
+    answer: &async_channel::Receiver<Option<A>>,
+    cancellation: &async_channel::Receiver<()>,
+) -> Result<Option<A>, ()> {
+    use std::future::Future;
+    let mut answer = std::pin::pin!(answer.recv());
+    let mut cancellation = std::pin::pin!(cancellation.recv());
+    std::future::poll_fn(|cx| {
+        if cancellation.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(()));
+        }
+        answer.as_mut().poll(cx).map(|answer| Ok(answer.ok().flatten()))
+    }).await
+}
+
 #[derive(Clone)]
 struct CompositionView {
     time: f64,
@@ -61,6 +78,8 @@ pub struct Controller {
     /// Window ▸ Background Tasks, while open.
     pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
+    /// Cancels only the unanswered recovery choice, never an in-flight save.
+    pub(crate) recovery_cancel: Option<async_channel::Sender<()>>,
     /// Held while a project opens and its panels settle: no App Nap or
     /// background throttling.
     pub(crate) busy: Option<crate::platform::Busy>,
@@ -101,6 +120,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) agent_panel_builds: std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
@@ -143,6 +163,7 @@ pub struct Controller {
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
     pub message: String,
+    pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
@@ -389,6 +410,9 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
+            if let Some(slot) = crate::generated_panel::agent_slot(v, id, bounds, w, cx) {
+                return Some(slot);
+            }
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
@@ -439,11 +463,17 @@ impl pm_shell::integration::Integration for Bridge {
             v.page_element(w, cx).or_else(|| v.home_element(w, cx))
         })
     }
+    fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
+        self.0.read(cx).delete_toast.clone().map(|v| v.into_any_element())
+    }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
     }
+    fn native_panel_id(&self, id: &str, cx: &App) -> String {
+        self.0.read(cx).agent_panel_builds.get(id).and_then(|b| b.target.clone()).unwrap_or_else(|| id.to_owned())
+    }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
-        self.0.read(cx).extensions.owns_panel(id)
+        self.0.read(cx).extensions.owns_panel(&self.native_panel_id(id, cx))
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
@@ -456,14 +486,20 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
-        self.0.read(cx).extensions.contributed.clone()
+        let v = self.0.read(cx);
+        let mut panels = v.extensions.contributed.clone();
+        panels.extend(v.agent_panel_builds.iter().map(|(id, b)| (id.clone(), b.title.clone())));
+        panels
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
-            v.sync_extension_panels(open);
+            let mut effective: Vec<&str> = open.to_vec();
+            for id in open { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.as_deref()) { effective.push(target); } }
+            let effective: Vec<String> = effective.into_iter().map(str::to_owned).collect();
+            v.sync_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             v.sync_parking(open, cx);
             let was_docked = v.builtins.agent_docked;
             v.builtins.agent_docked = open.contains(&"agent");
@@ -484,7 +520,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
-            v.hide_extension_panels(shown);
+            let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
+            for id in shown { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) { effective.push(target); } }
+            v.hide_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.
             let timeline = shown.contains(&"timeline");
@@ -830,6 +868,7 @@ impl Controller {
             pro_media,
             tasks_window: None,
             opening: false,
+            recovery_cancel: None,
             busy: None,
             opening_name: None,
             ghost_aspect: None,
@@ -851,6 +890,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),
@@ -879,6 +919,7 @@ impl Controller {
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
+            delete_toast: None,
             path: None,
             recent: vec![],
             library: None,
@@ -1856,6 +1897,7 @@ impl Controller {
         self.begin_ghost(&name, None, cx);
         cx.spawn(async move |this, cx| {
             let _operation = operation;
+            let mut cancelled = false;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
@@ -1873,6 +1915,11 @@ impl Controller {
                     r
                 });
                 if let Some(recovery) = recovery {
+                    let ticket = match reply {
+                        ShellReply::RecoveryRequired { ticket, .. } => ticket.clone(),
+                        _ => unreachable!(),
+                    };
+                    let (cancel, cancellation) = async_channel::bounded(1);
                     let answer = this.update(cx, |v, _| {
                         if let ShellReply::RecoveryRequired {
                             recovery: RecoveryResult::Unrecoverable { reason, .. },
@@ -1889,22 +1936,59 @@ impl Controller {
                             );
                         }
                         v.recovery_pending = true;
+                        v.recovery_cancel = Some(cancel);
+                        let kind = match reply {
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Recovered { .. }, .. } => "recover",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::OfferCopy { .. }, .. } => "offer_copy",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Unrecoverable { .. }, .. } => "unrecoverable",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::FromOtherFile { .. }, .. } => "other_file",
+                            _ => "none",
+                        };
+                        v.open_timer.mark("recovery_question", serde_json::json!({"kind":kind}));
                         v.mcp.awaiting_recovery(Some(name.clone()));
                         recovery.alert.sheet(&v.host.borrow().window)
                     });
                     let response = match answer {
-                        Ok(rx) => rx.recv().await.ok().flatten(),
-                        Err(_) => None,
+                        Ok(rx) => match recovery_answer(&rx, &cancellation).await {
+                            Ok(answer) => answer,
+                            Err(()) => {
+                                cancelled = true;
+                                // Await acknowledgement before releasing the fence:
+                                // no prepared file lock can outlive this open.
+                                let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                                None
+                            }
+                        },
+                        Err(_) => {
+                            let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                            None
+                        },
                     };
                     let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                     if let Some(call) = response.and_then(|action| recovery.decision(action)) {
                         result = kernel.shell(call).await;
+                    } else if !cancelled {
+                        let _ = kernel.shell(ShellCall::CancelRecovery { ticket }).await;
                     }
                 }
             }
+            // Keep the operation fence through this final state update. The
+            // quit retries after the task has finished and released it.
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
+                v.recovery_cancel = None;
+                if cancelled {
+                    v.busy = None;
+                    v.settling = None;
+                    v.open_timer.mark("cancelled", serde_json::json!({}));
+                    v.mcp.awaiting_recovery(None);
+                    v.after_open.fail();
+                    v.end_ghost(cx);
+                    v.message = "Opening cancelled. Recovery data is kept.".into();
+                    cx.notify();
+                    return;
+                }
                 // Panels say it's opening until they've mounted for the project.
                 v.settling = match &result {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
@@ -2910,21 +2994,6 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if cmd.name == crate::v4_quote::CITE_COMMAND {
-            return self
-                .builtins
-                .views
-                .get("agent")
-                .cloned()
-                .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
-        }
-        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") {
-            if self.builtins.views.get("agent").cloned().is_some_and(|view| {
-                view.update(cx, |v, cx| v.copy_selection(window, cx))
-            }) {
-                return true;
-            }
-        }
         // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
         // flight where it began, the rest wait (no play, scrub or edits).
         if let Some(g) = self.builtins.gizmos.clone()
@@ -3294,6 +3363,14 @@ impl Controller {
                 self.close_tab_page("settings", cx)
             }
             "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.launcher.task" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    if let Some(runtime) = &self.builtins.runtime {
+                        let _ = runtime.agent_launcher_switch(id);
+                    }
+                    self.show_builtin("agent", window, cx);
+                }
+            }
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
@@ -3429,6 +3506,7 @@ impl Controller {
                 }
             }
             "saveAs" => self.save_dialog(cx),
+            "renderPending" => self.render_pending(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
                 for call in undo_calls(self.edit_left_open(cx)) {

@@ -1070,7 +1070,7 @@ pub trait InteractiveElement: Sized {
         self
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     /// Set a key that can be used to look up this element's bounds
     /// in the [`crate::VisualTestContext::debug_bounds`] map
     /// This is a noop in release builds
@@ -1079,7 +1079,7 @@ pub trait InteractiveElement: Sized {
         self
     }
 
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, feature = "headless-support")))]
     /// Set a key that can be used to look up this element's bounds
     /// in the [`crate::VisualTestContext::debug_bounds`] map
     /// This is a noop in release builds
@@ -2396,7 +2396,7 @@ impl DivFrameState {
     }
 
     /// Returns the display text and layout used to paint each inline paragraph.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn measured_inline_paragraphs(&self) -> Vec<(SharedString, Arc<crate::InlineLayout>)> {
         self.inline
             .as_ref()
@@ -2863,7 +2863,7 @@ pub struct Interactivity {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) debug_selector: Option<String>,
 }
 
@@ -3244,7 +3244,7 @@ impl Interactivity {
                         .truncate(self.hover_region_listeners.len());
                 }
 
-                #[cfg(any(feature = "test-support", test))]
+                #[cfg(any(feature = "headless-support", test))]
                 if let Some(debug_selector) = &self.debug_selector {
                     window
                         .next_frame
@@ -3308,8 +3308,11 @@ impl Interactivity {
                             window.insert_window_control_hitbox(area, hitbox.clone());
                         }
 
-                        self.paint_mouse_listeners(hitbox, element_state.as_mut(), window, cx);
+                        // Bubble listeners run in reverse registration order. Give
+                        // this element's wheel observers their turn before its
+                        // default scrolling consumes the event for ancestors.
                         self.paint_scroll_listener(hitbox, &style, window, cx);
+                        self.paint_mouse_listeners(hitbox, element_state.as_mut(), window, cx);
                     }
 
                     self.paint_keyboard_listeners(window, cx);
@@ -4113,6 +4116,9 @@ impl Interactivity {
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
+            let padding = style.padding.to_pixels(hitbox.size.into(), window.rem_size());
+            let content = self.content_size + size(padding.left + padding.right, padding.top + padding.bottom);
+            let scroll_max = Point::from(content - hitbox.size).max(&Default::default());
             let ongoing_scroll = self.ongoing_scroll.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
@@ -4160,9 +4166,12 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
+                    scroll_offset.y = (scroll_offset.y + delta_y).clamp(-scroll_max.y, px(0.));
+                    scroll_offset.x = (scroll_offset.x + delta_x).clamp(-scroll_max.x, px(0.));
                     if *scroll_offset != old_scroll_offset {
+                        // The innermost region takes this event. At its edge the
+                        // next event bubbles to the enclosing panel/column.
+                        cx.stop_propagation();
                         cx.notify(current_view);
                     }
                 }

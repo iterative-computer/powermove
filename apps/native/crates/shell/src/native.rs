@@ -368,7 +368,11 @@ pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
 /// frame is set on a later turn of the run loop, because a view asks for
 /// this while its window is being drawn and resizing calls back into it.
 pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    let Ok(window_handle) = HasWindowHandle::window_handle(w) else {
+        // A headless surface has no AppKit sheet to resize.
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = window_handle.as_raw()
     else {
         return;
     };
@@ -1797,6 +1801,13 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Projects"));
             return Some(item);
         }
+        if name == "agent" {
+            let button = AgentButton::new(mtm, target.clone(), t.clone());
+            item.setView(Some(&button));
+            item.setBordered(false);
+            item.setLabel(&NSString::from_str("Agent"));
+            return Some(item);
+        }
         // Every other item is a plain bordered toolbar item (an image, or an
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
@@ -1826,94 +1837,11 @@ impl ToolbarDelegate {
     }
 }
 
-/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
-/// idle, working (an accent ring turns around the glyph) or needing an
-/// answer (an accent dot; it wins over the ring), with background runs.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct AgentStatus {
-    pub working: bool,
-    pub attention: bool,
-    /// `m:ss` of the run in view, for the tooltip.
-    pub elapsed: Option<String>,
-    pub background: usize,
-}
-impl AgentStatus {
-    pub fn tooltip(&self) -> String {
-        if self.attention {
-            "Agent needs your answer".into()
-        } else if self.working {
-            match &self.elapsed {
-                Some(e) => format!("Agent is working · {e}"),
-                None => "Agent is working".into(),
-            }
-        } else {
-            "Ask the Agent".into()
-        }
-    }
-}
-/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
-/// quarter ring at `turn` (working), or with a dot at its top trailing
-/// corner (attention). Idle is the plain template symbol.
-fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
-    let glyph = toolbar_symbol("sparkles", "Agent", t);
-    if !status.working && !status.attention {
-        return glyph;
-    }
-    let size = t.metrics.symbol_toolbar as f64 + 8.;
-    let accent = t.colors.accent;
-    let (working, attention) = (status.working && !status.attention, status.attention);
-    let dot = t.metrics.status_dot as f64;
-    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
-        let inner = glyph.size();
-        let at = NSRect::new(
-            NSPoint::new(
-                (rect.size.width - inner.width) / 2.,
-                (rect.size.height - inner.height) / 2.,
-            ),
-            inner,
-        );
-        glyph.drawInRect(at);
-        // The glyph in accent ink.
-        native_color(accent).set();
-        NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
-        if working {
-            let path = NSBezierPath::bezierPath();
-            let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
-            let start = 90. - turn * 360.;
-            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
-                centre,
-                rect.size.width / 2. - 1.,
-                start,
-                start - 270.,
-                true,
-            );
-            path.setLineWidth(1.5);
-            native_color(accent).setStroke();
-            path.stroke();
-        }
-        if attention {
-            let r = NSRect::new(
-                NSPoint::new(rect.size.width - dot, rect.size.height - dot),
-                NSSize::new(dot, dot),
-            );
-            native_color(accent).setFill();
-            NSBezierPath::bezierPathWithOvalInRect(r).fill();
-        }
-        objc2::runtime::Bool::YES
-    });
-    let image =
-        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
-    image.setAccessibilityDescription(Some(&NSString::from_str("Agent")));
-    image
-}
+#[path = "agent_launcher_native.rs"]
+mod launcher_native;
+use launcher_native::AgentButton;
 impl Host {
-    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
-    /// turning ring while working, still under Reduce Motion; a dot when it
-    /// needs an answer) and its tooltip.
-    pub fn set_agent_status(&mut self, status: AgentStatus) {
-        if status == self.agent_status {
-            return;
-        }
+    pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
         let Some(item) = self
             ._toolbar
             .items()
@@ -1922,37 +1850,13 @@ impl Host {
         else {
             return;
         };
-        let tokens = self.tokens.clone();
-        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
-        let turning = status.working && !status.attention && !tokens.accessibility.reduce_motion;
-        if !turning {
-            if let Some(timer) = self.agent_timer.take() {
-                timer.invalidate();
-            }
-            item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
-        } else if self.agent_timer.is_none() {
-            let started = std::time::Instant::now();
-            let shown = status.clone();
-            let item = item.clone();
-            let step =
-                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    let turn = started.elapsed().as_secs_f64() % 1.;
-                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
-                });
-            let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
-                    1. / 30.,
-                    true,
-                    &step,
-                )
-            };
-            unsafe {
-                objc2_foundation::NSRunLoop::mainRunLoop()
-                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
-            }
-            self.agent_timer = Some(timer);
-        }
-        self.agent_status = status;
+        let Some(view) = item.view() else {
+            return;
+        };
+        let Some(button) = view.downcast_ref::<AgentButton>() else {
+            return;
+        };
+        button.publish(snapshot, self.tokens.clone());
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -2025,6 +1929,23 @@ pub fn viewer_window(
         Some([at(x0 - start[0], cw - w), at(y0 - start[1], ch - h), cw, ch]),
     )
 }
+/// Scale a cached (possibly cropped) raster about the same composition point.
+/// Layer coordinates are bottom-up; navigation pan is top-down, in points.
+fn cached_zoom_frame(
+    frame: NSRect,
+    slot: [f64; 2],
+    ratio: f64,
+    old_pan: [f64; 2],
+    pan: [f64; 2],
+) -> NSRect {
+    NSRect::new(
+        NSPoint::new(
+            slot[0] / 2. + pan[0] + (frame.origin.x - slot[0] / 2. - old_pan[0]) * ratio,
+            slot[1] / 2. - pan[1] + (frame.origin.y - slot[1] / 2. + old_pan[1]) * ratio,
+        ),
+        NSSize::new(frame.size.width * ratio, frame.size.height * ratio),
+    )
+}
 pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
@@ -2043,16 +1964,14 @@ pub struct Host {
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
+    viewer_raster: Option<(SlotGeometry, f64, [f64; 2])>,
+    viewer_cover: Option<(metal::MetalLayer, SlotGeometry, f64, [f64; 2])>,
     /// The drawable's window onto the zoomed canvas ([`viewer_window`]), set
     /// before the drawable size so its observers read the matching window.
     pub viewer_crop: Rc<Cell<Option<[u32; 4]>>>,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
-    /// What the toolbar's Agent item shows, and the timer that turns its
-    /// working ring.
-    agent_status: AgentStatus,
-    agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2078,6 +1997,7 @@ pub struct Host {
     pub contributed_choices: Vec<Choice>,
     /// Rectangles of panel bodies a native surface below GPUI draws.
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
+    pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -2245,11 +2165,11 @@ impl Host {
             flowchart: None,
             layer,
             viewer_transform: None,
+            viewer_raster: None,
+            viewer_cover: None,
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
-            agent_status: AgentStatus::default(),
-            agent_timer: None,
             _delegate: delegate,
             _target: target,
             observer: None,
@@ -2269,6 +2189,7 @@ impl Host {
             base_choices: choices,
             contributed_choices: vec![],
             native_panels: Rc::default(),
+            native_panel_clips: Rc::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],
@@ -2286,7 +2207,7 @@ impl Host {
             sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
-        let native_rects = host.borrow().native_panels.clone();
+        let native_rects = host.borrow().native_panel_clips.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
@@ -3512,6 +3433,90 @@ impl Host {
         }
         self.viewer_transform = Some((dimensions, zoom, pan));
     }
+    /// Keep the current drawable while pointer navigation scales its cached pixels.
+    pub fn defer_viewer_raster(&mut self, active: bool) {
+        if active {
+            if self.viewer_raster.is_none()
+                && let (Some(Some(g)), Some((dimensions, Some(zoom), pan))) =
+                    (self.last_geometry, self.viewer_transform)
+            {
+                let mut cached = g;
+                if let Some(crop) = g.crop {
+                    let size = self.layer.drawable_size();
+                    let slot = [g.frame.size.width, g.frame.size.height];
+                    let x = (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + crop[0] as f64 / g.scale;
+                    let top = (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + crop[1] as f64 / g.scale;
+                    cached.layer = NSRect::new(NSPoint::new(x, slot[1] - top - size.height / g.scale), NSSize::new(size.width / g.scale, size.height / g.scale));
+                }
+                self.viewer_raster = Some((cached, zoom, pan));
+            }
+        } else if self.viewer_raster.take().is_some() {
+            self.last_geometry = None;
+        }
+    }
+    /// Apply cached placement in the input transaction, alongside the overlay.
+    pub fn place_cached_viewer(&mut self) {
+        if self.viewer_raster.is_none() { return; }
+        if let Some(g) = self.viewer_geometry() {
+            unsafe { let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer]; }
+        }
+        if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (&self.viewer_cover, self.viewer_transform, self.viewer_rect.get()) {
+            let frame = cached_zoom_frame(cached.layer, [r.w as f64, r.h as f64], zoom / old_zoom, *old_pan, pan);
+            unsafe { let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame]; }
+        }
+    }
+    /// Render the settled size below the cached composite. Reveal only a complete frame.
+    pub fn stage_viewer_raster(&mut self, layer: metal::MetalLayer) -> bool {
+        let Some((g, zoom, pan)) = self.viewer_raster.take() else {
+            return false;
+        };
+        if self.viewer_cover.is_some() {
+            self.last_geometry = None;
+            return false;
+        }
+        // Configure the target before the worker can acquire its first drawable.
+        // A default-size first frame must never qualify for the atomic reveal.
+        if let Some(target) = self.viewer_geometry() {
+            unsafe { let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer]; }
+            layer.set_contents_scale(target.scale);
+            layer.set_drawable_size(core_graphics::geometry::CGSize::new(
+                target.layer.size.width * target.scale,
+                target.layer.size.height * target.scale,
+            ));
+            self.viewer_crop.set(target.crop);
+        }
+        unsafe {
+            let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
+            let old = self.layer.as_ptr() as *mut AnyObject;
+            if let Some(root) = self.viewer.layer() {
+                let _: () =
+                    msg_send![&*root, insertSublayer:layer.as_ptr() as *mut AnyObject, below:old];
+            }
+        }
+        self.viewer_cover = Some((self.layer.clone(), g, zoom, pan));
+        self.layer = layer;
+        self.last_geometry = None;
+        true
+    }
+    pub fn reveal_viewer_raster(&mut self) {
+        if self.viewer_raster.is_some() {
+            return;
+        }
+        if let Some((cover, _, _, _)) = self.viewer_cover.take() {
+            unsafe {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setHidden:false];
+                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, removeFromSuperlayer];
+                // The replacement is now the sole primary layer. Release the
+                // retired layer's drawable pool even if a submitted frame still
+                // temporarily retains the layer itself.
+                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setDevice:std::ptr::null::<AnyObject>()];
+                CATransaction::commit();
+            }
+        }
+        debug_assert!(self.viewer_cover.is_none(), "settled viewer retains a staging surface");
+    }
     /// The highest zoom the display can show `dimensions` at.
     pub fn viewer_zoom_limit(&self, dimensions: [f64; 2]) -> f64 {
         zoom_limit(dimensions, self.window.backingScaleFactor())
@@ -3565,6 +3570,8 @@ impl Host {
     /// window. The presenter and placement binding release their old layer
     /// separately; the next layout sizes this fresh, configured layer.
     pub fn replace_viewer_layer(&mut self, layer: metal::MetalLayer) {
+        self.viewer_raster = None;
+        self.reveal_viewer_raster();
         unsafe {
             let old = self.layer.as_ptr() as *mut AnyObject;
             let _: () = msg_send![old, removeFromSuperlayer];
@@ -3616,7 +3623,19 @@ impl Host {
             } else {
                 ([r.w as f64, r.h as f64], [0., 0.])
             };
-            let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale, pan);
+            let (mut layer, mut crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale, pan);
+            if let (Some((cached, old_zoom, old_pan)), Some((_, Some(zoom), _))) =
+                (self.viewer_raster, self.viewer_transform)
+            {
+                layer = cached_zoom_frame(
+                    cached.layer,
+                    [r.w as f64, r.h as f64],
+                    zoom / old_zoom,
+                    old_pan,
+                    pan,
+                );
+                crop = cached.crop;
+            }
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
@@ -3631,11 +3650,31 @@ impl Host {
         self.last_geometry != Some(self.viewer_geometry())
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
+        if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
+            &self.viewer_cover,
+            self.viewer_transform,
+            self.viewer_rect.get(),
+        ) {
+            let frame = cached_zoom_frame(
+                cached.layer,
+                [r.w as f64, r.h as f64],
+                zoom / old_zoom,
+                *old_pan,
+                pan,
+            );
+            unsafe {
+                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame];
+            }
+        }
         let geometry = self.viewer_geometry();
         let moved = self.last_geometry != Some(geometry);
         if moved {
             if let Some(g) = geometry {
-                viewer_slot::show(&self.viewer, &self.layer, true);
+                if self.viewer_cover.is_some() {
+                    self.viewer.setHidden(false);
+                } else {
+                    viewer_slot::show(&self.viewer, &self.layer, true);
+                }
                 self.viewer.setFrame(g.frame);
                 // Without a transform the Metal layer is the view's own backing
                 // layer and AppKit sizes it; framing it here would move it to
@@ -3648,20 +3687,22 @@ impl Host {
                 }
                 self.layer.set_contents_scale(g.scale);
                 self.viewer_crop.set(g.crop);
-                // CAMetalLayer posts no KVO for drawableSize; the engine's
-                // output binding observes it, so announce the change here.
-                let key = NSString::from_str("drawableSize");
-                let layer = self.layer.as_ptr() as *mut AnyObject;
-                unsafe {
-                    let _: () = msg_send![layer, willChangeValueForKey: &*key];
-                }
-                self.layer
-                    .set_drawable_size(core_graphics::geometry::CGSize::new(
-                        g.layer.size.width * g.scale,
-                        g.layer.size.height * g.scale,
-                    ));
-                unsafe {
-                    let _: () = msg_send![layer, didChangeValueForKey: &*key];
+                if self.viewer_raster.is_none() {
+                    // CAMetalLayer posts no KVO for drawableSize; the engine's
+                    // output binding observes it, so announce the change here.
+                    let key = NSString::from_str("drawableSize");
+                    let layer = self.layer.as_ptr() as *mut AnyObject;
+                    unsafe {
+                        let _: () = msg_send![layer, willChangeValueForKey: &*key];
+                    }
+                    self.layer
+                        .set_drawable_size(core_graphics::geometry::CGSize::new(
+                            g.layer.size.width * g.scale,
+                            g.layer.size.height * g.scale,
+                        ));
+                    unsafe {
+                        let _: () = msg_send![layer, didChangeValueForKey: &*key];
+                    }
                 }
             } else {
                 viewer_slot::show(&self.viewer, &self.layer, false);
@@ -3857,6 +3898,7 @@ impl Host {
                 .disabled
                 .contains(menu::split_palette_command(&c.command).0)
         });
+        choices.push(Choice::new("Render Pending", "renderPending").within("Export"));
         choices.extend(state.palette_layers.iter().map(|(id, name)| {
             Choice::new(
                 name.clone(),
@@ -6341,26 +6383,6 @@ mod viewer_window_tests {
 }
 
 #[cfg(test)]
-mod agent_status_tests {
-    use super::AgentStatus;
-    #[test]
-    fn the_agent_item_says_what_the_agent_is_doing_and_attention_wins() {
-        assert_eq!(AgentStatus::default().tooltip(), "Ask the Agent");
-        let working = AgentStatus {
-            working: true,
-            elapsed: Some("1:04".into()),
-            ..Default::default()
-        };
-        assert_eq!(working.tooltip(), "Agent is working · 1:04");
-        let asking = AgentStatus {
-            attention: true,
-            ..working
-        };
-        assert_eq!(asking.tooltip(), "Agent needs your answer");
-    }
-}
-
-#[cfg(test)]
 mod key_order_tests {
     use super::passes_straight;
     /// Return, Space and the arrows go straight to a focused control or
@@ -6531,4 +6553,53 @@ pub fn viewer_preference(key: &str, default: bool) -> bool {
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
     objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+}
+
+#[cfg(test)]
+mod cached_zoom_tests {
+    use super::*;
+    #[test]
+    fn every_cached_layer_point_matches_the_live_overlay_during_zoom() {
+        let slot = [940., 610.];
+        let dimensions = [1920., 1080.];
+        let old_zoom = 0.74;
+        let old_pan = [37., -29.];
+        let (mut cached, crop) = viewer_window(slot, dimensions.map(|d| d * old_zoom), 2., old_pan);
+        let crop_origin = crop.map_or([0., 0.], |c| [c[0] as f64 / 2., c[1] as f64 / 2.]);
+        if crop.is_some() {
+            let top = (slot[1] - dimensions[1] * old_zoom) / 2. + old_pan[1] + crop_origin[1];
+            cached.origin.x = (slot[0] - dimensions[0] * old_zoom) / 2. + old_pan[0] + crop_origin[0];
+            cached.origin.y = slot[1] - top - cached.size.height;
+        }
+        // 410 vector/text layer positions, checked at every intermediate scale.
+        for step in 0..100 {
+            let zoom = old_zoom * (step as f64 * 0.008).exp();
+            let ratio = zoom / old_zoom;
+            let pan = [37. + step as f64 * 0.7, -29. - step as f64 * 0.3];
+            let frame = cached_zoom_frame(cached, slot, ratio, old_pan, pan);
+            for layer in 0..410 {
+                let p = [(layer * 37 % 1920) as f64, (layer * 53 % 1080) as f64];
+                let content = [
+                    frame.origin.x + (p[0] * old_zoom - crop_origin[0]) * ratio,
+                    slot[1] - frame.origin.y - frame.size.height + (p[1] * old_zoom - crop_origin[1]) * ratio,
+                ];
+                let overlay = [
+                    (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + p[0] * zoom,
+                    (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + p[1] * zoom,
+                ];
+                assert!((content[0] - overlay[0]).abs() < 1e-6);
+                assert!((content[1] - overlay[1]).abs() < 1e-6);
+            }
+        }
+    }
+    #[test]
+    fn cached_zoom_preserves_the_anchor_in_bottom_up_layer_coordinates() {
+        let frame = NSRect::new(NSPoint::new(100., 80.), NSSize::new(400., 240.));
+        // Cursor (200, 150) in a 600 × 400 slot, zoom 1 → 2.
+        let next = cached_zoom_frame(frame, [600., 400.], 2., [0., 0.], [100., 50.]);
+        assert_eq!(next.origin, NSPoint::new(0., -90.));
+        assert_eq!(next.size, NSSize::new(800., 480.));
+        assert!((next.origin.x + (200. - frame.origin.x) * 2. - 200.).abs() < 0.5);
+        assert!((next.origin.y + (250. - frame.origin.y) * 2. - 250.).abs() < 0.5);
+    }
 }

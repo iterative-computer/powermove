@@ -111,7 +111,11 @@ export interface TrackRow extends RowBase {
   enabled: boolean;
   expanded: boolean;
 }
-export type Row = LayerRow | PropertyRow | TrackRow;
+export interface HeadingRow extends RowBase {
+  kind: "heading";
+  layer: string;
+}
+export type Row = LayerRow | PropertyRow | TrackRow | HeadingRow;
 export interface TimelineFrame {
   /** Decimal native u64s: never round document/revision identities in JS. */
   document: string | null;
@@ -263,7 +267,7 @@ export function checkFrame(
       ids.has(row.id) ||
       !Number.isSafeInteger(row.depth) ||
       row.depth < 0 ||
-      !["layer", "property", "track"].includes(row.kind)
+      !["layer", "property", "track", "heading"].includes(row.kind)
     )
       throw new TypeError("Invalid native timeline row");
     ids.add(row.id);

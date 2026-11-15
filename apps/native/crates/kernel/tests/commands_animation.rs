@@ -847,3 +847,45 @@ fn the_transform_box_scales_times_values_and_speeds() {
         "clamped to a frame from the anchor key"
     );
 }
+
+#[test]
+fn selected_property_keys_take_absolute_value_and_undo_together() {
+    let mut s = store();
+    s.select_keys(["k1", "k2", "L1", "L2"]);
+    let before = layer(&s, "anim");
+    let other = layer(&s, "legacy");
+    run(&mut s, set("anim", "opacity", 42.0, 0.0));
+    assert!(
+        keys(&s, "anim", "opacity")
+            .iter()
+            .all(|k| num(k, &["v"]) == 42.0)
+    );
+    assert_eq!(layer(&s, "legacy"), other);
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "anim"), before);
+}
+
+#[test]
+fn selected_keys_away_from_playhead_do_not_change() {
+    let mut s = store();
+    s.select_keys(["k1", "k2"]);
+    run(&mut s, set("anim", "opacity", 42.0, 0.5));
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(k.len(), 3);
+    assert_eq!(num(&k[0], &["v"]), 0.0);
+    assert_eq!(num(&k[1], &["v"]), 42.0);
+    assert_eq!(num(&k[2], &["v"]), 100.0);
+}
+
+#[test]
+fn unselected_playhead_key_and_layer_scoped_selection_stay_local() {
+    let mut s = store();
+    s.select_layer_keys(vec![
+        ("legacy".into(), "k1".into()),
+        ("anim".into(), "k2".into()),
+    ]);
+    run(&mut s, set("anim", "opacity", 42.0, 0.0));
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(num(&k[0], &["v"]), 42.0);
+    assert_eq!(num(&k[1], &["v"]), 100.0);
+}

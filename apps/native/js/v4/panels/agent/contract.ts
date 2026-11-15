@@ -1,4 +1,3 @@
-import type { Citation } from "./citations";
 import type { Json, EventDetail } from "../../src/protocol";
 
 /** Wire facts emitted by pm-panel-agentpanel/src/v4.rs, not a JS document model. */
@@ -38,12 +37,7 @@ export interface Snapshot {
   /** What the run is doing before its first step lands. */
   activity?: string;
   showJump: boolean;
-  draft: {
-    citations?: Citation[];
-    text: string;
-    selection: [number, number];
-    armed: string | null;
-  };
+  draft: { text: string; selection: [number, number]; armed: string | null };
   attachments: {
     id: string;
     name: string;
@@ -95,7 +89,6 @@ export interface NativeFacts {
   bindings: { access: string; model: string };
 }
 export type Action =
-  | { type: "citations"; citations: Citation[] }
   | {
       type: "draft";
       text: string;

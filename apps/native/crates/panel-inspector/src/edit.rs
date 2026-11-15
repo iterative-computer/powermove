@@ -1,4 +1,4 @@
-use crate::view::{array, number, text};
+use crate::view::{array, text};
 use crate::{Inspector, InspectorError, PropertyId};
 use pm_kernel::commands::{
     comps::{CompCommand, CompPatch},
@@ -114,7 +114,6 @@ pub struct EditSession {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) initial: HashMap<Binding, Value>,
     pub(crate) targets: HashMap<Binding, Vec<Binding>>,
-    pub(crate) keys: HashMap<PropertyId, Vec<Value>>,
     pairs: HashMap<Binding, (Binding, Option<f64>, bool)>,
 }
 impl Inspector {
@@ -358,7 +357,6 @@ impl Inspector {
             return Err(InspectorError::InvalidInput);
         }
         let mut initial = HashMap::new();
-        let mut keys = HashMap::new();
         let mut targets = HashMap::new();
         let mut pairs = HashMap::new();
         let mut expanded = bindings.to_vec();
@@ -384,7 +382,7 @@ impl Inspector {
                 let animated = [own_prop, other_prop]
                     .iter()
                     .any(|p| p.as_ref().is_some_and(|p| !array(p.get("kf")).is_empty()));
-                if (linked || animated) && !bindings.contains(&other) {
+                if linked && !bindings.contains(&other) {
                     let own = self
                         .read_binding(binding, time)?
                         .as_f64()
@@ -405,8 +403,6 @@ impl Inspector {
                 }
             }
         }
-        let selected_keys: HashSet<String> =
-            self.published.selection.keys().iter().cloned().collect();
         for binding in &expanded {
             // A locked primary may still define a shared edit for editable peers.
             initial.insert(binding.clone(), self.read_binding(binding, time)?);
@@ -414,20 +410,6 @@ impl Inspector {
             targets.insert(binding.clone(), captured.clone());
             for target in captured {
                 initial.insert(target.clone(), self.read_binding(&target, time)?);
-                if let Binding::Property(id) = &target {
-                    let prop = self.property(id)?;
-                    let selected = array(prop.as_ref().and_then(|p| p.get("kf")))
-                        .iter()
-                        .filter(|k| {
-                            selected_keys.contains(text(k, "i"))
-                                && k.get("v").and_then(Value::as_f64).is_some()
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if selected.len() >= 2 {
-                        keys.insert(id.clone(), selected);
-                    }
-                }
             }
         }
         Ok(EditSession {
@@ -436,7 +418,6 @@ impl Inspector {
             owner: None,
             bindings: bindings.to_vec(),
             initial,
-            keys,
             targets,
             pairs,
         })
@@ -485,25 +466,6 @@ impl Inspector {
                 } else {
                     value.clone()
                 };
-                if let Binding::Property(id) = &target
-                    && let Some(keys) = session.keys.get(id).filter(|_| next.as_f64().is_some())
-                {
-                    let base = session.initial[&target]
-                        .as_f64()
-                        .ok_or(InspectorError::InvalidInput)?;
-                    for key in keys {
-                        let mut c = SetProperty::new(
-                            &id.layer,
-                            &id.path,
-                            number(key, "v", 0.0) + next.as_f64().expect("checked") - base,
-                            number(&self.layer(&id.layer)?, "from", 0.0) + number(key, "t", 0.0),
-                        );
-                        c.mode = KeyMode::Keyframe;
-                        c.preserve_hand_edits = false;
-                        commands.push(PropertyCommand::Set(c).into());
-                    }
-                    continue;
-                }
                 let mut next_commands = self.value_commands(&target, next, session.time)?;
                 if *force_keyframe {
                     for command in &mut next_commands {

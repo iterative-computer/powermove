@@ -156,13 +156,15 @@ fn a_drop_on_itself_is_already_here_and_off_every_zone_is_nowhere() {
 #[test]
 fn a_header_double_click_folds_a_panel_to_its_header_and_it_is_remembered() {
     let (mut l, t) = (Layout::preset("design"), tokens());
+    let before = l.geometry(BOUNDS, &t);
+    let (_, _, fixed_effects) = placed(&l, &before, "fxbrowser");
     assert!(l.toggle_collapsed("inspector"));
     let g = l.geometry(BOUNDS, &t);
     let (.., r) = placed(&l, &g, "inspector");
     assert!((r.h - t.metrics.header).abs() < 0.5, "{r:?}");
-    // Effects below takes the room.
+    // Fixed-height panels retain their height in a scrolling side dock.
     let (.., fx) = placed(&l, &g, "fxbrowser");
-    assert!(fx.h > BOUNDS.h / 2.);
+    assert_eq!(fx.h, fixed_effects.h);
     // Saved with the workspace, as the original app's `collapsed`.
     let record = pm_shell::workspace::write(&l, &serde_json::json!({"id": "design"}));
     assert_eq!(pm_shell::workspace::layout(&record).docks, l.docks);

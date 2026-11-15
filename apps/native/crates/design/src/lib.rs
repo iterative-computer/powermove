@@ -228,6 +228,13 @@ pub struct Metrics {
     pub toolbar_title_width: f32,
     pub toolbar_title_line: f32,
     pub control: f32,
+    /// Compact composition tab geometry.
+    pub comp_tab_height: f32,
+    pub comp_tab_leading: f32,
+    pub comp_tab_trailing: f32,
+    pub comp_tab_close: f32,
+    pub comp_tab_gap: f32,
+    pub comp_tab_content_gap: f32,
     /// Space between docked panels, and between them and the window edge.
     pub dock_gap: f32,
     /// Sidebar width of full-window screens (Home, Settings).
@@ -366,6 +373,10 @@ pub struct Metrics {
     /// Tallest a sheet's option body grows before it scrolls, so the sheet
     /// and its footer stay on screen.
     pub sheet_body_max: f32,
+    /// Compact two-line export queue rows and their inline progress indicator.
+    pub export_job_row: f32,
+    pub export_job_progress_width: f32,
+    pub export_job_progress_height: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
@@ -795,6 +806,12 @@ impl Tokens {
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
                 control: 28.,
+                comp_tab_height: 22.,
+                comp_tab_leading: 10.,
+                comp_tab_trailing: 6.,
+                comp_tab_close: 16.,
+                comp_tab_gap: 2.,
+                comp_tab_content_gap: 4.,
                 dock_gap: space.md,
                 sidebar: 224.,
                 border: 1.,
@@ -876,6 +893,9 @@ impl Tokens {
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
+                export_job_row: 44.,
+                export_job_progress_width: 80.,
+                export_job_progress_height: 2.,
                 composer_max_lines: 10.,
                 group_radius: radius.lg,
                 form_row: 40.,

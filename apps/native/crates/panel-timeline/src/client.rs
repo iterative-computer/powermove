@@ -29,6 +29,20 @@ impl From<ModelError> for ClientError {
     }
 }
 
+/// An immutable, disposable frame. Only scalar layer starts differ from the
+/// authoritative document; keys and every other subtree stay shared.
+#[derive(Clone, Debug)]
+pub struct LayerPreviewFrame {
+    pub starts: std::sync::Arc<[(String, f64)]>,
+    pub snapshot: pm_kernel::Snapshot,
+}
+struct LayerPreview {
+    drag: Drag,
+    commands: Vec<pm_kernel::Command>,
+    frame: Option<LayerPreviewFrame>,
+    serial: u64,
+    sample: Option<DragSample>,
+}
 /// Awaitable kernel adapter. No wait(), call_blocking(), platform or JS calls.
 /// Caller identity is injected so agent/MCP lock protections are retained.
 pub struct TimelineClient {
@@ -38,6 +52,7 @@ pub struct TimelineClient {
     pub model: TimelineModel,
     active: Option<(u64, Drag)>,
     active_revision: Option<u64>,
+    preview: Option<LayerPreview>,
     adopted: Option<pm_model::Value>,
 }
 impl TimelineClient {
@@ -53,6 +68,7 @@ impl TimelineClient {
             model: TimelineModel::default(),
             active: None,
             active_revision: None,
+            preview: None,
             adopted: None,
         };
         this.sync()?;
@@ -64,6 +80,15 @@ impl TimelineClient {
             .published(&self.project)
             .ok_or(ClientError::Closed)?;
         self.model.sync(&p);
+        if self.preview.as_ref().is_some_and(|preview| {
+            preview.drag.start.doc_id != p.snapshot.doc_id
+                || preview.drag.start.comp_id != p.snapshot.open_comp()
+        }) {
+            self.preview = None;
+        }
+        if let Some(sample) = self.preview.as_ref().and_then(|p| p.sample) {
+            self.preview_sample(sample)?;
+        }
         Ok(())
     }
     pub async fn call(&mut self, call: Call) -> Result<Ack, ClientError> {
@@ -134,7 +159,7 @@ impl TimelineClient {
         Ok(ack)
     }
     pub async fn begin_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
-        if self.active.is_some() {
+        if self.active.is_some() || self.preview.is_some() {
             return Err(ClientError::GestureActive);
         }
         self.sync()?;
@@ -201,7 +226,108 @@ impl TimelineClient {
         self.active = Some((id, drag));
         Ok(())
     }
+    /// Native Layers-mode bar moves preview locally. No writer lease, history,
+    /// document revision or JS publication changes until mouse-up.
+    pub fn begin_preview_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
+        if self.active.is_some() || self.preview.is_some() {
+            return Err(ClientError::GestureActive);
+        }
+        if !matches!(kind, DragKind::Layers { .. }) {
+            return Err(ModelError::InvalidGesture.into());
+        }
+        self.sync()?;
+        self.preview = Some(LayerPreview {
+            drag: Drag::begin(&self.model, kind)?,
+            commands: vec![],
+            frame: None,
+            serial: 0,
+            sample: None,
+        });
+        Ok(())
+    }
+    pub fn layer_preview(&self) -> Option<&LayerPreviewFrame> {
+        self.preview.as_ref().and_then(|p| p.frame.as_ref())
+    }
+    fn preview_sample(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
+        use pm_model::{Document, Op, Patch};
+        let p = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        let preview = self.preview.as_mut().ok_or(ClientError::NoGesture)?;
+        if p.snapshot.doc_id != preview.drag.start.doc_id
+            || p.snapshot.open_comp() != preview.drag.start.comp_id
+        {
+            return Err(ClientError::DocumentChanged);
+        }
+        let commands = preview.drag.commands(sample)?;
+        let starts: Vec<_> = commands
+            .iter()
+            .filter_map(|c| match c {
+                pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id, patch }) => {
+                    patch.from.map(|from| (layer_id.clone(), from))
+                }
+                _ => None,
+            })
+            .collect();
+        // Resolve the current stack once, including a concurrent reorder. A
+        // foreign edit remains visible and cancellation never rolls it back.
+        let root = p.snapshot.root().ok_or(ClientError::Closed)?;
+        let comp = pm_kernel::model::comp_node(root, preview.drag.start.comp_id.as_deref())
+            .ok_or(ClientError::DocumentChanged)?;
+        let locations: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                layer
+                    .get("id")
+                    .map(pm_model::Node::to_value)
+                    .and_then(|id| id.as_str().map(|id| (id.to_owned(), index)))
+            })
+            .collect();
+        let mut ops = Vec::with_capacity(starts.len());
+        for (id, from) in &starts {
+            let index = *locations
+                .get(id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            let mut path = pm_kernel::model::LayerLoc {
+                comp_id: preview.drag.start.comp_id.clone(),
+                index,
+            }
+            .path();
+            path.push("from".into());
+            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(*from))));
+        }
+        preview.serial += 1;
+        let revision = p.revision() + preview.serial;
+        let mut document = Document::from_root(Some(root.clone()), p.revision());
+        document
+            .apply_ops_at(&ops, revision)
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
+        preview.sample = Some(sample);
+        preview.commands = commands;
+        preview.frame = Some(LayerPreviewFrame {
+            starts: starts.into(),
+            snapshot: pm_kernel::Snapshot {
+                doc_id: p.snapshot.doc_id,
+                revision,
+                document: std::sync::Arc::new(document),
+            },
+        });
+        Ok(Ack {
+            txid: None,
+            revision: p.revision(),
+            folded: None,
+            notice: None,
+            reply: Reply::Applied {
+                revision: p.revision(),
+                changed: false,
+            },
+        })
+    }
     pub async fn drag(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
+        if self.preview.is_some() {
+            return self.preview_sample(sample);
+        }
         let (id, drag) = self.active.as_mut().ok_or(ClientError::NoGesture)?;
         let published = self
             .kernel
@@ -242,6 +368,36 @@ impl TimelineClient {
     /// Escape uses the kernel's selective cancellation; foreign edits survive.
     /// A conflict notice is returned intact so the host can report a kept edit.
     pub async fn finish_drag(&mut self, commit: bool) -> Result<Ack, ClientError> {
+        if let Some(preview) = self.preview.take() {
+            let published = self
+                .kernel
+                .published(&self.project)
+                .ok_or(ClientError::Closed)?;
+            if published.snapshot.doc_id != preview.drag.start.doc_id {
+                self.sync()?;
+                return Err(ClientError::DocumentChanged);
+            }
+            if commit {
+                return self
+                    .call(Call::Transact {
+                        label: Some(preview.drag.label().into()),
+                        body: WriteBody::Commands(preview.commands),
+                        expected_revision: None,
+                    })
+                    .await;
+            }
+            self.sync()?;
+            return Ok(Ack {
+                txid: None,
+                revision: published.revision(),
+                folded: None,
+                notice: None,
+                reply: Reply::Applied {
+                    revision: published.revision(),
+                    changed: false,
+                },
+            });
+        }
         let (id, drag) = self.active.as_ref().ok_or(ClientError::NoGesture)?;
         let published = self
             .kernel
@@ -297,13 +453,16 @@ impl TimelineClient {
     /// The host awaits disposal before retiring/replacing a panel. Drop never
     /// blocks the main thread and cannot silently cancel a kernel lease.
     pub async fn dispose(mut self) -> Result<Option<Ack>, ClientError> {
-        if self.active.is_some() {
+        if self.active.is_some() || self.preview.is_some() {
             self.finish_drag(false).await.map(Some)
         } else {
             Ok(None)
         }
     }
     pub fn active_drag(&self) -> Option<&Drag> {
-        self.active.as_ref().map(|(_, d)| d)
+        self.preview
+            .as_ref()
+            .map(|p| &p.drag)
+            .or_else(|| self.active.as_ref().map(|(_, d)| d))
     }
 }

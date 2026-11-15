@@ -271,7 +271,7 @@ pub fn read_container<R: RandomAccess + ?Sized>(
     let text = read_vec(source, 0, size)?;
     Ok(Container {
         format: ContainerFormat::Json,
-        document: json::parse_file_text(&text)?,
+        document: json::parse_project_file(&text)?,
         asset_order: asset_order(&text, &[]),
         media: Vec::new(),
         archived_media: Vec::new(),
@@ -307,7 +307,7 @@ fn read_pmv3<R: RandomAccess + ?Sized>(source: &R, size: u64) -> Result<Containe
         return Err(BAD_HEADER);
     }
     let text = read_vec(source, 9, header_length)?;
-    let header = json::parse_file_text(&text)?;
+    let header = json::parse_project_file(&text)?;
     let asset_order = asset_order(&text, &["document"]);
     let legacy_metadata = pmv3_metadata(&header);
     let (document, media) = pmv3_index(header, body_start, size)?;
@@ -519,7 +519,7 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
     if crate::hash::sha256_hex(&bytes) != document.2 {
         return Err(BAD_CONTENT_CHECKSUM);
     }
-    let document = json::parse_file_text(&bytes)?;
+    let document = json::parse_project_file(&bytes)?;
     let asset_order = asset_order(&bytes, &[]);
     let archived_media = media.split_off(items.len());
     let container = Container {

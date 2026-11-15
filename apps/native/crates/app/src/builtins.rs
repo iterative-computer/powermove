@@ -27,40 +27,26 @@ pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElemen
     }
 }
 
-/// How long a panel's scroll thumb stays after the last scroll.
-const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
-/// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
-const SCROLL_BAR: f32 = 9.;
-const SCROLL_THUMB_INSET: f32 = 2.;
-/// A panel body's overlay scroll thumb (the original app's thin one: 9 pt,
-/// inset 2 pt, text ink at `translucency.faint`), when its content is taller
-/// than its slot of `width` × `height`.
-fn scroll_thumb(
+/// The scroll container owns input and offset; panels paint no scrollbar chrome.
+fn panel_scroll_body(
+    id: &str,
+    body: f32,
     handle: &ScrollHandle,
-    width: f32,
-    height: f32,
-    t: &pm_design::Tokens,
-) -> Option<AnyElement> {
-    let max = f32::from(handle.max_offset().y);
-    if max <= 0.5 || height <= 0. {
-        return None;
-    }
-    let content = height + max;
-    let length = (height * height / content).max(t.metrics.hit);
-    let offset = (-f32::from(handle.offset().y)).clamp(0., max);
-    let top = (height - length) * offset / max;
-    let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
-    Some(
-        div()
-            .absolute()
-            .top(px(top + SCROLL_THUMB_INSET))
-            .left(px(width - thick - SCROLL_THUMB_INSET - t.metrics.border * 2.))
-            .w(px(thick))
-            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
-            .rounded(px(thick / 2.))
-            .bg(pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8))
-            .into_any_element(),
-    )
+    content: AnyElement,
+) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(body))
+        .child(
+            div()
+                .id(SharedString::from(format!("panel-body-{id}")))
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(handle)
+                .child(content),
+        )
+        .into_any_element()
 }
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
@@ -110,9 +96,8 @@ pub struct Host {
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     /// Each panel body's scroll (owner request 2026-11-14: side panels
     /// scroll when their content is taller than their slot), kept across
-    /// splitter drags, and when each last scrolled (its thumb shows a moment).
+    /// splitter drags and tab switches.
     scrolls: BTreeMap<String, ScrollHandle>,
-    scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     pub(crate) requests: VecDeque<PlatformRequest>,
@@ -165,10 +150,6 @@ impl Controller {
         {
             return;
         }
-        self.host.borrow_mut().set_contributed_bindings(
-            "native.agent.cite.",
-            [crate::v4_quote::cite_binding()],
-        );
         if let Some(job) = &self.builtins.export_job {
             job.cancel.store(true, std::sync::atomic::Ordering::Release);
         }
@@ -927,15 +908,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
-        let (working, attention, elapsed, background) = runtime.agent_status();
-        self.host
-            .borrow_mut()
-            .set_agent_status(pm_shell::AgentStatus {
-                working,
-                attention,
-                elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
-                background,
-            });
+        self.sync_agent_launcher(cx);
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
         if painters != self.builtins.painters
@@ -1102,46 +1075,16 @@ impl Controller {
             );
         }
         let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
-        let shown = self
-            .builtins
-            .scrolled_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = shown
-            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
-            .flatten();
-        let panel = id.to_owned();
-        Some(
+        let content = view.read(cx).in_body(body);
+        Some(panel_scroll_body(
+            id,
+            body,
+            &handle,
             div()
-                .relative()
-                .w_full()
-                .h(px(body))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("panel-body-{id}")))
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&handle)
-                        .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
-                            v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
-                            // The thumb goes once the scrolling has stopped.
-                            cx.spawn_in(window, async move |this, cx| {
-                                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            })
-                            .detach();
-                            cx.notify();
-                        }))
-                        // As tall as its content, at least its slot.
-                        .child({
-                            let content = view.read(cx).in_body(body);
-                            view.clone().cached(content)
-                        })
-                        .child(keep),
-                )
-                .children(thumb)
+                .child(view.clone().cached(content))
+                .child(keep)
                 .into_any_element(),
-        )
+        ))
     }
     pub fn builtin_header(
         &mut self,
@@ -1208,6 +1151,32 @@ impl Controller {
         })
         .detach();
     }
+    fn sync_agent_launcher(&self, cx: &App) {
+        let Some(runtime) = &self.builtins.runtime else { return; };
+        let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
+        let panel_open =
+            self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
+        self.host
+            .borrow_mut()
+            .set_agent_launcher(pm_shell::agent_launcher::Snapshot {
+                tasks: tasks
+                    .into_iter()
+                    .map(|(id, title, step, started_at, attention, running)| {
+                        pm_shell::agent_launcher::Task {
+                            id,
+                            title,
+                            step,
+                            started_at,
+                            attention,
+                            running,
+                        }
+                    })
+                    .collect(),
+                panel_open,
+                revision,
+                active_thread,
+            });
+    }
     /// Whether the Agent popover is showing (or on its way).
     pub fn agent_open(&self, cx: &App) -> bool {
         self.builtins.opening_windows.contains("agent")
@@ -1235,6 +1204,7 @@ impl Controller {
             return;
         };
         let _ = handle.update(cx, |_, w, _| w.remove_window());
+        self.sync_agent_launcher(cx);
         self.update_builtins(cx);
         gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
         cx.notify();
@@ -1319,6 +1289,7 @@ impl Controller {
             return;
         };
         self.builtins.opening_windows.insert(id.into());
+        if id == "agent" { self.sync_agent_launcher(cx); }
         let owner = cx.entity();
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
@@ -1596,6 +1567,16 @@ impl Controller {
                             }) =>
                         {
                             match effect.effect {
+                                pm_panel_media::Effect::Deleted { message } => {
+                                    let owner = effect.owner;
+                                    crate::v4_native::announce(&self.host.borrow().window, &message);
+                                    let kernel = self.kernel.clone();
+                                    self.delete_toast = Some(cx.new(|cx| crate::action_toast::ToastView::new(message, move |cx| {
+                                        let pending = kernel.call(&owner.project, pm_kernel::Request::new(pm_kernel::Caller::native(), pm_kernel::HistoryCall::Undo).with_document(owner.document).outside_revision(owner.revision));
+                                        cx.spawn(async move |_| { let _ = pending.await; }).detach();
+                                    }, cx)));
+                                    cx.notify();
+                                }
                                 pm_panel_media::Effect::OpenComposition(id) => {
                                     self.open_builtin_composition(&id, cx)
                                 }
@@ -1711,6 +1692,26 @@ impl Controller {
                     );
                     Ok(Value::Null)
                 }
+                "export.queue.add" => {
+                    self.begin_export_mode(request.input["options"].clone(), false, false, true, cx);
+                    Ok(Value::Null)
+                }
+                "export.queue.list" => { self.publish_render_queue(); Ok(Value::Null) }
+                "export.queue.render" => { self.render_pending(cx); Ok(Value::Null) }
+                "export.queue.action" => {
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let action = request.input["action"].as_str().unwrap_or("");
+                    let result = crate::render_queue::store(&self.profile).lock().unwrap().action(id, action);
+                    self.publish_render_queue();
+                    result.map(|_|Value::Null)
+                }
+                "export.queue.finder" => {
+                    let rows = crate::render_queue::store(&self.profile).lock().unwrap().projection();
+                    if let Some(path) = rows.as_array().and_then(|rows| rows.iter().find(|r|r["id"] == request.input["id"] && r["status"] == "Done")).and_then(|r|r["path"].as_str()) {
+                        crate::platform::reveal(std::path::Path::new(path));
+                    }
+                    Ok(Value::Null)
+                }
                 "export.cancel" => {
                     if let Some(job) = &self.builtins.export_job {
                         // Worker observes the flag and publishes terminal state
@@ -1719,6 +1720,12 @@ impl Controller {
                     } else {
                         let _ = runtime.observe_export(json!({"phase":"cancelled"}));
                         self.close_export_sheet(cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "export.showInFinder" => {
+                    if let Some(path) = request.input["path"].as_str() {
+                        crate::platform::reveal(std::path::Path::new(path));
                     }
                     Ok(Value::Null)
                 }
@@ -2104,6 +2111,7 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        self.host.borrow_mut().defer_viewer_raster(after.is_some());
         if let Some(host) = &self.extensions.host {
             host.shell_state(serde_json::json!({
                 "zoom": self.view.zoom.unwrap_or(1.),
@@ -2116,7 +2124,28 @@ impl Controller {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
             }
-            let Ok(pending) = this.update(cx, |v, _| v.write_ui()) else {
+            let Ok(pending) = this.update(cx, |v, cx| {
+                if after.is_some() {
+                    let layer = metal::MetalLayer::new();
+                    let old = v.host.borrow().viewer_layer();
+                    if pm_engine_service::layers::configure_layer(
+                        objc2::MainThreadMarker::new().unwrap(),
+                        &layer,
+                        &old.device(),
+                    )
+                    .is_ok()
+                        && v.host.borrow_mut().stage_viewer_raster(layer.clone())
+                        && let Some(viewer) = &v.viewer
+                    {
+                        let crop = v.host.borrow().viewer_crop.get().map(|[x, y, canvas_width, canvas_height]| pm_engine_service::Crop { x, y, canvas_width, canvas_height });
+                        let _ = viewer.retarget(layer, crop);
+                        v.builtins.frame_outline = Default::default();
+                    }
+                }
+                v.host.borrow_mut().defer_viewer_raster(false);
+                cx.notify();
+                v.write_ui()
+            }) else {
                 return;
             };
             if let Some(pending) = pending {
@@ -2141,6 +2170,18 @@ impl Controller {
 }
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| {
+            if let Some(viewer) = &v.viewer {
+                let _ = viewer.transient_snapshot(snapshot.clone());
+            }
+            if let Some(popout) = &v.popout {
+                if let Some(viewer) = &*popout.viewer.borrow() {
+                    let _ = viewer.transient_snapshot(snapshot);
+                }
+            }
+        });
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
@@ -2171,6 +2212,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
+            E::Status(message) => {
+                v.message = message;
+                cx.notify();
+            }
             E::Seek(time) => v.seek(time),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
@@ -2517,6 +2562,11 @@ impl crate::gizmo::Host for ControllerDelegate {
             let center = v.viewer_center();
             v.view.navigate(change, center, limit);
             v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
+            if matches!(change, crate::gizmo::Navigate::Zoom { .. }) {
+                let mut host = v.host.borrow_mut();
+                host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
+                host.place_cached_viewer();
+            }
             cx.notify();
         });
     }
@@ -3433,4 +3483,74 @@ pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
             pm_shell::MenuEntry::item("Composition…", "newComposition"),
         ],
     )
+}
+
+#[cfg(test)]
+mod panel_scroll_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn panel_scroll_capture() {
+        let dir = std::env::var("PM_DOCK_CAPTURE").ok();
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(gpui_parley::ParleyTextSystem::new(
+                    gpui_parley::SystemFonts::Load,
+                )),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            struct Frame(ScrollHandle);
+            impl Render for Frame {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    div().size_full().bg(rgb(0x202020)).child(panel_scroll_body(
+                        "test",
+                        160.,
+                        &self.0,
+                        div()
+                            .w(px(200.))
+                            .h(px(1000.))
+                            .flex_none()
+                            .bg(rgb(0x336699))
+                            .into_any_element(),
+                    ))
+                }
+            }
+            let handle = ScrollHandle::new();
+            let window = cx
+                .open_window(size(px(300.), px(160.)), |_, cx| {
+                    cx.new(|_| Frame(handle.clone()))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert!(
+                f32::from(handle.max_offset().y) > 0.,
+                "content really scrolls"
+            );
+            handle.set_offset(point(px(0.), px(-120.)));
+            window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+            cx.run_until_parked();
+            assert_eq!(f32::from(handle.offset().y), -120.);
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            if let Some(dir) = dir {
+                std::fs::create_dir_all(&dir).unwrap();
+                image.save(format!("{dir}/panel-scroll.png")).unwrap();
+            }
+            if std::env::var_os("PM_DOCK_BASELINE").is_none() {
+                let scale = image.width() / 300;
+                for y in 0..image.height() {
+                    for x in 292 * scale..image.width() {
+                        assert_eq!(
+                            &image.get_pixel(x, y).0[..3],
+                            &[32, 32, 32],
+                            "scrollbar thumb painted"
+                        );
+                    }
+                }
+            }
+        });
+    }
 }

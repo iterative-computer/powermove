@@ -13,7 +13,7 @@
 //! - Always Play Original is per project and asset.
 //! - Exports read originals unless the user picks "Use Proxies (Draft)".
 //! - The main thread reads memory only. File work runs on one file thread,
-//!   encodes on one worker (N8); pausing a task stops its encoder and it
+//!   encodes on two bounded workers; pausing a task stops its encoder and it
 //!   starts again on Resume.
 use pm_engine_service::MediaCatalog;
 use pm_promedia::storage::{Location, Storage, StorageClass, StorageSettings};
@@ -442,6 +442,8 @@ struct Job {
     source: PathBuf,
     size: ProxySize,
     format: ProxyFormat,
+    stop: Arc<AtomicBool>,
+    automatic: bool,
 }
 
 /// A rendition's state for one asset (the Project panel's status).
@@ -484,8 +486,8 @@ struct State {
     present: HashSet<PathBuf>,
     jobs: BTreeMap<TaskId, Job>,
     /// Why the running encode waits (low disk, playback or an export).
-    waiting: Option<(TaskId, pm_proxy::PauseReason)>,
-    waiting_required: u64,
+    waiting: BTreeMap<TaskId, (pm_proxy::PauseReason, u64)>,
+    priorities: HashMap<(String, String), i32>,
     /// Runtime facts, independent of the saved project and user proxy intent.
     preview_checked: HashSet<String>,
     preview_large: HashSet<String>,
@@ -506,15 +508,17 @@ struct Inner {
     /// The media cache's content-addressed objects (named by their bytes).
     objects: PathBuf,
     state: Mutex<State>,
+    index_write: Mutex<()>,
     tasks: Mutex<BackgroundTasks>,
-    /// Pause or cancel the running encode.
-    stop: AtomicBool,
+    /// Kept only by the headless A/B diagnostic to reproduce the old scheduler.
+    baseline: AtomicBool,
+    first_frame_ready: AtomicBool,
     storage: Mutex<Option<(PathBuf, Arc<Storage>)>>,
     preferences: Mutex<Preferences>,
     /// Space used, measured off the main thread after each change.
     usage: Mutex<Option<Usage>>,
     events: async_channel::Sender<Event>,
-    /// Interactive work (playback, an export) pauses generation.
+    /// Viewer activity pauses manual transcodes; automatic playback relief continues.
     interactive: Arc<AtomicBool>,
     /// Imported assets the catalog has not resolved yet.
     imported: Mutex<Vec<String>>,
@@ -928,6 +932,9 @@ impl Inner {
 
     /// Writes the index (call on a worker).
     fn save(&self) {
+        // Serialise snapshot + rename across the file thread and both encoders,
+        // without holding the UI's state lock during filesystem writes.
+        let _writing = self.index_write.lock().unwrap();
         let bytes = serde_json::to_vec_pretty(&self.state.lock().unwrap().index);
         if let Ok(bytes) = bytes {
             let _ = write_atomic(&index_path(&self.profile), &bytes);
@@ -1081,6 +1088,7 @@ impl Inner {
         kind: Rendition,
         prefs: &Preferences,
         assets: Vec<Original>,
+        automatic: bool,
     ) -> Result<usize, String> {
         let mut queued = 0;
         {
@@ -1107,7 +1115,15 @@ impl Inner {
                                 Rendition::Optimized => TaskKind::Optimized,
                             },
                             unit: ProgressUnit::Frames,
-                            priority: 0,
+                            priority: if automatic {
+                                state
+                                    .priorities
+                                    .get(&(project.into(), asset.clone()))
+                                    .copied()
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            },
                             total: 0,
                         },
                     )
@@ -1125,6 +1141,8 @@ impl Inner {
                         source,
                         size,
                         format,
+                        stop: Arc::new(AtomicBool::new(false)),
+                        automatic,
                     },
                 );
                 queued += 1;
@@ -1248,40 +1266,75 @@ impl Inner {
         freed
     }
 
-    /// Wakes the generation worker (started on first use).
+    /// Two bounded encodes can run while the file thread identifies later clips.
     fn kick(self: &Arc<Self>) {
+        let count = if self.baseline.load(Ordering::Acquire) {
+            1
+        } else {
+            2
+        };
         let mut wake = self.wake.lock().unwrap();
-        if let Some(tx) = wake.as_ref()
-            && tx.send(()).is_ok()
-        {
+        if let Some(tx) = wake.as_ref() {
+            for _ in 0..count {
+                let _ = tx.send(());
+            }
             return;
         }
         let (tx, rx) = mpsc::channel::<()>();
-        let _ = tx.send(());
-        let inner = Arc::downgrade(self);
-        if std::thread::Builder::new()
-            .name("pm-pro-media".into())
-            .spawn(move || {
-                for () in rx {
-                    let Some(inner) = inner.upgrade() else { break };
-                    inner.drain();
-                }
-            })
-            .is_ok()
-        {
-            *wake = Some(tx);
+        let rx = Arc::new(Mutex::new(rx));
+        for worker in 0..count {
+            let rx = rx.clone();
+            let inner = Arc::downgrade(self);
+            std::thread::Builder::new()
+                .name(format!("pm-pro-media-{worker}"))
+                .spawn(move || {
+                    loop {
+                        let message = rx.lock().unwrap().recv();
+                        if message.is_err() {
+                            break;
+                        }
+                        let Some(inner) = inner.upgrade() else { break };
+                        inner.drain();
+                    }
+                })
+                .expect("preview worker");
         }
+        for _ in 0..count {
+            let _ = tx.send(());
+        }
+        *wake = Some(tx);
     }
 
     fn drain(&self) {
         loop {
-            let Some(ticket) = self.tasks.lock().unwrap().start_next() else {
+            if !self.first_frame_ready.load(Ordering::Acquire) {
                 return;
+            }
+            let ticket = {
+                // Start and reset under the same task lock as act(): a
+                // cancellation just after start must not be cleared here.
+                let mut tasks = self.tasks.lock().unwrap();
+                let state = self.state.lock().unwrap();
+                let running = tasks
+                    .all()
+                    .iter()
+                    .filter(|t| t.state == TaskState::Running && !state.waiting.contains_key(&t.id))
+                    .count();
+                if running >= preview_job_limit(self.interactive.load(Ordering::Acquire)) {
+                    return;
+                }
+                drop(state);
+                let Some(ticket) = tasks.start_next() else {
+                    return;
+                };
+                if let Some(job) = self.state.lock().unwrap().jobs.get(&ticket.id) {
+                    job.stop.store(false, Ordering::Release);
+                }
+                ticket
             };
-            self.stop.store(false, Ordering::Release);
             let _ = self.events.try_send(Event::Changed);
             let result = self.run(ticket);
-            self.state.lock().unwrap().waiting = None;
+            self.state.lock().unwrap().waiting.remove(&ticket.id);
             let mut tasks = self.tasks.lock().unwrap();
             match tasks.worker_state(ticket) {
                 Ok(TaskState::PauseRequested | TaskState::CancelRequested) => {
@@ -1294,11 +1347,14 @@ impl Inner {
             }
             drop(tasks);
             self.measure_usage();
+            if let Some(tx) = self.wake.lock().unwrap().as_ref() {
+                let _ = tx.send(());
+            }
         }
     }
 
     fn run(&self, ticket: Ticket) -> Result<(), TaskFailure> {
-        let (kind, project, asset, source, size, format) = {
+        let (kind, project, asset, source, size, format, stop, automatic) = {
             let state = self.state.lock().unwrap();
             let job = state
                 .jobs
@@ -1311,6 +1367,8 @@ impl Inner {
                 job.source.clone(),
                 job.size,
                 job.format,
+                job.stop.clone(),
+                job.automatic,
             )
         };
         let before_source = Source::of(&source)
@@ -1322,14 +1380,14 @@ impl Inner {
         let (ffmpeg, ffprobe) = ffmpeg()
             .ok_or_else(|| failure(TaskFailureCode::CodecUnsupported, "FFmpeg is not available"))?;
         let content = self
-            .content_of(&source, &self.stop)
+            .content_of(&source, &stop)
             .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?;
         let hash = match content
             .strip_prefix("b3:")
             .or_else(|| content.strip_prefix("seq:"))
         {
             Some(hash) => hash.to_owned(),
-            None => hash_file(&source, &self.stop)
+            None => hash_file(&source, &stop)
                 .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?,
         };
         if self.note(&project, &asset, &source, &content) {
@@ -1374,7 +1432,28 @@ impl Inner {
                 let _ = self.events.try_send(Event::Changed);
             }
         };
-        let pause = || self.interactive.load(Ordering::Acquire);
+        let pause = || {
+            if !self.interactive.load(Ordering::Acquire) {
+                return false;
+            }
+            if !automatic || self.baseline.load(Ordering::Acquire) {
+                return true;
+            }
+            // If playback starts during two idle encodes, suspend the later
+            // one cooperatively, preserving its work until the viewer rests.
+            let tasks = self.tasks.lock().unwrap();
+            let state = self.state.lock().unwrap();
+            let primary = tasks
+                .all()
+                .iter()
+                .filter(|t| {
+                    t.state == TaskState::Running
+                        && state.jobs.get(&t.id).is_some_and(|j| j.automatic)
+                })
+                .map(|t| t.id)
+                .min();
+            primary.is_some_and(|id| id != ticket.id)
+        };
         let required = facts
             .and_then(|(w, h, depth, frames, alpha)| {
                 pm_proxy::ProxyRecipe::new(format, size, w, h, depth, alpha)
@@ -1391,10 +1470,16 @@ impl Inner {
         let on_pause = |reason: Option<pm_proxy::PauseReason>| {
             {
                 let mut state = self.state.lock().unwrap();
-                state.waiting = reason.map(|r| (ticket.id, r));
-                state.waiting_required = required;
+                if let Some(reason) = reason {
+                    state.waiting.insert(ticket.id, (reason, required));
+                } else {
+                    state.waiting.remove(&ticket.id);
+                }
             }
             let _ = self.events.try_send(Event::Changed);
+            if let Some(tx) = self.wake.lock().unwrap().as_ref() {
+                let _ = tx.send(());
+            }
         };
         let generated = pm_proxy::generate(pm_proxy::GenerationRequest {
             source: &source,
@@ -1405,7 +1490,7 @@ impl Inner {
             ffprobe: &ffprobe,
             store: &store,
             control: pm_proxy::GenerationControl {
-                cancel: &self.stop,
+                cancel: &stop,
                 pause: &pause,
                 on_pause: &on_pause,
                 on_progress: &on_progress,
@@ -1469,7 +1554,19 @@ impl Inner {
         let inner = self;
         let project = project.to_owned();
         inner.watch(&project, originals, all);
-        let originals = originals.to_vec();
+        let mut originals = originals.to_vec();
+        if !inner.baseline.load(Ordering::Acquire) {
+            let state = inner.state.lock().unwrap();
+            originals.sort_by_key(|(asset, _)| {
+                std::cmp::Reverse(
+                    state
+                        .priorities
+                        .get(&(project.clone(), asset.clone()))
+                        .copied()
+                        .unwrap_or(0),
+                )
+            });
+        }
         let mut changed = inner.refresh_present();
         let stop = AtomicBool::new(false);
         let mut previews = Vec::new();
@@ -1561,7 +1658,19 @@ impl Inner {
                     .and_then(|r| r.proxy.as_ref())
                     .is_some_and(|proxy| state.present.contains(&proxy.path));
                 if state.preview_large.contains(&content) && !original_only && !ready {
-                    previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
+                    drop(state);
+                    let original = (asset.clone(), "Prepare HD preview".into(), path.clone());
+                    if inner.baseline.load(Ordering::Acquire) {
+                        previews.push(original);
+                    } else {
+                        let prefs = Preferences {
+                            size: ProxySize::P1080,
+                            format: ProxyFormat::ProResProxy,
+                            ..inner.preferences()
+                        };
+                        let _ =
+                            inner.create(&project, Rendition::Proxy, &prefs, vec![original], true);
+                    }
                 }
             }
         }
@@ -1578,7 +1687,7 @@ impl Inner {
                 format: ProxyFormat::ProResProxy,
                 ..inner.preferences()
             };
-            let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
+            let _ = inner.create(&project, Rendition::Proxy, &prefs, previews, true);
         }
         for kind in [Rendition::Proxy, Rendition::Optimized] {
             let again: Vec<Original> = renew
@@ -1587,7 +1696,7 @@ impl Inner {
                 .map(|(_, original)| original.clone())
                 .collect();
             if !again.is_empty() {
-                let _ = inner.create(&project, kind, &inner.preferences(), again);
+                let _ = inner.create(&project, kind, &inner.preferences(), again, false);
             }
         }
     }
@@ -1662,8 +1771,8 @@ impl ProMedia {
                     known: HashMap::new(),
                     present: HashSet::new(),
                     jobs: BTreeMap::new(),
-                    waiting: None,
-                    waiting_required: 0,
+                    waiting: BTreeMap::new(),
+                    priorities: HashMap::new(),
                     preview_checked: HashSet::new(),
                     recipe_checked: HashSet::new(),
                     preview_large: HashSet::new(),
@@ -1671,8 +1780,10 @@ impl ProMedia {
                 }),
                 profile,
                 objects,
+                index_write: Mutex::new(()),
                 tasks: Mutex::new(BackgroundTasks::default()),
-                stop: AtomicBool::new(false),
+                baseline: AtomicBool::new(false),
+                first_frame_ready: AtomicBool::new(true),
                 storage: Mutex::new(None),
                 preferences: Mutex::new(preferences),
                 usage: Mutex::new(None),
@@ -1773,6 +1884,54 @@ impl ProMedia {
     /// Measures usage again on the file thread; `Changed` follows.
     pub fn refresh_usage(&self) {
         self.inner.io(|inner| inner.measure_usage());
+    }
+
+    /// Queue immediately on open, but give the first viewer frame the GPU
+    /// before starting hardware encodes. Imports into a warm viewer proceed.
+    pub(crate) fn wait_for_first_frame(&self) {
+        self.inner.first_frame_ready.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn first_frame_ready(&self) {
+        if !self.inner.first_frame_ready.swap(true, Ordering::AcqRel) {
+            let queued = self
+                .inner
+                .tasks
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .any(|t| t.state == TaskState::Queued);
+            if queued {
+                self.inner.kick();
+            }
+        }
+    }
+
+    /// Reorder only queued work; running encodes keep their progress.
+    pub(crate) fn prioritize(&self, project: &str, snapshot: &pm_kernel::Snapshot, time: f64) {
+        let priorities = preview_priorities(snapshot, time);
+        let mut tasks = self.inner.tasks.lock().unwrap();
+        let mut state = self.inner.state.lock().unwrap();
+        state.priorities.retain(|(owner, _), _| owner != project);
+        for (asset, priority) in priorities {
+            state.priorities.insert((project.into(), asset), priority);
+        }
+        for (id, job) in &state.jobs {
+            if job.automatic
+                && job.project == project
+                && tasks.get(*id).is_some_and(|t| t.state == TaskState::Queued)
+            {
+                let p = state
+                    .priorities
+                    .get(&(project.into(), job.asset.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                if tasks.get(*id).is_some_and(|t| t.priority != p) {
+                    let _ = tasks.priority(*id, p);
+                }
+            }
+        }
     }
 
     /// Identifies `project`'s originals (asset, path) on the file thread:
@@ -1901,7 +2060,7 @@ impl ProMedia {
         prefs: &Preferences,
         assets: Vec<Original>,
     ) -> Result<usize, String> {
-        self.inner.create(project, kind, prefs, assets)
+        self.inner.create(project, kind, prefs, assets, false)
     }
 
     /// Forgets `kind` for `assets` (id, original path or `None` offline)
@@ -1919,7 +2078,7 @@ impl ProMedia {
             let _ = inner.refresh_present();
             let _ = inner.events.try_send(Event::Renditions);
             if let Some((prefs, again)) = rebuild {
-                let _ = inner.create(&project, kind, &prefs, again);
+                let _ = inner.create(&project, kind, &prefs, again, false);
             }
             inner.measure_usage();
         });
@@ -1967,15 +2126,19 @@ impl ProMedia {
     /// file thread and queues the ones `prefs` asks for.
     pub fn create_on_import(&self, project: String, prefs: Preferences, assets: Vec<Original>) {
         self.inner.io(move |inner| {
-            let wanted: Vec<_> = assets
-                .into_iter()
-                .filter(|(_, _, path)| {
-                    picture(path)
-                        .is_some_and(|(w, h, depth, _)| prefs.creates_on_import(w, h, depth))
-                })
-                .collect();
-            if !wanted.is_empty() {
-                let _ = inner.create(&project, Rendition::Proxy, &prefs, wanted);
+            // Adopt first, including automatic HD previews regardless of the
+            // explicit Create Proxies preference. Start each encode immediately.
+            let originals = assets
+                .iter()
+                .map(|(id, _, path)| (id.clone(), path.clone()))
+                .collect::<Vec<_>>();
+            inner.identify(&project, &originals, false);
+            for original in assets {
+                if picture(&original.2)
+                    .is_some_and(|(w, h, depth, _)| prefs.creates_on_import(w, h, depth))
+                {
+                    let _ = inner.create(&project, Rendition::Proxy, &prefs, vec![original], false);
+                }
             }
         });
     }
@@ -1992,7 +2155,9 @@ impl ProMedia {
         }
         .map_err(|e| format!("{e:?}"))?;
         if running && matches!(action, TaskAction::Pause | TaskAction::Cancel) {
-            self.inner.stop.store(true, Ordering::Release);
+            if let Some(job) = self.inner.state.lock().unwrap().jobs.get(&id) {
+                job.stop.store(true, Ordering::Release);
+            }
         }
         drop(tasks);
         if action == TaskAction::Resume {
@@ -2005,12 +2170,12 @@ impl ProMedia {
     /// Why a running task's encode waits, in the task's words.
     pub fn waiting(&self, id: TaskId) -> Option<String> {
         let state = self.inner.state.lock().unwrap();
-        match state.waiting {
-            Some((task, pm_proxy::PauseReason::LowDisk)) if task == id => Some(media_pause_line(
+        match state.waiting.get(&id) {
+            Some((pm_proxy::PauseReason::LowDisk, required)) => Some(media_pause_line(
                 state.jobs.get(&id).map_or(Rendition::Proxy, |j| j.kind),
-                state.waiting_required,
+                *required,
             )),
-            Some((task, pm_proxy::PauseReason::InteractiveWork)) if task == id => {
+            Some((pm_proxy::PauseReason::InteractiveWork, _)) => {
                 Some("Waiting while the viewer plays or an export runs".into())
             }
             _ => None,
@@ -2019,12 +2184,13 @@ impl ProMedia {
 
     pub fn preview_pause_message(&self, project: &str) -> Option<String> {
         let state = self.inner.state.lock().unwrap();
-        let (id, reason) = state.waiting?;
-        let job = state.jobs.get(&id)?;
-        (reason == pm_proxy::PauseReason::LowDisk
-            && job.project == project
-            && job.kind == Rendition::Proxy)
-            .then(|| media_pause_line(Rendition::Proxy, state.waiting_required))
+        state.waiting.iter().find_map(|(id, (reason, required))| {
+            let job = state.jobs.get(id)?;
+            (*reason == pm_proxy::PauseReason::LowDisk
+                && job.project == project
+                && job.kind == Rendition::Proxy)
+                .then(|| media_pause_line(Rendition::Proxy, *required))
+        })
     }
 
     /// Every media task, in queue order.
@@ -2077,6 +2243,69 @@ fn media_pause_line(kind: Rendition, required: u64) -> String {
         "{label} paused, need {:.1} GB free",
         (required as f64 / 1e9 * 10.).ceil() / 10.
     )
+}
+
+/// Leave CPU time for the viewer during playback and cold-frame preparation.
+fn preview_job_limit(interactive: bool) -> usize {
+    if interactive { 1 } else { 2 }
+}
+
+/// Visible clips at the playhead precede nearby clips in the open comp;
+/// unused media stays at the back. A repeated source gets its best priority.
+fn preview_priorities(snapshot: &pm_kernel::Snapshot, time: f64) -> HashMap<String, i32> {
+    let mut priorities = HashMap::new();
+    let Some(root) = snapshot.root() else {
+        return priorities;
+    };
+    let layers = snapshot.layers(None);
+    let solo = layers.iter().any(|l| l.solo);
+    for layer in &layers {
+        let Some(node) = pm_kernel::model::find_layer(root, &layer.id)
+            .and_then(|loc| pm_kernel::model::layer_at(root, &loc))
+        else {
+            continue;
+        };
+        let Some(asset) = node
+            .get("d")
+            .and_then(|d| d.get("asset"))
+            .and_then(|n| pm_eval::node::string(Some(n)))
+        else {
+            continue;
+        };
+        let mut visible = layer.visible && (!solo || layer.solo);
+        let mut group = layer.group.as_ref();
+        let mut remaining = layers.len();
+        while let Some(id) = group {
+            if remaining == 0 {
+                visible = false;
+                break;
+            }
+            remaining -= 1;
+            let Some(parent) = layers.iter().find(|l| &l.id == id) else {
+                break;
+            };
+            visible &= parent.visible && time >= parent.in_time && time < parent.out_time;
+            group = parent.group.as_ref();
+        }
+        let distance = (layer.in_time - time).max(time - layer.out_time).max(0.);
+        let priority = if visible && distance == 0. {
+            2_000_000
+        } else {
+            1_000_000 - (distance * 1000.).min(900_000.) as i32 - if visible { 0 } else { 50_000 }
+        };
+        priorities
+            .entry(asset.to_string())
+            .and_modify(|p: &mut i32| *p = (*p).max(priority))
+            .or_insert(priority);
+    }
+    priorities
+}
+
+#[path = "cold_playback_bench.rs"]
+mod cold_playback_bench;
+
+pub(crate) fn cold_playback_bench() -> anyhow::Result<()> {
+    cold_playback_bench::run()
 }
 
 impl crate::session::Controller {
@@ -2133,6 +2362,22 @@ impl crate::session::Controller {
                 .iter()
                 .map(|(id, path)| (id.clone(), path.clone()))
                 .collect();
+            if let Some(p) = &self.published {
+                if !self
+                    .viewer
+                    .as_ref()
+                    .and_then(|v| v.status().frame)
+                    .is_some_and(|f| {
+                        f.stamp.doc_id == p.snapshot.doc_id
+                            && f.gpu_ok
+                            && f.completion_host_seconds.is_some()
+                    })
+                {
+                    self.pro_media.wait_for_first_frame();
+                }
+                self.pro_media
+                    .prioritize(&project, &p.snapshot, self.time());
+            }
             self.pro_media.identify(project, originals);
         }
     }
@@ -2448,9 +2693,6 @@ impl crate::session::Controller {
     /// facts call for one, probed off the main thread.
     pub(crate) fn proxies_on_import(&mut self, assets: &[String]) {
         let prefs = self.pro_media_preferences();
-        if prefs.create == Create::OnlyWhenAsked {
-            return;
-        }
         let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
             return;
         };
@@ -3607,6 +3849,194 @@ mod tests {
         assert!(!prefs.creates_on_import(1920, 1080, 10));
     }
     #[test]
+    fn concurrent_rendition_updates_persist_a_complete_index() {
+        let (_dir, media) = service();
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let inner = &media.inner;
+                scope.spawn(move || {
+                    for update in 0..20 {
+                        inner
+                            .state
+                            .lock()
+                            .unwrap()
+                            .index
+                            .assets
+                            .entry("p".into())
+                            .or_default()
+                            .insert(
+                                format!("asset-{worker}-{update}"),
+                                "synthetic-content".into(),
+                            );
+                        inner.save();
+                    }
+                });
+            }
+        });
+        let saved: Index =
+            serde_json::from_slice(&std::fs::read(index_path(&media.inner.profile)).unwrap())
+                .unwrap();
+        assert_eq!(saved.assets["p"].len(), 80);
+    }
+
+    #[test]
+    fn cold_open_queues_without_competing_with_the_first_frame() {
+        let (dir, media) = service();
+        media
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .priorities
+            .insert(("p".into(), "a".into()), 2_000_000);
+        media.wait_for_first_frame();
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &Preferences::default(),
+                vec![("a".into(), "Test".into(), dir.path().join("offline.mov"))],
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(media.snapshot()[0].state, TaskState::Queued);
+        assert_eq!(
+            media.snapshot()[0].priority,
+            0,
+            "automatic priorities do not change manual work"
+        );
+        let id = media.snapshot()[0].id;
+        media.act(id, TaskAction::Priority(7)).unwrap();
+        let empty = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(r#"{"id":"p","layers":[]}"#).unwrap(),
+        );
+        media.prioritize("p", &empty.snapshot(), 0.);
+        assert_eq!(
+            media.snapshot()[0].priority,
+            7,
+            "playhead updates preserve a manual priority"
+        );
+        media.first_frame_ready();
+        let started = std::time::Instant::now();
+        while !media.snapshot()[0].state.terminal() {
+            assert!(started.elapsed().as_secs() < 10);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(media.snapshot()[0].state, TaskState::Failed);
+    }
+
+    #[test]
+    fn preview_concurrency_reserves_playback_capacity() {
+        assert_eq!(preview_job_limit(true), 1);
+        assert_eq!(preview_job_limit(false), 2);
+    }
+
+    #[test]
+    fn previews_follow_visible_playhead_then_nearby_clips() {
+        let value = pm_model::json::parse(
+            r#"{"id":"P","compId":"C","w":1080,"h":1920,"fps":30,"dur":20,"layers":[
+            {"id":"now","type":"video","on":true,"from":0,"dur":2,"d":{"asset":"visible"}},
+            {"id":"off","type":"video","on":false,"from":0,"dur":2,"d":{"asset":"hidden"}},
+            {"id":"soon","type":"video","from":2,"dur":2,"d":{"asset":"near"}},
+            {"id":"later","type":"video","from":10,"dur":2,"d":{"asset":"far"}},
+            {"id":"again","type":"video","from":15,"dur":2,"d":{"asset":"visible"}}
+        ]}"#,
+        )
+        .unwrap();
+        let store = pm_kernel::DocumentStore::new_untitled(value);
+        let p = preview_priorities(&store.snapshot(), 1.);
+        assert!(p["visible"] > p["near"]);
+        assert!(p["near"] > p["far"]);
+        assert!(p["visible"] > p["hidden"]);
+        let moved = preview_priorities(&store.snapshot(), 11.);
+        assert!(moved["far"] > moved["near"]);
+    }
+
+    #[test]
+    fn two_workers_keep_independent_pause_and_cancel_state() {
+        if ffmpeg().is_none() {
+            return;
+        }
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        media.inner.interactive.store(true, Ordering::Release);
+        let source = clip(
+            dir.path(),
+            "parallel.mov",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=64x64:r=30:d=0.1",
+                "-c:v",
+                "prores_videotoolbox",
+                "-profile:v",
+                "proxy",
+            ],
+        );
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &Preferences::default(),
+                (0..4)
+                    .map(|i| (format!("a{i}"), format!("Manual {i}"), source.clone()))
+                    .collect(),
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            if media.inner.state.lock().unwrap().waiting.len() == 2 {
+                break;
+            }
+            assert!(
+                started.elapsed().as_secs() < 20,
+                "both workers pause independently"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let tasks = media.snapshot();
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.state == TaskState::Running)
+                .count(),
+            2
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.state == TaskState::Queued)
+                .count(),
+            2
+        );
+        let id = tasks
+            .iter()
+            .find(|t| t.state == TaskState::Running)
+            .unwrap()
+            .id;
+        media.act(id, TaskAction::Cancel).unwrap();
+        let state = media.inner.state.lock().unwrap();
+        assert!(state.jobs[&id].stop.load(Ordering::Acquire));
+        for (other, job) in &state.jobs {
+            if *other != id {
+                assert!(!job.stop.load(Ordering::Acquire));
+            }
+        }
+        drop(state);
+        for task in media.snapshot() {
+            if !task.state.terminal() {
+                let _ = media.act(task.id, TaskAction::Cancel);
+            }
+        }
+        let started = std::time::Instant::now();
+        while media.snapshot().iter().any(|t| !t.state.terminal()) {
+            assert!(started.elapsed().as_secs() < 20);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn low_disk_preview_message_states_required_space() {
         let (_dir, media) = service();
         let id = TaskId(1);
@@ -3621,16 +4051,19 @@ mod tests {
                     source: PathBuf::from("source.mov"),
                     size: ProxySize::P1080,
                     format: ProxyFormat::ProResProxy,
+                    stop: Arc::new(AtomicBool::new(false)),
+                    automatic: true,
                 },
             );
-            state.waiting = Some((id, pm_proxy::PauseReason::LowDisk));
-            state.waiting_required = (5 << 30) + (1 << 29);
+            state
+                .waiting
+                .insert(id, (pm_proxy::PauseReason::LowDisk, (5 << 30) + (1 << 29)));
         }
         let expected = "Previews paused, need 6.0 GB free";
         assert_eq!(media.preview_pause_message("p").as_deref(), Some(expected));
         assert_eq!(media.waiting(id).as_deref(), Some(expected));
         assert_eq!(media.preview_pause_message("another project"), None);
-        media.inner.state.lock().unwrap().waiting = None;
+        media.inner.state.lock().unwrap().waiting.clear();
         assert_eq!(media.preview_pause_message("p"), None);
     }
 
@@ -3662,7 +4095,7 @@ mod tests {
         let reopened = ProMedia::new(
             media.inner.profile.clone(),
             media.inner.objects.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
         );
         {
             let state = reopened.inner.state.lock().unwrap();

@@ -47,6 +47,9 @@ pub struct DocumentSource {
     snapshot: pm_kernel::Snapshot,
     media: pm_export::render::MediaPaths,
     meshes: Mutex<HashMap<String, Arc<Mesh>>>,
+    // Retaining the source makes identity safe against address reuse and
+    // Arc::make_mut. Deformed geometry has a new identity.
+    imported_meshes: Mutex<HashMap<usize, (Arc<pm_scene3d::render::Geometry>, Arc<Mesh>)>>,
     resources: Mutex<HashMap<String, Arc<pm_scene3d::render::Resource>>>,
     resolved: Mutex<Option<(SceneRequest, Arc<pm_scene3d::service::ResolvedScene>)>>,
     quality_override: Option<(String, Value)>,
@@ -109,6 +112,7 @@ impl DocumentSource {
             },
             media,
             meshes: Mutex::default(),
+            imported_meshes: Mutex::default(),
             resources: Mutex::default(),
             resolved: Mutex::default(),
             quality_override: None,
@@ -333,6 +337,18 @@ impl DocumentSource {
                 &pm_render::scene3d::model::source_of(&map)?.geometry(),
             ))
         })
+    }
+    fn imported_mesh(&self, geometry: &Arc<pm_scene3d::render::Geometry>) -> Result<Arc<Mesh>, String> {
+        let key = Arc::as_ptr(geometry) as usize;
+        let mut cache = self.imported_meshes.lock().map_err(|_| "Studio imported mesh cache poisoned")?;
+        if let Some((_, mesh)) = cache.get(&key) { return Ok(mesh.clone()); }
+        let mesh = self.cached_mesh(
+            format!("asset:{}", pm_scene3d::render::geometry_key(geometry)),
+            || Ok(convert_mesh(geometry)),
+        )?;
+        if cache.len() >= 512 { cache.clear(); }
+        cache.insert(key, (geometry.clone(), mesh.clone()));
+        Ok(mesh)
     }
     fn cached_mesh(
         &self,
@@ -869,10 +885,7 @@ impl SceneSource for DocumentSource {
                         maps::screen(object, index, &mut selected, &mut gpu, basic);
                         scene.materials.push(selected);
                         materials.push(gpu);
-                        let mesh = self.cached_mesh(
-                            format!("asset:{}", pm_scene3d::render::geometry_key(&part.geometry)),
-                            || Ok(convert_mesh(&part.geometry)),
-                        )?;
+                        let mesh = self.imported_mesh(&part.geometry)?;
                         instances.push(MeshInstance {
                             layer: id.into(),
                             mesh,
@@ -1265,5 +1278,28 @@ fn imported_material(m: &pm_scene3d::render::gltf::Material) -> Material {
             0.
         },
         ..Material::dielectric(color, if basic { 1. } else { m.roughness as f32 })
+    }
+}
+
+#[cfg(test)]
+mod immutable_mesh_cache_tests {
+    use super::*;
+    #[test]
+    fn retained_mesh_reuses_storage_and_detects_copy_on_write_edits() {
+        let source = DocumentSource::new(Arc::new(pm_model::Document::new(None, 0)), Default::default());
+        let mut geometry = Arc::new(pm_scene3d::render::Geometry {
+            positions: vec![0., 0., 0., 1., 0., 0., 0., 1., 0.],
+            normals: vec![0., 0., 1., 0., 0., 1., 0., 0., 1.],
+            uvs: vec![0., 0., 1., 0., 0., 1.],
+            indices: vec![0, 1, 2], indexed: true, groups: vec![],
+        });
+        let first = source.imported_mesh(&geometry).unwrap();
+        let again = source.imported_mesh(&geometry).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        Arc::make_mut(&mut geometry).positions[0] = -1.;
+        let edited = source.imported_mesh(&geometry).unwrap();
+        assert!(!Arc::ptr_eq(&first, &edited));
+        assert_eq!(first.positions[0].x, 0.);
+        assert_eq!(edited.positions[0].x, -1.);
     }
 }

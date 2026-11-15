@@ -99,7 +99,7 @@ impl Window {
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
         let selection = session.draft.text_selection();
-        value["draft"] = json!({"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         let mut threads = panel.summaries();
         value["threadTitle"] = json!(
@@ -274,11 +274,8 @@ fn retry_turn(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let mut request_draft = crate::composer::Draft::from_legacy(&text, &files)
+    let request_draft = crate::composer::Draft::from_legacy(&text, &files)
         .or_else(|_| crate::composer::Draft::from_legacy(&text, &[]))?;
-    if let Some(citations) = user.value["citations"].as_array() {
-        request_draft.set_citations(citations.clone())?;
-    }
     let saved = std::mem::replace(panel.draft_mut(thread)?, request_draft);
     let effect = panel.submit(thread, run, request, now);
     *panel.draft_mut(thread)? = saved;
@@ -316,14 +313,6 @@ pub fn dispatch(
             draft.set_text(text, now)?;
             draft.select_text(range)?;
             *panel.draft_mut(thread)? = draft;
-            None
-        }
-        "citations" => {
-            let citations = action["citations"]
-                .as_array()
-                .ok_or(Error::Invalid("citations"))?
-                .clone();
-            panel.draft_mut(thread)?.set_citations(citations)?;
             None
         }
         "focus" => {
@@ -621,15 +610,19 @@ mod tests {
         assert!(act(&mut p, json!({"type":"stop"})).unwrap().is_some());
     }
     #[test]
+    fn fresh_session_publishes_auto_access() {
+        assert_eq!(snapshot(&panel())["settings"]["access"], "auto");
+    }
+    #[test]
     fn full_access_returns_consent_instead_of_granting_authority() {
         let mut p = panel();
         let e = act(&mut p, json!({"type":"setAccess","access":"full"}))
             .unwrap()
             .unwrap();
         assert!(matches!(e.kind, EffectKind::ComputerConsent));
-        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
         p.acknowledge(e.id, false).unwrap();
-        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
     }
     #[test]
     fn access_modes_and_catalog_validation_use_real_model_methods() {

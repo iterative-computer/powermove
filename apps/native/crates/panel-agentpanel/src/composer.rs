@@ -75,7 +75,6 @@ struct State {
 #[derive(Clone, Debug)]
 pub struct Draft {
     state: State,
-    citations: Arc<[Value]>,
     catalog: HashMap<String, Attachment>,
     history: Vec<State>,
     cursor: usize,
@@ -90,7 +89,6 @@ impl Default for Draft {
         };
         Self {
             state: state.clone(),
-            citations: Arc::from([]),
             catalog: HashMap::new(),
             history: vec![state],
             cursor: 0,
@@ -180,27 +178,6 @@ impl Draft {
         }
         (text, files)
     }
-    pub fn citations(&self) -> &[Value] {
-        &self.citations
-    }
-    pub fn set_citations(&mut self, citations: Vec<Value>) -> Result<()> {
-        for c in &citations {
-            let start = c["start"].as_u64().ok_or(Error::Invalid("quote start"))?;
-            let end = c["end"].as_u64().ok_or(Error::Invalid("quote end"))?;
-            if c["messageId"].as_str().is_none_or(str::is_empty)
-                || c["text"].as_str().is_none_or(|t| {
-                    t.trim().is_empty()
-                        || t.encode_utf16().count() as u64 != end.saturating_sub(start)
-                })
-                || end <= start
-                || !c["comment"].is_string()
-            {
-                return Err(Error::Invalid("citation"));
-            }
-        }
-        self.citations = citations.into();
-        Ok(())
-    }
     pub fn request_text(&self) -> String {
         self.state
             .units
@@ -212,11 +189,10 @@ impl Draft {
             .collect()
     }
     pub fn sendable(&self) -> bool {
-        !self.citations.is_empty()
-            || self.state.units.iter().any(|u| match u {
-                Unit::File(_) => true,
-                Unit::Char(c) => !c.is_whitespace(),
-            })
+        self.state.units.iter().any(|u| match u {
+            Unit::File(_) => true,
+            Unit::Char(c) => !c.is_whitespace(),
+        })
     }
     pub fn attachments(&self) -> impl Iterator<Item = &Attachment> {
         self.state

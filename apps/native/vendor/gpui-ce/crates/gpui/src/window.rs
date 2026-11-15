@@ -899,7 +899,7 @@ pub enum WindowControlArea {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct HitboxId(u64);
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "headless-support")]
 impl HitboxId {
     /// A placeholder HitboxId exclusively for integration testing API's that
     /// need a hitbox but where the value of the hitbox does not matter. The
@@ -1145,7 +1145,7 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     cursor_styles: Vec<CursorStyleRequest>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
@@ -1197,7 +1197,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
 
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "headless-support"))]
             debug_bounds: FxHashMap::default(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1225,7 +1225,7 @@ impl Frame {
         self.tab_stops.clear();
         self.focus = None;
 
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "headless-support"))]
         {
             self.debug_bounds.clear();
         }
@@ -1922,7 +1922,10 @@ impl Window {
                 // after this frame (the window was re-invalidated mid-draw, or
                 // animations scheduled next-frame callbacks), re-arm the frame
                 // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                if invalidator.is_dirty()
+                    || !next_frame_callbacks.borrow().is_empty()
+                    || input_rate_tracker.borrow_mut().is_high_rate()
+                {
                     invalidator.wake_platform();
                 }
             }
@@ -2744,7 +2747,7 @@ impl Window {
     ///
     /// Tests have no platform frame loop, so this simulates the delivery of the
     /// next frame.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn simulate_next_frame(&mut self, cx: &mut App) -> usize {
         let callbacks = self.next_frame_callbacks.take();
         let count = callbacks.len();
@@ -2817,14 +2820,14 @@ impl Window {
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
+    #[cfg(any(test, feature = "headless-support", feature = "frame-capture"))]
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
     }
 
     /// Returns the current frame's quad and glyph sprite counts.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn rendered_primitive_counts(&self) -> (usize, usize, usize, usize) {
         let scene = &self.rendered_frame.scene;
         (
@@ -2839,7 +2842,7 @@ impl Window {
     /// painted output without rasterizing the frame. Quad bounds are in scaled pixels and are
     /// not clipped; each quad carries the content mask it will be clipped to when drawn. Quads
     /// whose bounds don't intersect their content mask are culled at paint time and won't appear.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn painted_quads(&self) -> Vec<Quad> {
         self.rendered_frame.scene.quads.clone()
     }
@@ -3014,7 +3017,7 @@ impl Window {
     }
 
     /// Overrides the display scale factor for tests.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         self.scale_factor = scale_factor;
         self.refresh();
@@ -5321,7 +5324,7 @@ impl Window {
     }
 
     /// Returns whether every frame of an image is present in the sprite atlas.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn has_image_atlas_entry(&self, data: &RenderImage) -> bool {
         data.frame_count() > 0
             && (0..data.frame_count()).all(|frame_index| {
@@ -7313,7 +7316,7 @@ impl Window {
     /// Act as an assistive client connecting to this test window: the adapter
     /// activates, and the updates it receives from then on are recorded for
     /// [`Self::take_a11y_updates`].
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn simulate_a11y_activation(&mut self) {
         self.a11y.simulate_activation();
         self.refresh();
@@ -7321,7 +7324,7 @@ impl Window {
 
     /// The accessibility updates delivered to a test window's adapter since the
     /// last call, oldest first.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn take_a11y_updates(&mut self) -> Vec<accesskit::TreeUpdate> {
         self.platform_window
             .as_test()
@@ -7648,7 +7651,7 @@ impl Window {
 
     /// For testing: set the current modifier keys state.
     /// This does not generate any events.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
     }
@@ -7656,7 +7659,7 @@ impl Window {
     /// For testing: simulate a mouse move event to the given position.
     /// This dispatches the event through the normal event handling path,
     /// which will trigger hover states and tooltips.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn simulate_mouse_move(&mut self, position: Point<Pixels>, cx: &mut App) {
         let event = PlatformInput::MouseMove(MouseMoveEvent {
             position,
@@ -7721,7 +7724,7 @@ impl<V: 'static + Render> WindowHandle<V> {
     /// Get the root view out of this window.
     ///
     /// This will fail if the window is closed or if the root view's type does not match `V`.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn root<C>(&self, cx: &mut C) -> Result<Entity<V>>
     where
         C: AppContext,
@@ -8840,6 +8843,34 @@ mod tests {
             test_window.frame_wake_count() > baseline,
             "scheduling a next-frame callback in an idle window must wake the frame source"
         );
+    }
+
+    #[gpui::test]
+    fn test_finished_animation_stays_idle(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform = cx.test_window(window.into());
+        let frame = || RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        };
+        platform.simulate_frame_request(frame());
+        let ran = Rc::new(Cell::new(false));
+        window.update(cx, {
+            let ran = ran.clone();
+            move |_, window, _| window.on_next_frame(move |window, _| {
+                ran.set(true);
+                window.on_next_frame(|_, _| {});
+            })
+        }).unwrap();
+        platform.simulate_frame_request(frame());
+        assert!(ran.get());
+        platform.simulate_frame_request(frame());
+        let settled = platform.frame_wake_count();
+        for _ in 0..120 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(platform.frame_wake_count(), settled,
+            "a settled animation must not request any more frames");
     }
 
     /// A frame request that arrives while next-frame callbacks are pending

@@ -641,7 +641,7 @@ impl TestAppContext {
     }
 
     /// Set a name for this App.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn set_name(&mut self, name: &'static str) {
         self.update(|cx| cx.name = Some(name))
     }

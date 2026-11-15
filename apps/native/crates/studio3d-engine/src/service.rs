@@ -244,11 +244,16 @@ impl StudioService {
         ) {
             return Err("Studio sample count must be positive".into());
         }
+        let prepare_start = std::time::Instant::now();
         let input = source.scene(&request)?;
+        let geometry_ms = prepare_start.elapsed().as_secs_f64()*1000.;
+        let compile_start = std::time::Instant::now();
         let failures = source.layer_failures(&request)?;
         let auxiliary = source.auxiliary_layers(&request)?;
         let extracted = self.extractor.extract(&input)?;
         validate(&input, &extracted)?;
+        let compile_ms = compile_start.elapsed().as_secs_f64()*1000.;
+        let upload_start = std::time::Instant::now();
         // The MetalFX denoised scaler biases low-albedo, procedurally colored
         // ground dark at Live's half resolution, even with matching guides.
         // Orthographic reference views also retain full pixel coverage and four
@@ -340,15 +345,22 @@ impl StudioService {
                 shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
             });
         }
+        let texture_start = std::time::Instant::now();
         if textures_changed {
             if let Some(maps) = &input.maps {
-                let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
+                let mut pixels = Vec::with_capacity(maps.layers.iter().map(|m| m.len()).sum());
+                for layer in &maps.layers {
+                    pixels.extend_from_slice(layer);
+                }
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
             }
             self.texture_uploads += 1;
             self.uploaded_maps = input.maps.clone();
+        }
+        if std::env::var_os("STUDIO_TIMINGS").is_some() {
+            eprintln!("STUDIO_PREPARE_TIMING ticks={} geometry_ms={geometry_ms:.3} scene_compile_ms={compile_ms:.3} resource_upload_ms={:.3} texture_upload_ms={:.3} positions={} triangles={} geometry_changed={geometry_changed} textures_changed={textures_changed}", request.ticks, upload_start.elapsed().as_secs_f64()*1000., texture_start.elapsed().as_secs_f64()*1000., extracted.prepared.positions.len(), extracted.prepared.tris.len());
         }
         if reset {
             r.set_camera(&input.scene);

@@ -136,12 +136,28 @@ pub fn validate_panel_with_table(
             let height = bounds
                 .map(|r| r.y1 - r.y0)
                 .or_else(|| style.get("minHeight").and_then(|v| token_number(v, table)));
+            // Compact composition tabs have their own kit hit geometry.
+            // Other controls retain the standard minimum.
+            let metadata = node.props.get("metadata");
+            let minimum = if node.props.get("role").and_then(Value::as_str) == Some("tab")
+                && metadata.and_then(|m| m.get("compositionTab")) == Some(&Value::Bool(true))
+            {
+                tokens.metrics.comp_tab_height
+            } else if component == Some(Component::ToolbarItem)
+                && metadata
+                    .and_then(|m| m.get("compositionTabClose"))
+                    .is_some_and(Value::is_object)
+            {
+                tokens.metrics.comp_tab_close
+            } else {
+                tokens.metrics.hit
+            };
             match (width, height) {
                 (Some(w), Some(h))
                     if w.is_finite()
                         && h.is_finite()
-                        && w >= f64::from(tokens.metrics.hit)
-                        && h >= f64::from(tokens.metrics.hit) => {}
+                        && w >= f64::from(minimum)
+                        && h >= f64::from(minimum) => {}
                 (Some(_), Some(_)) => flag("hitTarget", "smallHitTarget"),
                 _ => flag("hitTarget", "missingHitTarget"),
             }
@@ -182,6 +198,11 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
     if value.is_null() || (matches!(key, "flexGrow" | "flexShrink") && value.is_number()) {
         return true;
     }
+    // Binary visibility is structural state, like flex factors; intermediate
+    // visual opacities still require a token.
+    if key == "opacity" && matches!(value.as_u64(), Some(0 | 1)) {
+        return true;
+    }
     // Only structural keywords are literal. Strings like "22px", hex colours,
     // font names and numeric strings are never accepted as visual values.
     let categorical = match key {
@@ -216,7 +237,7 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
     } else {
         "metrics."
     };
-    token.starts_with(group)
+    token.starts_with(group) || (group == "metrics." && token.starts_with("space."))
 }
 /// IDs in visual depth-first order, compatible with Interaction::tab. Positive
 /// tabindex never reorders a panel away from its visual order.

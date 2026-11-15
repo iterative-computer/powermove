@@ -1970,7 +1970,7 @@ fn preplanned_operations_are_bound_to_document_identity() {
     ));
 }
 #[test]
-fn selected_value_keys_edit_between_keys_without_inserting_a_new_one() {
+fn selected_value_keys_away_from_playhead_insert_normally() {
     let (_a, mut c) = client();
     select_keys(&mut c, &["a0", "a2"]);
     block_on(c.begin_drag(DragKind::Property {
@@ -1984,9 +1984,9 @@ fn selected_value_keys_edit_between_keys_without_inserting_a_new_one() {
     }))
     .unwrap();
     let ch = c.model.index.channel("a", "opacity").unwrap();
-    assert_eq!(ch.keys.len(), 2);
-    assert_eq!(ch.keys[0].value, Value::Number(15.));
-    assert_eq!(ch.keys[1].value, Value::Number(55.));
+    assert_eq!(ch.keys.len(), 3);
+    assert_eq!(ch.keys[0].value, Value::Number(10.));
+    assert_eq!(ch.keys[1].value, Value::Number(35.));
     block_on(c.finish_drag(false)).unwrap();
 }
 #[test]
@@ -2472,7 +2472,7 @@ fn text_stagger_gesture_updates_animator_channels_and_undo_restores_both() {
 }
 
 #[test]
-fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
+fn linked_scale_scrub_away_from_selected_keys_keys_the_playhead() {
     let mut v = fixture();
     layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
     let (_actor, mut c) = client_with(v);
@@ -2489,8 +2489,9 @@ fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
     .unwrap();
     for axis in ["scale.x", "scale.y"] {
         let ch = c.model.index.channel("a", axis).unwrap();
-        assert_eq!(ch.keys.len(), 1);
-        assert_eq!(ch.keys[0].value, Value::Number(105.));
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!(ch.keys[0].value, Value::Number(100.));
+        assert_eq!(ch.keys[1].value, Value::Number(105.));
         assert_eq!(ch.keys[0].time, 0.125);
     }
     block_on(c.finish_drag(false)).unwrap();
@@ -2547,4 +2548,284 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         }
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
+}
+
+#[test]
+fn selected_property_drag_sets_all_selected_keys_absolutely_and_undoes_once() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2", "px"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "opacity".into())],
+        time: 1.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let ch = c.model.index.channel("a", "opacity").unwrap();
+    assert_eq!(ch.keys[0].value, Value::Number(15.));
+    assert_eq!(ch.keys[1].value, Value::Number(15.));
+    assert_eq!(
+        c.model.index.channel("a", "position.x").unwrap().keys[0].value,
+        Value::Number(5.)
+    );
+    undo(&mut c);
+    assert_eq!(
+        c.model.index.channel("a", "opacity").unwrap().keys[1].value,
+        Value::Number(50.)
+    );
+}
+
+#[test]
+fn delete_groups_key_precedence_matches_electron_even_after_last_key() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    // Programmatic selection can contain keys before the local flag changes.
+    c.model.key_selection_active = false;
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(
+        !c.model
+            .index
+            .channel("a", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .any(|k| k.id == "a0")
+    );
+    assert!(c.model.key_selection_active);
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    // A layer-row gesture leaves key mode and permits layer deletion.
+    let calls = c.model.select_layer("a", Modifiers::default()).unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_none());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+}
+
+#[test]
+fn delete_groups_adapter_skips_locked_and_reports_in_one_step() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","name":"Group","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"c","type":"shape","group":"n","p":{}},
+      {"id":"l","name":"Locked","type":"shape","lock":true,"p":{}},
+      {"id":"l2","name":"Locked 2","type":"shape","lock":true,"p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "c", "l", "l2"]);
+    let effects = command(&mut c, "delete", 0.);
+    assert_eq!(
+        effects,
+        vec![HostEffect::Status("Skipped 2 locked layers".into())]
+    );
+    assert_eq!(c.model.index.layers.len(), 2);
+    assert_eq!(c.model.index.layers[0].id, "l");
+    assert_eq!(c.model.index.layers[1].id, "l2");
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}
+
+#[test]
+fn delete_groups_adapter_ignores_stale_ids_after_external_edit_and_undo() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a", "b"]);
+    edit(
+        &mut c,
+        vec![
+            pm_kernel::LayerCommand::Delete {
+                layer_ids: vec!["a".into()],
+            }
+            .into(),
+        ],
+    );
+    undo(&mut c);
+    // A concurrent writer removes one of the selected items. The published
+    // selection and revision are consumed before the next user command.
+    let kernel = c.kernel.clone();
+    block_on(kernel.call(
+        "P",
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("External edit".into()),
+                expected_revision: None,
+                body: WriteBody::Commands(
+                    vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into()] }.into()],
+                ),
+            },
+        ),
+    ))
+    .unwrap()
+    .unwrap();
+    c.sync().unwrap();
+    // Model a stale UI snapshot; the kernel correctly refuses a fresh
+    // selection request containing IDs that no longer exist.
+    c.model.selection = pm_kernel::Selection::from_parts(
+        strings(&["a", "b", "stale"]), Vec::new(), None,
+    );
+    command(&mut c, "delete", 0.);
+    assert!(c.model.index.layer("a").is_none());
+    assert!(c.model.index.layer("c").is_some());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(c.model.index.layer("b").is_none());
+}
+
+#[test]
+fn delete_groups_adapter_counts_protected_group_once_and_keeps_its_children() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"locked","type":"shape","group":"n","lock":true,"p":{}},
+      {"id":"editable-child","type":"shape","group":"g","p":{}},
+      {"id":"other","type":"shape","p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "locked", "editable-child", "other"]);
+    assert_eq!(
+        command(&mut c, "delete", 0.),
+        vec![HostEffect::Status("Skipped 1 locked group".into())]
+    );
+    for id in ["g", "n", "locked", "editable-child"] {
+        assert!(c.model.index.layer(id).is_some(), "{id}");
+    }
+    assert!(c.model.index.layer("other").is_none());
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}
+
+#[test]
+fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
+    let (_a, mut c) = client();
+    let before = c.model.index.layer("a").unwrap().clone();
+    block_on(c.begin_drag(DragKind::TrimIn {
+        ids: strings(&["a"]),
+    }))
+    .unwrap();
+    for delta in [0.25, 0.5, 1.] {
+        block_on(c.drag(sample(delta))).unwrap();
+        let l = c.model.index.layer("a").unwrap();
+        let times: Vec<_> = l
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| l.from + k.time)
+            .collect();
+        let expected: Vec<_> = before
+            .channels
+            .iter()
+            .find(|ch| ch.path == "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| before.from + k.time)
+            .collect();
+        assert_eq!(times, expected);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("a").unwrap().from, before.from);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, before.duration);
+}
+
+#[test]
+fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
+    let m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"a","type":"shape","collapsed":false,"p":{"opacity":{"v":100,"kf":[]},"position.y":{"v":0,"kf":[{"i":"k","t":0,"v":0}]},"rotation":{"v":0,"kf":[],"expr":"time*10"},"anchor.x":{"v":0,"kf":[],"expr":""}},"fx":[{"id":"blur","type":"Blur","p":{"radius":{"v":10,"kf":[{"i":"r","t":0,"v":10}]},"quality":{"v":1,"kf":[]}}},{"id":"empty","type":"Glow","p":{"amount":{"v":0,"kf":[]}}}]}]}"#).unwrap());
+    let paths: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paths, ["position.y", "rotation", "blur.radius"]);
+    assert_eq!(
+        m.rows()
+            .iter()
+            .filter(|r| matches!(r.id, RowId::Effect { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(m.rows().last().unwrap().depth, 2);
+    let frame = v4::project_window(&m, 0, 20).unwrap();
+    assert_eq!(frame["window"]["rows"][3]["kind"], "heading");
+    assert_eq!(frame["window"]["rows"][3]["label"], "Blur");
+}
+
+#[test]
+fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
+    let (_actor, mut c) = client();
+    assert!(!c.model.layer_disclosable("c"));
+    c.model.toggle_disclosure("c").unwrap();
+    let property = RowId::Property {
+        layer_id: "c".into(),
+        channel: "opacity".into(),
+    };
+    let targets = vec![("c".into(), "opacity".into())];
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    assert!(c.model.layer_disclosable("c"));
+    c.model.editing_property = Some(("c".into(), "opacity".into()));
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    c.model.editing_property = None;
+    c.model.rebuild_rows();
+    assert!(c.model.row_position(&property).is_none());
+    assert!(!c.model.layer_disclosable("c"));
+}
+
+#[test]
+fn explicit_reveal_all_is_preserved_by_normal_and_cascade_twirls() {
+    let mut m = model(fixture());
+    m.reveal_property('*', false, 100, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.layer_disclosable("c"));
+    m.toggle_disclosure("c").unwrap();
+    m.toggle_disclosure("c").unwrap();
+    assert_eq!(m.reveal.layers["c"].paths, Some(vec!["*".into()]));
+    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id=="c" && channel=="opacity")));
+}
+
+#[test]
+fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
+    let mut m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"g","name":"Synthetic wordmark","type":"group","threeD":true,"collapsed":true,"p":{"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"anchor.z":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null},"orientation.x":{"v":0,"kf":[],"expr":null},"orientation.y":{"v":0,"kf":[],"expr":null},"orientation.z":{"v":0,"kf":[],"expr":null},"perspective":{"v":50,"kf":[],"expr":null},"position.x":{"v":100,"kf":[],"expr":null},"position.y":{"v":200,"kf":[{"i":"y","t":0,"v":210},{"i":"y2","t":1,"v":200}],"expr":null},"position.z":{"v":0,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"rotation.x":{"v":0,"kf":[],"expr":null},"rotation.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[{"i":"sx","t":0,"v":100}],"expr":null},"scale.y":{"v":100,"kf":[{"i":"sy","t":0,"v":100}],"expr":null},"scale.z":{"v":100,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null}}},{"id":"child","type":"shape","group":"g","p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.toggle_disclosure("g").unwrap();
+    let properties: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(properties, ["position.y", "scale"]);
+    assert_eq!(m.rows().last().unwrap().id, RowId::Layer("child".into()));
+    assert_eq!(m.rows().last().unwrap().depth, 1);
+    assert!(m.reveal.layers["g"].paths.is_none());
 }

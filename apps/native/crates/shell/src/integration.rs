@@ -35,6 +35,7 @@ pub trait Integration {
     fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
         None
     }
+    fn action_toast(&self, _cx: &mut App) -> Option<AnyElement> { None }
     /// Commands that cannot run now, so menus never offer a silent no-op.
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
@@ -56,6 +57,7 @@ pub trait Integration {
     }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String { id.to_owned() }
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }

@@ -9302,8 +9302,6 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     8,
     9,
     10,
-    15,
-    21,
     26,
     28,
   ],
@@ -9526,27 +9524,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       ],
       "id": 15,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 14,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -9554,16 +9534,8 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -9706,27 +9678,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       ],
       "id": 21,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 20,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -9734,16 +9688,8 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -10793,12 +10739,6 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -10817,12 +10757,6 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -17164,8 +17098,6 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     8,
     9,
     10,
-    13,
-    19,
     24,
     26,
   ],
@@ -17348,27 +17280,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       ],
       "id": 13,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 12,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -17376,16 +17290,8 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -17490,27 +17396,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       ],
       "id": 19,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 18,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -17518,16 +17406,8 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -18605,12 +18485,6 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -18629,12 +18503,6 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -18776,8 +18644,6 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     8,
     9,
     10,
-    13,
-    19,
     24,
     26,
   ],
@@ -18960,27 +18826,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       ],
       "id": 13,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 12,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -18988,16 +18836,8 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -19102,27 +18942,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       ],
       "id": 19,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 18,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -19130,16 +18952,8 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -20217,12 +20031,6 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -20241,12 +20049,6 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -25855,8 +25657,6 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     8,
     9,
     10,
-    13,
-    19,
     24,
     26,
   ],
@@ -26039,27 +25839,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       ],
       "id": 13,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 12,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -26067,16 +25849,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -26181,27 +25955,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       ],
       "id": 19,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 18,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -26209,16 +25965,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -27296,12 +27044,6 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -27320,12 +27062,6 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -27467,8 +27203,6 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     8,
     9,
     10,
-    13,
-    19,
     24,
     26,
   ],
@@ -27651,27 +27385,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       ],
       "id": 13,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 12,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -27679,16 +27395,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -27793,27 +27501,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       ],
       "id": 19,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 18,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -27821,16 +27511,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -28908,12 +28590,6 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -28932,12 +28608,6 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -29078,8 +28748,6 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
   "focusOrder": [
     8,
     9,
-    12,
-    18,
     23,
     25,
   ],
@@ -29198,27 +28866,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 12,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 11,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -29226,16 +28876,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -29340,27 +28982,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 18,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 17,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -29368,16 +28992,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -30466,12 +30082,6 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -30490,12 +30100,6 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",
@@ -30636,8 +30240,6 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
   "focusOrder": [
     8,
     9,
-    12,
-    18,
     23,
     25,
   ],
@@ -30756,27 +30358,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 12,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 11,
       "props": {
-        "id": "quote-source-history:message-0",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:history:message-0",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -30784,16 +30368,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -30898,27 +30474,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 18,
       "input": null,
-      "listeners": {
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "select": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 17,
       "props": {
-        "id": "quote-source-live:text-1",
-        "label": "Transcript text",
-        "metadata": {
-          "quoteSource": "thread:live:text-1",
-        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -30926,16 +30484,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.text_padding",
           },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
           "overflow": "hidden",
-          "position": "relative",
         },
-        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -32024,12 +31574,6 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
-    "setProps",
     "create",
     "setProps",
     "create",
@@ -32048,12 +31592,6 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setListeners",
     "setProps",
     "create",
     "setProps",

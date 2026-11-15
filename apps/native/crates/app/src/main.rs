@@ -7,6 +7,7 @@
 // the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
 // "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
 
+mod action_toast;
 mod access;
 mod after_open;
 mod agent_clients;
@@ -26,6 +27,7 @@ mod dialogs;
 mod entry;
 mod error_log;
 mod export_coordinator;
+mod render_queue;
 mod expression_sheet;
 mod extension_authoring;
 mod extension_transfer;
@@ -75,6 +77,7 @@ mod panel_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod project_capture_tests;
 mod panel_library;
+mod panel_library_preview;
 mod ghost;
 mod panels;
 #[cfg(test)]
@@ -125,7 +128,6 @@ mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
-mod v4_quote;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
@@ -198,6 +200,9 @@ mod lane_bundle_tests {
 fn main() -> Result<()> {
     diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--cold-playback-bench") {
+        return pro_media::cold_playback_bench();
+    }
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")

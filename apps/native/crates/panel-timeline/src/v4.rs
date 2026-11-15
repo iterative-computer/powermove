@@ -61,6 +61,7 @@ pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {
     match row {
+        RowId::Effect { layer_id, effect } => json!(["effect", layer_id, effect]).to_string(),
         RowId::Layer(id) => json!(["layer", id]).to_string(),
         RowId::Property { layer_id, channel } => json!(["property", layer_id, channel]).to_string(),
     }
@@ -76,6 +77,14 @@ pub fn parse_row(id: &str) -> Result<RowId, Error> {
             Ok(RowId::Property {
                 layer_id: layer_id.clone(),
                 channel: channel.clone(),
+            })
+        }
+        [kind, layer_id, effect]
+            if kind == "effect" && !layer_id.is_empty() && !effect.is_empty() =>
+        {
+            Ok(RowId::Effect {
+                layer_id: layer_id.clone(),
+                effect: effect.clone(),
             })
         }
         _ => Err(Error::InvalidIntent("row id")),
@@ -204,6 +213,7 @@ pub async fn dispatch(
                     .ok_or(Error::InvalidIntent("modifiers"))?,
             )?;
             let calls = match row {
+                RowId::Effect { .. } => return Err(Error::InvalidIntent("section row")),
                 RowId::Layer(id) => {
                     if client.model.mode == TimelineMode::Tracks {
                         client.model.select_track_layer(&id, m)?.0
@@ -212,6 +222,7 @@ pub async fn dispatch(
                     }
                 }
                 RowId::Property { layer_id, channel } => {
+                    client.model.key_selection_active = false;
                     client.model.graph_focus = Some((layer_id.clone(), channel.clone()));
                     vec![
                         pm_kernel::SelectionCall::Layers {
@@ -340,73 +351,7 @@ pub async fn dispatch(
                             .ok_or(Error::InvalidIntent("numeric property"))
                     };
                 let baseline = evaluated(&mut mirror, &path)?;
-                let l = client
-                    .model
-                    .index
-                    .layer(&layer)
-                    .ok_or(Error::InvalidIntent("layer"))?;
-                let channel = client
-                    .model
-                    .index
-                    .channel(&layer, &path)
-                    .ok_or(Error::InvalidIntent("path"))?;
-                let paired = match path.as_str() {
-                    "scale.x" => client.model.index.channel(&layer, "scale.y"),
-                    "scale.y" => client.model.index.channel(&layer, "scale.x"),
-                    _ => None,
-                };
-                let current = |c: &crate::Channel| {
-                    c.keys.iter().any(|k| {
-                        (l.from + k.time - context.time).abs() < 0.5 / client.model.index.fps
-                    })
-                };
-                let at_key = current(channel) || paired.is_some_and(current);
-                let selected: Vec<_> = channel
-                    .keys
-                    .iter()
-                    .filter(|k| client.model.selection.keys().contains(&k.id))
-                    .collect();
-                let paired_selected = paired.is_some_and(|c| {
-                    c.keys.iter().any(|k| {
-                        client.model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
-                    })
-                });
-                if !at_key && (!selected.is_empty() || paired_selected) {
-                    for key in selected {
-                        if let Some(start) = key.value.as_f64() {
-                            commands.push(
-                                pm_kernel::KeyframeCommand::Edit {
-                                    key_id: key.id.clone(),
-                                    time: None,
-                                    value: Some(pm_model::Value::Number(start + value - baseline)),
-                                }
-                                .into(),
-                            );
-                        }
-                    }
-                    if l.scale_linked {
-                        if let Some(paired) = paired {
-                            for key in paired
-                                .keys
-                                .iter()
-                                .filter(|k| client.model.selection.keys().contains(&k.id))
-                            {
-                                if let Some(start) = key.value.as_f64() {
-                                    commands.push(
-                                        pm_kernel::KeyframeCommand::Edit {
-                                            key_id: key.id.clone(),
-                                            time: None,
-                                            value: Some(pm_model::Value::Number(
-                                                start + value - baseline,
-                                            )),
-                                        }
-                                        .into(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } else if matches!(path.as_str(), "scale.x" | "scale.y") {
+                if matches!(path.as_str(), "scale.x" | "scale.y") {
                     let paired = if path == "scale.x" {
                         "scale.y"
                     } else {
@@ -580,6 +525,24 @@ pub fn project_window(
         .map(|row| {
             let mut value = json!({ "id": row_id(&row.id), "depth": row.depth });
             match &row.id {
+                RowId::Effect { layer_id, effect } => {
+                    let layer = model
+                        .index
+                        .layer(layer_id)
+                        .ok_or_else(|| ModelError::UnknownId(layer_id.clone()))?;
+                    value["kind"] = json!("heading");
+                    value["locked"] = json!(layer.effectively_locked);
+                    value["layer"] = json!(layer_id);
+                    value["label"] = json!(
+                        layer
+                            .effects
+                            .iter()
+                            .find(|(id, _)| id == effect)
+                            .map(|(_, label)| label.as_str())
+                            .unwrap_or(effect)
+                    );
+                    value["selected"] = json!(false);
+                }
                 RowId::Layer(id) => {
                     let layer = model
                         .index
@@ -587,6 +550,7 @@ pub fn project_window(
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
                     let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
+                    value["canOpen"] = json!(model.layer_disclosable(id));
                     value["layer"] = json!(id);
                     let definition = layer.definition.as_deref();
                     value["layerKind"] =

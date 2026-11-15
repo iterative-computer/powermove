@@ -12,6 +12,7 @@ use std::{
 
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
+    "panel_begin", "panel_build",
     "open_panel",
     "get_panel_state",
     "interact_panel",
@@ -207,7 +208,8 @@ impl McpSession {
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
-                _ => host.open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
+                _ => host
+                    .open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
             };
         }
         let session = self
@@ -357,8 +359,11 @@ impl McpSession {
                 "set_panel_layout" => Some(host.panel_layout(project.as_deref())?),
                 _ => None,
             };
+            let owner = agent(self.agent_token.as_deref(), &host).map(|(run, _)| run);
             drop(host);
-            let live = surfaces.call(name, project.as_deref(), args);
+            let mut surface_args = args.clone();
+            if name == "panel_begin" { surface_args["_panel_owner"] = json!(owner); }
+            let live = surfaces.call(name, project.as_deref(), &surface_args);
             if acting && let Some(id) = project.as_deref() {
                 // Panel handlers may edit asynchronously; later reads see it.
                 let host = shared
@@ -697,7 +702,15 @@ impl McpSession {
                 if let Some(note) = &imported.note {
                     result["missing"] = json!(note);
                 }
-                if name == "import_media_to_timeline" {
+                if name == "import_media_to_timeline" && imported.kind == "model" {
+                    drop(host);
+                    let layer = pm_kernel::new_id("layer");
+                    self.dispatch("edit_3d", &json!({"operation":"add_object","id":layer,"name":imported.name,"object":{"source":{"assetId":imported.asset},"useSourceMaterials":true}}))?;
+                    let at = args["at"].as_f64().unwrap_or(0.);
+                    let duration = (project["dur"].as_f64().unwrap_or(5.) - at).max(0.1);
+                    self.dispatch("apply_commands", &json!({"label":"Place 3D Model","commands":[{"type":"set_layer","target":layer,"patch":{"from":at,"duration":duration}}]}))?;
+                    result["layerId"] = json!(layer);
+                } else if name == "import_media_to_timeline" {
                     let at = args["at"].as_f64().unwrap_or(0.);
                     match crate::media::layer_for(&project, &imported, at) {
                         Some((layer, command)) => {
@@ -810,16 +823,22 @@ impl McpSession {
                 } else {
                     None
                 };
-                let scene_assets = if name == "edit_3d" && (pm_scene3d::geometry::needs_geometry(args) || args["keepRealWorldScale"] == true) {
+                let scene_assets = if name == "edit_3d"
+                    && (pm_scene3d::geometry::needs_geometry(args)
+                        || args["keepRealWorldScale"] == true)
+                {
                     Some(host.scene_geometry(&id)?)
-                } else { None };
+                } else {
+                    None
+                };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         host.playhead(&id),
-                        scene_assets.as_deref()
+                        scene_assets
+                            .as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
                 } else if strips.is_none() && video.is_none() {
@@ -1013,7 +1032,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             let extensions = if host.extensions.is_some() {
-                " To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+                " Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
             } else {
                 " Extension staging is inert: nothing here activates."
             };

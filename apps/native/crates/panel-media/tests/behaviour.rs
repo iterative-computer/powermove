@@ -2174,3 +2174,45 @@ fn linked_folder_rename_is_display_only_and_removal_unlinks_descendants() {
     assert_eq!(current(&h).folders["f1"].link, link);
     assert!(current(&h).folders["f2"].link.is_some());
 }
+
+#[test]
+fn delete_toast_metadata_and_guarded_undo_restore_whole_files() {
+    for (edit, message) in [
+        (Edit::DeleteAssets { ids: vec!["a".into()], confirmed: true }, "Deleted Alpha.mov"),
+        (Edit::DeleteAssets { ids: vec!["a".into(), "b".into()], confirmed: true }, "Deleted 2 items"),
+        (Edit::DeleteComposition { id: "C2".into() }, "Deleted Second"),
+    ] {
+        let (_actor, h, c) = actor();
+        let before = project(&h);
+        let plan = c.prepare(edit).unwrap();
+        assert_eq!(plan.delete_message.as_deref(), Some(message));
+        let ack = plan.submit(&h, Caller::native()).wait().unwrap().unwrap();
+        assert!(matches!(ack.reply, Reply::Applied { .. }));
+        let undo = Request::new(Caller::native(), HistoryCall::Undo)
+            .with_document(c.stamp.document).outside_revision(ack.revision);
+        let ack = h.call("P", undo).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, Reply::Throw(_)));
+        assert_eq!(project(&h), before);
+    }
+}
+
+#[test]
+fn non_file_edits_have_no_delete_toast() {
+    let c = catalog();
+    for edit in [Edit::RenameFolder { id: "f1".into(), name: "Renamed".into() }, Edit::DeleteFolder { id: "f1".into() }, Edit::DuplicateComposition { id: "C2".into(), new_id: "C3".into() }] {
+        assert_eq!(c.prepare(edit).unwrap().delete_message, None);
+    }
+}
+
+#[test]
+fn delete_toast_undo_cannot_undo_a_later_transaction() {
+    let (_actor, h, c) = actor();
+    let plan = c.prepare(Edit::DeleteAssets { ids: vec!["a".into()], confirmed: true }).unwrap();
+    let ack = plan.submit(&h, Caller::native()).wait().unwrap().unwrap();
+    applied(&h, &current(&h).prepare(Edit::RenameFolder { id: "f1".into(), name: "Later".into() }).unwrap());
+    let before = project(&h);
+    let undo = Request::new(Caller::native(), HistoryCall::Undo).with_document(c.stamp.document).outside_revision(ack.revision);
+    let ack = h.call("P", undo).wait().unwrap().unwrap();
+    assert!(matches!(ack.reply, Reply::Throw(_)));
+    assert_eq!(project(&h), before);
+}

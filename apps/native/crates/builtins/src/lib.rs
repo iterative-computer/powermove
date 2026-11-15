@@ -249,7 +249,10 @@ mod project_layout_tests {
 
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
+type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts);
 pub struct Builtins {
+    agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
     broker: Arc<Broker>,
     /// Built-in panels by id; a fork that replaces one runs in its place here.
@@ -393,6 +396,11 @@ impl EffectDesk {
     }
 }
 impl Builtins {
+    /// Invalidates disk covers whenever the built-in panel bundle changes.
+    pub fn cover_version() -> &'static str {
+        BUNDLE
+    }
+
     pub fn new(
         kernel: KernelHandle,
         project: &str,
@@ -942,21 +950,67 @@ impl Builtins {
     /// a question or approval waiting, the run in view's time, and how many
     /// threads run behind the one in view.
     pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
-        let Ok((agent, _)) = self.agent_state() else {
-            return (false, false, None, 0);
-        };
-        let state = agent.shared();
-        let panel = &state.panel;
-        let Ok(session) = panel.session(panel.active_id()) else {
-            return (false, false, None, 0);
-        };
-        let background = panel.background_runs();
-        (
-            session.run.is_some() || background > 0,
-            session.needs_answer(),
-            session.elapsed_ms(agent_host::now_ms()),
-            background,
-        )
+        // Called by the UI drain. Never wait for the JS backend, provider launch,
+        // prompt construction or durable storage. The next drain refreshes facts.
+        let mut cached = self
+            .agent_status_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let observed = (|| {
+            let entries = self.broker.entries.try_lock().ok()?;
+            let Some(entry) = entries.get("agent").cloned() else {
+                return Some((false, false, None, 0, (vec![], 0, String::new())));
+            };
+            drop(entries);
+            let backend = entry.try_lock().ok()?.backend.clone();
+            let backend = backend.try_lock().ok()?;
+            let Some(agent) = backend.native.agent.clone() else {
+                return Some((false, false, None, 0, (vec![], 0, String::new())));
+            };
+            drop(backend);
+            let state = agent.try_lock().ok()?;
+            let panel = &state.panel;
+            let session = panel.session(panel.active_id()).ok()?;
+            let background = panel.background_runs();
+            let mut revision = 0;
+            let mut summaries = panel.summaries();
+            summaries.sort_by_key(|thread| thread.id != panel.active_id());
+            let tasks = summaries.into_iter().filter_map(|t| {
+                let s = panel.session(&t.id).ok()?;
+                revision += s.trace.rows.len() as u64 + s.conversation.len() as u64;
+                let attention = panel.launcher_attention(&t.id);
+                if s.run.is_none() && !attention { return None; }
+                let started = s.run.as_ref().map_or(t.updated_at, |r| r.started_at);
+                Some((t.id, t.title, s.activity.clone(), started, attention, s.run.is_some()))
+            }).collect();
+            Some((
+                session.run.is_some() || background > 0,
+                session.needs_answer(),
+                session.elapsed_ms(agent_host::now_ms()),
+                background,
+                (tasks, revision, panel.active_id().into()),
+            ))
+        })();
+        if let Some(observed) = observed {
+            *cached = observed;
+        }
+        (cached.0, cached.1, cached.2, cached.3)
+    }
+
+    /// Live facts across every thread, independent of panel visibility.
+    pub fn agent_launcher_tasks(&self) -> LauncherFacts {
+        self.agent_status();
+        self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.clone()
+    }
+    pub fn agent_launcher_switch(&self, id: &str) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        {
+            let mut state = agent.shared();
+            if state.panel.active_id() == id { return Ok(()); }
+            state.panel.switch(id).map_err(|e| e.to_string())?;
+        }
+        link.publish_now();
+        Ok(())
     }
     /// Adding the effect `definition` to `layer` at `time` as the Effects
     /// panel `panel` adds one (its definitions, extensions' included): the
@@ -1200,6 +1254,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()))),
             pool,
             broker,
             realms: Mutex::default(),
@@ -1656,6 +1711,9 @@ impl Builtins {
                 Err(error) => json!({"accepted":false,"error":error}),
             },
         );
+    }
+    pub fn observe_render_queue(&self, queue: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("export")?.eval(format!("runtime.engine('export.queueObserve',{});__pmBuiltin.publish()", queue))
     }
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("export")?.eval(format!(
@@ -2301,6 +2359,12 @@ impl EngineProxy for Broker {
                 entry.overlay = Surface::default();
                 self.forget_overlay(panel);
                 (self.wake)();
+                Ok(Value::Null)
+            }
+            "export.queueObserve" => {
+                let mut backend = entry.backend.shared();
+                backend.native.export["queue"] = input.clone();
+                backend.native.export["sequence"] = json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
                 Ok(Value::Null)
             }
             "export.observe" => {

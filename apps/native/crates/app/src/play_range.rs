@@ -157,6 +157,8 @@ impl Controller {
         }
     }
     /// A transport command from a person, with the run shaped around it.
+    /// Pause keeps the displayed frame, as Electron does; key selection must
+    /// never become a return position for a later stop.
     pub fn transport(&mut self, command: TransportCommand) -> bool {
         match command {
             TransportCommand::Play { rate } if rate != PlaybackRate::STOPPED => {
@@ -164,18 +166,29 @@ impl Controller {
                     self.shape_run();
                 }
             }
-            TransportCommand::Pause | TransportCommand::Step { .. } => self.end_run(),
             _ => {}
         }
         let Some(v) = &self.viewer else { return false };
         // Measured through the frame it presents.
-        match v.command_at(command, Self::event_time()) {
+        let accepted = match v.command_at(command, Self::event_time()) {
             Ok(()) => true,
             Err(e) => {
                 self.message = e.to_string();
                 false
             }
+        };
+        // Pause/step must sample the running clock before removing its loop.
+        // SetLoop re-anchors to wrapped media time; after a wrap that time can
+        // precede run_start and picture_at would mistake it for pre-roll.
+        if accepted
+            && matches!(
+                command,
+                TransportCommand::Pause | TransportCommand::Step { .. }
+            )
+        {
+            self.end_run();
         }
+        accepted
     }
     /// Each display tick: a run stops at the work area's end when Loop is
     /// off, and one that ended by itself gives up its loop.
@@ -201,6 +214,158 @@ impl Controller {
 mod tests {
     use super::*;
     use pm_engine_service::transport::Transport;
+
+    /// The old stop sequence clears the loop first. After crossing its end,
+    /// this rebases the clock below run_start and Pause restores that start.
+    #[test]
+    fn space_stop_after_a_wrap_keeps_the_current_frame() {
+        let mut t = Transport::new(TICKS_PER_SECOND / 30);
+        t.clock.set_end(Some(10 * TICKS_PER_SECOND));
+        let start = pm_engine_service::transport::PREROLL_US;
+        let prepare = |t: &mut Transport| {
+            t.command(
+                TransportCommand::Seek {
+                    time: Ticks::from_whole_seconds(4),
+                    mode: pm_protocol::clock::SeekMode::Exact,
+                },
+                0,
+            );
+            t.command(loop_command(&run(None, 10., 4., true)), 0);
+            t.command(
+                TransportCommand::Play {
+                    rate: PlaybackRate::NORMAL,
+                },
+                0,
+            );
+        };
+        prepare(&mut t);
+        let stop = start + 7_000_000; // 4 + 7 wraps to 1 s.
+        t.command(TransportCommand::SetLoop { range: None }, stop);
+        t.command(TransportCommand::Pause, stop);
+        assert_eq!(
+            t.clock.media_at(stop),
+            4 * TICKS_PER_SECOND,
+            "reproduces the former return to the run start"
+        );
+        prepare(&mut t);
+        t.command(TransportCommand::Pause, stop);
+        t.command(TransportCommand::SetLoop { range: None }, stop);
+        assert_eq!(t.clock.media_at(stop), TICKS_PER_SECOND);
+    }
+
+    #[test]
+    fn space_stop_after_key_add_from_properties_or_timeline_keeps_time() {
+        use pm_kernel::{Caller, KernelActor, KernelConfig, OpenSource, Request, SelectionCall};
+        use pm_panel_inspector::{
+            Binding, EffectClipboard, Inspector, PropertyId, v4_properties::*,
+        };
+        for properties in [false, true] {
+            let actor = KernelActor::spawn(KernelConfig::default());
+            let kernel = actor.handle();
+            let project = pm_model::json::parse(&crate::v4_view_tests::project_json(1)).unwrap();
+            kernel
+                .open("p", OpenSource::Untitled(project))
+                .wait()
+                .unwrap()
+                .unwrap();
+            let submit = |request| {
+                let ack = kernel.call("p", request).wait().unwrap().unwrap();
+                assert!(
+                    !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+                    "{:?}",
+                    ack.reply
+                );
+            };
+            submit(Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ));
+            if properties {
+                let mut inspector =
+                    Inspector::new(kernel.published("p").unwrap(), EffectClipboard::default());
+                let mut adapter = V4Adapter::default();
+                let handle = adapter
+                    .register(
+                        &inspector,
+                        vec![Binding::Property(PropertyId::new("l0", "opacity"))],
+                    )
+                    .unwrap();
+                let V4Plan::Request(request) = adapter
+                    .action(
+                        &mut inspector,
+                        Caller::native(),
+                        &handle,
+                        V4Action::AddKey,
+                        1.,
+                    )
+                    .unwrap()
+                else {
+                    panic!("key add must only edit")
+                };
+                submit(*request);
+            } else {
+                let mut client =
+                    pm_panel_timeline::TimelineClient::new(kernel.clone(), "p", Caller::native())
+                        .unwrap();
+                let plan = client
+                    .model
+                    .property_diamond(&[("l0".into(), "opacity".into())], 1.)
+                    .unwrap();
+                assert!(plan.effects.is_empty(), "adding a key never seeks");
+                for call in plan.calls {
+                    submit(Request::new(Caller::native(), call));
+                }
+            }
+            let client =
+                pm_panel_timeline::TimelineClient::new(kernel.clone(), "p", Caller::native())
+                    .unwrap();
+            let key = client.model.index.channel("l0", "opacity").unwrap().keys[0]
+                .id
+                .clone();
+            for selected in [false, true] {
+                submit(Request::new(
+                    Caller::native(),
+                    SelectionCall::Keys(if selected { vec![key.clone()] } else { vec![] }),
+                ));
+                let mut t = Transport::new(TICKS_PER_SECOND / 30);
+                t.clock.set_end(Some(10 * TICKS_PER_SECOND));
+                let mut now = 0;
+                for elapsed in [100_000, 7_000_000, 100_000, 17_000_000] {
+                    t.command(
+                        TransportCommand::Seek {
+                            time: Ticks::from_whole_seconds(4),
+                            mode: pm_protocol::clock::SeekMode::Exact,
+                        },
+                        now,
+                    );
+                    t.command(loop_command(&run(None, 10., 4., true)), now);
+                    t.command(
+                        TransportCommand::Play {
+                            rate: PlaybackRate::NORMAL,
+                        },
+                        now,
+                    );
+                    now += pm_engine_service::transport::PREROLL_US + elapsed;
+                    let frame = TICKS_PER_SECOND / 30;
+                    let expected = ((4 * TICKS_PER_SECOND
+                        + elapsed * TICKS_PER_SECOND / 1_000_000)
+                        % (10 * TICKS_PER_SECOND))
+                        / frame
+                        * frame;
+                    t.command(TransportCommand::Pause, now);
+                    t.command(TransportCommand::SetLoop { range: None }, now);
+                    assert_eq!(
+                        t.clock.media_at(now),
+                        expected,
+                        "properties={properties}, selected={selected}, elapsed={elapsed}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn play_repeats_the_work_area_while_loop_is_on() {

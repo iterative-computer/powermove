@@ -16,9 +16,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -196,79 +201,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -281,9 +271,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -848,79 +843,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -933,9 +913,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -1722,79 +1707,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -1807,9 +1777,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -2609,79 +2584,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -2694,9 +2654,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -3496,79 +3461,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -3581,9 +3531,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -4380,79 +4335,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -4465,9 +4405,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -5503,79 +5448,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -5588,9 +5518,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -6429,79 +6364,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -6514,9 +6434,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -7322,79 +7247,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -7407,9 +7317,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -8513,79 +8428,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -8598,9 +8498,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -9387,79 +9292,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -9472,9 +9362,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -19048,79 +18943,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -19133,9 +19013,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -19952,79 +19837,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -20037,9 +19907,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -20866,79 +20741,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -20951,9 +20811,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -21638,79 +21503,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -21723,9 +21573,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -22513,107 +22368,112 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
+                      "type": "text",
                     },
                     {
                       "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
+                        "aria-hidden": false,
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab-close:launch",
                         "label": "Close Launch Film",
                         "metadata": {
-                          "designTodo": "T1",
+                          "compositionTabClose": {
+                            "active": true,
+                            "tab": "timeline:tab:launch",
+                            "visible": true,
+                          },
                           "requiredSymbol": "xmark",
                         },
                         "style": {
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
                           "color": {
                             "token": "colors.muted",
                           },
+                          "height": {
+                            "token": "metrics.comp_tab_close",
+                          },
                           "minHeight": {
-                            "token": "metrics.hit",
+                            "token": "metrics.comp_tab_close",
                           },
                           "minWidth": {
-                            "token": "metrics.hit",
+                            "token": "metrics.comp_tab_close",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.border",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.border",
                           },
                           "symbolSize": {
                             "token": "metrics.symbol_inline",
                           },
+                          "width": {
+                            "token": "metrics.comp_tab_close",
+                          },
                         },
                         "tabIndex": -1,
-                        "title": "Close Launch Film (⌘W)",
+                        "title": "Close Launch Film",
                       },
                       "type": "button",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -22628,76 +22488,109 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": false,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:end",
-                        "label": "Endcard",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.muted",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": -1,
-                        "title": "Endcard",
                       },
-                      "type": "button",
+                      "type": "text",
                     },
                     {
                       "props": {
+                        "aria-hidden": true,
                         "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:end",
-                        "label": "Endcard menu",
+                        "id": "timeline:tab-close:end",
+                        "label": "Close Endcard",
                         "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
+                          "compositionTabClose": {
+                            "active": false,
+                            "tab": "timeline:tab:end",
+                            "visible": false,
+                          },
+                          "requiredSymbol": "xmark",
                         },
                         "style": {
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
                           "color": {
                             "token": "colors.muted",
                           },
+                          "height": {
+                            "token": "metrics.comp_tab_close",
+                          },
                           "minHeight": {
-                            "token": "metrics.hit",
+                            "token": "metrics.comp_tab_close",
                           },
                           "minWidth": {
-                            "token": "metrics.hit",
+                            "token": "metrics.comp_tab_close",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.border",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.border",
                           },
                           "symbolSize": {
                             "token": "metrics.symbol_inline",
                           },
+                          "width": {
+                            "token": "metrics.comp_tab_close",
+                          },
                         },
-                        "title": "Endcard menu",
+                        "tabIndex": -1,
+                        "title": "Close Endcard",
                       },
                       "type": "button",
                     },
                   ],
                   "props": {
+                    "aria-selected": false,
+                    "id": "timeline:tab:end",
+                    "label": "Endcard",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.secondary",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": -1,
+                    "title": "Endcard",
                   },
                   "type": "div",
                 },
@@ -22710,9 +22603,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",
@@ -23507,79 +23405,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                       ],
                       "props": {
-                        "aria-selected": true,
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab:launch",
-                        "label": "Launch Film",
-                        "role": "tab",
                         "style": {
-                          "color": {
-                            "token": "colors.text",
+                          "maxWidth": {
+                            "token": "metrics.toolbar_title_width",
                           },
-                          "fontSize": {
-                            "token": "typography.reading",
-                          },
-                          "fontWeight": {
-                            "token": "typography.medium_weight",
-                          },
-                          "height": {
-                            "token": "metrics.control",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "paddingLeft": {
-                            "token": "metrics.gap",
-                          },
-                          "paddingRight": {
-                            "token": "metrics.gap",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_toolbar",
-                          },
+                          "overflow": "hidden",
+                          "textOverflow": "ellipsis",
+                          "whiteSpace": "nowrap",
                         },
-                        "tabIndex": 0,
-                        "title": "Launch Film",
                       },
-                      "type": "button",
-                    },
-                    {
-                      "props": {
-                        "data-pm-component": "toolbar-item",
-                        "id": "timeline:tab-menu:launch",
-                        "label": "Launch Film menu",
-                        "metadata": {
-                          "designTodo": "T1",
-                          "requiredSymbol": "ellipsis",
-                        },
-                        "style": {
-                          "color": {
-                            "token": "colors.muted",
-                          },
-                          "minHeight": {
-                            "token": "metrics.hit",
-                          },
-                          "minWidth": {
-                            "token": "metrics.hit",
-                          },
-                          "symbolSize": {
-                            "token": "metrics.symbol_inline",
-                          },
-                        },
-                        "title": "Launch Film menu",
-                      },
-                      "type": "button",
+                      "type": "text",
                     },
                   ],
                   "props": {
+                    "aria-selected": true,
+                    "id": "timeline:tab:launch",
+                    "label": "Launch Film",
+                    "metadata": {
+                      "compositionTab": true,
+                    },
+                    "role": "tab",
                     "style": {
                       "alignItems": "center",
+                      "background": {
+                        "token": "colors.selected_fill",
+                      },
+                      "borderRadius": {
+                        "token": "metrics.control_radius",
+                      },
+                      "color": {
+                        "token": "colors.text",
+                      },
                       "display": "flex",
                       "flexDirection": "row",
+                      "flexShrink": 0,
+                      "fontSize": {
+                        "token": "typography.reading",
+                      },
+                      "gap": {
+                        "token": "metrics.comp_tab_content_gap",
+                      },
+                      "height": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minHeight": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "minWidth": {
+                        "token": "metrics.comp_tab_height",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.comp_tab_leading",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.comp_tab_trailing",
+                      },
                     },
+                    "tabIndex": 0,
+                    "title": "Launch Film",
                   },
                   "type": "div",
                 },
@@ -23592,9 +23475,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "alignItems": "center",
                   "display": "flex",
                   "flexDirection": "row",
+                  "flexShrink": 1,
                   "gap": {
-                    "token": "metrics.gap",
+                    "token": "metrics.comp_tab_gap",
                   },
+                  "minWidth": {
+                    "token": "metrics.comp_tab_gap",
+                  },
+                  "overflow": "scroll",
                 },
               },
               "type": "div",

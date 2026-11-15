@@ -448,6 +448,7 @@ impl<V: 'static + Render> TestAppWindow<V> {
     /// Simulate a scroll event.
     pub fn simulate_scroll(&mut self, position: Point<Pixels>, delta: Point<Pixels>) {
         self.simulate_event(crate::ScrollWheelEvent {
+            is_momentum: false,
             position,
             delta: crate::ScrollDelta::Pixels(delta),
             modifiers: Default::default(),

@@ -80,6 +80,12 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
 | `metrics.column_least` | Narrowest side column | 200 | 200 | 200 | 200 |
 | `metrics.column_most` | Widest side column | 760 | 760 | 760 | 760 |
+| `metrics.comp_tab_close` | Composition tab close button width | 16 | 16 | 16 | 16 |
+| `metrics.comp_tab_content_gap` | Gap between composition tab label and close button | 4 | 4 | 4 | 4 |
+| `metrics.comp_tab_gap` | Gap between composition tabs | 2 | 2 | 2 | 2 |
+| `metrics.comp_tab_height` | Composition tab height | 22 | 22 | 22 | 22 |
+| `metrics.comp_tab_leading` | Composition tab leading padding | 10 | 10 | 10 | 10 |
+| `metrics.comp_tab_trailing` | Composition tab trailing padding | 6 | 6 | 6 | 6 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
@@ -93,6 +99,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
 | `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
 | `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
+| `metrics.export_job_progress_height` | Inline export job progress stroke | 2 | 2 | 2 | 2 |
+| `metrics.export_job_progress_width` | Inline export job progress width | 80 | 80 | 80 | 80 |
+| `metrics.export_job_row` | Two-line export job row height | 44 | 44 | 44 | 44 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |

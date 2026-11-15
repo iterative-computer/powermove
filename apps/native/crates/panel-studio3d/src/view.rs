@@ -1419,7 +1419,7 @@ fn landscape_fog(layers: &[Value]) -> Option<Value> {
 /// film): a clear sky, a key softbox placed for a highlight, and a floor so
 /// it has a contact shadow and a reflection. Nothing is added
 /// when the composition already has a light or a sky.
-fn starter(layers: &[Value], id: &str) -> Vec<Value> {
+pub fn starter(layers: &[Value], id: &str) -> Vec<Value> {
     let lit = layers.iter().any(|l| {
         schema::role(l) == Some(Role::Light)
             || fields::environment(&l["d"]["data"]) == Some("world")
@@ -1478,7 +1478,10 @@ pub fn add_models(
             continue;
         }
         let file = record["name"].as_str().unwrap_or("3D Model").to_string();
-        let obj = file.to_ascii_lowercase().ends_with(".obj");
+        let obj = record["format"].as_str().map_or_else(
+            || file.to_ascii_lowercase().ends_with(".obj"),
+            |format| format == "obj",
+        );
         // The layer is named for the model, not its file: "Bottle".
         let name = std::path::Path::new(&file)
             .file_stem()

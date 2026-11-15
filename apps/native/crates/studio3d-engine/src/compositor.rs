@@ -112,7 +112,12 @@ impl Pass {
                 ..Default::default()
             },
         );
-        if self.source.prepare_materials(capture, request, tier)? {
+        let material_start = std::time::Instant::now();
+        let changed = self.source.prepare_materials(capture, request, tier)?;
+        if std::env::var_os("STUDIO_TIMINGS").is_some() {
+            eprintln!("STUDIO_MATERIAL_TIMING ticks={} screen_precomp_ms={:.3}", request.ticks, material_start.elapsed().as_secs_f64()*1000.);
+        }
+        if changed {
             self.cached = None;
             self.splat_cache = None;
         }

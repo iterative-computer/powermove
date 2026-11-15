@@ -52,14 +52,29 @@ pub(crate) fn rig(panel: &str, layers: usize) -> Rig {
     rig_project(panel, &project_json(layers))
 }
 pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
+    rig_source(
+        panel,
+        OpenSource::Untitled(pm_model::json::parse(project).unwrap()),
+    )
+}
+pub(crate) fn rig_source(panel: &str, source: OpenSource) -> Rig {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
-    let project = pm_model::json::parse(project).unwrap();
-    kernel
-        .open(PROJECT, OpenSource::Untitled(project))
-        .wait()
-        .unwrap()
-        .unwrap();
+    kernel.open(PROJECT, source).wait().unwrap().unwrap();
+    if let Ok(comp_id) = std::env::var("PM_PANEL_CAPTURE_COMP") {
+        let document = kernel.published(PROJECT).unwrap().snapshot.doc_id;
+        kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::Call::OpenComposition { comp_id, document },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -1569,4 +1584,38 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
             assert_eq!(after, first, "timeline paint should remain reusable");
         }
     }
+}
+
+
+#[gpui::test]
+fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
+    let rig = rig("export", 1);
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    wait(rig.runtime.observe_render_queue(json!([
+        {"id":4,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Failed","progress":0.,"error":"Missing media","finishedAt":1794686460}
+    ])).unwrap());
+    wait(rig.runtime.observe_export(json!({"phase":"rendering","frame":42,"total":100,"elapsed":2.})).unwrap());
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.activate());
+    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.retry.4", window, cx)));
+    let revealed = std::cell::Cell::new(false);
+    settle(&mut vcx, |cx| {
+        for publication in rig.runtime.take_publications() {
+            let surface = &publication.surface;
+            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.retry.4")) {
+                if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_f64) == Some(1.0) { revealed.set(true); }
+            }
+            view.update(cx, |v,cx|v.publish(publication,cx));
+        }
+        revealed.get()
+    });
+    assert!(revealed.get(), "keyboard focus reveals the row's actions");
 }

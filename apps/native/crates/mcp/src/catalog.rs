@@ -75,6 +75,7 @@ pub fn native_tools() -> &'static Vec<Value> {
     })
 }
 pub fn permits(subset: &str, name: &str) -> bool {
+    if subset == "app" && ["panel_begin", "panel_build"].contains(&name) { return true; }
     catalog()[subset]
         .as_array()
         .unwrap()
@@ -257,6 +258,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "interact_panel",
     "capture_panel",
     "computer_use_panel",
+    "panel_begin",
+    "panel_build",
     "set_panel_layout",
     "get_workspace_state",
     "thread_launch",
@@ -289,6 +292,8 @@ pub const HOST_BACKED: &[&str] = &[
     "interact_panel",
     "capture_panel",
     "computer_use_panel",
+    "panel_begin",
+    "panel_build",
     "set_panel_layout",
     "get_workspace_state",
     "thread_launch",
@@ -361,5 +366,20 @@ pub fn backing(name: &str) -> &'static str {
             "creative-app inventory service"
         }
         _ => "agent runtime, user MCP servers and scripting sandbox",
+    }
+}
+
+#[cfg(test)]
+mod panel_build_tools_tests {
+    use super::*;
+    use serde_json::json;
+    #[test] fn panel_build_is_discoverable_and_validates_progress() {
+        assert!(names().iter().any(|n| n == "panel_begin"));
+        assert!(permits("app", "panel_begin"));
+        assert!(!permits("inspection", "panel_begin"));
+        assert!(validate("panel_begin", &json!({"title":"Grade", "placement":{"beside":"inspector"}, "planned":[{"kind":"slider","label":"Exposure"}]})).is_ok());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":1})).is_ok());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"pretend"})).is_err());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":-1})).is_err());
     }
 }

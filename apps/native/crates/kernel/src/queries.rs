@@ -127,7 +127,7 @@ pub struct QueryContext {
 
 impl QueryContext {
     /// A context at `document`'s revision, sharing its tree.
-    pub(crate) fn new(document: &Document) -> QueryContext {
+    pub fn new(document: &Document) -> QueryContext {
         let mut engine = Engine::new();
         engine.adopt_document(document.clone(), ConsistencyHash::default());
         QueryContext { engine }

@@ -39,6 +39,8 @@ pub enum ShellCall {
         source: SessionSource,
         electron_profile: Option<PathBuf>,
     },
+    /// Abandon a prepared question, releasing its lock without choosing edits.
+    CancelRecovery { ticket: String },
     DecideRecovery {
         ticket: String,
         decision: RecoveryDecision,
@@ -296,6 +298,7 @@ pub enum RecoveryResult {
 #[derive(Clone, Debug)]
 pub enum ShellReply {
     Library(OpenDecision),
+    RecoveryCancelled,
     RecoveryRequired {
         ticket: String,
         recovery: RecoveryResult,
@@ -839,6 +842,12 @@ impl Kernel {
                     Some(job) => job.run(),
                     None => Err(failure("Nothing to do")),
                 }
+            }
+            ShellCall::CancelRecovery { ticket } => {
+                // Prepared recovery owns only a read result and file lock.
+                // Dropping it neither applies nor rejects the journal's work.
+                self.pending_recovery.remove(&ticket);
+                Ok(ShellReply::RecoveryCancelled)
             }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self

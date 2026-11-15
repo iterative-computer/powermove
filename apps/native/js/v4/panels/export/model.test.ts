@@ -311,13 +311,17 @@ test("subscriptions accept real host publications and reject stale/retired gener
   await f.model.dispose();
   expect(await f.publish(initial())).toBe(false);
 });
-test("completion closes and permits another export only after native reset", async () => {
+test("completion stays visible and permits another export only after native reset", async () => {
   const f = fixture();
   await f.model.connect("export.fixture");
   await f.model.show();
   const s = initial();
   s.run = { phase: "done", path: "fixture.mp4" };
   await f.publish(s);
+  expect(f.model.open).toBe(true);
+  await f.model.showInFinder();
+  expect(commands(f)).toContain("export.showInFinder");
+  await f.model.dismissCompleted();
   expect(f.model.open).toBe(false);
   await f.model.show();
   expect(f.model.canExport).toBe(true);
@@ -614,4 +618,20 @@ test("the Frame Rate row shows the rate the export uses", () => {
   expect(listedRate(12)).toBe(12);
   expect(rateOptions(12)[0]).toEqual({ v: 12, label: "12 fps" });
   expect(rateOptions(12).slice(1)).toEqual(rates);
+});
+
+test("queue submission freezes displayed options without starting a single export", async () => {
+  const f = fixture();
+  await f.model.refreshPlan();
+  await f.model.addToQueue();
+  expect(commands(f)).toContain("export.queue.add");
+  expect(commands(f)).not.toContain("export.begin");
+  const request = f.requests.find(
+    (r) =>
+      r.operation.type === "command" &&
+      r.operation.command === "export.queue.add",
+  )!;
+  expect((request.operation as any).args.options).toEqual(f.model.options);
+  await f.model.queueAction(7, "retry");
+  expect(commands(f)).toContain("export.queue.action");
 });

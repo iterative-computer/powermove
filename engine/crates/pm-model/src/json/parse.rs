@@ -424,6 +424,23 @@ pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     parse(&text)
 }
 
+/// Read a project container, retiring the obsolete migration recovery archive.
+/// Its raw value is scanned only; it is never expanded into a model tree.
+/// Active undo lives in the envelope's bounded `history`, not this member.
+pub fn parse_project_file(bytes: &[u8]) -> Result<Value, ParseError> {
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let text = String::from_utf8_lossy(bytes);
+    let mut parser = Parser::new(text.as_bytes(), 0, 0);
+    parser.retire_archive = true;
+    parser.skip_whitespace();
+    let value = parser.value(&mut ValueBuilder)?;
+    parser.skip_whitespace();
+    if parser.pos != parser.bytes.len() {
+        return Err(parser.error("unexpected data after JSON value"));
+    }
+    Ok(value)
+}
+
 /// `Object.keys` of the object at `path` in JSON text this module already
 /// accepted, or `None` when there is none. A tree's objects are sorted, so a
 /// caller that needs authored member order reads it here. Skips everything
@@ -589,6 +606,8 @@ struct Parser<'a, O> {
     /// vector of their own besides its values'.
     members: Vec<(JsString, O)>,
     items: Vec<O>,
+    retire_archive: bool,
+    path: Vec<JsString>,
 }
 
 impl<'a, O> Parser<'a, O> {
@@ -599,6 +618,8 @@ impl<'a, O> Parser<'a, O> {
             depth,
             members: Vec::new(),
             items: Vec::new(),
+            retire_archive: false,
+            path: Vec::new(),
         }
     }
 
@@ -688,8 +709,29 @@ impl<'a, O> Parser<'a, O> {
             }
             self.pos += 1;
             self.skip_whitespace();
-            let value = self.value(b)?;
-            self.members.push((key, value));
+            let project = self.retire_archive && self.depth == self.path.len() + 1
+                && (self.path.is_empty()
+                    || self.path.iter().map(|k| k.as_str()).eq([Some("proj")])
+                    || self.path.iter().map(|k| k.as_str()).eq([Some("document")])
+                    || self
+                        .path
+                        .iter()
+                        .map(|k| k.as_str())
+                        .eq([Some("document"), Some("proj")]));
+            if self.retire_archive && project && key.as_str() == Some("native3dHistoryArchive") {
+                let mut scan = Scan {
+                    bytes: self.bytes,
+                    pos: self.pos,
+                };
+                scan.skip_value()
+                    .ok_or_else(|| self.error("unterminated migration archive"))?;
+                self.pos = scan.pos;
+            } else {
+                if self.retire_archive { self.path.push(key.clone()); }
+                let value = self.value(b)?;
+                if self.retire_archive { self.path.pop(); }
+                self.members.push((key, value));
+            }
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
