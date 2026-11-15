@@ -662,7 +662,7 @@ fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
         s.vcx
             .simulate_mouse_move(row.center(), None, Modifiers::none());
         s.idle(cx);
-        let target = bounds(&mut s.vcx, &format!(r#"timeline:{control}:["layer","l2"]"#));
+        let target = bounds(&mut s.vcx, &format!("timeline:{control}:layer:l2"));
         let from = target.center();
         s.vcx
             .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());

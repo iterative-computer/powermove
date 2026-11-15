@@ -3365,9 +3365,7 @@ impl SurfaceView {
                     cx.stop_propagation();
                 });
         }
-        if let Some(layer) = node.timeline_layer_drag.clone()
-            && !events.pointer()
-        {
+        if let Some(layer) = node.timeline_layer_drag.clone() {
             let outline = self.natives.outline.clone();
             element =
                 element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
@@ -3386,7 +3384,6 @@ impl SurfaceView {
             );
         }
         if events.pointer() {
-            let layer_drag = node.timeline_layer_drag.clone();
             element = element.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, event: &MouseDownEvent, window, cx| {
@@ -3394,9 +3391,6 @@ impl SurfaceView {
                     // the press gives the keyboard to the item it lands in.
                     if !window.default_prevented() {
                         v.focus_pressed(id, window, cx);
-                    }
-                    if let Some(layer) = &layer_drag {
-                        v.natives.outline.press_layer(layer, event.position, cx);
                     }
                     v.press(id, event, cx);
                     cx.stop_propagation();
