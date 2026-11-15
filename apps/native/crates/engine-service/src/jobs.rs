@@ -121,6 +121,13 @@ pub(crate) fn shader_cache() -> Option<PathBuf> {
 }
 /// A job whose process cannot draw with the fonts it was asked to
 /// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
+/// The export stopped because the app's fonts could not be compared with the
+/// export's: what did not answer, not a change of fonts.
+pub(crate) fn fonts_uncompared_message(why: &str) -> String {
+    format!(
+        "Rendering stopped because Powermove could not check the export's fonts: {why}. Try again."
+    )
+}
 pub const FONTS_CHANGED: &str =
     "Rendering stopped because the fonts on this Mac changed. Try again.";
 /// A job whose fonts resolved some text to another face (another file,
@@ -1050,6 +1057,7 @@ pub fn run_child() -> Result<()> {
                 replies: face_replies.clone(),
                 next: AtomicU64::new(1),
                 differ: AtomicBool::new(false),
+                uncompared: Mutex::default(),
                 disputed: Mutex::default(),
             }),
         }))
@@ -1405,13 +1413,17 @@ pub fn run_child() -> Result<()> {
                 .is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) =>
         {
             let differ = fenced.as_ref().and_then(|fonts| fonts.faces.as_ref());
+            let uncompared = differ.and_then(|faces| faces.uncompared.lock().unwrap().clone());
             let why = match differ.filter(|faces| faces.differ.load(Ordering::Acquire)) {
                 Some(faces) => faces_differ_message(
                     faces.disputed.lock().unwrap().as_ref(),
                     &faces.resolved.lock().unwrap(),
                     &document,
                 ),
-                None => FONTS_CHANGED.into(),
+                None => match uncompared {
+                    Some(why) => fonts_uncompared_message(&why),
+                    None => FONTS_CHANGED.into(),
+                },
             };
             emit(status(&job_id, JobState::Failed, 0., None, Some(why)))?
         }
@@ -1476,6 +1488,9 @@ struct Faces {
     differ: AtomicBool,
     /// The job's question it answered otherwise.
     disputed: Mutex<Option<pm_text::answers::Query>>,
+    /// Why the app could not compare at all (its font service did not
+    /// answer): what the failure says, never that the fonts changed.
+    uncompared: Mutex<Option<String>>,
 }
 impl Faces {
     /// Whether the app's registry answers everything this job's answered
@@ -1508,7 +1523,9 @@ impl Faces {
         };
         let asked = std::time::Instant::now();
         send(&mut std::io::stdout().lock(), &message).map_err(|e| e.to_string())?;
-        let answer = answered.recv_timeout(std::time::Duration::from_secs(30));
+        // Longer than the app waits for its own font service to take the
+        // question up (`pm_text::host::ASK_TIMEOUT`): its answer, or why not.
+        let answer = answered.recv_timeout(pm_text::host::ASK_TIMEOUT * 2);
         job_diagnostic(serde_json::json!({
             "faces_compared": ask.answers.len(),
             "faces": ask.faces.len(),
@@ -1525,8 +1542,15 @@ impl Faces {
                 *self.disputed.lock().unwrap() = query;
                 Err(why)
             }
-            Ok(Err(Dispute::Moved(why))) => Err(why),
-            Err(_) => Err("the app did not compare the job's faces".to_owned()),
+            Ok(Err(Dispute::Moved(why))) => {
+                *self.uncompared.lock().unwrap() = Some(why.clone());
+                Err(why)
+            }
+            Err(_) => {
+                let why = "the app did not answer the export's font check".to_owned();
+                *self.uncompared.lock().unwrap() = Some(why.clone());
+                Err(why)
+            }
         }
     }
 }
@@ -1998,7 +2022,10 @@ impl JobRasters {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
-        *self.error.lock().unwrap() = Some("The extension did not draw the layer in time".into());
+        *self.error.lock().unwrap() = Some(
+            "the app did not send the layer within 120 s (it answers the export's extension layers)"
+                .into(),
+        );
         None
     }
 }
@@ -2863,6 +2890,20 @@ mod tests {
             left_out_note(&clips(1).0),
             "Exported without 1 offline clip: take 0.mov."
         );
+    }
+    /// A font check the app could not answer says what did not answer, not
+    /// that the fonts on this Mac changed.
+    #[test]
+    fn an_unanswered_font_check_names_what_did_not_answer() {
+        let message = fonts_uncompared_message(
+            "the app's registry did not answer: \
+             the engine's font service did not take the question within 60 s",
+        );
+        assert!(
+            message.contains("font service did not take the question"),
+            "{message}"
+        );
+        assert_ne!(message, FONTS_CHANGED);
     }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.
