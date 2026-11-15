@@ -47,6 +47,7 @@ function Icon(props: {
   disabled?: boolean;
   active?: boolean;
   primary?: boolean;
+  square?: boolean;
   /** A row's small mark (its disclosure): the inline glyph in the muted ink. */
   quiet?: boolean;
   /** The glyph's own ink (a token name), for a mark that carries state in
@@ -78,6 +79,15 @@ function Icon(props: {
         symbolSize: t(
           props.quiet ? "metrics.symbol_inline" : "metrics.symbol_panel",
         ),
+        ...(props.square
+          ? {
+              width: t("metrics.hit"),
+              height: t("metrics.hit"),
+            }
+          : {}),
+        ...(props.square && props.active
+          ? { background: t("colors.selected_fill") }
+          : {}),
         ...(props.primary ? { color: t("colors.text") } : {}),
         ...(props.quiet ? { color: t("colors.muted") } : {}),
         ...(props.tint ? { color: t(props.tint) } : {}),
@@ -267,9 +277,6 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             intent={{ type: "graphOptions" }}
           />
         )}
-        {/* The Graph Editor switch reads as a control, not a mark: its curve
-            glyph with a "Graph" label in the text ink, lit while the graph
-            shows (a lone faint glyph here went unnoticed). */}
         <Icon
           id="timeline:graph"
           label="Graph Editor"
@@ -277,18 +284,10 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           symbol="point.topleft.down.to.point.bottomright.curvepath"
           active={graph}
           primary
+          square
           send={send}
           intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
-        >
-          <text
-            style={{
-              color: t("colors.text"),
-              fontSize: t("typography.reading"),
-            }}
-          >
-            Graph
-          </text>
-        </Icon>
+        />
         {(f.shyLayers || f.hideShy) && (
           <Icon
             id="timeline:hide-shy"

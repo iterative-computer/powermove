@@ -499,3 +499,17 @@ test("joined property values expose separate native axis scrub targets", async (
   expect(native.diagnostics).toEqual([]);
   await root.dispose();
 });
+
+test("graph switch is icon-only and retains its accessible toggle", async () => {
+  const { root } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  const graph = byId(root, "timeline:graph");
+  expect(graph.props.label).toBe("Graph Editor");
+  expect(graph.props.title).toBe("Show Graph Editor (⇧F3)");
+  expect(graph.children.length).toBe(0);
+  await root.render(
+    <TimelinePanel frame={states["graph-empty"]()} send={() => {}} />,
+  );
+  expect(byId(root, "timeline:graph").props["aria-pressed"]).toBe(true);
+  await root.dispose();
+});
