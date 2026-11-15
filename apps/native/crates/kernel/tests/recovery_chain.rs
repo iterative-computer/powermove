@@ -843,11 +843,132 @@ fn a_project_opened_as_a_copy_recovers_on_the_next_open() {
     else {
         panic!("{recovery:?} did not open");
     };
-    // Recovered beside the project that opened (its save went to the copy
-    // this open made, which the next open does not reopen: PM-361).
+    // Recovered in the copy the save went to, which the next open of the
+    // project takes up again (PM-379).
     assert!(
         name(&k, &session.project).starts_with("Renamed after saving"),
         "{}",
         name(&k, &session.project)
     );
+}
+
+/// PM-379. A library project that opens as a copy (its file is missing on
+/// this Mac: a "— Native" project made from an original-app project) is
+/// edited, saved and closed, and the app quits. Opened again the way the
+/// app reopens it (the entry the person opened), it made another copy of the
+/// entry and showed the state from before the save; the save was only in the
+/// copy the first open made. Now the open takes up the copy made last time:
+/// the saved edit comes back, and however often it is opened Home lists the
+/// entry and that one copy.
+#[test]
+fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
+    let root = TempDir::new("reopen-as-copy");
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        let mut project = value();
+        let o = project.as_object_mut().unwrap();
+        o.insert("id", Value::from("sync"));
+        o.insert("name", Value::from("Sync — Native"));
+        let meta = pm_model::json::parse(&format!(
+            r#"{{"file":{{"path":"{}"}}}}"#,
+            root.path("gone/Sync.pmv").display()
+        ))
+        .unwrap();
+        w.save_project("sync", project, Value::Null, Value::Null, meta)
+            .unwrap();
+    }
+    let open = |k: &mut Kernel| {
+        let ShellReply::Opened {
+            session, decision, ..
+        } = k
+            .shell(ShellCall::PrepareOpen {
+                id: "sync".into(),
+                source: SessionSource::Library {
+                    profile: root.0.clone(),
+                    project: "sync".into(),
+                },
+                electron_profile: None,
+            })
+            .unwrap()
+        else {
+            panic!("not opened")
+        };
+        assert!(
+            matches!(decision, pm_kernel::locks::OpenDecision::AsCopy(_)),
+            "{decision:?}"
+        );
+        session
+    };
+    let entries = || {
+        let mut rows: Vec<String> = pm_kernel::library::LibraryStore::open(&root.0)
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|row| format!("{} {}", row.id, row.name))
+            .collect();
+        rows.sort();
+        rows
+    };
+    {
+        let mut k = kernel(&root.0);
+        let session = open(&mut k);
+        assert_eq!(width(&k, &session.project), 320.);
+        widen(&mut k, &session.project, 640.);
+        k.shell(ShellCall::Save(session.clone())).unwrap();
+        k.shell(ShellCall::Close(session)).unwrap();
+    }
+    let after_save = entries();
+    eprintln!("after the save: {after_save:?}");
+    for reopen in 1..=2 {
+        let mut k = kernel(&root.0);
+        let session = open(&mut k);
+        assert_eq!(
+            width(&k, &session.project),
+            640.,
+            "open {reopen} after the save shows the state before it"
+        );
+        k.shell(ShellCall::Close(session)).unwrap();
+        assert_eq!(entries(), after_save, "open {reopen} made another entry");
+    }
+    assert_eq!(after_save.len(), 2, "{after_save:?}");
+    assert!(
+        after_save.iter().any(|e| e == "sync Sync — Native"),
+        "{after_save:?}"
+    );
+    // Work not saved in that copy, then a forced quit: the next open asks,
+    // and Recover brings it back in the same copy.
+    {
+        let mut k = kernel(&root.0);
+        let session = open(&mut k);
+        widen(&mut k, &session.project, 800.);
+        k.durability_barrier().unwrap();
+    }
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "sync".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "sync".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired { ticket, .. } = reply else {
+        panic!("no recovery question: {reply:?}");
+    };
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    else {
+        panic!("not opened");
+    };
+    assert_eq!(width(&k, &session.project), 800.);
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(entries(), after_save, "the recovery made another entry");
 }
