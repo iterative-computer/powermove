@@ -134,7 +134,37 @@ impl TimelineClient {
             return Err(ClientError::OriginMismatch);
         }
         let document = plan.expected_document.unwrap_or(self.model.index.doc_id);
-        for call in plan.calls {
+        let mut calls = plan.calls.into_iter().peekable();
+        while let Some(call) = calls.next() {
+            let call = match call {
+                Call::Transact {
+                    label,
+                    body,
+                    expected_revision,
+                } => {
+                    let mut selection = Vec::new();
+                    while matches!(calls.peek(), Some(Call::Selection(_))) {
+                        if let Some(Call::Selection(next)) = calls.next() {
+                            selection.push(next);
+                        }
+                    }
+                    if selection.is_empty() {
+                        Call::Transact {
+                            label,
+                            body,
+                            expected_revision,
+                        }
+                    } else {
+                        Call::TransactWithSelection {
+                            label,
+                            body,
+                            expected_revision,
+                            selection: pm_kernel::SelectionCall::Batch(selection),
+                        }
+                    }
+                }
+                call => call,
+            };
             self.call_document(call, document).await?;
         }
         Ok(plan.effects)
