@@ -121,7 +121,10 @@ pub struct Fonts {
     /// metrics-and-shaping subsets), so ink can be answered.
     pub(crate) outlines: bool,
     answers: Answers,
-    fonts: Vec<(String, u32, FontBytes)>,
+    /// Each face's bytes and the face to read in them: 0 in a subset main
+    /// served (one face), the face's own index in a whole font file (a
+    /// collection such as Helvetica.ttc holds Regular, Bold, ...).
+    fonts: Vec<(String, u32, FontBytes, u32)>,
     /// The editor renderer's font cache seeds (amendment 19), from main.
     seeds: Vec<pm_text::compat::FontCacheSeed>,
     pub(crate) measure: CompatMeasure<ReplayResolver>,
@@ -143,8 +146,8 @@ impl Fonts {
     /// faces (the re-layout event of docs/engine/text.md).
     fn rebuild(&mut self) {
         let mut resolver = ReplayResolver::new(&self.answers);
-        for (blob, index, data) in &self.fonts {
-            resolver.add_font(blob, *index, data.clone(), 0);
+        for (blob, index, data, read) in &self.fonts {
+            resolver.add_font(blob, *index, data.clone(), *read);
         }
         self.measure = CompatMeasure::new(resolver);
         self.measure
@@ -659,10 +662,22 @@ impl Engine {
     /// [`Engine::add_font`] with bytes shared with their owner (a host's
     /// font registry), never copied.
     pub fn add_font_bytes(&mut self, blob: &str, index: u32, data: FontBytes) {
+        self.add_face(blob, index, data, 0);
+    }
+
+    /// Adds face `index` of `blob` from its whole font file (a host's
+    /// registry, as the native app's text host serves it): the face read is
+    /// `index`, so a collection's Bold is measured as the renderer draws it,
+    /// not as its first face.
+    pub fn add_whole_font_bytes(&mut self, blob: &str, index: u32, data: FontBytes) {
+        self.add_face(blob, index, data, index);
+    }
+
+    fn add_face(&mut self, blob: &str, index: u32, data: FontBytes, read: u32) {
         self.fonts
             .fonts
-            .retain(|(b, i, _)| !(b == blob && *i == index));
-        self.fonts.fonts.push((blob.to_owned(), index, data));
+            .retain(|(b, i, ..)| !(b == blob && *i == index));
+        self.fonts.fonts.push((blob.to_owned(), index, data, read));
         self.fonts.rebuild();
     }
 

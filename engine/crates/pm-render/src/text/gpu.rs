@@ -1322,6 +1322,7 @@ impl TextGpu {
             return Ok(c.target.view.clone());
         }
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextRenderMicros);
         let scene = &plan.scene;
         let region = Rect::new(plan.crop[0] as f64, plan.crop[1] as f64,
             plan.crop[2] as f64, plan.crop[3] as f64);
@@ -1332,6 +1333,7 @@ impl TextGpu {
         };
         // Glyphs, sizes, or transforms the cache has not met (a layer first
         // drawn, or animated) get their geometry on several threads at once.
+        let coverage = pm_perf::Span::new(pm_perf::Counter::TextCoverageMicros);
         self.cpu.coverage_cache().prepare(
             scene.items.iter().filter(|item| needed(item)).flat_map(|item| match &item.content {
                 ItemContent::Coverage { paths } => paths.as_slice(),
@@ -1339,6 +1341,7 @@ impl TextGpu {
             }),
             |n, make| crate::parallel::map(n, make),
         );
+        drop(coverage);
         let atlas = atlas::pack_region(
             scene,
             MAX_PAGE,

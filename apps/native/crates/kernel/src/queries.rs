@@ -179,8 +179,10 @@ impl QueryContext {
         faces: impl IntoIterator<Item = (String, u32, pm_text::font::FontBytes)>,
     ) -> Result<(), String> {
         self.engine.add_font_answers(answers)?;
+        // The registry serves whole font files: each face is read at its own
+        // index (a collection's Bold, not its first face).
         for (blob, index, bytes) in faces {
-            self.engine.add_font_bytes(&blob, index, bytes);
+            self.engine.add_whole_font_bytes(&blob, index, bytes);
         }
         Ok(())
     }
