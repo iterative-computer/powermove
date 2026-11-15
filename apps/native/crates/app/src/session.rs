@@ -3202,6 +3202,16 @@ impl Controller {
                     .send_command("panel:show:timeline", vec![]);
                 timeline.update(cx, |t, cx| t.show_graph(layer, channel, keys, cx));
             }
+            // A Properties diamond keyed a property: the graph plots it.
+            "timeline.focusGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.focus_graph(layer, channel, cx));
+            }
             "properties.expression" => {
                 let Some(input) = cmd.args.first() else {
                     return false;
