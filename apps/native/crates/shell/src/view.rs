@@ -6,6 +6,8 @@ use crate::{
     workspace,
 };
 use gpui::{prelude::*, *};
+#[cfg(test)]
+use ::core::prelude::v1::test;
 use pm_design::Tokens;
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
