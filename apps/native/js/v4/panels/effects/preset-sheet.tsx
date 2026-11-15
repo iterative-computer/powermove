@@ -24,8 +24,12 @@ export function PresetSheet({
   return (
     <div
       role="dialog"
+      focusScope
+      aria-modal={true}
       label="Save Animation Preset"
       style={{
+        display: "flex",
+        flexDirection: "column",
         padding: token("metrics.inset"),
         gap: token("metrics.gap"),
         background: token("colors.panel"),
