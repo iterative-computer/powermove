@@ -3279,6 +3279,14 @@ impl Controller {
                 self.close_tab_page("settings", cx)
             }
             "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.launcher.task" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    if let Some(runtime) = &self.builtins.runtime {
+                        let _ = runtime.agent_launcher_switch(id);
+                    }
+                    self.show_builtin("agent", window, cx);
+                }
+            }
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),

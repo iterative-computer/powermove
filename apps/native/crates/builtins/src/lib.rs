@@ -958,6 +958,36 @@ impl Builtins {
             background,
         )
     }
+    /// Live facts across every thread, independent of panel visibility.
+    pub fn agent_launcher_tasks(&self) -> (Vec<(String, String, String, u64, bool, bool)>, u64) {
+        let Ok((agent, _)) = self.agent_state() else {
+            return (vec![], 0);
+        };
+        let state = agent.shared();
+        let panel = &state.panel;
+        let mut revision = 0;
+        let tasks = panel
+            .summaries()
+            .into_iter()
+            .filter_map(|t| {
+                let s = panel.session(&t.id).ok()?;
+                revision += s.trace.rows.len() as u64 + s.conversation.len() as u64;
+                let attention = panel.launcher_attention(&t.id);
+                if s.run.is_none() && !attention {
+                    return None;
+                }
+                let started = s.run.as_ref().map_or(t.updated_at, |r| r.started_at);
+                Some((t.id, t.title, s.activity.clone(), started, attention, s.run.is_some()))
+            })
+            .collect();
+        (tasks, revision)
+    }
+    pub fn agent_launcher_switch(&self, id: &str) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        agent.shared().panel.switch(id).map_err(|e| e.to_string())?;
+        link.publish_now();
+        Ok(())
+    }
     /// Adding the effect `definition` to `layer` at `time` as the Effects
     /// panel `panel` adds one (its definitions, extensions' included): the
     /// commands of one Undo step.

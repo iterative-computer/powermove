@@ -777,6 +777,15 @@ impl Panel {
             })
             .collect()
     }
+    /// Approval and question facts for the toolbar, including a consent
+    /// requested before a run has started.
+    pub fn launcher_attention(&self, id: &str) -> bool {
+        self.session(id).is_ok_and(Session::needs_answer)
+            || self
+                .pending
+                .values()
+                .any(|p| matches!(p, Pending::Consent(t) if t.thread == id))
+    }
     pub fn background_runs(&self) -> usize {
         self.sessions
             .iter()
@@ -1865,6 +1874,16 @@ mod consent_tests {
             self.0.insert(key.into(), value.clone());
             Ok(())
         }
+    }
+    #[test]
+    fn launcher_attention_tracks_pending_consent_without_a_run() {
+        let mut panel = Panel::load(&mut Memory::default(), "p", "t", 0).unwrap();
+        assert!(!panel.launcher_attention("t"));
+        let ask = panel.set_access("t", "full").unwrap().unwrap();
+        assert!(panel.session("t").unwrap().run.is_none());
+        assert!(panel.launcher_attention("t"));
+        panel.acknowledge(ask.id, true).unwrap();
+        assert!(!panel.launcher_attention("t"));
     }
     #[test]
     fn full_access_without_the_persons_consent_asks_again_instead_of_failing() {
