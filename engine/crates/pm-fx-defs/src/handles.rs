@@ -223,18 +223,87 @@ mod tests {
     }
 }
 
-pub const MAX_STOPS:usize=16;
-pub fn validate_stops(raw:&Value)->Result<Vec<Stop>,String> {
-    let stops:Vec<Stop>=serde_json::from_value(raw.clone()).map_err(|e|format!("gradientStops: {e}"))?;
-    if !(2..=MAX_STOPS).contains(&stops.len()) || stops.iter().any(|s| !s.position.is_finite() || !(0. ..=1.).contains(&s.position) || s.color.iter().any(|v| !v.is_finite() || !(0. ..=1.).contains(v))) {
-        return Err("gradientStops: expected 2..16 finite positions and RGBA channels in 0..1".into());
-    } Ok(stops)
+pub const MAX_STOPS: usize = 16;
+pub fn validate_stops(raw: &Value) -> Result<Vec<Stop>, String> {
+    let stops: Vec<Stop> =
+        serde_json::from_value(raw.clone()).map_err(|e| format!("gradientStops: {e}"))?;
+    if !(2..=MAX_STOPS).contains(&stops.len())
+        || stops.iter().any(|s| {
+            !s.position.is_finite()
+                || !(0. ..=1.).contains(&s.position)
+                || s.color
+                    .iter()
+                    .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+        })
+    {
+        return Err(
+            "gradientStops: expected 2..16 finite positions and RGBA channels in 0..1".into(),
+        );
+    }
+    Ok(stops)
 }
 /// Portable scalar uniforms avoid backend-specific uniform-array packing.
-pub fn gradient_glsl(key:&str)->String {
-    let mut out=format!("uniform float u_{key}Count;\n");
-    for i in 0..MAX_STOPS {out+=&format!("uniform float u_{key}P{i}; uniform vec4 u_{key}C{i};\n");}
-    out+=&format!("vec4 pm_{key}(float t) {{ vec4 c=u_{key}C0; float p=u_{key}P0;\n");
-    for i in 1..MAX_STOPS {out+=&format!("if(u_{key}Count>{}.5){{if(t<=u_{key}P{i}) return mix(c,u_{key}C{i},clamp((t-p)/max(u_{key}P{i}-p,1e-8),0.,1.)); c=u_{key}C{i};p=u_{key}P{i};}}\n",i);}
-    out+"return c; }\n"
+pub fn gradient_glsl(key: &str) -> String {
+    let mut out = format!("uniform float u_{key}Count;\n");
+    for i in 0..MAX_STOPS {
+        out += &format!("uniform float u_{key}P{i}; uniform vec4 u_{key}C{i};\n");
+    }
+    out += &format!("vec4 pm_{key}(float t) {{ vec4 c=u_{key}C0; float p=u_{key}P0;\n");
+    for i in 1..MAX_STOPS {
+        out += &format!(
+            "if(u_{key}Count>{}.5){{if(t<=u_{key}P{i}) return mix(c,u_{key}C{i},clamp((t-p)/max(u_{key}P{i}-p,1e-8),0.,1.)); c=u_{key}C{i};p=u_{key}P{i};}}\n",
+            i
+        );
+    }
+    out + "return c; }\n"
+}
+
+/// All arguments are screen points, so the removal threshold is independent of
+/// parent transforms, nonuniform layer scale and composition zoom.
+pub fn drag_stop(
+    stops: &[Stop],
+    index: usize,
+    pointer: [f64; 2],
+    start: [f64; 2],
+    end: [f64; 2],
+) -> (Vec<Stop>, bool) {
+    let (t, distance) = project(pointer, start, end);
+    let mut out = stops.to_vec();
+    let removed = distance > 24. && delete_stop(&mut out, index);
+    if !removed {
+        move_stop(&mut out, index, t);
+    }
+    (out, removed)
+}
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+    #[test]
+    fn off_line_threshold_is_exactly_24_screen_points_at_every_zoom() {
+        let mut stops = vec![
+            Stop {
+                position: 0.,
+                color: [0.; 4],
+            },
+            Stop {
+                position: 1.,
+                color: [1.; 4],
+            },
+        ];
+        add_stop(&mut stops, 0.5);
+        for zoom in [0.25, 1., 4.] {
+            let m = Mapping([0., 2. * zoom, -0.5 * zoom, 0., 200., 100.]);
+            let a = m.screen([0., 0.]);
+            let b = m.screen([100., 0.]);
+            let p = m.screen([50., 0.]);
+            for (distance, expected) in [(23.999, false), (24., false), (24.001, true)] {
+                let (out, removed) = drag_stop(&stops, 1, [p[0] + distance, p[1]], a, b);
+                assert_eq!(removed, expected);
+                assert_eq!(out.len(), if expected { 2 } else { 3 });
+            }
+            let (out, removed) = drag_stop(&stops[..2], 0, [p[0] + 100., p[1]], a, b);
+            assert!(!removed);
+            assert_eq!(out.len(), 2);
+        }
+    }
 }

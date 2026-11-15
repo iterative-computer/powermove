@@ -2972,3 +2972,196 @@ fn gradient_handle_drag_inverts_layer_rotation_and_nonuniform_scale(cx: &mut Tes
             < 1e-6
     );
 }
+
+fn gradient_stop_project(animated: bool) -> String {
+    let mut p: serde_json::Value = serde_json::from_str(&gradient_handle_project(false)).unwrap();
+    p["layers"][0]["fx"][0]["version"] = serde_json::json!(3);
+    let stops =
+        serde_json::json!([{"position":0,"color":[1,0,0,1]},{"position":1,"color":[0,0,1,1]}]);
+    p["layers"][0]["fx"][0]["p"]["stops"] = serde_json::json!({"v":stops,"kf":if animated {serde_json::json!([{"i":"stops0","t":0,"v":stops}])}else{serde_json::json!([])}});
+    p.to_string()
+}
+fn ramp_at(s: &Stage, t: f64) -> [f64; 2] {
+    let points = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
+    [
+        points[0][0] + (points[1][0] - points[0][0]) * t,
+        points[0][1] + (points[1][1] - points[0][1]) * t,
+    ]
+}
+fn stop_values(s: &Stage) -> Vec<pm_fx_defs::handles::Stop> {
+    s.surface.read_with(&s.vcx, |g, _| g.effect_stop_values())
+}
+fn add_middle_stop(s: &mut Stage, cx: &mut TestAppContext) {
+    let at = ramp_at(s, 0.5);
+    click(s, cx, at, Modifiers::none(), 1);
+    s.refresh(cx);
+}
+#[gpui::test]
+fn gradient_stop_click_line_adds_interpolated_colour_and_one_undo(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_stop_project(false));
+    add_middle_stop(&mut s, cx);
+    let stops = stop_values(&s);
+    assert_eq!(stops.len(), 3);
+    assert_eq!(stops[1].position, 0.5);
+    assert_eq!(stops[1].color, [0.5, 0., 0.5, 1.]);
+    s.undo(cx);
+    assert_eq!(stop_values(&s).len(), 2);
+}
+#[gpui::test]
+fn gradient_stop_drag_moves_along_line_and_is_one_keyframed_undo(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_stop_project(true));
+    add_middle_stop(&mut s, cx);
+    let from = ramp_at(&s, 0.5);
+    let to = ramp_at(&s, 0.75);
+    let at = s.point_of(from);
+    s.drag(
+        cx,
+        at,
+        point(px((to[0] - from[0]) as f32), px((to[1] - from[1]) as f32)),
+        Modifiers::none(),
+    );
+    assert!((stop_values(&s)[1].position - 0.75).abs() < 1e-6);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let root = p.snapshot.root().unwrap().to_value();
+    let keys = root.get("layers").unwrap().as_array().unwrap()[0]
+        .get("fx")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .get("p")
+        .unwrap()
+        .get("stops")
+        .unwrap()
+        .get("kf")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(keys.len(), 2);
+    s.undo(cx);
+    assert_eq!(stop_values(&s)[1].position, 0.5);
+}
+#[gpui::test]
+fn gradient_stop_off_line_removal_uses_screen_points_and_preserves_two(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_stop_project(false));
+    add_middle_stop(&mut s, cx);
+    let at = s.point_of(ramp_at(&s, 0.5));
+    // The diagonal ramp's perpendicular has unit direction (-sqrt(.5),sqrt(.5)).
+    let n = (0.5f32).sqrt();
+    s.drag(cx, at, point(px(-25. * n), px(25. * n)), Modifiers::none());
+    assert_eq!(stop_values(&s).len(), 2);
+    s.undo(cx);
+    assert_eq!(stop_values(&s).len(), 3);
+    let at = s.point_of(ramp_at(&s, 0.5));
+    s.drag(cx, at, point(px(-23. * n), px(23. * n)), Modifiers::none());
+    assert_eq!(stop_values(&s).len(), 3);
+    let at = s.point_of(ramp_at(&s, 0.5));
+    s.drag(cx, at, point(px(-25. * n), px(25. * n)), Modifiers::none());
+    let endpoint = ramp_at(&s, 0.);
+    click(
+        &mut s,
+        cx,
+        [endpoint[0] + 6., endpoint[1]],
+        Modifiers::none(),
+        1,
+    );
+    s.vcx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    s.refresh(cx);
+    assert_eq!(stop_values(&s).len(), 2);
+}
+#[gpui::test]
+fn gradient_stop_delete_key_removes_selected_stop_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_stop_project(false));
+    add_middle_stop(&mut s, cx);
+    s.vcx.simulate_keystrokes("backspace");
+    let g = s.surface.clone();
+    settle(cx, move |cx| g.read_with(cx, |g, _| g.idle()));
+    s.refresh(cx);
+    assert_eq!(stop_values(&s).len(), 2);
+    s.undo(cx);
+    assert_eq!(stop_values(&s).len(), 3);
+}
+#[gpui::test]
+fn gradient_stop_double_click_opens_anchored_picker_and_edits_rgba(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_stop_project(false));
+    add_middle_stop(&mut s, cx);
+    let at = ramp_at(&s, 0.5);
+    click(&mut s, cx, at, Modifiers::none(), 2);
+    let b = s
+        .surface
+        .read_with(&s.vcx, |g, cx| g.effect_picker_rect(cx))
+        .expect("anchored picker");
+    let anchor = s.point_of(at);
+    assert!(f32::from(b.origin.y - anchor.y).abs() < 170.);
+    // Drag the R slider from 50% to 100%.
+    let from = b.origin + point(px(100.), px(42.));
+    s.drag(cx, from, point(px(72.), px(0.)), Modifiers::none());
+    assert_eq!(stop_values(&s)[1].color, [1., 0., 0.5, 1.]);
+    // Alpha is a separate gesture and undo item.
+    let from=b.origin+point(px(172.),px(114.));
+    s.drag(cx,from,point(px(-108.),px(0.)),Modifiers::none());
+    assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,0.25]);
+    s.undo(cx);assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,1.]);
+    s.undo(cx);
+    assert_eq!(stop_values(&s)[1].color, [0.5, 0., 0.5, 1.]);
+    s.vcx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |g, cx| g.effect_picker_rect(cx))
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn agent_registered_shader_effect_stop_handle_drives_its_collection(cx: &mut TestAppContext) {
+    let mut p: serde_json::Value = serde_json::from_str(&gradient_stop_project(false)).unwrap();
+    p["layers"][0]["fx"][0]["type"] = serde_json::json!("agent.ramp");
+    p["layers"][0]["fx"][0]["version"] = serde_json::json!(1);
+    let mut s = stage_on(cx, &p.to_string());
+    let mut definition = pm_fx_defs::catalog::main_catalog()
+        .current("gradient")
+        .unwrap()
+        .clone();
+    definition.id = "agent.ramp".into();
+    definition.label = "Agent ramp".into();
+    definition.frag = "o=pm_stops(v_uv.x);".into();
+    definition.metadata.remove("legacy");
+    definition.metadata.remove("rawShader");
+    definition
+        .metadata
+        .insert("version".into(), serde_json::json!(1));
+    s.rig
+        .kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            ops: vec![pm_kernel::state::StateOp::Register {
+                registry: "effects".into(),
+                entry: pm_kernel::state::Registration {
+                    token: "test.agent.ramp".into(),
+                    owner: Caller::native().writer,
+                    id: "agent.ramp".into(),
+                    definition: pm_model::json::parse(&serde_json::to_string(&definition).unwrap())
+                        .unwrap(),
+                },
+            }],
+            ..Default::default()
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+    add_middle_stop(&mut s, cx);
+    assert_eq!(stop_values(&s).len(), 3);
+    let from = ramp_at(&s, 0.5);
+    let to = ramp_at(&s, 0.75);
+    let at = s.point_of(from);
+    s.drag(
+        cx,
+        at,
+        point(px((to[0] - from[0]) as f32), px((to[1] - from[1]) as f32)),
+        Modifiers::none(),
+    );
+    assert!((stop_values(&s)[1].position - 0.75).abs() < 1e-6);
+    s.undo(cx);
+    assert_eq!(stop_values(&s)[1].position, 0.5);
+}

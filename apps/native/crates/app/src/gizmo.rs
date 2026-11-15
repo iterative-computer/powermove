@@ -329,6 +329,8 @@ impl Job {
 pub struct GizmoSurface {
     effect_controls: Vec<effect_handles::Control>,
     effect_drag: Option<effect_handles::Drag>,
+    effect_stop: Option<(usize, usize)>,
+    effect_picker: Option<(usize, usize)>,
     /// The layer a click would select under the pointer, outlined
     /// (viewer.ts hoverTargetId): its id and composition corners.
     hover_box: Option<(String, [[f64; 2]; 4])>,
@@ -610,6 +612,8 @@ impl GizmoSurface {
         Self {
             effect_controls: vec![],
             effect_drag: None,
+            effect_stop: None,
+            effect_picker: None,
             hover_box: None,
             hover_out: false,
             hover_next: None,
@@ -1009,7 +1013,7 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(position, frame);
-        if self.effects_hit(at, frame.scale).is_some() && self.controls && self.host.tool(cx) == Tool::Select && !self.host.playing(cx) {
+        if self.effects_hover(at, frame) && self.controls && self.text_session().is_none() && self.host.tool(cx) == Tool::Select && !self.host.playing(cx) {
             self.set_cursor(CursorStyle::Crosshair, cx);
             return;
         }
@@ -1213,7 +1217,7 @@ impl GizmoSurface {
         {
             return;
         }
-        if tool == Tool::Select && self.effects_down(event, frame, cx) { return; }
+        if tool == Tool::Select && self.effects_down(event, frame, window, cx) { return; }
         let start = |hit, click| Drag {
             hit,
             origin: event.position,
@@ -1714,6 +1718,7 @@ impl GizmoSurface {
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         if let Some(drag) = self.effect_drag.take() {
+            if drag.removed { self.effect_stop = None; self.effect_picker = None; }
             if drag.active { self.queue.push_back(Job::Finish(commit)); self.pump(cx); }
             self.effects_reread(cx);
             return;
@@ -1773,6 +1778,10 @@ impl GizmoSurface {
         }
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.effect_picker.take().is_some() {
+            if self.effect_drag.is_some() { self.on_up(false, None, cx); }
+            cx.notify(); return true;
+        }
         if self.finish_text(false, cx) {
             return true;
         }
@@ -2780,6 +2789,10 @@ impl Render for GizmoSurface {
             .id("viewer-gizmos")
             .size_full()
             .track_focus(&focus)
+            .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
+                if matches!(e.keystroke.key.as_str(), "backspace" | "delete") && s.effects_delete(cx) { cx.stop_propagation(); }
+                if e.keystroke.key=="escape" && s.effect_picker.is_some() {s.cancel(cx);cx.stop_propagation();}
+            }))
             .on_key_up(cx.listener(|s, event: &KeyUpEvent, _, cx| {
                 s.studio_fly_key(&event.keystroke, false, cx);
             }))

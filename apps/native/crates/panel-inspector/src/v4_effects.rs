@@ -315,11 +315,16 @@ impl EffectsPanel {
                 "readonly",
                 (param.is_none()
                     || !model.editable(layer)
-                    || display.is_none_or(|d| d.control == "opaque"))
+                    || (display.is_none_or(|d| d.control == "opaque") && !param.as_ref().is_some_and(|p|p.kind=="gradientStops")))
                 .into(),
             ),
         ]);
         let fields = p.as_object_mut().expect("parameter");
+        if param.as_ref().is_some_and(|p|p.kind=="gradientStops") {
+            let value=state.as_ref().map(|s|&s.value).unwrap_or_else(||raw.get("v").unwrap_or(&raw));
+            let count=value.as_array().map_or(0,|s|s.len());
+            fields.insert("display",format!("{count} stops · Edit in viewer").into());
+        }
         // Without a definition the stored data is kept whole in `value`;
         // `display` is what the row shows: the value at rest, or
         // Animated when keyed.
