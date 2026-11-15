@@ -50,7 +50,7 @@ fn effect_space(
     uv: [f64; 4],
     origin: [f64; 2],
     resolution: [f64; 2],
-) -> [(String, Call); 8] {
+) -> [(String, Call); 9] {
     let d = if !step.raster_space
         && step.owner.is_none()
         && step.density.iter().all(|d| d.is_finite() && *d > 0.)
@@ -70,6 +70,12 @@ fn effect_space(
         ("u_pixelScale".into(), f(&step.density)),
         ("u_effectScale".into(), f(&step.density)),
         (
+            "u_effectOrigin".into(),
+            f(&step
+                .source_domain
+                .map_or([0., 0.], |(_, extent)| [extent.x, extent.y])),
+        ),
+        (
             "u_coordRes".into(),
             f(&[resolution[0] / d[0], resolution[1] / d[1]]),
         ),
@@ -79,7 +85,10 @@ fn effect_space(
         ),
         (
             "u_texel".into(),
-            f(&[d[0] / f64::from(buffer.0), d[1] / f64::from(buffer.1)]),
+            f(&[
+                (if step.raster_texel { 1. } else { d[0] }) / f64::from(buffer.0),
+                (if step.raster_texel { 1. } else { d[1] }) / f64::from(buffer.1),
+            ]),
         ),
     ]
 }
@@ -1582,6 +1591,47 @@ mod tests {
 #[cfg(test)]
 mod coordinate_tests {
     use super::*;
+    #[test]
+    fn modern_blur_radius_scales_once_and_legacy_radius_stays_compatible() {
+        let mut definition = super::super::builtin_definitions().definitions.remove(0);
+        definition
+            .glsl
+            .as_mut()
+            .unwrap()
+            .source
+            .push_str("\nuniform vec2 u_effectScale;\n");
+        assert!(!super::super::plan::effect_step(&definition, "unused", &[]).raster_texel);
+        definition
+            .glsl
+            .as_mut()
+            .unwrap()
+            .source
+            .push_str("// kernel uses u_effectScale\n");
+        let mut step = super::super::plan::effect_step(&definition, "blur", &[]);
+        for density in [[0.5, 0.25], [1., 1.], [2., 3.]] {
+            step.density = density;
+            for modern in [false, true] {
+                step.raster_texel = modern;
+                let calls = effect_space(
+                    &step,
+                    (100, 50),
+                    (100, 50),
+                    [0., 0., 1., 1.],
+                    [0., 0.],
+                    [100., 50.],
+                );
+                let expected = if modern {
+                    [0.01, 0.02]
+                } else {
+                    [density[0] / 100., density[1] / 50.]
+                };
+                assert_eq!(
+                    calls.iter().find(|(k, _)| k == "u_texel").unwrap().1,
+                    f(&expected)
+                );
+            }
+        }
+    }
     #[test]
     fn extension_uniforms_count_output_pixels_even_for_a_cropped_anisotropic_frame() {
         let mut definition = super::super::builtin_definitions().definitions.remove(0);
