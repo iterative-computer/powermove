@@ -3588,16 +3588,16 @@ impl Controller {
                     self.host.borrow().send_command("play", vec![]);
                 }
             }
-            // Space on an item a click left with the keyboard in a panel that
-            // takes keys (a Project card: Quick Look) is the item's: Play
-            // declines and the key reaches it. In the timeline and the viewer
-            // Space plays.
+            // Space on a Project item a click left with the keyboard is the
+            // item's (Quick Look, as in Finder): Play declines and the key
+            // reaches it. Everywhere else Space plays.
             "play"
                 if cmd.token.is_some()
-                    && self.builtins.views.iter().any(|(id, v)| {
-                        !matches!(id.as_str(), "timeline" | "viewer")
-                            && v.read(cx).focused_takes_keys(window)
-                    }) =>
+                    && self
+                        .builtins
+                        .views
+                        .get("assets")
+                        .is_some_and(|v| v.read(cx).focused_takes_keys(window)) =>
             {
                 return false;
             }
