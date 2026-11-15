@@ -88,7 +88,8 @@ impl Agent {
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
         if panel.surface().surface.nodes().values().any(|node|
-            node.props.get("id").and_then(Value::as_str) == Some("agent-access")) {
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
             panel.choose("agent-access", "editor");
         }
         panel
@@ -116,7 +117,8 @@ impl Agent {
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
         if panel.surface().surface.nodes().values().any(|node|
-            node.props.get("id").and_then(Value::as_str) == Some("agent-access")) {
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
             panel.choose("agent-access", "editor");
         }
         panel
@@ -1459,7 +1461,10 @@ const RESUMED: &str = "Saw: Review these results, verify changes where needed";
 fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
-    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    let release = root.path().join("child-release");
+    let mut environment = slow_environment(root.path(), "1.0");
+    environment.vars.insert("PM_FAKE_CHILD_RELEASE".into(), release.to_string_lossy().into_owned());
+    let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Chatgpt);
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -1516,6 +1521,7 @@ fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
         state.runs.held(&run)
             && state.panel.session(&thread).unwrap().activity == "Waiting for 1 subagent to finish…"
     });
+    std::fs::write(&release, b"continue").unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let agent2 = agent.clone();
     while !{
