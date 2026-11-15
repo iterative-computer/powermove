@@ -92,7 +92,10 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 288);
+    assert_eq!(bindings.len(), 289);
+    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
+    assert_eq!(camera.command, "newCamera");
+    assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
