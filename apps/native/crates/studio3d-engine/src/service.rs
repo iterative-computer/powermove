@@ -244,11 +244,16 @@ impl StudioService {
         ) {
             return Err("Studio sample count must be positive".into());
         }
+        let prepare_start = std::time::Instant::now();
         let input = source.scene(&request)?;
+        let geometry_ms = prepare_start.elapsed().as_secs_f64()*1000.;
+        let compile_start = std::time::Instant::now();
         let failures = source.layer_failures(&request)?;
         let auxiliary = source.auxiliary_layers(&request)?;
         let extracted = self.extractor.extract(&input)?;
         validate(&input, &extracted)?;
+        let compile_ms = compile_start.elapsed().as_secs_f64()*1000.;
+        let upload_start = std::time::Instant::now();
         // The MetalFX denoised scaler biases low-albedo, procedurally colored
         // ground dark at Live's half resolution, even with matching guides.
         // Orthographic reference views also retain full pixel coverage and four
@@ -349,6 +354,9 @@ impl StudioService {
             }
             self.texture_uploads += 1;
             self.uploaded_maps = input.maps.clone();
+        }
+        if std::env::var_os("STUDIO_TIMINGS").is_some() {
+            eprintln!("STUDIO_PREPARE_TIMING ticks={} geometry_ms={geometry_ms:.3} scene_compile_ms={compile_ms:.3} resource_upload_ms={:.3} positions={} triangles={} geometry_changed={geometry_changed} textures_changed={textures_changed}", request.ticks, upload_start.elapsed().as_secs_f64()*1000., extracted.prepared.positions.len(), extracted.prepared.tris.len());
         }
         if reset {
             r.set_camera(&input.scene);
