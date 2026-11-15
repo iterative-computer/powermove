@@ -2378,3 +2378,19 @@ fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
     assert_eq!(index.layer("a").unwrap().from, 1.);
     assert!(p.entry.is_none());
 }
+
+#[test]
+fn a_focused_axis_plots_its_whole_track_as_v1() {
+    // v1 plots the focused track's every axis: Scale X brings Scale Y.
+    let mut m = model(fixture());
+    m.graph_focus = Some(("a".into(), "scale.x".into()));
+    let (series, picked) = m.graph_series();
+    assert!(!picked);
+    assert_eq!(
+        series,
+        vec![
+            ("a".to_owned(), "scale.x".to_owned()),
+            ("a".to_owned(), "scale.y".to_owned())
+        ]
+    );
+}
