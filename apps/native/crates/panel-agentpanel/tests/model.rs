@@ -1,6 +1,6 @@
 //! Tagged behaviors: threads.ts:139–239; spatial.ts:828–865,971–1061,
 //! 1702–1738,1762–1975; QuestionCard.svelte:17–45; ToolActivity.svelte:22–62.
-use pm_agents::{Access, Provider, persistence::Store};
+use pm_agents::{Access, ApprovalMode, Provider, persistence::Store};
 use pm_panel_agentpanel::{
     Error,
     activity::{Rows, Trace},
@@ -46,6 +46,69 @@ fn event(p: &mut Panel, seq: u64, value: Value) {
 fn question(secret: bool, transport: &str) -> Value {
     json!({"kind":"question","itemId":"q","requestId":"request1","transport":transport,"blocking":true,"questions":[{"id":"first","question":"Choose","multiSelect":true,"allowOther":true,"secret":secret,"options":[{"label":"A"},{"label":"B"}]}]})
 }
+#[test]
+fn fresh_profile_and_new_chats_start_on_auto() {
+    let mut p = panel();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("t").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+    for (i, mode) in ["editor", "supervised", "auto", "full"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = p.active_id().to_owned();
+        if let Some(consent) = p.set_access(&id, mode).unwrap() {
+            p.acknowledge(consent.id, true).unwrap();
+        }
+        p.draft_mut(&id).unwrap().insert_text("keep", 1, false);
+        let new = format!("new-{i}");
+        assert_eq!(p.new_thread(&new, 2).unwrap(), new);
+        let settings = &p.session(&new).unwrap().settings;
+        assert_eq!(settings.access, Access::Project, "after {mode}");
+        assert_eq!(settings.approval, ApprovalMode::Auto, "after {mode}");
+    }
+}
+
+#[test]
+fn persisted_thread_without_access_starts_on_auto() {
+    let mut store = Memory::default();
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({
+            "version": 1, "activeId": "old", "threads": [
+                pm_agents::persistence::new_thread("old", 0)
+            ]
+        }),
+    );
+    let p = Panel::load(&mut store, "p", "unused", 1).unwrap();
+    assert_eq!(p.session("old").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("old").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+}
+
+#[test]
+fn saved_access_choices_survive_reload_and_blank_chat_reuse() {
+    for (mode, access, approval) in [
+        ("editor", Access::Editor, ApprovalMode::Auto),
+        ("supervised", Access::Project, ApprovalMode::Supervised),
+        ("auto", Access::Project, ApprovalMode::Auto),
+    ] {
+        let mut p = panel();
+        p.set_access("t", mode).unwrap();
+        let mut store = Memory::default();
+        p.save(&mut store, 1).unwrap();
+        let mut restored = Panel::load(&mut store, "p", "unused", 2).unwrap();
+        assert_eq!(restored.new_thread("unused", 3).unwrap(), "t");
+        let settings = &restored.session("t").unwrap().settings;
+        assert_eq!(settings.access, access, "{mode}");
+        assert_eq!(settings.approval, approval, "{mode}");
+    }
+}
+
 #[test]
 fn background_thread_preserves_drafts_run_and_streaming_without_switching_focus() {
     let mut p = panel();
@@ -340,7 +403,7 @@ fn question_skip_only_reply_transport_and_message_answer_preserves_composer() {
 fn computer_access_needs_matching_consent_and_late_grants_cannot_override_choice() {
     let mut p = panel();
     let effect = p.set_access("t", "full").unwrap().unwrap();
-    assert_eq!(p.session("t").unwrap().settings.access, Access::Editor);
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
     p.set_access("t", "editor").unwrap();
     assert!(p.acknowledge(effect.id, true).is_err());
     let effect = p.set_access("t", "full").unwrap().unwrap();

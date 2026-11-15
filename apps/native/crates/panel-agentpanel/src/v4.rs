@@ -610,15 +610,19 @@ mod tests {
         assert!(act(&mut p, json!({"type":"stop"})).unwrap().is_some());
     }
     #[test]
+    fn fresh_session_publishes_auto_access() {
+        assert_eq!(snapshot(&panel())["settings"]["access"], "auto");
+    }
+    #[test]
     fn full_access_returns_consent_instead_of_granting_authority() {
         let mut p = panel();
         let e = act(&mut p, json!({"type":"setAccess","access":"full"}))
             .unwrap()
             .unwrap();
         assert!(matches!(e.kind, EffectKind::ComputerConsent));
-        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
         p.acknowledge(e.id, false).unwrap();
-        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
     }
     #[test]
     fn access_modes_and_catalog_validation_use_real_model_methods() {
