@@ -245,7 +245,7 @@ fn capture_project_panel() {
                     })
                     .unwrap();
                 let surface = surface.borrow().clone().unwrap();
-                for i in 0..120 {
+                for i in 0..240 {
                     // The panel asks for its saved list/grid choice.
                     for request in r.runtime.take_platform_requests() {
                         let answer = match request.operation.as_str() {
