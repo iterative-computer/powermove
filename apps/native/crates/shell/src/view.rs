@@ -879,6 +879,17 @@ impl Editor {
         cx.notify();
         true
     }
+    /// Pointer focus has no panel ring. Keep AppKit and GPUI in agreement so
+    /// the previous field, toolbar control or splitter cannot retain arrows.
+    pub fn focus_canvas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(self.panel_focus.get("viewer").unwrap_or(&self.focus), cx);
+        self.ringed_panel = None;
+        self.split_focus = None;
+        if let Some(host) = &self.host {
+            host.borrow_mut().focus_canvas();
+        }
+        cx.notify();
+    }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = cmd.name.strip_prefix("dockScroll:") {
             if let Some((di, _, _)) = self.layout.find(id) {
@@ -3644,6 +3655,34 @@ mod keyboard_tests {
             }
         });
     }
+
+    #[::core::prelude::v1::test]
+    fn canvas_press_releases_control_focus_without_a_panel_ring() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, w, cx| {
+                w.focus(&v.workspace_focus, cx);
+                v.ringed_panel = Some("timeline".into());
+                v.focus_canvas(w, cx);
+                assert!(v.panel_focus["viewer"].is_focused(w));
+                assert!(v.ringed_panel.is_none());
+                assert!(v.split_focus.is_none());
+            })
+            .unwrap();
+    }
+
     fn command(name: &str) -> Command {
         Command {
             name: name.into(),

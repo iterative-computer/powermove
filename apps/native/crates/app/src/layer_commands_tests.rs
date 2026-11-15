@@ -670,3 +670,94 @@ fn document_command_results_restore_with_the_edit_without_selection_entries() {
         );
     }
 }
+
+#[test]
+fn viewer_arrow_nudges_use_comp_pixels_for_all_selected_layers_and_key_animation() {
+    let animated = layer("a", "solid", 40., 20., 0., "#FF0000", "").replace(
+        r#""position.x":{"v":40,"kf":[]}"#,
+        r#""position.x":{"v":40,"kf":[{"i":"x0","t":0,"v":40},{"i":"x2","t":2,"v":40}]}"#,
+    );
+    let (_actor, kernel) = open(&[animated, layer("b", "solid", 60., 30., 0., "#00FF00", "")]);
+    select(&kernel, &["a", "b"]);
+    let evaluate = |id: &str, channel: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        pm_kernel::QueryMirror::new(&p)
+            .queries()
+            .evaluate(None, id, channel, 1.)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    for (chord, dx, dy) in [
+        ("left", -1., 0.),
+        ("right", 1., 0.),
+        ("up", 0., -1.),
+        ("down", 0., 1.),
+        ("shift+left", -10., 0.),
+        ("shift+right", 10., 0.),
+        ("shift+up", 0., -10.),
+        ("shift+down", 0., 10.),
+    ] {
+        let before: Vec<_> = ["a", "b"]
+            .map(|id| (evaluate(id, "position.x"), evaluate(id, "position.y")))
+            .into();
+        let (command, args) = crate::commands_tests::dispatch(chord);
+        assert_eq!(command, "nudgeSelection");
+        let p = kernel.published("synthetic").unwrap();
+        run(&kernel, command_plan(&command, &args, &p, 1.).unwrap());
+        for (i, id) in ["a", "b"].iter().enumerate() {
+            assert_eq!(evaluate(id, "position.x"), before[i].0 + dx, "{chord}");
+            assert_eq!(evaluate(id, "position.y"), before[i].1 + dy, "{chord}");
+        }
+        if dx != 0. {
+            let p = kernel.published("synthetic").unwrap();
+            let root = p.snapshot.root().unwrap();
+            let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+            let value = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
+            let keys = value
+                .get("p")
+                .unwrap()
+                .get("position.x")
+                .unwrap()
+                .get("kf")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert!(
+                keys.iter()
+                    .any(|key| key.get("t").and_then(Value::as_f64) == Some(1.))
+            );
+        }
+        send(&kernel, HistoryCall::Undo.into());
+        for (i, id) in ["a", "b"].iter().enumerate() {
+            assert_eq!(evaluate(id, "position.x"), before[i].0);
+            assert_eq!(evaluate(id, "position.y"), before[i].1);
+        }
+    }
+}
+
+#[test]
+fn arrows_in_fields_never_dispatch_layer_nudge() {
+    use pm_shell::keyboard::{Effect, Key, Resolver};
+    for chord in [
+        "left",
+        "right",
+        "up",
+        "down",
+        "shift+left",
+        "shift+right",
+        "shift+up",
+        "shift+down",
+    ] {
+        let mut resolver = Resolver::new();
+        let effects = resolver.submit(Key {
+            token: 1,
+            chord: chord.into(),
+            field: true,
+            repeat: false,
+            up: false,
+            compat: false,
+        });
+        assert_eq!(effects, vec![Effect::Replay(1)], "{chord}");
+    }
+}

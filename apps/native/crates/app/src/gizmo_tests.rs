@@ -20,6 +20,7 @@ use std::{
 
 #[derive(Default)]
 struct Recorder {
+    canvas_focuses: Cell<usize>,
     lines: RefCell<Vec<OverlayLine>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
@@ -112,6 +113,9 @@ impl TextInput for FakeInput {
 }
 struct Recording(Rc<Recorder>);
 impl Host for Recording {
+    fn focus_canvas(&self, _: &mut gpui::Window, _: &mut App) {
+        self.0.canvas_focuses.set(self.0.canvas_focuses.get() + 1);
+    }
     fn time(&self, _: &App) -> f64 {
         0.5
     }
@@ -3014,4 +3018,15 @@ fn viewer_zoom_synthetic_sequences(_: &mut TestAppContext) {
     view.navigate(input.wheel(&wheel).unwrap(), center, 0.8);
     assert_eq!(view.scale.get(), 0.1, "reversal starts at the clamped value");
     assert_anchor(&view);
+}
+
+#[gpui::test]
+fn selecting_in_viewer_claims_canvas_keyboard_focus(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    select(&s, &[]);
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    assert_eq!(s.recorder.canvas_focuses.get(), 0);
+    click(&mut s, cx, [210., 160.], Modifiers::none(), 1);
+    assert_eq!(selected(&s), ["l0"]);
+    assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }

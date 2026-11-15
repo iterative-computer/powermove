@@ -2373,6 +2373,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
+    fn focus_canvas(&self, window: &mut Window, cx: &mut App) {
+        let shell = self.0.upgrade().and_then(|c| c.read(cx).shell.clone());
+        if let Some(shell) = shell {
+            let _ = shell.update(cx, |shell, cx| shell.focus_canvas(window, cx));
+        }
+    }
+
     fn drop_project_items(&self, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             let at = v.time();
