@@ -291,6 +291,135 @@ pub async fn dispatch(
             )],
             ..Plan::default()
         },
+        "propertyValue" => {
+            let layer = string(intent, "layer")?;
+            let path = string(intent, "path")?;
+            let value = intent["value"]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or(Error::InvalidIntent("value"))?;
+            let targets = client.model.property_targets(layer, &[path.to_owned()])?;
+            let published = client
+                .kernel
+                .published(&client.project)
+                .ok_or(Error::MissingHost("project"))?;
+            let mut mirror = pm_kernel::QueryMirror::new(&published);
+            let mut commands = Vec::new();
+            for (layer, path) in targets {
+                let evaluated =
+                    |mirror: &mut pm_kernel::QueryMirror, path: &str| -> Result<f64, Error> {
+                        mirror
+                            .queries()
+                            .evaluate(
+                                client.model.index.comp_id.as_deref(),
+                                &layer,
+                                path,
+                                context.time,
+                            )
+                            .map_err(|_| Error::MissingHost("evaluated property"))?
+                            .as_f64()
+                            .ok_or(Error::InvalidIntent("numeric property"))
+                    };
+                let baseline = evaluated(&mut mirror, &path)?;
+                let l = client
+                    .model
+                    .index
+                    .layer(&layer)
+                    .ok_or(Error::InvalidIntent("layer"))?;
+                let channel = client
+                    .model
+                    .index
+                    .channel(&layer, &path)
+                    .ok_or(Error::InvalidIntent("path"))?;
+                let paired = match path.as_str() {
+                    "scale.x" => client.model.index.channel(&layer, "scale.y"),
+                    "scale.y" => client.model.index.channel(&layer, "scale.x"),
+                    _ => None,
+                };
+                let current = |c: &crate::Channel| {
+                    c.keys.iter().any(|k| {
+                        (l.from + k.time - context.time).abs() < 0.5 / client.model.index.fps
+                    })
+                };
+                let at_key = current(channel) || paired.is_some_and(current);
+                let selected: Vec<_> = channel
+                    .keys
+                    .iter()
+                    .filter(|k| client.model.selection.keys().contains(&k.id))
+                    .collect();
+                let paired_selected = paired.is_some_and(|c| {
+                    c.keys.iter().any(|k| {
+                        client.model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
+                    })
+                });
+                if !at_key && (!selected.is_empty() || paired_selected) {
+                    for key in selected {
+                        if let Some(start) = key.value.as_f64() {
+                            commands.push(
+                                pm_kernel::KeyframeCommand::Edit {
+                                    key_id: key.id.clone(),
+                                    time: None,
+                                    value: Some(pm_model::Value::Number(start + value - baseline)),
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    if l.scale_linked {
+                        if let Some(paired) = paired {
+                            for key in paired
+                                .keys
+                                .iter()
+                                .filter(|k| client.model.selection.keys().contains(&k.id))
+                            {
+                                if let Some(start) = key.value.as_f64() {
+                                    commands.push(
+                                        pm_kernel::KeyframeCommand::Edit {
+                                            key_id: key.id.clone(),
+                                            time: None,
+                                            value: Some(pm_model::Value::Number(
+                                                start + value - baseline,
+                                            )),
+                                        }
+                                        .into(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if matches!(path.as_str(), "scale.x" | "scale.y") {
+                    let paired = if path == "scale.x" {
+                        "scale.y"
+                    } else {
+                        "scale.x"
+                    };
+                    let other = evaluated(&mut mirror, paired)?;
+                    for call in client
+                        .model
+                        .scale_value(&layer, &path, value, context.time, baseline, other)?
+                        .calls
+                    {
+                        if let pm_kernel::Call::Transact {
+                            body: pm_kernel::WriteBody::Commands(c),
+                            ..
+                        } = call
+                        {
+                            commands.extend(c);
+                        }
+                    }
+                } else {
+                    let mut set = pm_kernel::commands::properties::SetProperty::new(
+                        &layer,
+                        &path,
+                        pm_model::Value::Number(value),
+                        context.time,
+                    );
+                    set.preserve_hand_edits = false;
+                    commands.push(pm_kernel::PropertyCommand::Set(set).into());
+                }
+            }
+            Plan::edit(commands, client.model.index.revision)
+        }
         "keyToggle" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;

@@ -3069,5 +3069,15 @@
     "in_fields": false,
     "repeat": true,
     "loose": false
+  },
+  {
+    "id": "native.renameLayer",
+    "chord": "enter",
+    "command": "renameLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

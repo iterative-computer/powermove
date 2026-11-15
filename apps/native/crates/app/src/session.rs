@@ -2875,6 +2875,58 @@ impl Controller {
             return true;
         }
         match cmd.name.as_str() {
+            "timeline.parentMenu" => {
+                let Some(id) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.as_str())
+                else {
+                    return false;
+                };
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let rows = crate::layer_commands::layer_menu(published, id, self.time());
+                let items = rows
+                    .iter()
+                    .find(|row| row["label"] == "Parent")
+                    .and_then(|row| row["children"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let choices = items.clone();
+                let ids = cmd.args.first().cloned().unwrap_or_default();
+                let host = self.host.clone();
+                crate::v4_native::menu(
+                    window,
+                    &items,
+                    cx,
+                    Box::new(move |choice: Option<usize>, _: &mut App| {
+                        if let Some(row) = choice.and_then(|i| choices.get(i)) {
+                            host.borrow().send_command("timeline.propertyEdit", vec![serde_json::json!({"type":"parent","ids":ids,"parent":row["args"][0]})]);
+                        }
+                    }),
+                );
+                return true;
+            }
+            "timeline.propertyEdit" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(action) = cmd.args.first().cloned() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.timeline_action(action) else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+                return true;
+            }
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();
                 self.shortcuts_action(&action, window, cx);
@@ -3358,6 +3410,32 @@ impl Controller {
                     },
                     cx,
                 );
+            }
+            // v1: Return (and the row menu's Rename…) opens the selected
+            // layer's name field in the timeline; a text layer's Return edits
+            // its text first (text.editSelected steps aside otherwise).
+            "renameLayer" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(p) = self.published.clone() else {
+                    return false;
+                };
+                let [id] = p.selection.layers() else {
+                    return false;
+                };
+                let row =
+                    pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(id.clone()));
+                let Ok(ticket) =
+                    runtime.timeline_action(serde_json::json!({"type":"rename","id":row}))
+                else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
             }
             "toggleLayerStrips" => {
                 let Some(runtime) = self.builtins.runtime.clone() else {

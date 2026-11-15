@@ -475,3 +475,27 @@ test("all sixteen scheme/accessibility token combinations accept the panel witho
   }
   await root.dispose();
 });
+
+test("joined property values expose separate native axis scrub targets", async () => {
+  const { root, commits } = recorder();
+  const f = states["scale-compound"]();
+  const row = f.window.rows.find(
+    (r) => r.kind === "property" && r.path === "scale",
+  )!;
+  if (row.kind !== "property") throw new Error("missing scale row");
+  row.axes = [
+    { path: "scale.x", readout: "100" },
+    { path: "scale.y", readout: "125" },
+  ];
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  for (const path of ["scale.x", "scale.y"]) {
+    const value = byId(root, `timeline:value:${row.id}:${path}`);
+    expect(value.props.metadata).toEqual({
+      timelineScrub: { layer: row.layer, path },
+    });
+  }
+  const native = replay(commits).at(-1);
+  expect(native.accepted).toBe(true);
+  expect(native.diagnostics).toEqual([]);
+  await root.dispose();
+});

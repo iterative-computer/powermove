@@ -55,6 +55,11 @@ impl Outline {
                 true
             })
     }
+    fn parent_pick(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
+            surface.update(cx, |s, _| s.press_parent(layer.into(), at));
+        }
+    }
     /// A layer name pressed: the surface may lift it into a reorder (the
     /// row still takes the click).
     fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
@@ -2715,6 +2720,14 @@ impl SurfaceView {
                     cx.stop_propagation();
                 }),
             );
+        }
+        if let Some(layer) = node.timeline_parent_pick.clone() {
+            let outline = self.natives.outline.clone();
+            element =
+                element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                    outline.parent_pick(&layer, event.position, cx);
+                    cx.stop_propagation();
+                });
         }
         if let Some(layer) = node.timeline_layer_drag.clone() {
             let outline = self.natives.outline.clone();

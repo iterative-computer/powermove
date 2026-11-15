@@ -2378,3 +2378,118 @@ fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
     assert_eq!(index.layer("a").unwrap().from, 1.);
     assert!(p.entry.is_none());
 }
+
+#[test]
+fn quick_offset_key_gesture_replaces_preview_and_undoes_in_one_step() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::QuickOffsetKeys {
+        groups: vec![strings(&["a0", "a2"]), strings(&["b0"])],
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.125))).unwrap();
+    block_on(c.drag(sample(0.25))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "a2"), 2.);
+    assert_eq!(key_time(&c, "b0"), 0.25);
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(key_time(&c, "b0"), 0.);
+}
+
+#[test]
+fn text_stagger_gesture_updates_animator_channels_and_undo_restores_both() {
+    let document = parse(r#"{"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[{"id":"text","type":"text","from":0,"dur":5,"p":{},"d":{"text":"Hello","animators":[{"id":"a","mode":"stagger","timingVersion":2,"p":{"delay":{"v":0.5,"kf":[]},"duration":{"v":1,"kf":[]},"stagger":{"v":0.1,"kf":[]}}}]}}]}"#).unwrap();
+    let (_actor, mut c) = client_with(document);
+    let band = stagger::Band {
+        layer: "text".into(),
+        animator: "a".into(),
+        delay: 0.5,
+        duration_value: 1.,
+        stagger: 0.1,
+        start: 0.5,
+        duration: 1.,
+        cascade: 0.4,
+        end: 1.9,
+        out: false,
+        legacy: false,
+    };
+    block_on(c.begin_drag(DragKind::TextStagger {
+        band,
+        end: true,
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.7))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.5)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.15)
+    );
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.1)
+    );
+}
+
+#[test]
+fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
+    let (_actor, mut c) = client_with(v);
+    select_keys(&mut c, &["sx", "sy"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "scale.x".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        let ch = c.model.index.channel("a", axis).unwrap();
+        assert_eq!(ch.keys.len(), 1);
+        assert_eq!(ch.keys[0].value, Value::Number(105.));
+        assert_eq!(ch.keys[0].time, 0.125);
+    }
+    block_on(c.finish_drag(false)).unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        assert_eq!(
+            c.model.index.channel("a", axis).unwrap().keys[0].value,
+            Value::Number(100.)
+        );
+    }
+}

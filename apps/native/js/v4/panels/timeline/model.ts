@@ -98,6 +98,7 @@ export interface PropertyRow extends RowBase {
   next: boolean;
   /** A compound Scale readout stays one semantic row, with real axis keys. */
   readout: string;
+  axes?: Array<{ path: string; readout: string; editor?: TextLease }>;
   numeric?: NumericLease;
   scaleLinked?: boolean;
 }

@@ -55,6 +55,7 @@ function Icon(props: {
   tabIndex?: number;
   key?: string;
   children?: ComponentChildren;
+  parentPick?: string;
 }) {
   // DESIGN-TODO(opus) T1: kit has no symbol slot. This is a neutral, labelled
   // control with inspectable required symbol, not a text/emoji icon substitute.
@@ -63,7 +64,13 @@ function Icon(props: {
       id={props.id}
       label={props.label}
       title={props.title ?? props.label}
-      metadata={{ requiredSymbol: props.symbol, designTodo: "T1" }}
+      metadata={{
+        requiredSymbol: props.symbol,
+        designTodo: "T1",
+        ...(props.parentPick
+          ? { timelineParentPick: { layer: props.parentPick } }
+          : {}),
+      }}
       disabled={props.disabled}
       active={props.active}
       tabIndex={props.tabIndex}
@@ -488,6 +495,7 @@ function Layer({
           item.on || item.always || show ? (
             <Icon
               key={item.name}
+              parentPick={item.name === "parent" ? row.layer : undefined}
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
@@ -581,8 +589,71 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           {row.label}
         </text>
       </div>
-      <div style={{ ...line, paddingRight: t("metrics.gap") }}>
-        {/* The link stands before the value: values end on one edge. */}
+      <div
+        style={{
+          ...line,
+          width: t("metrics.value_column"),
+          flexShrink: 0,
+          gap: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        }}
+      >
+        {/* v1 propertyValueColumns: equal axis columns, then the Scale link. */}
+
+        {row.numeric && row.scaleLinked === undefined ? (
+          <UI.NumberField
+            id={`timeline:value:${row.id}`}
+            label={row.label}
+            {...row.numeric}
+            disabled={row.locked}
+            tabIndex={-1}
+          />
+        ) : (
+          (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
+            (axis) =>
+              axis.editor ? (
+                <UI.TextField
+                  id={`timeline:value-edit:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                  value={axis.editor.value}
+                  binding={axis.editor.binding}
+                  style={{
+                    flexGrow: 1,
+                    flexBasis: t("metrics.hit"),
+                    minWidth: t("metrics.hit"),
+                  }}
+                  tabIndex={-1}
+                  metadata={{ cancelChange: true }}
+                  onChange={(e) =>
+                    send({ type: "editDone", value: String(e.value ?? "") })
+                  }
+                />
+              ) : (
+                <text
+                  id={`timeline:value:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}, ${axis.readout}`}
+                  metadata={
+                    row.locked
+                      ? {}
+                      : {
+                          timelineScrub: { layer: row.layer, path: axis.path },
+                        }
+                  }
+                  style={{
+                    color: t(row.locked ? "colors.muted" : "colors.text"),
+                    fontSize: t("typography.body"),
+                    fontVariantNumeric: "tabular-nums",
+                    flexGrow: 1,
+                    flexBasis: t("metrics.hit"),
+                    minWidth: t("metrics.hit"),
+                    overflow: "hidden",
+                  }}
+                >
+                  {axis.readout}
+                </text>
+              ),
+          )
+        )}
         {row.scaleLinked !== undefined && (
           <Icon
             id={`timeline:scale-link:${row.id}`}
@@ -598,30 +669,6 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             send={send}
             intent={{ type: "scaleLink", layer: row.layer }}
           />
-        )}
-        {row.numeric && row.scaleLinked === undefined ? (
-          <UI.NumberField
-            id={`timeline:value:${row.id}`}
-            label={row.label}
-            {...row.numeric}
-            disabled={row.locked}
-            tabIndex={-1}
-          />
-        ) : (
-          <text
-            label={row.accessibilityLabel}
-            metadata={{
-              designTodo: "T5",
-              timelineScrub: { layer: row.layer, path: row.path },
-            }}
-            style={{
-              color: t(row.locked ? "colors.muted" : "colors.text"),
-              fontSize: t("typography.body"),
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {row.readout}
-          </text>
         )}
       </div>
     </>

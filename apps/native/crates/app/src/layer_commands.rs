@@ -504,12 +504,17 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
     let row = |label: &str, command: &str, args: serde_json::Value, enabled: bool| json!({"id":command,"label":label,"args":args,"disabled":!enabled});
     let plain = |label: &str, command: &str| row(label, command, json!([]), editable);
     let submenu = |label: &str, children: Vec<serde_json::Value>| json!({"id":"","label":label,"disabled":!editable,"children":children});
-    let mut rows = vec![
+    let mut rows = Vec::new();
+    // v1: Rename… leads, for one layer (↩ opens the same field).
+    if facts.selected.len() == 1 {
+        rows.push(plain("Rename…", "renameLayer"));
+    }
+    rows.extend([
         plain("Duplicate", "duplicate"),
         plain("Group", "groupLayers"),
         plain("Simplify Keyframes", "simplifyKeyframes"),
         plain("Pre-compose…", "precompose"),
-    ];
+    ]);
     if facts.selected.len() == 2 {
         rows.push(row(
             "Use Bottom Layer as Mask",

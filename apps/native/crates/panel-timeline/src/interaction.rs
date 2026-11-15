@@ -790,6 +790,19 @@ impl TimelineModel {
         p.calls.push(SelectionCall::Keys(selected).into());
         Ok(p)
     }
+    /// v1's separateDimensionsItem: the selection when the row's layer is
+    /// in it, else that layer; locked layers stay as they are.
+    fn separate_targets(&self, layer: &str) -> Vec<String> {
+        let selected = self.selection.layers();
+        let ids: Vec<String> = if selected.iter().any(|id| id == layer) {
+            selected.to_vec()
+        } else {
+            vec![layer.to_owned()]
+        };
+        ids.into_iter()
+            .filter(|id| self.index.layer(id).is_some_and(|l| !l.effectively_locked))
+            .collect()
+    }
     pub fn require_channel(&self, layer: &str, channel: &str) -> Result<(), ModelError> {
         let l = self
             .index
@@ -964,6 +977,15 @@ pub enum DragKind {
     TrimOut {
         ids: Vec<String>,
     },
+    QuickOffsetKeys {
+        groups: Vec<Vec<String>>,
+        time: f64,
+    },
+    TextStagger {
+        band: crate::stagger::Band,
+        end: bool,
+        time: f64,
+    },
     QuickOffsetLayers {
         ids: Vec<String>,
     },
@@ -1021,6 +1043,7 @@ pub struct Drag {
     pub key_snap: Option<crate::snap::GroupLock>,
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
+    selected_property_keys: std::collections::HashSet<String>,
     property_keys: std::collections::HashMap<(String, String), Vec<(String, f64)>>,
 }
 impl Drag {
@@ -1093,6 +1116,29 @@ impl Drag {
                     }
                 }
             }
+            DragKind::TextStagger { band, time, .. } => {
+                finite(*time)?;
+                for key in ["delay", "duration", "stagger"] {
+                    let path = format!("ta.{}.{key}", band.animator);
+                    if key == "duration" || index.channel(&band.layer, &path).is_some() {
+                        model.require_channel(&band.layer, &path)?;
+                    }
+                }
+            }
+            DragKind::QuickOffsetKeys { groups, time } => {
+                finite(*time)?;
+                if groups.len() < 2 {
+                    return Err(ModelError::InvalidGesture);
+                }
+                for id in groups.iter().flatten() {
+                    let (l, _, _) = index
+                        .key(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    if l.effectively_locked {
+                        return Err(ModelError::Locked(l.id.clone()));
+                    }
+                }
+            }
             DragKind::Handle { id, .. } => {
                 let (l, _, _) = index
                     .key(id)
@@ -1156,18 +1202,30 @@ impl Drag {
             for (l, c) in targets {
                 let layer = index.layer(l).unwrap();
                 let channel = index.channel(l, c).unwrap();
-                if !channel
-                    .keys
-                    .iter()
-                    .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
-                {
+                let paired = match c.as_str() {
+                    "scale.x" => index.channel(l, "scale.y"),
+                    "scale.y" => index.channel(l, "scale.x"),
+                    _ => None,
+                };
+                let at_key = |channel: &crate::Channel| {
+                    channel
+                        .keys
+                        .iter()
+                        .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
+                };
+                if !at_key(channel) && !paired.is_some_and(at_key) {
                     let keys: Vec<_> = channel
                         .keys
                         .iter()
                         .filter(|k| model.selection.keys().contains(&k.id))
                         .filter_map(|k| k.value.as_f64().map(|v| (k.id.clone(), v)))
                         .collect();
-                    if !keys.is_empty() {
+                    let paired_selected = paired.is_some_and(|p| {
+                        p.keys.iter().any(|k| {
+                            model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
+                        })
+                    });
+                    if !keys.is_empty() || paired_selected {
                         property_keys.insert((l.clone(), c.clone()), keys);
                     }
                 }
@@ -1194,6 +1252,7 @@ impl Drag {
             key_snap: None,
             track_snap,
             property_values: Default::default(),
+            selected_property_keys: model.selection.keys().iter().cloned().collect(),
             property_keys,
         })
     }
@@ -1219,7 +1278,15 @@ impl Drag {
             DragKind::Layers { .. } => "Move clip",
             DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
+            DragKind::TextStagger { end, .. } => {
+                if end {
+                    "Stretch text animation"
+                } else {
+                    "Move text animation"
+                }
+            }
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
+            DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
             DragKind::Keys { .. } => "Move keyframe",
             DragKind::GraphKeys { .. } => "Edit curve",
             DragKind::StretchKeys { .. } => "Stretch keyframes",
@@ -1295,6 +1362,23 @@ impl Drag {
         };
         let mut out = Vec::new();
         match &self.kind {
+            DragKind::TextStagger { band, end, time } => {
+                out.extend(band.commands(*end, sample.time_delta, self.start.fps, *time))
+            }
+            DragKind::QuickOffsetKeys { groups, time } => {
+                let mut model = TimelineModel::default();
+                model.index = self.start.clone();
+                let plan = model.quick_offset_keys(groups, sample.time_delta, *time)?;
+                for call in plan.calls {
+                    if let pm_kernel::Call::Transact {
+                        body: pm_kernel::WriteBody::Commands(commands),
+                        ..
+                    } = call
+                    {
+                        out.extend(commands);
+                    }
+                }
+            }
             DragKind::ProEdit(command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
                 let mut command = command.clone();
@@ -1525,6 +1609,33 @@ impl Drag {
                                 .into(),
                             );
                         }
+                        if self.start.layer(l).is_some_and(|layer| layer.scale_linked) {
+                            let paired = match c.as_str() {
+                                "scale.x" => Some("scale.y"),
+                                "scale.y" => Some("scale.x"),
+                                _ => None,
+                            };
+                            if let Some(paired) = paired {
+                                if let Some(channel) = self.start.channel(l, paired) {
+                                    for key in &channel.keys {
+                                        if self.selected_property_keys.contains(&key.id) {
+                                            if let Some(start) = key.value.as_f64() {
+                                                out.push(
+                                                    KeyframeCommand::Edit {
+                                                        key_id: key.id.clone(),
+                                                        time: None,
+                                                        value: Some(Value::Number(
+                                                            start + sample.value_delta,
+                                                        )),
+                                                    }
+                                                    .into(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                     let channel = self.start.channel(l, c).unwrap();
@@ -1541,6 +1652,38 @@ impl Drag {
                         })
                         .ok_or(ModelError::MissingHost("evaluated property baseline"))?;
                     let value = baseline + sample.value_delta;
+                    if matches!(c.as_str(), "scale.x" | "scale.y")
+                        && targets
+                            .iter()
+                            .filter(|(layer, path)| {
+                                layer == l && matches!(path.as_str(), "scale.x" | "scale.y")
+                            })
+                            .count()
+                            == 1
+                    {
+                        let paired = if c == "scale.x" { "scale.y" } else { "scale.x" };
+                        let other = self
+                            .property_values
+                            .get(&(l.clone(), paired.into()))
+                            .copied()
+                            .or_else(|| self.start.channel(l, paired)?.value.as_f64())
+                            .ok_or(ModelError::InvalidNumber)?;
+                        let mut model = TimelineModel::default();
+                        model.index = self.start.clone();
+                        for call in model
+                            .scale_value(l, c, value, *time, baseline, other)?
+                            .calls
+                        {
+                            if let Call::Transact {
+                                body: WriteBody::Commands(commands),
+                                ..
+                            } = call
+                            {
+                                out.extend(commands);
+                            }
+                        }
+                        continue;
+                    }
                     out.push(
                         PropertyCommand::Set(SetProperty::new(l, c, Value::Number(value), *time))
                             .into(),
@@ -1788,6 +1931,19 @@ impl TimelineModel {
                             .is_some_and(|c| !c.keys.is_empty()),
                     false,
                 );
+                // v1's separateDimensionsItem: on a Position row, checked
+                // while its layer's dimensions are separate.
+                if channel == "position" || channel.starts_with("position.") {
+                    let separated = self
+                        .index
+                        .layer(layer)
+                        .is_some_and(|l| l.separate_dimensions);
+                    add(
+                        "track.separate",
+                        !self.separate_targets(layer).is_empty(),
+                        separated,
+                    );
+                }
             }
             Context::Layer { .. } => add("layer.shared-menu", true, false),
             Context::Graph { series } => {
@@ -1929,6 +2085,41 @@ impl TimelineModel {
             "track.paste" => {
                 return Err(ModelError::MissingHost("clipboard payload: use paste_keys"));
             }
+            "track.separate" => {
+                let Context::Track { layer, .. } = context else {
+                    return Err(ModelError::InvalidGesture);
+                };
+                let separated = !self
+                    .index
+                    .layer(layer)
+                    .is_some_and(|l| l.separate_dimensions);
+                let commands = self
+                    .separate_targets(layer)
+                    .into_iter()
+                    .map(|layer_id| {
+                        pm_kernel::commands::layers::LayerCommand::Set {
+                            layer_id,
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                separate_dimensions: Some(separated),
+                                ..Default::default()
+                            },
+                        }
+                        .into()
+                    })
+                    .collect();
+                let mut plan = Plan::edit(commands, self.index.revision);
+                if let Some(pm_kernel::Call::Transact { label, .. }) = plan.calls.first_mut() {
+                    *label = Some(
+                        if separated {
+                            "Separate Dimensions"
+                        } else {
+                            "Join Dimensions"
+                        }
+                        .into(),
+                    );
+                }
+                plan
+            }
             "layer.shared-menu" => {
                 if let Context::Layer { id } = context {
                     Plan {
@@ -2013,6 +2204,7 @@ pub fn menu_label(id: &str) -> &'static str {
         "track.add" => "Add Keyframe",
         "track.paste" => "Paste Keyframes",
         "track.clear" => "Remove All Keyframes",
+        "track.separate" => "Separate Dimensions",
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
         "graph.speed" => "Speed Graph",

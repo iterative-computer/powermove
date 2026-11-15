@@ -13,6 +13,7 @@ mod reveal;
 mod session;
 pub mod snap;
 mod snapshot;
+pub mod stagger;
 pub mod tracks;
 pub mod v4;
 mod v4_actions;

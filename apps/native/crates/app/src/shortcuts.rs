@@ -37,6 +37,7 @@ fn key_only_label(command: &str, args: &[Value]) -> Option<String> {
         "selectAll" => "Select All".into(),
         "blurField" => "Leave Text Field".into(),
         "toggleLayerStrips" => "Show Layer Bars".into(),
+        "renameLayer" => "Rename Layer".into(),
         "nudgeKeyframes" if number(0) < 0. => {
             format!("Nudge Keyframes {} Frames Earlier", -number(0))
         }

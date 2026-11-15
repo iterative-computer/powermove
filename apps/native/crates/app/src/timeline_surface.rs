@@ -161,6 +161,16 @@ enum Spec {
     WorkIn,
     WorkOut,
     WorkMove,
+    /// ⌥ on a key: stretch the selected keys' timing (the grabbed key's
+    /// composition time).
+    StretchKeys {
+        grabbed: f64,
+    },
+    QuickOffsetKeys,
+    TextStagger {
+        band: pm_panel_timeline::stagger::Band,
+        end: bool,
+    },
 }
 enum Job {
     Sync,
@@ -225,12 +235,21 @@ struct Press {
     release: Option<Job>,
 }
 enum Gesture {
+    ParentPick {
+        ids: Vec<String>,
+        origin: Point<Pixels>,
+        at: Point<Pixels>,
+        target: Option<String>,
+        moved: bool,
+    },
     Idle,
     Pressed(Press),
     Dragging {
         origin: Point<Pixels>,
         proedit: bool,
         readout: bool,
+        quick: Option<(Point<Pixels>, f64, usize)>,
+        quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
     },
@@ -1482,7 +1501,7 @@ impl TimelineSurface {
             return;
         }
         let mods = Self::mods(event.modifiers);
-        let additive = mods.shift || mods.command();
+        let additive = !(mods.alt && mods.command()) && (mods.shift || mods.command());
         if y < m.ruler as f64 {
             // v1: the work area's bar (its thin strip at the top of the
             // ruler) moves it on a plain drag; ⌥ moves it from anywhere on
@@ -1531,9 +1550,17 @@ impl TimelineSurface {
         }
         let slop = ((m.hit - m.keyframe) as f64 / 2.).max(0.);
         if let Some((on, key)) = frame.hit_layer_key(x, y, slop)
-            && let Some((layer, channel, _)) = self.model.index.key_on(&on, &key)
+            && let Some((layer, channel, hit)) = self.model.index.key_on(&on, &key)
         {
+            // v1: a double-click on a key opens its value editor, for the
+            // whole selection when the key is part of it (the first click
+            // selected it).
+            if event.click_count == 2 {
+                self.delegate.command("keyframeValue", cx);
+                return;
+            }
             let selected = self.model.selection.key_selected(&on, &key);
+            let grabbed = layer.from + hit.time;
             let (layer, channel) = (layer.id.clone(), channel.path.clone());
             self.queue.push_back(Job::SelectKey {
                 layer: layer.clone(),
@@ -1542,9 +1569,18 @@ impl TimelineSurface {
                 additive,
                 dragging: true,
             });
+            // v1: ⌥ stretches the selected keys' timing from the far end
+            // when the first or last of them is grabbed.
+            let spec = if mods.alt && mods.command() {
+                Spec::QuickOffsetKeys
+            } else if mods.alt && !additive && !mods.command() {
+                Spec::StretchKeys { grabbed }
+            } else {
+                Spec::Keys
+            };
             self.gesture = Gesture::Pressed(Press {
                 origin: event.position,
-                spec: Some(Spec::Keys),
+                spec: Some(spec),
                 release: (additive && selected).then_some(Job::SelectKey {
                     layer,
                     channel,
@@ -1555,6 +1591,35 @@ impl TimelineSurface {
             });
             self.pump(cx);
             return;
+        }
+        // v1 textStagger.hit runs before a clip body's slide.
+        if let Some(op) = frame.ops.iter().rev().find(|op| {
+            frame.hit_clip(x, y).is_none_or(|(_, edge)| edge.is_none())
+                && (op.shape == "stagger"
+                    && op.detail["locked"] != true
+                    && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
+                    && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
+                    && (x - (op.bounds.x + op.bounds.width)).abs() < 5.
+                    || op.shape == "stagger"
+                        && op.detail["locked"] != true
+                        && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
+                        && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
+                        && x >= op.bounds.x - 2.
+                        && x <= op.bounds.x + op.bounds.width)
+        }) {
+            if let Ok(band) = serde_json::from_value(op.detail["band"].clone()) {
+                let end = (x - (op.bounds.x + op.bounds.width)).abs() < 5.;
+                let band: pm_panel_timeline::stagger::Band = band;
+                self.queue
+                    .push_back(Job::SelectLayer(band.layer.clone(), mods));
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::TextStagger { band, end }),
+                    release: None,
+                });
+                self.pump(cx);
+                return;
+            }
         }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
@@ -1711,6 +1776,94 @@ impl TimelineSurface {
         self.clamp_scroll();
         self.changed(false, cx);
     }
+    pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>) {
+        let selected = self.model.selection.layers();
+        let ids = if selected.contains(&layer) {
+            selected.to_vec()
+        } else {
+            vec![layer]
+        };
+        let ids: Vec<_> = ids
+            .into_iter()
+            .filter(|id| {
+                self.model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| !l.effectively_locked && l.kind != "audio")
+            })
+            .collect();
+        if !ids.is_empty() {
+            self.gesture = Gesture::ParentPick {
+                ids,
+                origin,
+                at: origin,
+                target: None,
+                moved: false,
+            };
+        }
+    }
+    fn parent_target(&self, ids: &[String], position: Point<Pixels>) -> Option<String> {
+        if !self.bounds.contains(&position) {
+            return None;
+        }
+        let (_, y) = self.local(position);
+        let frame = self.frame.as_ref()?;
+        let row = self
+            .scene
+            .as_ref()?
+            .layer_row_at(frame.viewport, &self.tokens, y)?;
+        let RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&row.id).ok()? else {
+            return None;
+        };
+        // v1 wouldCycle also rejects an ancestor group, and a group's descendants.
+        let ancestors = |start: &str| {
+            let mut result = BTreeSet::new();
+            let mut at = self
+                .model
+                .index
+                .layer(start)
+                .and_then(|l| l.group.as_deref());
+            while let Some(group) = at {
+                if !result.insert(group.to_owned()) {
+                    break;
+                }
+                at = self
+                    .model
+                    .index
+                    .layer(group)
+                    .and_then(|l| l.group.as_deref());
+            }
+            result
+        };
+        if ids.iter().any(|child| ancestors(child).contains(&id)) {
+            return None;
+        }
+        let mut candidate = Some(id.as_str());
+        let mut seen = BTreeSet::new();
+        if self.model.index.layer(&id)?.kind == "audio" {
+            return None;
+        }
+        while let Some(parent) = candidate {
+            if ids.iter().any(|child| child == parent) || !seen.insert(parent) {
+                return None;
+            }
+            if ids.iter().any(|child| {
+                self.model
+                    .index
+                    .layer(child)
+                    .is_some_and(|l| l.kind == "group")
+                    && ancestors(parent).contains(child)
+            }) {
+                return None;
+            }
+            candidate = self
+                .model
+                .index
+                .layer(parent)
+                .and_then(|l| l.parent.as_deref());
+        }
+        Some(id)
+    }
     pub fn press_property(&mut self, layer: String, path: String, origin: Point<Pixels>) {
         self.gesture = Gesture::Pressed(Press {
             origin,
@@ -1802,7 +1955,11 @@ impl TimelineSurface {
             });
             self.gesture = Gesture::Pressed(Press {
                 origin: event.position,
-                spec: Some(Spec::GraphKeys),
+                spec: Some(if event.modifiers.alt && event.modifiers.platform {
+                    Spec::QuickOffsetKeys
+                } else {
+                    Spec::GraphKeys
+                }),
                 release: None,
             });
             self.pump(cx);
@@ -1894,6 +2051,24 @@ impl TimelineSurface {
         if self.graph_grab.is_some() && matches!(self.gesture, Gesture::Dragging { .. }) {
             self.graph_at = Some(event.position);
         }
+        if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
+            let target = self.parent_target(ids, event.position);
+            let delta = event.position - *origin;
+            let travel = f32::from(delta.x).hypot(f32::from(delta.y));
+            if let Gesture::ParentPick {
+                at,
+                target: next,
+                moved,
+                ..
+            } = &mut self.gesture
+            {
+                *at = event.position;
+                *next = target;
+                *moved |= travel >= self.tokens.metrics.panel_drag_threshold;
+            }
+            cx.notify();
+            return true;
+        }
         let held = match self.gesture {
             Gesture::Zoom => Some((Part::Zoom, 0.)),
             Gesture::Navigate { grab } => Some((Part::Time, grab)),
@@ -1936,6 +2111,9 @@ impl TimelineSurface {
                 .expanded_ids(&moving)
                 .iter()
                 .any(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+            if !locked {
+                self.cursor = CursorStyle::ClosedHand;
+            }
             self.gesture = if locked {
                 Gesture::Idle
             } else {
@@ -1956,8 +2134,14 @@ impl TimelineSurface {
             Gesture::Idle => return false,
             Gesture::Pressed(press) => {
                 let delta = event.position - press.origin;
-                let travel = f32::from(delta.x).hypot(f32::from(delta.y));
-                if travel < self.tokens.metrics.drag_threshold {
+                let travel = if matches!(press.spec, Some(Spec::Property { .. })) {
+                    f32::from(delta.x).abs()
+                } else {
+                    f32::from(delta.x).hypot(f32::from(delta.y))
+                };
+                if travel < self.tokens.metrics.drag_threshold
+                    && !matches!(press.spec, Some(Spec::TextStagger { .. }))
+                {
                     return true;
                 }
                 let origin = press.origin;
@@ -1970,6 +2154,43 @@ impl TimelineSurface {
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
                 );
                 let readout = matches!(spec, Spec::Property { .. });
+                let quick_count = match spec {
+                    Spec::QuickOffsetKeys => self
+                        .model
+                        .index
+                        .layers
+                        .iter()
+                        .filter(|l| {
+                            l.channels.iter().any(|c| {
+                                c.keys
+                                    .iter()
+                                    .any(|k| self.model.selection.keys().contains(&k.id))
+                            })
+                        })
+                        .count(),
+                    Spec::Offset => self.model.selection.layers().len(),
+                    _ => 0,
+                };
+                let quick = (quick_count > 1).then_some((event.position, 0., quick_count));
+                let mut quick_limits = Vec::new();
+                if quick_count > 1 && matches!(spec, Spec::QuickOffsetKeys) {
+                    let mut rank = 0;
+                    for layer in &self.model.index.layers {
+                        let times: Vec<_> = layer
+                            .channels
+                            .iter()
+                            .flat_map(|c| &c.keys)
+                            .filter(|k| self.model.selection.keys().contains(&k.id))
+                            .map(|k| layer.from + k.time)
+                            .collect();
+                        if times.is_empty() {
+                            continue;
+                        }
+                        let factor = rank as f64 / (quick_count - 1) as f64;
+                        quick_limits.extend(times.into_iter().map(|time| (time, factor)));
+                        rank += 1;
+                    }
+                }
                 let handle = match &spec {
                     Spec::Handle { key, .. } => self
                         .graph
@@ -1980,11 +2201,17 @@ impl TimelineSurface {
                     _ => None,
                 };
                 let time = self.delegate.time(cx);
+                // v1: a clip being moved is held (grabbing).
+                if matches!(spec, Spec::Layers | Spec::Duplicate) {
+                    self.cursor = CursorStyle::ClosedHand;
+                }
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
                     readout,
+                    quick,
+                    quick_limits,
                     handle,
                 };
             }
@@ -1995,8 +2222,21 @@ impl TimelineSurface {
                 origin,
                 proedit,
                 readout,
+                quick,
+                quick_limits,
                 handle,
             } => {
+                if let Some((at, total, _)) = quick {
+                    *at = event.position;
+                    *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
+                    // v1 drawQuickOffset reads the planner's bounded total.
+                    for &(time, factor) in quick_limits.iter().filter(|(_, factor)| *factor > 0.) {
+                        *total = total
+                            .max((time.min(0.) - time) / factor)
+                            .min((time.max(self.model.index.duration) - time) / factor);
+                    }
+                    cx.notify();
+                }
                 let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
                 if let (Some(layer_from), Some(area), Some(graph)) =
@@ -2136,6 +2376,22 @@ impl TimelineSurface {
         (self.graph_grab, self.graph_at, self.graph_box) = (None, None, None);
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
+            Gesture::ParentPick {
+                ids, target, moved, ..
+            } => {
+                if moved {
+                    if let Some(target) = target {
+                        self.queue.push_back(Job::Apply(self.model.parent(
+                            &ids,
+                            Some(target),
+                            self.delegate.time(cx),
+                        )));
+                    }
+                } else {
+                    self.delegate
+                        .run("timeline.parentMenu", vec![serde_json::json!(ids)], cx);
+                }
+            }
             // A click on a name stays the row's own (it selects).
             Gesture::LayerPress { .. } => return false,
             // One undo step ("Move layers"), through the model's drop.
@@ -2155,6 +2411,13 @@ impl TimelineSurface {
                 }
             }
             Gesture::Pressed(press) => {
+                if let Some(Spec::Property { layer, path }) = press.spec {
+                    self.delegate.run(
+                        "timeline.propertyEdit",
+                        vec![serde_json::json!({"type":"propertyEdit","layer":layer,"path":path})],
+                        cx,
+                    );
+                }
                 if let Some(job) = press.release {
                     self.queue.push_back(job);
                 }
@@ -2240,25 +2503,43 @@ impl TimelineSurface {
             return;
         };
         let ruler = self.tokens.metrics.ruler as f64;
+        // v1: a property row's name offers its lane's menu (Add Keyframe at
+        // the playhead, Paste, Remove All, Separate Dimensions).
+        let mut column_track = None;
         if x < self.view.layer_column {
             let row = self
                 .scene
                 .as_ref()
                 .and_then(|s| s.row_at(y - ruler + self.view.scroll_y))
                 .and_then(|r| pm_panel_timeline::v4::parse_row(&r.id).ok());
-            if let Some(RowId::Layer(id)) = row {
-                self.layer_menu(id, window, cx);
+            match row {
+                Some(RowId::Layer(id)) => {
+                    self.layer_menu(id, window, cx);
+                    return;
+                }
+                Some(RowId::Property { layer_id, channel }) => {
+                    column_track = Some(MenuContext::Track {
+                        layer: layer_id,
+                        channel,
+                    });
+                }
+                _ => return,
             }
-            return;
         }
-        let time = self.time_at(x);
+        let time = if column_track.is_some() {
+            self.delegate.time(cx)
+        } else {
+            self.time_at(x)
+        };
         let at = |kind: &str, layer: Option<&str>| {
             vec![(
                 "timeline:context",
                 serde_json::json!({"kind":kind,"layerId":layer,"time":time}),
             )]
         };
-        let context = if y < ruler {
+        let context = if let Some(track) = column_track {
+            track
+        } else if y < ruler {
             match frame.hit_op("marker:", x, y, 2.) {
                 Some(op) => MenuContext::Marker {
                     id: op.id["marker:".len()..].to_owned(),
@@ -2473,6 +2754,15 @@ impl TimelineSurface {
                 CursorStyle::ResizeColumn
             } else if self.work_handle_at(x, y).is_some() {
                 CursorStyle::ResizeLeftRight
+            } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
+                // v1: the ruler scrubs.
+                CursorStyle::ResizeLeftRight
+            } else if self.frame.as_ref().is_some_and(|f| {
+                f.hit_layer_key(x, y, ((m.hit - m.keyframe) as f64 / 2.).max(0.))
+                    .is_some()
+            }) {
+                // v1: a key is a thing to press.
+                CursorStyle::PointingHand
             } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -2482,6 +2772,15 @@ impl TimelineSurface {
                 })
             {
                 CursorStyle::ResizeLeftRight
+            } else if let Some((id, None)) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
+                && !self
+                    .model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| l.effectively_locked)
+            {
+                // v1: a clip's body grabs.
+                CursorStyle::OpenHand
             } else {
                 CursorStyle::Arrow
             };
@@ -2556,6 +2855,10 @@ impl TimelineSurface {
         self.view.layer_column
     }
     #[cfg(test)]
+    /// The pointer the timeline shows (tests).
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
+    }
     pub fn model(&self) -> Arc<TimelineModel> {
         self.model.clone()
     }
@@ -2836,6 +3139,61 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
+        Spec::TextStagger { band, end } => DragKind::TextStagger { band, end, time },
+        Spec::QuickOffsetKeys => {
+            let groups: Vec<Vec<String>> = model
+                .index
+                .layers
+                .iter()
+                .filter_map(|layer| {
+                    let ids: Vec<_> = keys
+                        .iter()
+                        .filter(|id| {
+                            model
+                                .index
+                                .key(id)
+                                .is_some_and(|(l, _, _)| l.id == layer.id)
+                        })
+                        .cloned()
+                        .collect();
+                    (!ids.is_empty()).then_some(ids)
+                })
+                .collect();
+            if groups.len() < 2 {
+                DragKind::Keys { ids: keys }
+            } else {
+                DragKind::QuickOffsetKeys { groups, time }
+            }
+        }
+        Spec::StretchKeys { grabbed } => {
+            // v1's keyframeStretchAnchor: two or more keys apart, grabbed at
+            // the first or last; anything else moves them.
+            let times: Vec<f64> = keys
+                .iter()
+                .filter_map(|id| model.index.key(id).map(|(l, _, k)| l.from + k.time))
+                .collect();
+            let first = times.iter().copied().fold(f64::INFINITY, f64::min);
+            let last = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let anchor = (times.len() >= 2 && last - first >= 1e-9)
+                .then(|| {
+                    if (grabbed - last).abs() < 1e-6 {
+                        Some(first)
+                    } else if (grabbed - first).abs() < 1e-6 {
+                        Some(last)
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+            match anchor {
+                Some(anchor_time) => DragKind::StretchKeys {
+                    ids: keys,
+                    anchor_time,
+                    grabbed_time: grabbed,
+                },
+                None => DragKind::Keys { ids: keys },
+            }
+        }
         Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
         Spec::Transform { keys, anchor } => DragKind::TransformKeys {
             ids: keys,
@@ -2987,6 +3345,123 @@ impl ModelPresenter for Presenter {
                 text: c.text,
             })
             .collect()
+    }
+    fn stagger_bands(
+        &self,
+        layer: &pm_panel_timeline::Layer,
+        time: f64,
+    ) -> Vec<pm_panel_timeline::stagger::Band> {
+        if layer.kind != "text" {
+            return vec![];
+        }
+        let Some(root) = self.published.snapshot.root() else {
+            return vec![];
+        };
+        let Some(node) = pm_kernel::model::find_layer(root, &layer.id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+        else {
+            return vec![];
+        };
+        let Some(animators) = node.get("d").and_then(|d| d.get("animators")) else {
+            return vec![];
+        };
+        let raw: serde_json::Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&animators.to_value()))
+                .unwrap_or_default();
+        if !raw.as_array().into_iter().flatten().any(|animator| {
+            animator["enabled"] != false
+                && animator["mode"] == "stagger"
+                && animator["p"].get("duration").is_some()
+        }) {
+            return vec![];
+        }
+        crate::text_host::query(&self.published, |q| {
+            let layout = q.text_layout(None, &layer.id, time)?;
+            let lines: Vec<pm_model::JsString> = layout
+                .get("lines")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|l| {
+                    l.get("text")
+                        .and_then(pm_model::Value::as_str)
+                        .map(Into::into)
+                })
+                .collect();
+            let mut bands = Vec::new();
+            for animator in raw.as_array().into_iter().flatten() {
+                if animator["enabled"] == false
+                    || animator["mode"] != "stagger"
+                    || animator["p"].get("duration").is_none()
+                {
+                    continue;
+                }
+                let Some(id) = animator["id"].as_str() else {
+                    continue;
+                };
+                let unit = match animator["unit"].as_str() {
+                    Some("words") => pm_eval::text_anim::UnitKind::Words,
+                    Some("lines") => pm_eval::text_anim::UnitKind::Lines,
+                    _ => pm_eval::text_anim::UnitKind::Characters,
+                };
+                let count = (pm_eval::text_anim::count_text_units(&lines, unit).max(1) as f64
+                    + animator["unitOffset"].as_f64().unwrap_or(0.))
+                .max(animator["unitTotal"].as_f64().unwrap_or(0.))
+                .max(1.);
+                let mut value = |key: &str| -> Result<f64, pm_kernel::QueryError> {
+                    if animator["p"].get(key).is_none() {
+                        return Ok(0.);
+                    }
+                    Ok(
+                        q.evaluate(None, &layer.id, &format!("ta.{id}.{key}"), time)?
+                            .as_f64()
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(0.),
+                    )
+                };
+                let (delay, duration_value, stagger) =
+                    (value("delay")?, value("duration")?, value("stagger")?);
+                let duration = duration_value.max(0.);
+                let rank = (count - 1.).max(0.)
+                    / if matches!(animator["order"].as_str(), Some("center" | "edges")) {
+                        2.
+                    } else {
+                        1.
+                    };
+                let cascade = stagger.max(0.) * rank;
+                let out = match animator["anchor"].as_str() {
+                    Some("in") => false,
+                    Some("out") => true,
+                    _ => animator["direction"] == "out",
+                };
+                let legacy_duration = animator["legacyStartDuration"]
+                    .as_f64()
+                    .filter(|v| v.is_finite());
+                let start = if out {
+                    let offset = legacy_duration
+                        .map(|duration| duration - delay - duration_value.max(0.) - cascade)
+                        .unwrap_or(delay);
+                    layer.duration - offset - duration - cascade
+                } else {
+                    delay
+                };
+                bands.push(pm_panel_timeline::stagger::Band {
+                    layer: layer.id.clone(),
+                    animator: id.into(),
+                    delay,
+                    duration_value,
+                    stagger,
+                    start,
+                    duration,
+                    cascade,
+                    end: start + duration + cascade,
+                    out,
+                    legacy: legacy_duration.is_some(),
+                });
+            }
+            Ok(bands)
+        })
+        .unwrap_or_default()
     }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
         match key.stored_string("e") {
@@ -3497,6 +3972,29 @@ impl Render for TimelineSurface {
                                     .border_color(rgb(tokens.colors.secondary)),
                             );
                         }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
+                            if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
+                                // v1 installParentPickwhip: the same cubic and target label.
+                                let mut line = PathBuilder::stroke(px(2.));
+                                line.move_to(*origin);
+                                line.cubic_bezier_to(*at, *origin + point(px(60.), px(0.)), *at - point(px(60.), px(0.)));
+                                if let Ok(line) = line.build() { window.paint_path(line, rgb(tokens.colors.accent)); }
+                                let label = target.as_ref().and_then(|id| surface.model.index.layer(id)).map(|l| format!("Parent to {}", l.name.to_string_lossy())).unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
+                                if target.is_some() {
+                                    if let (Some(scene), Some(frame)) = (&surface.scene, &surface.frame) {
+                                        let (_, y) = surface.local(*at);
+                                        if let Some(row) = scene.layer_row_at(frame.viewport, &tokens, y) {
+                                            window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(0.), px(row.top as f32)), size(bounds.size.width, px(row.height as f32)))).background(rgba((tokens.colors.accent << 8) | 0x29)));
+                                        }
+                                    }
+                                }
+                                let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                let text = window.text_system().shape_line(label.into(), px(12.), &runs);
+                                let label_at = point((at.x + px(12.)).min(surface.bounds.right() - px(200.)), at.y - px(12.));
+                                let _ = text.paint(label_at, px(16.), TextAlign::Left, None, window, cx);
+                            }
+                        }
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -3521,9 +4019,16 @@ impl Render for TimelineSurface {
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = released.update(cx, |s, cx| {
+                                    if let Gesture::ParentPick { ids, .. } = &s.gesture {
+                                        let next = s.parent_target(ids, event.position);
+                                        if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
+                                            *target = next;
+                                            *at = event.position;
+                                        }
+                                    }
                                     s.on_up(cx);
                                 });
                             }
@@ -3548,6 +4053,64 @@ impl TimelineSurface {
     fn graph_readout(&self) -> Option<AnyElement> {
         if !matches!(self.gesture, Gesture::Dragging { .. }) {
             return None;
+        }
+        let quick = match &self.gesture {
+            Gesture::Dragging {
+                quick: Some(quick), ..
+            } => Some(*quick),
+            _ => None,
+        };
+        if let Some((at, total, count)) = quick {
+            let local = at - self.bounds.origin;
+            let t = &self.tokens;
+            let left = (f32::from(local.x) + 14.)
+                .max(self.view.layer_column as f32 + 8.)
+                .min(
+                    (f32::from(self.bounds.size.width) - 222.)
+                        .max(self.view.layer_column as f32 + 8.),
+                );
+            let top = (f32::from(local.y) + 14.)
+                .max(t.metrics.ruler + 8.)
+                .min((f32::from(self.bounds.size.height) - 53.).max(t.metrics.ruler + 8.));
+            let column = |left, label: &'static str, value: f64| {
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(6.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(t.colors.muted))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(t.colors.text))
+                            .child(format!(
+                                "{}{}",
+                                if value < 0. { "−" } else { "+" },
+                                crate::captions_panel::timecode(value.abs(), self.model.index.fps)
+                            )),
+                    )
+            };
+            return Some(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(214.))
+                    .h(px(45.))
+                    .rounded(px(7.))
+                    .bg(rgb(t.colors.floating))
+                    .border(px(t.metrics.border))
+                    .border_color(rgb(t.colors.separator))
+                    .child(column(10., "TOTAL OFFSET", total))
+                    .child(column(112., "PER LAYER", total / (count - 1) as f64))
+                    .into_any_element(),
+            );
         }
         let at = self.graph_at?;
         let text = match &self.graph_box {
@@ -3802,6 +4365,26 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         .clip
         .map(|c| Bounds::new(at(c.x, c.y), size(px(c.width as f32), px(c.height as f32))));
     let draw = |window: &mut Window, cx: &mut App| match op.shape {
+        "stagger" => {
+            let mut path = PathBuilder::fill();
+            for (i, p) in op.detail["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let point = at(p[0].as_f64().unwrap_or(0.), p[1].as_f64().unwrap_or(0.));
+                if i == 0 {
+                    path.move_to(point);
+                } else {
+                    path.line_to(point);
+                }
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
         // 45° stripes clipped to the op's rounded box (offline clips, the
         // render bar while rendering).
         "stripes-45" => {
