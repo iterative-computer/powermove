@@ -84,6 +84,9 @@ impl Agent {
             latest: None,
             typed: String::new(),
         };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
         // These protocol fixtures exercise the Editor/app-server transport.
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
@@ -113,6 +116,9 @@ impl Agent {
             latest: None,
             typed: String::new(),
         };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
         // These protocol fixtures exercise the Editor/app-server transport.
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
@@ -122,6 +128,14 @@ impl Agent {
             panel.choose("agent-access", "editor");
         }
         panel
+    }
+    fn account_checks_finished(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while [Provider::Chatgpt, Provider::Claude].into_iter().any(|provider|
+            self.panels.broker.agent.connection(provider).0 == "checking") {
+            assert!(Instant::now() < deadline, "account status check timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
     /// Sign-in status arrives from a worker; a run needs it.
     fn connected(&mut self, provider: Provider) {
@@ -139,25 +153,10 @@ impl Agent {
     /// Acts on the publication last seen, as a click does: a streaming run may
     /// publish again before the event arrives.
     fn press(&mut self, id: &str, event: &str, detail: EventDetail) {
-        // Account-status workers may replace a target while the fixture reads
-        // it. Retry only a rejected admission: no event has been enqueued yet.
-        // press_seen remains strict for tests that deliberately keep an old tree.
-        for attempt in 0..3 {
-            self.text();
-            match self.drive_seen(id, event, detail.clone()) {
-                Err(Error::Host(message)) if message == "stale native drive" && attempt < 2 => {},
-                driven => {
-                    self.finish_press(id, driven);
-                    return;
-                }
-            }
-        }
+        self.text();
+        self.press_seen(id, event, detail);
     }
     fn press_seen(&mut self, id: &str, event: &str, detail: EventDetail) {
-        let driven = self.drive_seen(id, event, detail);
-        self.finish_press(id, driven);
-    }
-    fn drive_seen(&mut self, id: &str, event: &str, detail: EventDetail) -> Result<Ticket<Evaluation>> {
         let target = self.node(id);
         let (generation, revision) = {
             let p = self.latest.as_ref().expect("agent publication");
@@ -165,7 +164,7 @@ impl Agent {
         };
         // As the app's SurfaceView::send does: by the node's semantic id, so a
         // republish between seeing the button and the press still lands.
-        self.panels.activate(
+        let driven = self.panels.activate(
             "agent",
             generation,
             revision,
@@ -173,9 +172,7 @@ impl Agent {
             Some(id),
             event,
             detail,
-        )
-    }
-    fn finish_press(&mut self, id: &str, driven: Result<Ticket<Evaluation>>) {
+        );
         match driven.map(wait) {
             Ok(Ok(_)) => {
                 self.text();
