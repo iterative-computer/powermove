@@ -801,15 +801,43 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         // Opened while another app is in front (a file opened from Finder or
         // a launcher): it is the tab shown and the key window when the app
         // is brought forward, not the tab that was key before (U3).
-        unsafe {
-            let group: *mut AnyObject = msg_send![window, tabGroup];
-            if !group.is_null() {
-                let _: () = msg_send![group, setSelectedWindow: window];
-            }
-        }
-        window.makeKeyWindow();
+        select_in_background(window);
     }
     true
+}
+/// The app is not active: `window` becomes its group's tab shown and the key
+/// window for when the app comes forward, staying where it stands among
+/// other apps' windows. Selecting a tab orders its window front, which for
+/// an inactive app is above every other app's windows: it goes back just
+/// above the app's own front editor window, or behind, as `present` puts an
+/// inactive app's window.
+fn select_in_background(window: &NSWindow) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let tabs: Vec<isize> = tab_windows(window).iter().map(|w| w.windowNumber()).collect();
+    // Only the app's editor windows count: a pop-up or helper window can
+    // stand above other apps' windows, and going above it would too.
+    let front = app.orderedWindows().to_vec().into_iter().find(|w| {
+        w.isVisible()
+            && w.windowNumber() != window.windowNumber()
+            && !tabs.contains(&w.windowNumber())
+            && ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber()))
+    });
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: window];
+        }
+    }
+    match front {
+        Some(front) => {
+            window.orderWindow_relativeTo(NSWindowOrderingMode::Above, front.windowNumber())
+        }
+        None => window.orderBack(None),
+    }
+    window.makeKeyWindow();
 }
 /// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`
 /// (objc2's `Sel` has no `RefEncode`, so `*mut Sel` cannot be declared directly).
@@ -1710,6 +1738,10 @@ fn route(number: isize, name: String) {
 }
 /// After a relaunch: the window with session id `id` (the one that was in
 /// front) comes forward, its tab the one its group shows.
+/// The session ids of the editor windows open now.
+pub fn live_window_ids() -> Vec<u64> {
+    WINDOW_IDS.with(|m| m.borrow().values().copied().filter(|id| *id != 0).collect())
+}
 pub fn bring_session_window(id: u64) {
     let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
     let Some(mtm) = MainThreadMarker::new() else {
@@ -1724,23 +1756,7 @@ pub fn bring_session_window(id: u64) {
         return;
     }
     // Launched in the background: `present` would send it to the back.
-    // It goes just above the app's own front window (never above another
-    // app's) and is key when the app comes forward.
-    unsafe {
-        let group: *mut AnyObject = msg_send![&*window, tabGroup];
-        if !group.is_null() {
-            let _: () = msg_send![group, setSelectedWindow: &*window];
-        }
-    }
-    let front = app
-        .orderedWindows()
-        .to_vec()
-        .into_iter()
-        .find(|w| w.isVisible() && w.windowNumber() != window.windowNumber());
-    if let Some(front) = front {
-        window.orderWindow_relativeTo(NSWindowOrderingMode::Above, front.windowNumber());
-    }
-    window.makeKeyWindow();
+    select_in_background(&window);
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {

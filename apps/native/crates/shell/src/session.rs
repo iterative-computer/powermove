@@ -36,6 +36,13 @@ pub struct Session {
     /// Id of the key window when last saved.
     #[serde(default)]
     pub key: Option<u64>,
+    /// Every entry was an open window when the file was last written: a
+    /// quit kept only the windows still open, and a launch kept only the
+    /// windows it restored. A file without it comes from a build that
+    /// restored one window and never took the others out, so its entries
+    /// are history, not what was open (PM-392).
+    #[serde(default)]
+    pub complete: bool,
 }
 impl Session {
     pub fn next_id(&self) -> u64 {
@@ -66,6 +73,33 @@ impl Session {
         }
         if self.key == Some(id) {
             self.key = None;
+        }
+    }
+    /// Only the windows `ids` stay (the windows open at a quit); the file is
+    /// then complete.
+    pub fn keep(&mut self, ids: &[u64]) {
+        self.windows.retain(|w| ids.contains(&w.id));
+        let kept: Vec<u64> = self.windows.iter().map(|w| w.id).collect();
+        for w in &mut self.windows {
+            if w.tab_group.is_some_and(|g| !kept.contains(&g)) {
+                w.tab_group = None;
+            }
+        }
+        if self.key.is_some_and(|k| !kept.contains(&k)) {
+            self.key = None;
+        }
+        self.complete = true;
+    }
+    /// The windows a launch reopens. From a complete file, every window
+    /// (`all`, the system's "Close windows when quitting an app" off) or the
+    /// key window's arrangement; from an earlier build's file, only the key
+    /// window's arrangement, which is all that build reopened.
+    pub fn launch_plan(&self, tabs: bool, all: bool) -> Vec<WindowState> {
+        let all = all && self.complete;
+        if tabs {
+            self.restore_plan_tabs(all)
+        } else {
+            self.restore_plan(all)
         }
     }
     /// Separate windows mode: the windows to reopen. With `all == false` (the system's "Close windows when
@@ -175,6 +209,10 @@ pub enum Change {
     Upsert { state: WindowState, key: bool },
     /// The person closed the window.
     Remove(u64),
+    /// A quit: only these windows (the ones open) stay.
+    Keep(Vec<u64>),
+    /// A launch: the windows it restores, the file complete.
+    Replace(Session),
 }
 enum Job {
     Change(PathBuf, Change),
@@ -266,6 +304,8 @@ fn update<'a>(
                 }
             }
             Change::Remove(id) => session.remove(*id),
+            Change::Keep(ids) => session.keep(ids),
+            Change::Replace(whole) => session = whole.clone(),
         }
     }
     session.version = 1;
@@ -390,5 +430,89 @@ mod writer_tests {
         assert!(flush().is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), newer);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    fn window(id: u64, project: &str, tab_group: Option<u64>) -> WindowState {
+        WindowState {
+            id,
+            frame: [10., 10., 800., 600.],
+            project: project.into(),
+            workspace: "design".into(),
+            tab_group,
+            fullscreen: false,
+        }
+    }
+    /// An earlier build's file: 21 entries, of which only the key window was
+    /// open (that build reopened one window and never took the rest out).
+    fn history() -> Session {
+        let mut windows = vec![
+            window(1, "paper", None),
+            window(2, "a", Some(1)),
+            window(3, "b", Some(1)),
+            window(4, "c", None),
+        ];
+        windows.extend((5..=21).map(|id| window(id, &format!("old{id}"), None)));
+        Session {
+            version: 1,
+            windows,
+            key: Some(4),
+            complete: false,
+        }
+    }
+
+    #[test]
+    fn a_file_from_an_earlier_build_reopens_only_its_key_windows_arrangement() {
+        // The file an earlier build wrote has no `complete`.
+        let old: Session = serde_json::from_str(
+            r#"{"version":1,"windows":[{"id":4,"frame":[0,0,800,600],"project":"c","workspace":"design"}],"key":4}"#,
+        )
+        .unwrap();
+        assert!(!old.complete);
+        let s = history();
+        for tabs in [true, false] {
+            for all in [true, false] {
+                let plan = s.launch_plan(tabs, all);
+                assert_eq!(
+                    plan.iter().map(|w| w.id).collect::<Vec<_>>(),
+                    [4],
+                    "tabs {tabs}, all {all}"
+                );
+            }
+        }
+        // Key window in a tab group: the group, as the earlier build had it.
+        let s = Session {
+            key: Some(2),
+            ..history()
+        };
+        let plan = s.launch_plan(true, true);
+        assert_eq!(plan.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_complete_file_reopens_every_window_it_holds() {
+        let mut s = history();
+        s.complete = true;
+        assert_eq!(s.launch_plan(true, true).len(), 21);
+        assert_eq!(s.launch_plan(false, true).len(), 19, "a group is one window");
+    }
+
+    #[test]
+    fn a_quit_keeps_the_open_windows_only_and_marks_the_file_complete() {
+        let mut s = history();
+        s.keep(&[2, 3, 4]);
+        assert!(s.complete);
+        assert_eq!(s.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [2, 3, 4]);
+        // The group's leader went: its tabs no longer point at it.
+        assert!(s.windows.iter().all(|w| w.tab_group.is_none()));
+        assert_eq!(s.key, Some(4));
+        s.keep(&[2]);
+        assert_eq!(s.key, None);
+        // A round trip keeps the mark.
+        let back: Session = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert!(back.complete);
     }
 }
