@@ -350,6 +350,7 @@ impl McpSession {
             };
         }
         if name == "run_command" {
+            catalog::validate(name, args)?;
             let command = args["command"].as_str().unwrap_or_default();
             if command == "transport.seek" {
                 let time = args["args"][0]
@@ -378,6 +379,11 @@ impl McpSession {
                 return Ok(json!({"ran":false,"scope":"agent",
                     "reason":"The user's view and transport stay where they left them. Use render_frames for private inspection."}));
             }
+        }
+        if name == "run_command" {
+            return Err(Error::invalid(
+                "Use apply_commands or edit_video for edits in the agent's private focus. UI menu commands belong to the user during co-editing.",
+            ));
         }
         if PANEL_TOOLS.contains(&name) {
             // As with the Store reads, a host without the capability says so
@@ -656,7 +662,13 @@ impl McpSession {
         assert_project(session, &host, &id)?;
         if ["get_project_state", "get_timeline", "list_media"].contains(&name) {
             let result = if name == "get_project_state" {
-                views::project_state(&host, &id, args)?
+                views::project_state_at(
+                    &host,
+                    &id,
+                    args,
+                    json!({"layers":session.focus,"keys":[],"chan":null}),
+                    session.time,
+                )?
             } else if name == "list_media" {
                 crate::media::list(
                     &host.read_document(&id)?,
@@ -1212,6 +1224,11 @@ impl McpSession {
             .iter()
             .filter_map(|l| l["id"].as_str().map(str::to_owned))
             .collect();
+        let focus = project
+            .as_deref()
+            .map(|id| host.view(id).map(|v| v.selection.layers().to_vec()))
+            .transpose()?
+            .unwrap_or_default();
         self.writer = next_writer();
         if let Some(id) = project.as_deref() {
             if let Some(app) = host.coedit_host() {
@@ -1241,7 +1258,7 @@ impl McpSession {
             known_layers,
             owned_scopes: Vec::new(),
             observed_revision: baseline,
-            focus: Vec::new(),
+            focus,
         });
         Ok(result)
     }

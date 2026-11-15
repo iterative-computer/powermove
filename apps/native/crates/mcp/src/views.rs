@@ -54,9 +54,16 @@ fn at_path<'a>(root: &'a Value, path: &Value) -> Option<&'a Value> {
     Some(v)
 }
 pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
+    project_state_at(host, id, a, host.selection(id)?, host.playhead(id))
+}
+pub fn project_state_at(
+    host: &Automation,
+    id: &str,
+    a: &Value,
+    selection: Value,
+    time: f64,
+) -> Result<Value> {
     let p = host.read_document(id)?;
-    let selection = host.selection(id)?;
-    let time = host.playhead(id);
     let mut result = project_state_data(p, selection, time, host.revision(id)?, a)?;
     if let Some(registry) = host.media_registry.as_deref()
         && let Some(assets) = result["mediaAssets"].as_array_mut()

@@ -289,3 +289,25 @@ fn typing_holds_after_four_seconds_and_user_wins_at_release() {
     drop(actor);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn agent_evaluation_time_is_private_and_reported_consistently() {
+    let (root, host, mut session, id) = fixture();
+    let original = host.lock().unwrap().playhead(&id);
+    let result = session
+        .dispatch(
+            "run_command",
+            &json!({"command":"transport.seek","args":[1.25]}),
+        )
+        .unwrap();
+    assert_eq!(result["scope"], "agent");
+    assert_eq!(host.lock().unwrap().playhead(&id), original);
+    let result = session
+        .dispatch("get_project_state", &json!({"indexOnly":true}))
+        .unwrap();
+    assert_eq!(result["composition"]["playhead"], 1.25);
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+}
