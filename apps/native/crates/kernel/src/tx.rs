@@ -689,6 +689,8 @@ pub struct Project {
     mutations: VecDeque<(u64, Writer)>,
     record_writers: HashMap<u64, Writer>,
     agent_turns: HashSet<Writer>,
+    /// History-only finalization waits for the person's current entry to end.
+    pending_squashes: HashMap<Writer, (ActorHistoryMark, String)>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
@@ -722,6 +724,7 @@ impl Project {
             mutations: VecDeque::new(),
             record_writers: HashMap::new(),
             agent_turns: HashSet::new(),
+            pending_squashes: HashMap::new(),
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -945,6 +948,12 @@ impl Project {
                 self.mutations.pop_front();
             }
         }
+        if self.entry.is_none() && !self.pending_squashes.is_empty() {
+            let pending = std::mem::take(&mut self.pending_squashes);
+            for (_, (mark, label)) in pending {
+                self.squash_turn(&mark, &label);
+            }
+        }
         self.collect_retired();
         if let (Some(key), Some(ack)) = (txid, &handled.reply) {
             self.remember(key, ack.clone());
@@ -958,6 +967,22 @@ impl Project {
             self.notices.push(notice);
         }
         handled
+    }
+
+    fn squash_turn(&mut self, mark: &ActorHistoryMark, label: &str) -> Option<u64> {
+        if mark.document != self.store.doc_id() {
+            return None;
+        }
+        let owned = self
+            .record_writers
+            .iter()
+            .filter_map(|(id, owner)| (*owner == mark.writer).then_some(*id))
+            .collect();
+        let ids = self.store.squash_segments(&mark.mark, &owned, label)?;
+        for id in &ids {
+            self.record_writers.insert(*id, mark.writer);
+        }
+        ids.last().copied()
     }
 
     fn memory(&mut self, caller: Caller, call: crate::MemoryCall) -> Reply {
@@ -1476,26 +1501,20 @@ impl Project {
                 label,
                 expected_revision,
             } => {
-                let valid = self.entry.is_none()
-                    && self.revision() == expected_revision
+                let valid = self.revision() == expected_revision
                     && mark.document == self.store.doc_id()
                     && mark.writer == writer;
-                let owned = self
-                    .record_writers
-                    .iter()
-                    .filter_map(|(id, owner)| (*owner == writer).then_some(*id))
-                    .collect();
-                let ids = if valid {
-                    self.store.squash_segments(&mark.mark, &owned, &label)
-                } else {
+                let entry = if !valid {
                     None
+                } else if self.entry.is_some() {
+                    // Do not close, fold into or wait on the person's drag.
+                    // The actor finalizes it after commit/cancel in handle().
+                    self.pending_squashes.insert(writer, (mark, label));
+                    None
+                } else {
+                    self.squash_turn(&mark, &label)
                 };
-                if let Some(ids) = &ids {
-                    for id in ids {
-                        self.record_writers.insert(*id, writer);
-                    }
-                }
-                Reply::Entry(ids.and_then(|ids| ids.last().copied()))
+                Reply::Entry(entry)
             }
             HistoryCall::Do { label, body } => {
                 match self.write(writer, caller.origin, &label, &body, true) {
