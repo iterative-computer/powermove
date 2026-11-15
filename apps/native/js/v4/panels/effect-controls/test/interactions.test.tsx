@@ -205,6 +205,8 @@ test.each([false, true])(
       const list = () => find(root, (p) => p.id === "layer-effects:list");
       const settle = async () => {
         await h.controller.settled();
+        // The synthetic wire host has no viewport range callback.
+        await h.controller.drive({ type: "range", range: [0, 64] });
         await root.flush();
       };
       const order = () =>
