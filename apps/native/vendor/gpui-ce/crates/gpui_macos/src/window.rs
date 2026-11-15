@@ -2322,6 +2322,15 @@ impl PlatformWindow for MacWindow {
         unsafe { window.styleMask().contains(NSWindowStyleMask::FullScreen) }
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(state) = state.upgrade() {
+                state.lock().start_display_link();
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }
@@ -4142,6 +4151,13 @@ extern "C" fn step(view: *mut c_void) {
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
 
+        // Consume this frame's demand before invoking GPUI. Dirty views and
+        // animation callbacks re-arm through frame_waker during the callback.
+        // Leave the legacy CV source alone: stopping it inside its callback
+        // has different threading requirements.
+        if let Some(link) = &lock.ca_display_link {
+            let _: () = msg_send![&**link, setPaused: true];
+        }
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
             drop(lock);
@@ -4149,9 +4165,12 @@ extern "C" fn step(view: *mut c_void) {
             callback(request);
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
-            // The link keeps stepping a visible window that has nothing new
-            // to draw: an unchanged window gives back its full-window
-            // intermediates until it draws again.
+            // Device recovery can demand a forced retry during presentation.
+            if lock.force_render_pending {
+                lock.start_display_link();
+            }
+            // Release intermediates when a continuing animation has left
+            // them unused. A fully idle window no longer ticks this callback.
             #[cfg(not(feature = "wgpu"))]
             lock.renderer.release_idle_targets(IDLE_TARGETS);
             #[cfg(not(feature = "wgpu"))]
