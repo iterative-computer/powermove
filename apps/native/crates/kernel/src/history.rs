@@ -203,7 +203,10 @@ pub struct HistoryRecord {
     /// `Some` for an external (closure) entry: no operations, undone by its
     /// realm. Never exported (the old `export()` kept document entries only).
     pub external: Option<ExternalRef>,
+    /// Interface-owned selection; agent/MCP navigation never creates these entries.
     pub selection: Option<Arc<(crate::selection::Selection, crate::selection::Selection)>>,
+    /// Optional Interface selection belonging to a document command. Runtime only.
+    pub document_selection: Option<Arc<(crate::selection::Selection, crate::selection::Selection)>>,
     /// The digest of the form the file stores for this step, computed once
     /// and shared by every copy ([`History::identity`]).
     digest: Arc<std::sync::OnceLock<String>>,
@@ -792,6 +795,7 @@ impl History {
             bytes,
             external: None,
             selection: None,
+            document_selection: None,
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
@@ -827,6 +831,7 @@ impl History {
             bytes,
             external: Some(external),
             selection: None,
+            document_selection: None,
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
@@ -836,6 +841,42 @@ impl History {
         self.cursor = self.entries.len();
         self.trim();
         id
+    }
+
+    pub(crate) fn document_selection(
+        &mut self,
+        before: crate::Selection,
+        after: crate::Selection,
+        revision: u64,
+    ) {
+        if self.can_redo() {
+            return;
+        }
+        let Some(record) = self.entries.last_mut() else {
+            return;
+        };
+        if !record.is_document()
+            || record.origin != Origin::Interface
+            || record.revision != revision
+        {
+            return;
+        }
+        if record.document_selection.is_none() && before == after {
+            return;
+        }
+        let before = if let Some(previous) = record.document_selection.take() {
+            let bytes = previous.0.encoded_bytes() + previous.1.encoded_bytes();
+            record.bytes -= bytes;
+            self.total_bytes -= bytes;
+            previous.0.clone()
+        } else {
+            before
+        };
+        let bytes = before.encoded_bytes() + after.encoded_bytes();
+        record.document_selection = Some(Arc::new((before, after)));
+        record.bytes += bytes;
+        self.total_bytes += bytes;
+        self.trim();
     }
 
     pub(crate) fn push_selection(
@@ -859,6 +900,7 @@ impl History {
             bytes,
             external: None,
             selection: Some(Arc::new((before, after))),
+            document_selection: None,
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
@@ -1278,6 +1320,7 @@ impl History {
                 bytes,
                 external: None,
                 selection: None,
+                document_selection: None,
                 digest: Default::default(),
                 assets: Default::default(),
                 saved_text: Default::default(),

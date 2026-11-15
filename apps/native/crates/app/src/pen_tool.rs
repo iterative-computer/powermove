@@ -623,10 +623,12 @@ impl GizmoSurface {
         let Some(drag) = self.pen_drag.take() else {
             return false;
         };
-        self.queue.push_back(Job::Finish(commit));
+        // The layer selection is part of the first vertex's document edit.
+        // Apply it while the gesture is open so history captures it on commit.
         if let Some(id) = drag.select.filter(|_| commit) {
             self.queue.push_back(Job::Select(Some(id)));
         }
+        self.queue.push_back(Job::Finish(commit));
         self.pump(cx);
         true
     }

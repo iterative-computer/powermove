@@ -394,6 +394,8 @@ pub struct GizmoSurface {
     /// The oldest pointer event behind the queued drag steps (`Host::input`).
     step_input: Option<f64>,
     latest: u64,
+    #[cfg(test)]
+    completed_read: u64,
     /// Press waiting on a pick; the drag starts on its answer if still held.
     picking: Option<Point<Pixels>>,
     picks: usize,
@@ -667,6 +669,8 @@ impl GizmoSurface {
             busy: false,
             step_input: None,
             latest: 0,
+            #[cfg(test)]
+            completed_read: 0,
             picking: None,
             picks: 0,
             controls: true,
@@ -875,6 +879,8 @@ impl GizmoSurface {
                         s.studio_push_view(cx);
                     }
                     s.draw(cx);
+                    #[cfg(test)]
+                    { s.completed_read = ticket; }
                 }
             });
         })
@@ -1418,7 +1424,7 @@ impl GizmoSurface {
                     if !p.selection.layers().contains(&hit) {
                         let ids = vec![hit.clone()];
                         let selection = SelectionCall::Layers { ids, add: false };
-                        let request = Request::new(Caller::native(), selection);
+                        let request = Request::new(Caller::native(), selection.user());
                         kernel.call(&project, request).await?.ok()?;
                     }
                     let p = kernel.published(&project)?;
@@ -1483,7 +1489,7 @@ impl GizmoSurface {
                     let add =
                         press.shift && target.is_some() && !selected.contains(target.as_ref()?);
                     let selection = SelectionCall::Layers { ids, add };
-                    let request = Request::new(Caller::native(), selection);
+                    let request = Request::new(Caller::native(), selection.user());
                     kernel.call(&project, request).await?.ok()?;
                     let p = kernel.published(&project)?;
                     let empty = target.is_none();
@@ -1793,11 +1799,11 @@ impl GizmoSurface {
             return;
         };
         if drag.active {
-            self.queue.push_back(Job::Finish(commit));
             if let (true, Some(copies)) = (commit, drag.copies) {
                 let ids = copies.into_iter().map(|(_, copy)| copy).collect();
                 self.queue.push_back(Job::SelectLayers(ids));
             }
+            self.queue.push_back(Job::Finish(commit));
             self.pump(cx);
         } else if let Some(press) = drag.click.filter(|_| commit) {
             self.pick(press, cx);
@@ -1863,7 +1869,11 @@ impl GizmoSurface {
                     else {
                         return Ok(());
                     };
-                    let call = Call::Transact {
+                    let call = Call::TransactWithSelection {
+                        selection: plan.select.map_or_else(
+                            || SelectionCall::Batch(vec![]),
+                            |id| SelectionCall::Layers { ids: vec![id], add: false },
+                        ),
                         label: Some(plan.label.into()),
                         body: WriteBody::Commands(plan.commands),
                         expected_revision: Some(published.revision()),
@@ -1875,15 +1885,6 @@ impl GizmoSurface {
                         .map_err(|e| format!("{e:?}"))?;
                     if let Reply::Throw(error) = ack.reply {
                         return Err(error.to_string());
-                    }
-                    if let Some(id) = plan.select {
-                        let select = SelectionCall::Layers {
-                            ids: vec![id],
-                            add: false,
-                        };
-                        kernel
-                            .call(&project, Request::new(Caller::native(), select))
-                            .await;
                     }
                     Ok::<(), String>(())
                 })
@@ -1944,34 +1945,30 @@ impl GizmoSurface {
                             };
                             let select = SelectionCall::Layers { ids, add: false };
                             return kernel
-                                .call(&project, Request::new(Caller::native(), select))
+                                .call(&project, Request::new(Caller::native(), select.user()))
                                 .await
                                 .ok_or("Kernel closed")?
                                 .map_err(|e| format!("{e:?}"));
                         }
                         (Job::Transact(label, commands, select), _) => {
-                            let call = Call::Transact {
+                            let selection = select.map_or_else(
+                                || SelectionCall::Batch(vec![]),
+                                |id| SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                },
+                            );
+                            let call = Call::TransactWithSelection {
                                 label: Some(label.into()),
                                 body: WriteBody::Commands(commands),
                                 expected_revision: None,
+                                selection,
                             };
-                            let ack = kernel
+                            return kernel
                                 .call(&project, Request::new(Caller::native(), call))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"))?;
-                            if let (Some(id), false) =
-                                (select, matches!(ack.reply, Reply::Throw(_)))
-                            {
-                                let select = SelectionCall::Layers {
-                                    ids: vec![id],
-                                    add: false,
-                                };
-                                kernel
-                                    .call(&project, Request::new(Caller::native(), select))
-                                    .await;
-                            }
-                            return Ok(ack);
+                                .map_err(|e| format!("{e:?}"));
                         }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),
@@ -2044,6 +2041,11 @@ impl GizmoSurface {
     /// The text session, including one still finishing.
     pub fn text_open(&self) -> Option<&text::TextSession> {
         self.text.as_ref()
+    }
+    /// The latest pose read finished; an empty selection is a completed read too.
+    #[cfg(test)]
+    pub fn refresh_complete(&self) -> bool {
+        !self.refreshing && self.completed_read == self.latest
     }
     #[cfg(test)]
     pub fn idle(&self) -> bool {

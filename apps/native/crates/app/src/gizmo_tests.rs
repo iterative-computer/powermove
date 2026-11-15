@@ -291,7 +291,7 @@ impl Stage {
         self.surface.update(&mut self.vcx, |s, cx| s.refresh(cx));
         let surface = self.surface.clone();
         settle(cx, move |cx| {
-            surface.read_with(cx, |s, _| s.idle() && !s.poses().is_empty())
+            surface.read_with(cx, |s, _| s.idle() && s.refresh_complete())
         });
     }
     fn point_of(&mut self, comp: [f64; 2]) -> Point<Pixels> {
@@ -924,6 +924,7 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
+    let before_selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
     s.recorder.tool.set(Some(Tool::Shape));
     let at = s.point_of([300., 200.]);
     s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
@@ -945,6 +946,21 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection,
+        before_selection
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(layer_value(&s.rig.kernel, &id).is_some());
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        [id]
+    );
 }
 /// With a maskable layer selected the drawn box becomes a mask on it.
 #[gpui::test]
@@ -1022,6 +1038,7 @@ fn the_text_tool_types_a_new_layer_in_one_undo_step(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_empty_new_text_leaves_nothing_behind(cx: &mut TestAppContext) {
     let mut s = stage(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
     s.recorder.tool.set(Some(Tool::Text));
     let at = s.point_of([400., 300.]);
     s.vcx.simulate_click(at, Modifiers::none());
@@ -1040,6 +1057,9 @@ fn an_empty_new_text_leaves_nothing_behind(cx: &mut TestAppContext) {
         surface.read_with(cx, |g, _| g.text_open().is_none())
     });
     assert!(layer_value(&s.rig.kernel, &id).is_none());
+    let after = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.history.entries, before.history.entries);
+    assert_eq!(after.selection, before.selection);
     let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     let reply = s
         .rig
@@ -1227,6 +1247,7 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
         .unwrap();
     s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
     cx.run_until_parked();
+    let entries = s.rig.kernel.published(PROJECT).unwrap().history.entries;
     // Around the first square (150..250, 100..200) only.
     let from = s.point_of([120., 80.]);
     s.vcx
@@ -1248,7 +1269,37 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
     settle(cx, move |_| {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
     });
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(published.history.entries, entries + 1);
+    assert_eq!(published.history.undo_label.as_deref(), Some("Selection"));
+    s.undo(cx);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |g, _| g.refresh_complete() && g.poses().is_empty())
+    );
+    assert!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .is_empty()
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.poses().len()), 1);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        ["l0"]
+    );
 }
+
 /// A move that brings the box's right edge within 8 points of the
 /// composition's centre snaps onto it; Command moves freely.
 #[gpui::test]
@@ -1461,6 +1512,7 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
         settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
         s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
     };
+    let before_history = s.rig.kernel.published(PROJECT).unwrap().history.entries;
     click(&mut s, cx, [400., 300.]);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
@@ -1470,17 +1522,50 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
     settle(cx, move |cx| {
         surface.read_with(cx, |g, _| g.pen_paths() == [1])
     });
+    let first = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        first.history.entries,
+        before_history + 1,
+        "first vertex and selection are one document step"
+    );
+    assert_eq!(
+        first.history.undo_label.as_deref(),
+        Some("Draw path vertex")
+    );
+    assert_eq!(first.history.applied, before_history + 1);
+    drop(first);
     click(&mut s, cx, [500., 300.]);
     let surface = s.surface.clone();
     settle(cx, move |cx| {
         surface.read_with(cx, |g, _| g.pen_paths() == [2])
     });
     assert_eq!(count(&s), before + 1);
+    let created = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().history.entries,
+        before_history + 2
+    );
     let undo = || Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
     s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
     assert_eq!(count(&s), before, "two clicks, two steps, nothing left");
+    assert!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .is_empty()
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().selection, created);
 }
+
 /// A new path layer's path closes on a click on its first vertex, as a
 /// mask path does.
 #[gpui::test]
@@ -1642,6 +1727,7 @@ fn option_dragging_the_body_leaves_the_layer_and_moves_a_copy(cx: &mut TestAppCo
     };
     let original = layers(&s)[0].id.clone();
     let before = position(&s, &original);
+    let before_selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
     let (body, ..) = s.points();
     let at = s.point_of([body[0] + 30., body[1] + 30.]);
     let option = Modifiers {
@@ -1674,6 +1760,21 @@ fn option_dragging_the_body_leaves_the_layer_and_moves_a_copy(cx: &mut TestAppCo
         .unwrap();
     assert_eq!(layers(&s).len(), 1, "one Undo step");
     assert_eq!(position(&s, &original), before);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection,
+        before_selection
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(layers(&s).len(), 2);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        [copy]
+    );
 }
 
 /// View ▸ Show Rulers: a press in the top ruler makes a horizontal guide
