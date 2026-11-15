@@ -139,10 +139,25 @@ impl Agent {
     /// Acts on the publication last seen, as a click does: a streaming run may
     /// publish again before the event arrives.
     fn press(&mut self, id: &str, event: &str, detail: EventDetail) {
-        self.text();
-        self.press_seen(id, event, detail);
+        // Account-status workers may replace a target while the fixture reads
+        // it. Retry only a rejected admission: no event has been enqueued yet.
+        // press_seen remains strict for tests that deliberately keep an old tree.
+        for attempt in 0..3 {
+            self.text();
+            match self.drive_seen(id, event, detail.clone()) {
+                Err(Error::Host(message)) if message == "stale native drive" && attempt < 2 => {},
+                driven => {
+                    self.finish_press(id, driven);
+                    return;
+                }
+            }
+        }
     }
     fn press_seen(&mut self, id: &str, event: &str, detail: EventDetail) {
+        let driven = self.drive_seen(id, event, detail);
+        self.finish_press(id, driven);
+    }
+    fn drive_seen(&mut self, id: &str, event: &str, detail: EventDetail) -> Result<Ticket<Evaluation>> {
         let target = self.node(id);
         let (generation, revision) = {
             let p = self.latest.as_ref().expect("agent publication");
@@ -150,7 +165,7 @@ impl Agent {
         };
         // As the app's SurfaceView::send does: by the node's semantic id, so a
         // republish between seeing the button and the press still lands.
-        let driven = self.panels.activate(
+        self.panels.activate(
             "agent",
             generation,
             revision,
@@ -158,7 +173,9 @@ impl Agent {
             Some(id),
             event,
             detail,
-        );
+        )
+    }
+    fn finish_press(&mut self, id: &str, driven: Result<Ticket<Evaluation>>) {
         match driven.map(wait) {
             Ok(Ok(_)) => {
                 self.text();
