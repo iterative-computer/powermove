@@ -33,6 +33,7 @@ struct Recorder {
     stamps: RefCell<Vec<f64>>,
     /// The composition size the viewer reports, when not 640 by 360.
     size: Cell<Option<[f64; 2]>>,
+    scale: Cell<Option<f64>>,
     /// Compositions a double-clicked precomp asked to open.
     opened: RefCell<Vec<String>>,
     /// Model geometry a part pick loads, and the parts it focused.
@@ -128,7 +129,7 @@ impl Host for Recording {
         }
         Some(ViewFrame {
             origin: bounds.origin + point(px(20.), px(20.)),
-            scale: 1.,
+            scale: self.0.scale.get().unwrap_or(1.),
             size: self.0.size.get().unwrap_or([640., 360.]),
         })
     }
@@ -296,7 +297,8 @@ impl Stage {
     }
     fn point_of(&mut self, comp: [f64; 2]) -> Point<Pixels> {
         let origin = bounds(&mut self.vcx, "viewer.gizmos").origin;
-        origin + point(px(20. + comp[0] as f32), px(20. + comp[1] as f32))
+        let scale = self.recorder.scale.get().unwrap_or(1.) as f32;
+        origin + point(px(20. + comp[0] as f32 * scale), px(20. + comp[1] as f32 * scale))
     }
     fn drag(
         &mut self,
@@ -2982,7 +2984,7 @@ fn gradient_handle_drag_is_one_undo_and_keys_animated_params(cx: &mut TestAppCon
     let mut q = pm_kernel::QueryMirror::new(&p);
     assert_eq!(
         q.queries()
-            .evaluate(None, "l0", "ramp.startX", 0.5)
+            .evaluate_property(None, "l0", "ramp.startX", 0.5)
             .unwrap()
             .as_f64(),
         Some(35.)
@@ -3028,7 +3030,7 @@ fn agent_shader_handle_drives_its_uniform(cx: &mut TestAppContext) {
     let mut q = pm_kernel::QueryMirror::new(&p);
     assert_eq!(
         q.queries()
-            .evaluate(None, "l0", "u.uX", 0.5)
+            .evaluate_property(None, "l0", "u.uX", 0.5)
             .unwrap()
             .as_f64(),
         Some(32.)
@@ -3038,7 +3040,7 @@ fn agent_shader_handle_drives_its_uniform(cx: &mut TestAppContext) {
     let mut q = pm_kernel::QueryMirror::new(&p);
     assert_eq!(
         q.queries()
-            .evaluate(None, "l0", "u.uX", 0.5)
+            .evaluate_property(None, "l0", "u.uX", 0.5)
             .unwrap()
             .as_f64(),
         Some(20.)
@@ -3060,7 +3062,7 @@ fn gradient_handle_drag_inverts_layer_rotation_and_nonuniform_scale(cx: &mut Tes
     let mut q = pm_kernel::QueryMirror::new(&p);
     assert!(
         (q.queries()
-            .evaluate(None, "l0", "ramp.startX", 0.5)
+            .evaluate_property(None, "l0", "ramp.startX", 0.5)
             .unwrap()
             .as_f64()
             .unwrap()
@@ -3070,7 +3072,7 @@ fn gradient_handle_drag_inverts_layer_rotation_and_nonuniform_scale(cx: &mut Tes
     );
     assert!(
         (q.queries()
-            .evaluate(None, "l0", "ramp.startY", 0.5)
+            .evaluate_property(None, "l0", "ramp.startY", 0.5)
             .unwrap()
             .as_f64()
             .unwrap()
@@ -3096,7 +3098,15 @@ fn ramp_at(s: &Stage, t: f64) -> [f64; 2] {
     ]
 }
 fn stop_values(s: &Stage) -> Vec<pm_fx_defs::handles::Stop> {
-    s.surface.read_with(&s.vcx, |g, _| g.effect_stop_values())
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let value = pm_kernel::QueryMirror::new(&p)
+        .queries()
+        .evaluate_property(None, "l0", "ramp.stops", 0.5)
+        .unwrap();
+    let value = serde_json::from_str(&pm_model::json::to_canonical_string(&value)).unwrap();
+    let stored = pm_fx_defs::handles::validate_stops(&value).unwrap();
+    assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.effect_stop_values()), stored);
+    stored
 }
 fn add_middle_stop(s: &mut Stage, cx: &mut TestAppContext) {
     let at = ramp_at(s, 0.5);
@@ -3298,4 +3308,70 @@ fn gradient_handle_shift_constrains_screen_angle_under_nonuniform_layer_transfor
     let angle = (p[1][1] - p[0][1]).atan2(p[1][0] - p[0][0]);
     let step = std::f64::consts::FRAC_PI_4;
     assert!((angle - (angle / step).round() * step).abs() < 1e-6);
+}
+
+/// The begin reply can arrive while the pointer is still down and the queue is
+/// empty. Its gesture id must survive until release (or cancellation).
+#[gpui::test]
+fn gradient_gesture_keeps_its_id_between_pointer_steps_and_cancels_cleanly(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_on(cx, &gradient_handle_project(false));
+    let points = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
+    assert_eq!(points, vec![[220., 170.], [280., 230.]]);
+    let from = s.point_of(points[0]);
+    let to = from + point(px(10.), px(5.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.effect_gesture_open()));
+    // A publication arriving mid-drag must preserve the user's local preview.
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |g, _| g.effect_points())[0],
+        [230., 175.]
+    );
+    s.surface.update(&mut s.vcx, |g, cx| assert!(g.cancel(cx)));
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.refresh(cx);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.effect_gesture_open()));
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |g, _| g.effect_points()),
+        points
+    );
+    assert!(s.recorder.reports.borrow().is_empty());
+    // Cancellation must also free the kernel for the next completed drag.
+    s.drag(cx, from, point(px(12.), px(6.)), Modifiers::none());
+    s.undo(cx);
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |g, _| g.effect_points()),
+        points
+    );
+}
+
+#[gpui::test]
+fn gradient_handles_read_stops_before_editing_and_map_drag_through_comp_zoom(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_on(cx, &gradient_stop_project(false));
+    assert_eq!(stop_values(&s).len(), 2);
+    for scale in [0.5, 2.] {
+        s.recorder.scale.set(Some(scale));
+        s.refresh(cx);
+        let points = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
+        assert_eq!(points, vec![[220., 170.], [280., 230.]]);
+        let from = s.point_of(points[0]);
+        s.drag(cx, from, point(px(12.), px(6.)), Modifiers::none());
+        let moved = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
+        assert_eq!(moved[0], [220. + 12. / scale, 170. + 6. / scale]);
+        s.undo(cx);
+        assert_eq!(
+            s.surface.read_with(&s.vcx, |g, _| g.effect_points()),
+            points
+        );
+    }
 }

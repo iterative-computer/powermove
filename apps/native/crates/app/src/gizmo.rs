@@ -2048,6 +2048,7 @@ impl GizmoSurface {
                 }
                 if s.queue.is_empty()
                     && s.drag.is_none()
+                    && s.effect_drag.is_none()
                     && s.pen_drag.is_none()
                     && !s.studio.busy()
                 {

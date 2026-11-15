@@ -178,7 +178,7 @@ impl GizmoSurface {
                         .filter_map(|k| {
                             mirror
                                 .queries()
-                                .evaluate(None, id, &format!("{prefix}{k}"), time)
+                                .evaluate_property(None, id, &format!("{prefix}{k}"), time)
                                 .ok()
                                 .and_then(|v| v.as_f64())
                                 .map(|v| (k, v))
@@ -187,7 +187,7 @@ impl GizmoSurface {
                     let stops = if let Handle::Line { stops: Some(k), .. } = &declaration {
                         mirror
                             .queries()
-                            .evaluate(None, id, &format!("{prefix}{k}"), time)
+                            .evaluate_property(None, id, &format!("{prefix}{k}"), time)
                             .ok()
                             .and_then(|v| {
                                 serde_json::from_str::<serde_json::Value>(
@@ -733,6 +733,10 @@ impl GizmoSurface {
 
 impl GizmoSurface {
     #[cfg(test)]
+    pub fn effect_gesture_open(&self) -> bool {
+        self.effect_drag.as_ref().is_some_and(|d| d.active) && self.gesture.is_some()
+    }
+    #[cfg(test)]
     pub fn effect_stop_values(&self) -> Vec<Stop> {
         self.effect_controls
             .first()
@@ -972,6 +976,20 @@ mod captures {
                 .wait()
                 .unwrap()
                 .unwrap();
+            kernel
+                .call(
+                    "capture",
+                    Request::new(
+                        Caller::native(),
+                        SelectionCall::Layers {
+                            ids: vec!["demo".into()],
+                            add: false,
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
             let p = kernel.published("capture").unwrap();
             let mut renderer = pm_render::Renderer::headless().unwrap();
             renderer
@@ -1022,52 +1040,18 @@ mod captures {
             let kernel = actor.handle();
             let window = cx
                 .open_window(size(px(640.), px(360.)), |_, cx| {
-                    let gizmo = cx.new(|_| {
+                    let gizmo = cx.new(|cx| {
                         let mut g = GizmoSurface::new(
                             kernel,
                             "capture".into(),
                             pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
                             Rc::new(CaptureHost),
                         );
-                        g.effect_controls.push(Control {
-                            layer: "demo".into(),
-                            prefix: "ramp.".into(),
-                            declaration: pm_fx_defs::handles::parse(
-                                pm_fx_defs::catalog::main_catalog()
-                                    .current("gradient")
-                                    .unwrap()
-                                    .metadata
-                                    .get("viewerHandles"),
-                                &pm_fx_defs::catalog::main_catalog()
-                                    .current("gradient")
-                                    .unwrap()
-                                    .params,
-                            )
-                            .unwrap()
-                            .remove(0),
-                            world: [1., 0., 0., 1., 0., 0.],
-                            stops: vec![
-                                Stop {
-                                    position: 0.,
-                                    color: [0., 0., 0., 1.],
-                                },
-                                Stop {
-                                    position: 0.5,
-                                    color: [0.5, 0.5, 0.5, 1.],
-                                },
-                                Stop {
-                                    position: 1.,
-                                    color: [1.; 4],
-                                },
-                            ],
-                            values: BTreeMap::from([
-                                ("startX".into(), 160.),
-                                ("startY".into(), 100.),
-                                ("endX".into(), 460.),
-                                ("endY".into(), 100.),
-                                ("rampShape".into(), if radial { 1. } else { 0. }),
-                            ]),
-                        });
+                        // Capture controls resolved from the real selected layer and
+                        // its evaluated parameters, through the production reader.
+                        g.effects_reread(cx);
+                        assert_eq!(g.effect_points(), vec![[160., 100.], [460., 100.]]);
+                        assert_eq!(g.effect_stop_values().len(), 3);
                         g.effect_stop = Some((0, 1));
                         if radial {
                             g.effect_picker = Some((0, 1));
