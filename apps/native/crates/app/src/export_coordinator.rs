@@ -396,7 +396,8 @@ impl Controller {
                                 v.note(line, cx);
                             }
                         }
-                        Err(_) => v.close_export_sheet(cx),
+                        Err(_) if queue_id.is_none() => v.close_export_sheet(cx),
+                        Err(_) => {},
                     }
                 }
                 if let Some(id) = history_id {
@@ -523,7 +524,7 @@ async fn execute(
     }
     match &result {
         Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
-            observe(&runtime, json!({"phase":"cancelled"})).await
+            observe(&runtime, json!({"phase":if frozen.queue.is_some() { "idle" } else { "cancelled" }})).await
         }
         Err(error) => {
             let offline = !error.offline.is_empty();
