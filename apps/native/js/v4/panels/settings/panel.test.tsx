@@ -377,8 +377,9 @@ test("leased native preference control writes through the model and v4 host, not
   });
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
-  const appearance = find(root, "Appearance", "pop-up-button");
-  await event(root, appearance.id, "change", { value: "dark" });
+  // Appearance is a short exclusive choice: a segmented control.
+  const appearance = find(root, "Appearance", "segmented-control");
+  await event(root, find(root, "Dark", "segment").id, "click");
   await Promise.resolve();
   await f.host.getSetting("themeMode");
   expect(f.settings.get("themeMode")).toBe("dark");

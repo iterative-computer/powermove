@@ -83,7 +83,11 @@ const HEADER_ROW = "project.name";
 /** Rows the design gives a stepper beside the field. */
 const STEPPED = new Set(["project.fps"]);
 /** Short exclusive choices the design shows as a segmented control. */
-const SEGMENTED = new Set(["project.colorDepth"]);
+const SEGMENTED = new Set([
+  "project.colorDepth",
+  "appearance",
+  "open-projects-in",
+]);
 function RowControl({
   row,
   model,
@@ -192,6 +196,7 @@ function RowControl({
       <UI.SegmentedControl
         label={row.label}
         disabled={common.disabled}
+        attr={common.attr}
         value={String(row.value)}
         options={options.map((o) => ({ id: String(o.v), label: o.label }))}
         onChange={(id) => {
