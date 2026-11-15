@@ -42,9 +42,7 @@ pub struct Editor {
     geometry: Geometry,
     dock_scroll: HashMap<String, f32>,
     dock_scroll_max: HashMap<String, f32>,
-    dock_scrolled_at: Option<std::time::Instant>,
     last_scroll_focus: Option<FocusHandle>,
-    scrollbar_task: Option<Task<()>>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -132,9 +130,7 @@ impl Editor {
             geometry: Geometry::default(),
             dock_scroll: HashMap::new(),
             dock_scroll_max: HashMap::new(),
-            dock_scrolled_at: None,
             last_scroll_focus: None,
-            scrollbar_task: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -331,16 +327,7 @@ impl Editor {
             return false;
         }
         self.dock_scroll.insert(id.into(), next);
-        self.dock_scrolled_at = Some(std::time::Instant::now());
         true
-    }
-
-    fn dock_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.notify();
-        self.scrollbar_task = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(950)).await;
-            let _ = this.update(cx, |this, cx| { this.dock_scrolled_at = None; cx.notify(); });
-        }));
     }
 
     /// Save the layout in its workspace record and session.
@@ -853,7 +840,7 @@ impl Editor {
                 let dock = self.layout.docks[di].id.clone();
                 let by = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
                 if by.is_finite() && self.scroll_dock(&dock, by) {
-                    self.dock_moved(window, cx);
+                    cx.notify();
                 }
             }
             return;
@@ -882,7 +869,7 @@ impl Editor {
                 };
                 let dock = self.layout.docks[p.dock].id.clone();
                 if by.is_finite() && self.scroll_dock(&dock, by) {
-                    self.dock_moved(window, cx);
+                    cx.notify();
                 }
             }
             return;
@@ -2102,7 +2089,6 @@ impl Render for Editor {
                     if this.scroll_dock(&id, by) {
                         cx.stop_propagation();
                         cx.notify();
-                        this.dock_moved(window, cx);
                     }
                 }
             }))
@@ -2757,41 +2743,8 @@ impl Render for Editor {
                 root = root.child(panel);
             }
         }
-        let show_scrollbar = !cx.should_auto_hide_scrollbars()
-            || self
-                .dock_scrolled_at
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(900));
-        if show_scrollbar {
-            for (&di, bounds) in &self.geometry.side_docks {
-                let offset = self
-                    .dock_scroll
-                    .get(&self.layout.docks[di].id)
-                    .copied()
-                    .unwrap_or(0.);
-                let bottom = self
-                    .geometry
-                    .panels
-                    .iter()
-                    .filter(|p| p.dock == di)
-                    .map(|p| p.rect.y + p.rect.h + offset)
-                    .fold(bounds.y, f32::max);
-                let content = bottom - bounds.y;
-                if content > bounds.h && bounds.h > 0. {
-                    let length = (bounds.h * bounds.h / content).max(18.).min(bounds.h);
-                    let top = offset / (content - bounds.h) * (bounds.h - length);
-                    root = root.child(
-                        positioned(Rect {
-                            x: bounds.x + bounds.w - 7.,
-                            y: bounds.y + top,
-                            w: 5.,
-                            h: length,
-                        })
-                        .rounded(px(3.))
-                        .bg(tint(c.text, 0.35)),
-                    );
-                }
-            }
-        }
+        // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
+        // momentum still move the column; no idle scrollbar timer is needed.
         self.geometry.tabs = tab_spans;
         if let Some(integration) = &self.integration {
             // Every panel on screen, built-in or an extension's: the viewer

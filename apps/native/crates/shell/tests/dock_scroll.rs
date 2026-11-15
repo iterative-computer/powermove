@@ -77,8 +77,30 @@ fn overflowing_dock_reaches_last_panel_and_captures_three_positions() {
                 })
                 .unwrap();
             cx.run_until_parked();
-            cx.capture_screenshot(window.into())
-                .unwrap()
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            // Inspect the otherwise empty right edge of each visible panel body.
+            // A column thumb would change these pixels while scrolling.
+            let metrics = Tokens::new(Scheme::Dark, Accessibility::default()).metrics;
+            let scale = image.width() / 1000;
+            let x = image.width() - (metrics.dock_gap as u32 + 4) * scale;
+            let panels = window
+                .update(&mut cx, |editor, _, _| {
+                    ["inspector", "easing", "fxbrowser"].map(|id| editor.panel_rect(id).unwrap())
+                })
+                .unwrap();
+            for y in (100..550).step_by(20) {
+                if panels
+                    .iter()
+                    .any(|p| y as f32 > p.y + metrics.header + 20. && (y as f32) < p.y + p.h - 20.)
+                {
+                    assert_eq!(
+                        image.get_pixel(x, y * scale),
+                        image.get_pixel(x - 8 * scale, y * scale),
+                        "no column scrollbar thumb at {name}:{y}"
+                    );
+                }
+            }
+            image
                 .save(dir.join(format!("dark-right-{name}.png")))
                 .unwrap();
         }
