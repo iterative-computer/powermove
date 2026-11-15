@@ -25,7 +25,7 @@ fn drop_previews_cover_only_the_drop_zone() {
     // never a whole dock.
     let full = l;
     let mut l = full.clone();
-    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline", "agent"] {
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline", "easing"] {
         l.close_panel(id).unwrap();
     }
     let g = l.geometry(BOUNDS, &t);

@@ -38,6 +38,15 @@ fn key_only_label(command: &str, args: &[Value]) -> Option<String> {
         "blurField" => "Leave Text Field".into(),
         "toggleLayerStrips" => "Show Layer Bars".into(),
         "renameLayer" => "Rename Layer".into(),
+        "studio.view" => {
+            let action = args.first().and_then(Value::as_str).unwrap_or("");
+            let view = args.get(1).and_then(Value::as_str).unwrap_or("");
+            match action {
+                "fly" => "Fly Navigation".into(),
+                "look" => "Toggle 2D / 3D View".into(),
+                _ => format!("3D View: {}", view.split('-').map(|word| { let mut c=word.chars(); c.next().map(|first| first.to_uppercase().collect::<String>()+c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(" ")),
+            }
+        }
         "nudgeKeyframes" if number(0) < 0. => {
             format!("Nudge Keyframes {} Frames Earlier", -number(0))
         }

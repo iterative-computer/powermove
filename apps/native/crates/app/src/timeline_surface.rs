@@ -2904,6 +2904,10 @@ impl TimelineSurface {
             CursorStyle::ResizeColumn
         } else if self.work_handle_at(x, y).is_some() {
             CursorStyle::ResizeLeftRight
+        } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
+            CursorStyle::ResizeLeftRight
+        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key(x,y,((m.hit-m.keyframe) as f64/2.).max(0.)).is_some()) {
+            CursorStyle::PointingHand
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -2913,6 +2917,8 @@ impl TimelineSurface {
                 })
         {
             CursorStyle::ResizeLeftRight
+        } else if self.clip_at(x,y).is_some_and(|(id,_)| !self.model.index.layer(&id).is_some_and(|l| l.effectively_locked)) {
+            CursorStyle::OpenHand
         } else {
             CursorStyle::Arrow
         };
