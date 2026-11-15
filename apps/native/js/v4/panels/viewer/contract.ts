@@ -210,3 +210,8 @@ export function resolutionTitle(m: ViewerModel) {
     ? `Auto (${effective})`
     : label;
 }
+
+/** Fly controls belong only to an active flight in the free 3D view. */
+export function showsFlyHint(model: ViewerModel, source: boolean): boolean {
+  return !source && model.studio?.look === "free" && model.studio.fly === true;
+}

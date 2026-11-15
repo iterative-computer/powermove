@@ -2620,3 +2620,33 @@ fn scale_axis_columns_follow_the_linked_ratio_and_undo(cx: &mut TestAppContext) 
         assert_eq!(value(&s, "scale.y"), 50.);
     }
 }
+
+#[gpui::test]
+fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, duration, mapping, end) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.duration,
+            t.time_mapping(),
+            t.model().index.work[1],
+        )
+    });
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    s.drag(
+        cx,
+        point(x_of(end) - px(2.), y),
+        point(x_of(end - 2.), y),
+        Modifiers::none(),
+    );
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.model().index.duration, duration);
+        assert_eq!(t.time_mapping(), mapping);
+        assert!(t.model().index.work[1] < end);
+    });
+}

@@ -2424,13 +2424,10 @@ impl TimelineSurface {
     fn autoscroll(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let left = self.bounds.origin.x + px(self.view.layer_column as f32);
         let right = self.bounds.origin.x + self.bounds.size.width;
-        let over = if position.x < left {
-            f32::from(position.x - left)
-        } else if position.x > right {
-            f32::from(position.x - right)
-        } else {
+        let over = edge_overflow(f32::from(position.x), f32::from(left), f32::from(right));
+        if over == 0. {
             return;
-        };
+        }
         self.view.scroll_time = (self.view.scroll_time + over as f64 * 0.1 / self.view.pps)
             .max(self.model.index.minimum_time());
         self.changed(false, cx);
@@ -5102,3 +5099,27 @@ const WORK_HANDLE_REACH: f64 = 6.;
 /// v1's work-area bar: the top strip of the ruler a plain drag moves it by
 /// (WORK_BAR.height with a point of grace).
 const WORK_BAR_STRIP: f64 = 6.;
+
+// Scrolling follows the pointer crossing the visible time area, never a
+// composition/work-area endpoint or the dragged object's bounds.
+fn edge_overflow(pointer: f32, left: f32, right: f32) -> f32 {
+    if pointer < left {
+        pointer - left
+    } else if pointer > right {
+        pointer - right
+    } else {
+        0.
+    }
+}
+#[cfg(test)]
+mod edge_scroll_regression {
+    use super::edge_overflow;
+    #[test]
+    fn only_the_visible_edge_starts_scrolling() {
+        for pointer in [200., 400., 700., 1000.] {
+            assert_eq!(edge_overflow(pointer, 200., 1000.), 0.);
+        }
+        assert_eq!(edge_overflow(199., 200., 1000.), -1.);
+        assert_eq!(edge_overflow(1001., 200., 1000.), 1.);
+    }
+}
