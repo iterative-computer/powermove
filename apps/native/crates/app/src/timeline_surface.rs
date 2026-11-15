@@ -315,6 +315,7 @@ enum Gesture {
     Dragging {
         origin: Point<Pixels>,
         proedit: bool,
+        keys: bool,
         readout: bool,
         quick: Option<(Point<Pixels>, f64, usize)>,
         quick_limits: Vec<(f64, f64)>,
@@ -385,6 +386,7 @@ pub struct TimelineSurface {
     reading: BTreeSet<crate::waveforms::Key>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
+    snap_guide: Option<f64>,
     /// The graph on screen; its value range may be held (`steady_graph`).
     graph: Option<Arc<Graph>>,
     /// The latest graph over its own fitted range, for Fit Selected Curves.
@@ -489,6 +491,7 @@ impl TimelineSurface {
             reading: Default::default(),
             model: Default::default(),
             scene: None,
+            snap_guide: None,
             graph: None,
             graph_fitted: None,
             graph_view: None,
@@ -1038,6 +1041,7 @@ impl TimelineSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                s.snap_guide = client.active_drag().and_then(|d| d.snap_target());
                 s.client = Some(client);
                 s.busy = false;
                 if let Some(preview) = preview {
@@ -2124,13 +2128,29 @@ impl TimelineSurface {
     /// The graph drawn into its region; `playhead` marks each curve's value
     /// there.
     fn graph_point_at(&self, x: f64, y: f64) -> bool {
-        let Some(region) = self.graph_region() else { return false; };
-        if y < region.y + graph_render::LEGEND { return false; }
-        if self.graph.as_ref().zip(self.viewport()).and_then(|(g,v)| g.selection_box(v,region))
-            .is_some_and(|b| graph_render::grip_at(b,x,y).is_some()) { return true; }
-        self.graph_ops(None).is_some_and(|ops| ops.iter().any(|o|
-            (o.id.starts_with("graph-key:") || o.id.starts_with("graph-handle:")) &&
-            (x-o.bounds.x-o.bounds.width/2.).hypot(y-o.bounds.y-o.bounds.height/2.) < graph_render::POINT_HIT))
+        let Some(region) = self.graph_region() else {
+            return false;
+        };
+        if y < region.y + graph_render::LEGEND {
+            return false;
+        }
+        if self
+            .graph
+            .as_ref()
+            .zip(self.viewport())
+            .and_then(|(g, v)| g.selection_box(v, region))
+            .is_some_and(|b| graph_render::grip_at(b, x, y).is_some())
+        {
+            return true;
+        }
+        self.graph_ops(None).is_some_and(|ops| {
+            ops.iter().any(|o| {
+                (o.id.starts_with("graph-key:") || o.id.starts_with("graph-handle:"))
+                    && (x - o.bounds.x - o.bounds.width / 2.)
+                        .hypot(y - o.bounds.y - o.bounds.height / 2.)
+                        < graph_render::POINT_HIT
+            })
+        })
     }
     fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
         self.graph
@@ -2170,9 +2190,9 @@ impl TimelineSurface {
             playhead: self.delegate.time(cx),
         }
     }
-    /// Snap reach in seconds: one keyframe glyph on screen, at any zoom.
+    /// Electron strip/scrub crossing radius in seconds, at any zoom.
     fn snap_radius(&self) -> f64 {
-        self.tokens.metrics.keyframe as f64 / self.view.pps
+        pm_panel_timeline::snap::tolerances(false, self.view.pps).1
     }
     fn on_move(
         &mut self,
@@ -2334,10 +2354,12 @@ impl TimelineSurface {
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
                     self.cursor = CursorStyle::ClosedHand;
                 }
+                let keys = matches!(spec, Spec::Keys | Spec::GraphKeys);
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
+                    keys,
                     readout,
                     quick,
                     quick_limits,
@@ -2350,6 +2372,7 @@ impl TimelineSurface {
             Gesture::Dragging {
                 origin,
                 proedit,
+                keys,
                 readout,
                 quick,
                 quick_limits,
@@ -2366,8 +2389,11 @@ impl TimelineSurface {
                     }
                     cx.notify();
                 }
-                let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
+                let (origin, proedit, keys, readout, handle) =
+                    (*origin, *proedit, *keys, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                (sample.acquire_tolerance, sample.release_tolerance) =
+                    pm_panel_timeline::snap::tolerances(keys, self.view.pps);
                 if let (Some(layer_from), Some(area), Some(graph)) =
                     (handle, self.graph_area(), self.graph.as_ref())
                 {
@@ -2447,7 +2473,7 @@ impl TimelineSurface {
                     (f32::from(at.x) as f64, 0.)
                 };
                 let time = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
-                let radius = self.tokens.metrics.keyframe as f64 / self.view.pps;
+                let radius = pm_panel_timeline::snap::tolerances(false, self.view.pps).1;
                 if let Ok(HostEffect::Seek(time)) =
                     scrub.update(time, event.modifiers.shift, radius)
                 {
@@ -2997,7 +3023,10 @@ impl TimelineSurface {
             CursorStyle::ResizeLeftRight
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
-        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key(x,y,((m.hit-m.keyframe) as f64/2.).max(0.)).is_some()) {
+        } else if self.frame.as_ref().is_some_and(|f| {
+            f.hit_layer_key(x, y, ((m.hit - m.keyframe) as f64 / 2.).max(0.))
+                .is_some()
+        }) {
             CursorStyle::PointingHand
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
@@ -3008,7 +3037,13 @@ impl TimelineSurface {
                 })
         {
             CursorStyle::ResizeLeftRight
-        } else if self.clip_at(x,y).is_some_and(|(id,_)| !self.model.index.layer(&id).is_some_and(|l| l.effectively_locked)) {
+        } else if self.clip_at(x, y).is_some_and(|(id, _)| {
+            !self
+                .model
+                .index
+                .layer(&id)
+                .is_some_and(|l| l.effectively_locked)
+        }) {
             CursorStyle::OpenHand
         } else {
             CursorStyle::Arrow
@@ -3814,6 +3849,21 @@ impl Render for TimelineSurface {
             }
             ops
         });
+        let snap_target = match &self.gesture {
+            Gesture::Scrub(scrub) => scrub.snap_target(),
+            Gesture::Dragging { .. } => self.snap_guide,
+            _ => None,
+        };
+        let snap_ops = self
+            .viewport()
+            .map(|v| {
+                pm_panel_timeline::render::snap_guide(
+                    v,
+                    self.tokens.metrics.ruler as f64,
+                    snap_target,
+                )
+            })
+            .unwrap_or_default();
         let region = self.graph_region();
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
@@ -3992,6 +4042,15 @@ impl Render for TimelineSurface {
                     children.push_child_at(id, node, bounds);
                 }
             })
+            .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, cx| {
+                let radius = s.snap_radius();
+                if let Gesture::Scrub(scrub) = &mut s.gesture {
+                    if let Ok(HostEffect::Seek(time)) = scrub.modifiers(event.modifiers.shift, radius) {
+                        s.delegate.seek(frame_time(&s.model, time), cx);
+                    }
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
@@ -4227,6 +4286,9 @@ impl Render for TimelineSurface {
                             }
                         }
                         for op in graph.iter().flatten() {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        for op in &snap_ops {
                             paint(op, bounds.origin, &tokens, window, cx);
                         }
                         // A graph with no curve says how to get one.
