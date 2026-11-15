@@ -2462,8 +2462,7 @@ impl TimelineSurface {
         // drawn there (the rows under the graph are not shown).
         let keys = if in_graph {
             let graph = self.graph.clone();
-            self.graph_area()
-                .and_then(|a| self.graph_ops(a))
+            self.graph_ops(None)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|o| {
