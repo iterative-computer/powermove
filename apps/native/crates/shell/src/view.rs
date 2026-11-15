@@ -1082,8 +1082,8 @@ impl Editor {
             "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
-            // One project per window: a new tab is a new window.
-            "newTab" => crate::open_editor(cx),
+            // Tabs mode: a new tab of this window; else a new window.
+            "newTab" => crate::open_editor_tab(cx, self.window_id),
             "deselect" | "cancel" => {
                 if self.gesture.is_some() {
                     self.cancel_gesture(cx);

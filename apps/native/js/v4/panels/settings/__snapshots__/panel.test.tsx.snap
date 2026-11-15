@@ -68,6 +68,15 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -148,6 +157,15 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -352,6 +370,15 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -432,6 +459,15 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -512,6 +548,15 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -592,6 +637,15 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -672,6 +726,15 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -763,6 +826,15 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -843,6 +915,15 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div
@@ -923,6 +1004,15 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                   text "Windows"
                 div group label="Windows"
                   div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
+                    div
                     div group settings.row.restore-windows label="Reopen Last Project on Launch"
                       div
                         div

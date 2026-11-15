@@ -890,6 +890,8 @@ impl Controller {
         .detach();
     }
     pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
+        // Settings › General › Open Projects In may have changed.
+        crate::tabs::follow(&self.kernel, cx);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };

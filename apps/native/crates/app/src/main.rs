@@ -13,6 +13,7 @@ mod agent_clients;
 mod alert;
 mod appearance;
 mod builtins;
+mod tabs;
 #[cfg(test)]
 mod builtins_tests;
 mod cloud;
@@ -382,6 +383,9 @@ fn main() -> Result<()> {
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
     let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // Projects open as tabs or in windows of their own, by the setting,
+    // before any window is restored.
+    pm_shell::set_tabs_mode(tabs::setting(&handle));
     // The command-line project opens in the first window only.
     let launch = Cell::new(launch);
     let result = pm_shell::run_gated(

@@ -104,6 +104,10 @@ export interface ExportSnapshot {
     hasAudio: boolean;
     captionLayers: number;
     hasWorkArea: boolean;
+    /** The work area in seconds, and the composition's length: "Work area"
+     * says what it covers (a work area starts as the whole composition). */
+    workArea?: [number, number] | null;
+    duration?: number;
     /** The project keeps HDR light, so HDR delivery is on offer. */
     hdr?: boolean;
     /** The composition has 3D layers; `saved` names its own quality preset. */

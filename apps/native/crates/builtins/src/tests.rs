@@ -934,6 +934,47 @@ fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
 }
 
 #[test]
+fn the_export_sheet_knows_the_work_area_it_would_export() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "export-work".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let kernel = actor.handle();
+    let mut export = data::Backend::new(kernel.clone(), identity, "export", false).unwrap();
+    let project = export.export_snapshot().unwrap()["project"].clone();
+    assert_eq!(project["duration"], json!(10.0), "{project}");
+    assert_eq!(project["workArea"], Value::Null, "{project}");
+    let seen = kernel.published("synthetic").unwrap().revision();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Set Work Area".into()),
+                    expected_revision: Some(seen),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::SetWorkArea {
+                            comp: None,
+                            start: Some(2.0),
+                            end: Some(5.0),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let project = export.export_snapshot().unwrap()["project"].clone();
+    assert_eq!(project["hasWorkArea"], json!(true), "{project}");
+    assert_eq!(project["workArea"], json!([2.0, 5.0]), "{project}");
+}
+
+#[test]
 fn the_export_sheet_opens_on_the_projects_output() {
     let actor = actor();
     let kernel = actor.handle();

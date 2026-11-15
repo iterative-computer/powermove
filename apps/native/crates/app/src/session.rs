@@ -1000,6 +1000,13 @@ impl Controller {
                 cx.notify();
                 return;
             }
+            // Tabs mode: the project shown stays as it is and the other
+            // opens as a new tab of this window.
+            crate::lifecycle::OpenPlan::AfterClose if pm_shell::tabs_mode() => {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(next, leader, cx);
+                return;
+            }
             crate::lifecycle::OpenPlan::AfterClose => {}
         }
         self.replace_with = Some(next);
@@ -2516,7 +2523,12 @@ impl Controller {
             // opens in a window of its own (one project per window), never
             // in place of the one the person is working on.
             self.mcp.bind_window(self.window_key, self.session.clone());
-            crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            if pm_shell::tabs_mode() {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            } else {
+                crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            }
             return;
         }
         self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
@@ -3154,7 +3166,9 @@ impl Controller {
                     self.close_tab_page(&id, cx);
                 }
             }
-            "closeTab" | "closeProject" if self.session.is_some() => {
+            // Tabs mode: the tab closes (its window; the last one stays on
+            // Home). Separate windows: the project closes, the window stays.
+            "closeTab" | "closeProject" if self.session.is_some() && !pm_shell::tabs_mode() => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Project, cx)
             }

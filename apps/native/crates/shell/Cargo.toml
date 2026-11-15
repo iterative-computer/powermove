@@ -42,5 +42,5 @@ harness = false
 name = "hosted_present"
 harness = false
 [[test]]
-name = "one_window_per_project"
+name = "window_tabs"
 harness = false
