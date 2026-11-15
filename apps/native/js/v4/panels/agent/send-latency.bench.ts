@@ -1,5 +1,6 @@
 /** Headless controller + native op transport. Measures JS slices, excluding
- * AppKit layout/GPU. Optional PM_AGENT_VIEW / PM_AGENT_HOST select baseline. */
+ * AppKit layout/GPU. ms is wall time; cpuMs includes all process threads.
+ * Optional PM_AGENT_VIEW / PM_AGENT_HOST select baseline. */
 import { createElement } from "preact";
 import { createRoot } from "../../src";
 import { HostClient } from "../../src/host-api";
@@ -34,16 +35,33 @@ p.snapshot.rows.count = 64;
 p.snapshot.rows.range = [0, 64];
 const client = new HostClient(
   { realm: "bench", project: p.snapshot.projectId, generation: 1 },
-  async (request) => ({
-    ...request,
-    accepted: true,
-    revision: 0,
-    value:
+  async (request) => {
+    if (
       request.operation.type === "command" &&
-      request.operation.command === "read"
-        ? (p as any)
-        : null,
-  }),
+      request.operation.command === "send"
+    ) {
+      const action = request.operation.args as any;
+      if (action.action.type === "submit") {
+        p.snapshot.runId = "synthetic-run";
+        p.snapshot.phase = "running";
+      } else if (action.action.type === "draft") {
+        p.snapshot.draft.text = action.action.text;
+        p.snapshot.draft.selection = action.action.selection;
+      }
+      p.sequence++;
+      publish(p);
+    }
+    return {
+      ...request,
+      accepted: true,
+      revision: 0,
+      value:
+        request.operation.type === "command" &&
+        request.operation.command === "read"
+          ? (p as any)
+          : null,
+    };
+  },
 );
 const model = await HostAgentModel.connect(client, {
   read: "read",
@@ -63,12 +81,20 @@ const draw = () =>
     createElement(AgentView, { publication: model.inspect(), send: () => {} }),
   );
 await draw();
-const frames: { ms: number; stack: string; bytes: number }[] = [];
+const frames: { ms: number; cpuMs: number; stack: string; bytes: number }[] =
+  [];
 async function measure(stack: string, fn: () => Promise<unknown>) {
   const before = bytes,
-    start = performance.now();
+    start = performance.now(),
+    cpu = process.cpuUsage();
   await fn();
-  frames.push({ ms: performance.now() - start, stack, bytes: bytes - before });
+  const busy = process.cpuUsage(cpu);
+  frames.push({
+    ms: performance.now() - start,
+    cpuMs: (busy.user + busy.system) / 1000,
+    stack,
+    bytes: bytes - before,
+  });
 }
 await measure("HostAgentModel.dispatch(submit)", () =>
   model.dispatch({ type: "submit" }),

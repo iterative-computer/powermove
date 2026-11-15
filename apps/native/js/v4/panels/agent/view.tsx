@@ -4,8 +4,7 @@
  * groups, questions, errors with Try Again, composer with its run options)
  * and draws it with the native kit and pm-design tokens.
  */
-import type { ComponentChildren } from "preact";
-import { memo } from "preact/compat";
+import { Component, type ComponentChildren } from "preact";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
@@ -40,6 +39,27 @@ import {
   type ToolDetail,
   type ToolsRow,
 } from "./present";
+
+/** Pure view memoization using native Preact. Importing preact/compat installs
+ * DOM event normalization globally, which changes native field event plans. */
+function memo<P extends object>(
+  view: (props: P) => ComponentChildren,
+  equal: (a: P, b: P) => boolean = (a, b) => {
+    const keys = Object.keys(a) as (keyof P)[];
+    return (
+      keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k])
+    );
+  },
+) {
+  return class extends Component<P> {
+    shouldComponentUpdate(next: P) {
+      return !equal(this.props, next);
+    }
+    render() {
+      return view(this.props);
+    }
+  };
+}
 
 const t = UI.token;
 /** The composer and answer fields hold the model's draft (sent as actions),
@@ -756,7 +776,7 @@ interface Local {
   type: (key: string, text: string) => void;
 }
 
-function UserMessage({
+function UserMessageView({
   m,
   answering,
 }: {
@@ -817,13 +837,18 @@ function UserMessage({
     </div>
   );
 }
+const UserMessage = memo(
+  UserMessageView,
+  (a, b) =>
+    a.answering === b.answering && JSON.stringify(a.m) === JSON.stringify(b.m),
+);
 const STOPPED = /\b(cancell?ed|stopped)\b/i;
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
   video: "Video",
   audio: "Sound",
 };
-function AssistantMessage({
+function AssistantMessageView({
   m,
   s,
   send,
@@ -905,6 +930,20 @@ function AssistantMessage({
     </div>
   );
 }
+const AssistantMessage = memo(AssistantMessageView, (a, b) => {
+  // Only inert prose can ignore changing command callbacks and run facts.
+  // Interactive replies always render, keeping retry/media actions current.
+  const inert = ({ value: v }: Message) =>
+    !v.error &&
+    !v.nativeResult &&
+    v.kind !== "result" &&
+    !v.requiresProject &&
+    !Array.isArray(v.visualReplies) &&
+    !Array.isArray(v.media);
+  return (
+    inert(a.m) && inert(b.m) && JSON.stringify(a.m) === JSON.stringify(b.m)
+  );
+});
 /** What a reply names besides its words: interactive visual replies (each
  * opens in its own viewer) and the images, videos and sounds it mentions
  * (each opens in its own app; a web address only when asked). */
