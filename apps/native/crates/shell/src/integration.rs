@@ -45,6 +45,10 @@ pub trait Integration {
     }
     /// Recent projects (library id, name), newest first, for the project
     /// name's menu in the bar.
+    /// Layer ids and names in the active composition.
+    fn palette_layers(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
     fn recent(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }

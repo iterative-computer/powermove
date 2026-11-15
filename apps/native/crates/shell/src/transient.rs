@@ -13,6 +13,8 @@ pub struct Choice {
     /// Choosing it keeps the menu open (a provider row: its models follow
     /// in the same menu); the owner sends the menu's new rows.
     pub stays: bool,
+    /// Electron offers layer and effect rows only for a nonempty name search.
+    pub search_only: bool,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -21,6 +23,10 @@ impl Choice {
             command: command.into(),
             ..Default::default()
         }
+    }
+    pub fn on_search(mut self) -> Self {
+        self.search_only = true;
+        self
     }
     pub fn within(mut self, category: impl Into<String>) -> Self {
         self.category = category.into();
@@ -104,6 +110,11 @@ impl Picker {
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
+                if c.search_only {
+                    let query = self.query.trim().to_lowercase();
+                    return (!query.is_empty() && c.label.to_lowercase().contains(&query))
+                        .then_some((2, i));
+                }
                 let label = rank(&c.label, &self.query);
                 // Command ids only match literally; subsequences of ids are noise.
                 let command = c.command.to_lowercase().contains(&query).then_some(2);
@@ -177,5 +188,20 @@ impl Picker {
             self.hover = None;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod palette_layer_tests {
+    use super::*;
+    #[test]
+    fn layer_rows_require_a_trimmed_case_insensitive_name_search() {
+        let mut picker = Picker { choices: vec![Choice::new("Logo", "palette.selectLayer:private-id").within("Layer").on_search()], ..Default::default() };
+        assert!(picker.filtered().is_empty());
+        picker.search("  LOG  ".into());
+        assert_eq!(picker.filtered(), vec![0]);
+        assert_eq!(picker.navigate("enter").as_deref(), Some("palette.selectLayer:private-id"));
+        picker.search("private-id".into());
+        assert!(picker.filtered().is_empty());
     }
 }

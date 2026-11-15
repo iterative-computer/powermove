@@ -1489,3 +1489,13 @@ fn camera_entry_shortcut() {
     assert_eq!(command, "newCamera");
     assert_camera_entry(&command, &args);
 }
+
+#[test]
+fn palette_selects_named_layer_and_rejects_missing_layer() {
+    let desk = Desk::new(project(vec![json!({"id":"logo","name":"Logo","type":"solid","dur":10})]));
+    assert_eq!(crate::layer_commands::palette_layers(&desk.published()), vec![("logo".into(), "Logo".into())]);
+    let plan = command_plan("palette.selectLayer", &[json!("logo")], &desk.published(), 0.).unwrap();
+    desk.call(SelectionCall::Layers { ids: plan.select.unwrap(), add: false });
+    assert_eq!(desk.selected(), vec!["logo"]);
+    assert!(command_plan("palette.selectLayer", &[json!("missing")], &desk.published(), 0.).is_none());
+}

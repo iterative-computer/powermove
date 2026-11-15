@@ -98,6 +98,8 @@ impl MenuEntry {
 pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
+    /// Active composition layers offered by the command palette.
+    pub palette_layers: Vec<(String, String)>,
     pub open: Vec<String>,
     /// Window ▸ Workspace: id, name, built-in (built-ins first).
     pub workspaces: Vec<(String, String, bool)>,
@@ -3830,6 +3832,10 @@ impl Host {
                 .disabled
                 .contains(menu::split_palette_command(&c.command).0)
         });
+        choices.extend(state.palette_layers.iter().map(|(id, name)| {
+            Choice::new(name.clone(), menu::palette_command("palette.selectLayer", &[serde_json::json!(id)]))
+                .within("Layer").on_search()
+        }));
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
             if open && !crate::layout::closable(id) {

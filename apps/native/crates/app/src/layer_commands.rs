@@ -170,6 +170,9 @@ pub enum Route {
     Paste,
 }
 pub fn route(name: &str, args: &[serde_json::Value]) -> Option<Route> {
+    if name == "palette.selectLayer" {
+        return Some(Route::Plan("palette.selectLayer"));
+    }
     if let Some(planned) = PLANNED.iter().find(|p| **p == name) {
         return Some(Route::Plan(planned));
     }
@@ -1008,6 +1011,10 @@ pub fn command_plan(
 ) -> Option<Plan> {
     let layers = list_layers(published.snapshot.root()?, None);
     let selected = published.selection.layers().to_vec();
+    if name == "palette.selectLayer" {
+        let id = args.first()?.as_str()?;
+        return layers.iter().any(|l| l.id == id).then(|| selection_plan(vec![id.to_owned()]));
+    }
     let any = !selected.is_empty();
     let restack = |to| {
         any.then(|| {
@@ -1934,3 +1941,8 @@ pub(crate) mod commands_tests;
 #[cfg(test)]
 #[path = "layer_commands_tests.rs"]
 mod tests;
+
+/// Palette scope follows the open composition, including nested compositions.
+pub fn palette_layers(published: &Published) -> Vec<(String, String)> {
+    published.snapshot.root().map(|root| list_layers(root, None).into_iter().map(|l| (l.id, l.name)).collect()).unwrap_or_default()
+}

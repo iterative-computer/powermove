@@ -534,6 +534,7 @@ impl Editor {
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
         MenuState {
+            palette_layers: self.integration.as_ref().map(|i| i.palette_layers(cx)).unwrap_or_default(),
             panels: panels
                 .ids()
                 .into_iter()

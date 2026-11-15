@@ -363,6 +363,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
+    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
+        self.0.read(cx).published.as_deref().map(crate::layer_commands::palette_layers).unwrap_or_default()
+    }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
     }
