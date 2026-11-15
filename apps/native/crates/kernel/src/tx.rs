@@ -217,15 +217,6 @@ impl ActorHistoryMark {
 
 #[derive(Clone, Debug)]
 pub enum SelectionCall {
-    /// One user action that changes layers, keys and channel together.
-    Batch(Vec<SelectionCall>),
-    /// Live gesture feedback or document-driven selection, without history.
-    Preview(Vec<SelectionCall>),
-    /// Record the completed gesture against its original Interface selection.
-    FinishGesture {
-        document: u64,
-        before: Selection,
-    },
     Layers {
         ids: Vec<String>,
         add: bool,
@@ -831,24 +822,7 @@ impl Project {
                 Handled::reply(self.ack(txid, None, None, reply))
             }
             Call::Selection(selection) => {
-                let before = match &selection {
-                    SelectionCall::FinishGesture { document, before }
-                        if *document == self.store.doc_id() =>
-                    {
-                        Some(before.clone())
-                    }
-                    SelectionCall::FinishGesture { .. } | SelectionCall::Preview(_) => None,
-                    _ => Some(self.store.selection().clone()),
-                };
                 let reply = self.select(selection);
-                if caller.origin == Origin::Interface
-                    && self.entry.is_none()
-                    && !matches!(reply, Reply::Throw(_))
-                    && let Some(before) = before
-                {
-                    self.store
-                        .kernel_selection(before, self.store.selection().clone());
-                }
                 Handled::reply(self.ack(txid, None, None, reply))
             }
             Call::Restore {
@@ -1037,17 +1011,6 @@ impl Project {
             SelectionCall::LayerKeys(pairs) => self.store.select_layer_keys(pairs),
             SelectionCall::Channel(channel) => self.store.set_selected_channel(channel),
             SelectionCall::Clear => self.store.clear_selection(),
-            SelectionCall::Batch(calls) | SelectionCall::Preview(calls) => {
-                let before = self.store.selection().clone();
-                for call in calls {
-                    let reply = self.select(call);
-                    if matches!(reply, Reply::Throw(_)) {
-                        self.store.set_selection(before);
-                        return reply;
-                    }
-                }
-            }
-            SelectionCall::FinishGesture { .. } => {}
         }
         Reply::Selection(self.store.selection().clone())
     }
@@ -1424,13 +1387,11 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
-            HistoryCall::Selection { before, after } => Reply::Entry(
-                if caller.origin == Origin::Interface && self.entry.is_none() {
-                    self.store.kernel_selection(before, after)
-                } else {
-                    None
-                },
-            ),
+            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() {
+                self.store.kernel_selection(before, after)
+            } else {
+                None
+            }),
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,

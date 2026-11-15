@@ -1650,11 +1650,7 @@ impl Controller {
                         v.note(format!("{before} → {after} keyframes"), cx);
                     }
                     if let Some(ids) = select {
-                        v.call(
-                            SelectionCall::Preview(vec![SelectionCall::Layers { ids, add: false }])
-                                .into(),
-                            cx,
-                        );
+                        v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
                     }
                 }
                 other => v.edit_failed(other.and_then(Result::err)),

@@ -1223,7 +1223,6 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
         .unwrap();
     s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
     cx.run_until_parked();
-    let entries = s.rig.kernel.published(PROJECT).unwrap().history.entries;
     // Around the first square (150..250, 100..200) only.
     let from = s.point_of([120., 80.]);
     s.vcx
@@ -1245,29 +1244,6 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
     settle(cx, move |_| {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
     });
-    let published = s.rig.kernel.published(PROJECT).unwrap();
-    assert_eq!(published.history.entries, entries + 1);
-    assert_eq!(published.history.undo_label.as_deref(), Some("Selection"));
-    s.undo(cx);
-    assert!(
-        s.rig
-            .kernel
-            .published(PROJECT)
-            .unwrap()
-            .selection
-            .layers()
-            .is_empty()
-    );
-    s.rig
-        .kernel
-        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
-        .wait()
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
-        ["l0"]
-    );
 }
 /// A move that brings the box's right edge within 8 points of the
 /// composition's centre snaps onto it; Command moves freely.

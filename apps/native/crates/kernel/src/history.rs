@@ -203,7 +203,6 @@ pub struct HistoryRecord {
     /// `Some` for an external (closure) entry: no operations, undone by its
     /// realm. Never exported (the old `export()` kept document entries only).
     pub external: Option<ExternalRef>,
-    /// Interface-owned selection; agent/MCP navigation never creates these entries.
     pub selection: Option<Arc<(crate::selection::Selection, crate::selection::Selection)>>,
     /// The digest of the form the file stores for this step, computed once
     /// and shared by every copy ([`History::identity`]).
