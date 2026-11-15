@@ -319,17 +319,25 @@ impl Resource {
 /// Complete immutable mesh identity, independent of address or path reuse.
 pub fn geometry_key(g: &Geometry) -> String {
     use sha2::{Digest, Sha256};
+    // Feed complete blocks instead of calling SHA's streaming API once for
+    // every four-byte scalar in a potentially multi-million-vertex model.
+    fn words(h: &mut Sha256, values: impl Iterator<Item = u32>) {
+        let mut bytes = [0u8; 4096];
+        let mut used = 0;
+        for value in values {
+            bytes[used..used + 4].copy_from_slice(&value.to_le_bytes());
+            used += 4;
+            if used == bytes.len() { h.update(&bytes); used = 0; }
+        }
+        h.update(&bytes[..used]);
+    }
     let mut h = Sha256::new();
     for data in [&g.positions, &g.normals, &g.uvs] {
         h.update((data.len() as u64).to_le_bytes());
-        for value in data {
-            h.update(value.to_bits().to_le_bytes());
-        }
+        words(&mut h, data.iter().map(|value| value.to_bits()));
     }
     h.update((g.indices.len() as u64).to_le_bytes());
-    for value in &g.indices {
-        h.update(value.to_le_bytes());
-    }
+    words(&mut h, g.indices.iter().copied());
     format!("{:x}", h.finalize())
 }
 
@@ -360,4 +368,26 @@ pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
     cache.retain(|_, pixels| pixels.strong_count() > 0);
     cache.insert(key, Arc::downgrade(&pixels));
     Ok(pixels)
+}
+
+#[cfg(test)]
+mod geometry_key_tests {
+    use super::*;
+    #[test]
+    fn block_hash_matches_scalar_hash_including_float_bits_and_partial_blocks() {
+        use sha2::{Digest, Sha256};
+        let g = Geometry {
+            positions: (0..4099).map(|i| f32::from_bits(i * 100_000)).collect(),
+            normals: vec![-0., f32::NAN, f32::INFINITY], uvs: vec![],
+            indices: (0..1031).collect(), indexed: true, groups: vec![],
+        };
+        let mut h = Sha256::new();
+        for data in [&g.positions, &g.normals, &g.uvs] {
+            h.update((data.len() as u64).to_le_bytes());
+            for value in data { h.update(value.to_bits().to_le_bytes()); }
+        }
+        h.update((g.indices.len() as u64).to_le_bytes());
+        for value in &g.indices { h.update(value.to_le_bytes()); }
+        assert_eq!(geometry_key(&g), format!("{:x}", h.finalize()));
+    }
 }
