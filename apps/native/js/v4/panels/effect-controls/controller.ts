@@ -174,7 +174,6 @@ export class EffectsController {
     if (!row) return;
     const multi = p.selectedCount > 1;
     const items: MenuItem[] = [
-      { id: "save-preset", label: "Save Animation Preset…" },
       { id: "copy", label: "Copy" },
       { id: "duplicate", label: "Duplicate Effect" },
       {
@@ -210,21 +209,14 @@ export class EffectsController {
       items.find((i) => i.id === choice)?.disabled
     )
       return;
-    if (choice === "save-preset")
-      this.platform.command("saveAnimationPreset", [
-        { layer: p.layer, effects: [id] },
-      ]);
-    else if (choice === "up" || choice === "down")
+    if (choice === "up" || choice === "down")
       await this.drive({
         type: "reorder",
         id,
         direction: choice === "up" ? -1 : 1,
       });
     else if (["copy", "duplicate", "reset", "remove"].includes(choice))
-      await this.drive({
-        type: choice as "copy" | "duplicate" | "reset" | "remove",
-        id,
-      });
+      await this.drive({ type: choice as "copy" | "duplicate" | "reset" | "remove", id });
     else if (choice === "paste") await this.drive({ type: "paste" });
   }
   /** A parameter row's menu; Reset clears keys and expression (v1 B367). */

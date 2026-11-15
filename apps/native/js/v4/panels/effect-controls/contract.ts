@@ -122,7 +122,7 @@ export interface Platform {
   /** Maps semantic IDs to accepted numeric nodes, queues native focus/reveal. */
   focus(id: string): void;
   /** Runs an app command (shows the Color panel). */
-  command(name: string, args?: unknown[]): void;
+  command(name: string): void;
   announce(message: string): void;
   report(error: unknown): void;
 }

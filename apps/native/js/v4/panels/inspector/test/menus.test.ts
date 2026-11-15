@@ -145,8 +145,3 @@ test("Position menu has Electron dimension and easing labels with lock guards", 
       .every((i) => !i.enabled),
   ).toBe(true);
 });
-
-test("property menu offers Save Animation Preset", async () => {
- const {rowMenu}=await import("../property-menu");
- expect(rowMenu({id:"opacity",label:"Opacity",control:{kind:"readonly",text:"100"}} as any).some(item=>item.action==="save-preset" && item.enabled)).toBe(true);
-});

@@ -139,7 +139,6 @@ export type Alignment =
   | "vcenter"
   | "bottom";
 export type RowAction =
-  | "save-preset"
   | "add-key"
   | "remove-animation"
   | "edit-expression"

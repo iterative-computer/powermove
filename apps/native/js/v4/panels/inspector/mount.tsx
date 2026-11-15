@@ -24,24 +24,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         args: intent as unknown as Json,
       }),
     },
-    {
-      request: async (request) => {
-        const choice = await platform("inspector", request);
-        if (choice === "save-preset") {
-          const row =
-            request.type === "row-menu" ? session.row(request.row) : undefined;
-          const control = row?.control;
-          const paths =
-            control && "binding" in control ? control.binding.channels : [];
-          await platform("command", {
-            name: "saveAnimationPreset",
-            args: [{ properties: paths }],
-          });
-          return null;
-        }
-        return choice;
-      },
-    },
+    { request: (request) => platform("inspector", request) },
     {
       schedule(callback) {
         let active = true;

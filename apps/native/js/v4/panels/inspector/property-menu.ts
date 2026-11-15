@@ -3,7 +3,6 @@ import type { Row, RowAction, MenuItem } from "./contracts";
 export function rowMenu(row: Row): MenuItem[] {
   const enabled = !row.locked && !row.disabled;
   return [
-    { label: "Save Animation Preset…", action: "save-preset", enabled },
     {
       label: "Add Keyframe at Playhead",
       action: "add-key",

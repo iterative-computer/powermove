@@ -155,7 +155,7 @@ test("search failure leaves previous rows inspectable, reports failure and stops
   expect(model.searching).toBe(false);
   expect(errors).toHaveLength(1);
   expect(model.error).toBe("Couldn’t search effects. Try again.");
-  expect(model.announcement.text).toBe(model.error!);
+  expect(model.announcement.text).toBe(model.error);
 });
 test("applying without target announces exact copy; rows remain draggable", async () => {
   const { model, applied } = fixture();
@@ -405,7 +405,7 @@ test("uninstalled items do not appear and presets use the same model actions wit
   model.setTarget({ id: "layer", effects: [] });
   await model.apply("glow");
   expect(applied).toHaveLength(1);
-  expect(model.drag("glow")?.kind).toBe("preset");
+  expect(model.drag("glow")?.kind).toBe("effect");
 });
 test("retirement fences pending search, apply, registry and setting observations", async () => {
   const apply = deferred<void>(),
@@ -442,25 +442,4 @@ test("published row indices are immutable and late target/settings failure canno
   await model.settingsSettled();
   expect(model.target).toBeNull();
   expect(errors).toEqual([]);
-});
-test("My Presets keeps its section and preset drag identity", () => {
-  const { model } = fixture();
-  model.replaceRegistry({
-    groups: ["My Presets"],
-    items: [
-      {
-        id: "preset:p1",
-        label: "Move",
-        group: "My Presets",
-        kind: "preset",
-        installed: true,
-      },
-    ],
-  });
-  expect(model.rows()[0]).toMatchObject({ type: "group", name: "My Presets" });
-  expect(model.drag("preset:p1")).toEqual({
-    kind: "preset",
-    id: "preset:p1",
-    label: "Move",
-  });
 });

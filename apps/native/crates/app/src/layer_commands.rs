@@ -513,7 +513,6 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         rows.push(plain("Rename…", "renameLayer"));
     }
     rows.extend([
-        plain("Save Animation Preset…", "saveAnimationPreset"),
         plain("Duplicate", "duplicate"),
         plain("Group", "groupLayers"),
         plain("Simplify Keyframes", "simplifyKeyframes"),

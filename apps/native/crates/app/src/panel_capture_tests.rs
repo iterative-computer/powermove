@@ -129,29 +129,6 @@ fn capture_builtin_panels() {
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(h);
-                let _preset_profile = tempfile::tempdir().unwrap();
-                if panel == "fxbrowser" && std::env::var_os("PM_PRESET_CAPTURE").is_some() {
-                    r.runtime.set_presets_folder(_preset_profile.path());
-                    let folder = _preset_profile.path().join("presets");
-                    std::fs::create_dir_all(&folder).unwrap();
-                    std::fs::write(folder.join("move.json"),r#"{"schemaVersion":1,"id":"move","name":"Gentle Move","effects":[],"properties":[{"path":"opacity","channel":{"v":100,"kf":[]}}]}"#).unwrap();
-                    if std::env::var("PM_PRESET_CAPTURE").as_deref() == Ok("sheet") {
-                        let ticket = r
-                            .runtime
-                            .preset_sheet(serde_json::json!({"layer":"l0"}))
-                            .unwrap();
-                        while ticket.try_take().is_none() {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                    } else {
-                        for (_, t) in r.runtime.publish() {
-                            let t = t.unwrap();
-                            while t.try_take().is_none() {
-                                std::thread::sleep(std::time::Duration::from_millis(1));
-                            }
-                        }
-                    }
-                }
                 let mut first = publication(&r);
                 if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
                     let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("queue.job.4")).unwrap().id;

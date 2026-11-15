@@ -1,7 +1,6 @@
 import { useLayoutEffect, useReducer } from "preact/hooks";
 import {
   EmptyState,
-  PushButton,
   PopUpButton,
   TextField,
   ToolbarItem,
@@ -243,16 +242,6 @@ export function EffectsPanel({
                   }}
                 >
                   <text style={groupTextStyle}>{row.name}</text>
-                  {row.name === "My Presets" ? (
-                    <PushButton
-                      label="Undo Delete Preset"
-                      onClick={() =>
-                        void model.presetAction?.("preset:", "undo")
-                      }
-                    >
-                      Undo Delete
-                    </PushButton>
-                  ) : null}
                 </TreeItem>
               );
             const { item } = row;
@@ -300,30 +289,6 @@ export function EffectsPanel({
                 }}
               >
                 {/* Symbols, native drag capsules and focus rings need kit APIs; no glyph substitute. */}
-                {item.kind === "preset" && selected ? (
-                  <div>
-                    <TextField
-                      label="Preset name"
-                      binding={model.presetRenameBinding}
-                      value={item.label}
-                      onChange={(e) =>
-                        void model.presetAction?.(
-                          item.id,
-                          "rename",
-                          String(e.value ?? ""),
-                        )
-                      }
-                    />
-                    <PushButton
-                      label="Delete Preset"
-                      onClick={() =>
-                        void model.presetAction?.(item.id, "delete")
-                      }
-                    >
-                      Delete
-                    </PushButton>
-                  </div>
-                ) : null}
                 <text
                   title={item.label}
                   style={{
