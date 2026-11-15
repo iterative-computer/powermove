@@ -84,7 +84,13 @@ fn capture_builtin_panels() {
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(h);
-                let first = publication(&r);
+                let mut first = publication(&r);
+                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                    let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("queue.job.4")).unwrap().id;
+                    let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "pointerenter", Default::default()).unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                    first = r.runtime.take_publications().pop().unwrap_or(first);
+                }
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
                     Arc::new(
