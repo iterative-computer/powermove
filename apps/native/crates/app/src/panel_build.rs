@@ -182,11 +182,13 @@ pub struct State {
     pub started: std::time::Instant,
     pub changed: std::time::Instant,
     pub row: usize,
+    pub pending: std::collections::VecDeque<usize>,
+    pub complete: bool,
 }
 impl Default for State {
     fn default() -> Self {
         let now = std::time::Instant::now();
-        Self { stage: Stage::Wake, started: now, changed: now, row: 0 }
+        Self { stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false }
     }
 }
 impl State {
@@ -196,5 +198,52 @@ impl State {
             self.row = row;
             self.changed = std::time::Instant::now();
         }
+    }
+}
+
+impl State {
+    /// Publications are committed data. Queue every newly published control;
+    /// a short plan phase precedes each ink instead of dropping burst arrivals.
+    pub fn published(&mut self, rows: impl IntoIterator<Item = usize>, complete: bool) {
+        self.pending.extend(rows);
+        self.complete = complete;
+        if self.stage == Stage::Ready { self.event("start", self.row); }
+    }
+    pub fn tick(&mut self) {
+        let age = self.changed.elapsed().as_secs_f32();
+        match self.stage {
+            Stage::Wake | Stage::Rest if !self.pending.is_empty() => {
+                let row = self.pending.pop_front().unwrap();
+                self.event("plan", row);
+            }
+            Stage::Sketch if age >= 0.12 => self.event("commit", self.row),
+            Stage::Ink if age >= 0.58 => {
+                if let Some(row) = self.pending.pop_front() { self.event("plan", row); }
+                else if self.complete { self.event("ready", self.row); }
+                else if age >= 2. { self.event("rest", self.row); }
+            }
+            Stage::Wake | Stage::Rest if self.complete => self.event("ready", self.row),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+    #[test]
+    fn publications_queue_every_ink_before_ready() {
+        let mut s = State::default();
+        s.published([0, 1], true);
+        for row in 0..2 {
+            s.tick();
+            assert_eq!((s.stage, s.row), (Stage::Sketch, row));
+            s.changed -= std::time::Duration::from_millis(121);
+            s.tick();
+            assert_eq!(s.stage, Stage::Ink);
+            s.changed -= std::time::Duration::from_millis(581);
+            s.tick();
+        }
+        assert_eq!(s.stage, Stage::Ready);
     }
 }

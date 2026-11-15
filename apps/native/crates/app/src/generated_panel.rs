@@ -51,7 +51,34 @@ pub fn panel(
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
     let (_, _, def) = section(v, id)?;
+    if let Some(state) = v.panel_builds.get_mut(id) { state.tick(); }
     Some(render(v, id, &def, rect, window, cx))
+}
+
+/// Generated definitions arrive through the kernel workspace publication,
+/// including agent-authored workspace edits. Compare authored controls rather
+/// than local state values so editing a finished slider never restarts a build.
+pub(crate) fn publication(
+    builds: &mut std::collections::HashMap<String, panel_build::State>,
+    before: &Value,
+    after: &Value,
+) {
+    let sections = after["custom"].as_array().cloned().unwrap_or_default();
+    builds.retain(|id, _| sections.iter().any(|s| s["id"].as_str() == Some(id)));
+    for section in &sections {
+        let Some(id) = section["id"].as_str() else { continue; };
+        let previous = before["custom"].as_array().and_then(|sections| sections.iter().find(|s| s["id"] == id));
+        let controls = section["controls"].as_array().cloned().unwrap_or_default();
+        let changed: Vec<_> = controls.iter().enumerate().filter_map(|(index, control)| {
+            let old = previous.and_then(|s| s["controls"].get(index));
+            (old != Some(control)).then_some(index)
+        }).collect();
+        if !changed.is_empty() || (previous.is_none() && controls.is_empty()) {
+            builds.entry(id.to_owned()).or_default().published(changed, section["building"] != true);
+        } else if section["building"] != true {
+            if let Some(state) = builds.get_mut(id) { state.complete = true; }
+        }
+    }
 }
 
 /// The canvas owns no hit targets or focus handles. Every primitive is clipped
@@ -98,6 +125,12 @@ fn build_surface(
                         if panel_build::inside_slot([x-radius, y-radius], size, 8.) && panel_build::inside_slot([x+radius, y+radius], size, 8.) {
                             paint(x-radius, y-radius, radius*2., radius*2., radius, 0xf0580a, dim * if light { 0.055 } else { 0.09 });
                         }
+                    }
+                }
+                for row in 0..state.row {
+                    let row_y = (row as f32 + 0.5) * row_height;
+                    if row_y + 3. < size[1] {
+                        paint(12., (row_y-3.).max(0.), (size[0]-24.).max(0.), 6., 3., if light { 0x111111 } else { 0xf2f2f2 }, dim);
                     }
                 }
                 if state.stage == panel_build::Stage::Ink {
@@ -1046,6 +1079,22 @@ mod tests {
         SelectionCall, WorkspaceCall, WriteBody,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn published_controls_drive_build_but_state_edits_do_not() {
+        let mut builds = std::collections::HashMap::new();
+        let before = json!({"custom":[]});
+        let after = json!({"custom":[{"id":"new", "controls":[{"type":"slider"},{"type":"number"}]}]});
+        super::publication(&mut builds, &before, &after);
+        assert_eq!(builds["new"].pending.len(), 2);
+        assert!(builds["new"].complete);
+        let mut edited = after.clone();
+        edited["custom"][0]["state"] = json!({"amount":5});
+        super::publication(&mut builds, &after, &edited);
+        assert_eq!(builds["new"].pending.len(), 2);
+        super::publication(&mut builds, &after, &before);
+        assert!(builds.is_empty());
+    }
 
     const PROJECT: &str = "generated";
     fn open() -> (KernelActor, KernelHandle) {

@@ -1257,6 +1257,11 @@ impl Controller {
         );
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
+        if let Some(previous) = &self.published {
+            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
+                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
+            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
+        }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
