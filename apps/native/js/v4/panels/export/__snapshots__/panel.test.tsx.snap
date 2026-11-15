@@ -289,6 +289,143 @@ exports[`wire snapshot: selected video 1`] = `
                     {
                       "children": [
                         {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
                           "children": [],
                           "props": {},
                           "text": "Output",
@@ -3072,6 +3209,46 @@ exports[`wire snapshot: selected video 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -3482,6 +3659,143 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -6273,6 +6587,46 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -6683,6 +7037,143 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -9471,6 +9962,46 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -9881,6 +10412,143 @@ exports[`wire snapshot: ProRes alpha 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -13000,6 +13668,46 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -13410,6 +14118,143 @@ exports[`wire snapshot: PNG sequence 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -15653,6 +16498,46 @@ exports[`wire snapshot: PNG sequence 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Frames",
                       "type": "text",
                     },
@@ -16063,6 +16948,143 @@ exports[`wire snapshot: still 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -17771,6 +18793,46 @@ exports[`wire snapshot: still 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Frame",
                       "type": "text",
                     },
@@ -17935,6 +18997,143 @@ exports[`wire snapshot: project 1`] = `
           },
           "text": "",
           "type": "text",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
         },
         {
           "children": [
@@ -18400,6 +19599,46 @@ exports[`wire snapshot: project 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Save Project File",
                       "type": "text",
                     },
@@ -18810,6 +20049,143 @@ exports[`wire snapshot: no captions 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -21221,6 +22597,46 @@ exports[`wire snapshot: no captions 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -21631,6 +23047,143 @@ exports[`wire snapshot: multiple captions 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -24419,6 +25972,46 @@ exports[`wire snapshot: multiple captions 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -24829,6 +26422,143 @@ exports[`wire snapshot: custom size 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -27880,6 +29610,46 @@ exports[`wire snapshot: custom size 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -28290,6 +30060,143 @@ exports[`wire snapshot: inline invalid size 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -31363,6 +33270,46 @@ exports[`wire snapshot: inline invalid size 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -31776,6 +33723,143 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -34564,6 +36648,46 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                     {
                       "children": [],
                       "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
                       "text": "Export Video",
                       "type": "text",
                     },
@@ -34728,6 +36852,143 @@ exports[`wire snapshot: preparing 1`] = `
           },
           "text": "",
           "type": "text",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
         },
         {
           "children": [
@@ -34967,6 +37228,143 @@ exports[`wire snapshot: rendering with preview and ETA 1`] = `
           },
           "text": "",
           "type": "text",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
         },
         {
           "children": [
@@ -35259,6 +37657,143 @@ exports[`wire snapshot: finishing 1`] = `
         {
           "children": [
             {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
+        },
+        {
+          "children": [
+            {
               "children": [],
               "props": {
                 "aria-valuenow": 1,
@@ -35496,6 +38031,143 @@ exports[`wire snapshot: cancelling 1`] = `
           },
           "text": "",
           "type": "text",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
         },
         {
           "children": [
@@ -35741,6 +38413,143 @@ exports[`wire snapshot: failed 1`] = `
             {
               "children": [
                 {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
                   "children": [],
                   "props": {},
                   "text": "Export failed: Reconnect the source and try again.",
@@ -35940,7 +38749,369 @@ exports[`wire snapshot: failed 1`] = `
 }
 `;
 
-exports[`wire snapshot: done (sheet absent) 1`] = `[]`;
+exports[`wire snapshot: done (sheet absent) 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "props": {},
+              "text": "Export",
+              "type": "text",
+            },
+          ],
+          "props": {
+            "role": "heading",
+            "style": {
+              "color": {
+                "token": "colors.text",
+              },
+              "fontSize": {
+                "token": "typography.heading",
+              },
+              "fontWeight": {
+                "token": "typography.display_weight",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "text",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Render Pending",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": true,
+                    "id": "export.queue.render",
+                    "label": "Render Pending",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+              ],
+              "props": {
+                "style": {
+                  "alignItems": "center",
+                  "display": "flex",
+                  "flexDirection": "row",
+                  "justifyContent": "space-between",
+                },
+              },
+              "text": "",
+              "type": "div",
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "The render queue is empty.",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "style": {
+                      "color": {
+                        "token": "colors.muted",
+                      },
+                      "fontSize": {
+                        "token": "typography.minimum",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "export.queue.rows",
+                "style": {
+                  "display": "flex",
+                  "flexDirection": "column",
+                  "maxHeight": {
+                    "token": "metrics.sheet_body_max",
+                  },
+                },
+              },
+              "text": "",
+              "type": "scroll",
+            },
+          ],
+          "props": {
+            "label": "Queue",
+            "role": "group",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.gap",
+              },
+              "paddingLeft": {
+                "token": "metrics.inset",
+              },
+              "paddingRight": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
+        },
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [],
+                  "props": {},
+                  "text": "Export complete",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "style": {
+                  "color": {
+                    "token": "colors.text",
+                  },
+                  "fontSize": {
+                    "token": "typography.body",
+                  },
+                },
+              },
+              "text": "",
+              "type": "text",
+            },
+            {
+              "children": [
+                {
+                  "children": [],
+                  "props": {},
+                  "text": "fixture.mp4",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "style": {
+                  "color": {
+                    "token": "colors.muted",
+                  },
+                  "fontSize": {
+                    "token": "typography.minimum",
+                  },
+                },
+              },
+              "text": "",
+              "type": "text",
+            },
+            {
+              "children": [
+                {
+                  "children": [],
+                  "props": {},
+                  "text": "Show in Finder",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "data-pm-component": "push-button",
+                "id": "export.showInFinder",
+                "label": "Show in Finder",
+                "metadata": {
+                  "pmKit": {
+                    "buttonRole": "normal",
+                  },
+                },
+                "style": {
+                  "color": {
+                    "token": "colors.text",
+                  },
+                  "fontSize": {
+                    "token": "typography.body",
+                  },
+                  "height": {
+                    "token": "metrics.control",
+                  },
+                  "minHeight": {
+                    "token": "metrics.hit",
+                  },
+                  "minWidth": {
+                    "token": "metrics.hit",
+                  },
+                },
+              },
+              "text": "",
+              "type": "button",
+            },
+            {
+              "children": [
+                {
+                  "children": [],
+                  "props": {},
+                  "text": "Done",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "data-pm-component": "push-button",
+                "id": "export.done",
+                "label": "Done",
+                "metadata": {
+                  "pmKit": {
+                    "buttonRole": "default",
+                  },
+                },
+                "style": {
+                  "color": {
+                    "token": "colors.text",
+                  },
+                  "fontSize": {
+                    "token": "typography.body",
+                  },
+                  "height": {
+                    "token": "metrics.control",
+                  },
+                  "minHeight": {
+                    "token": "metrics.hit",
+                  },
+                  "minWidth": {
+                    "token": "metrics.hit",
+                  },
+                },
+              },
+              "text": "",
+              "type": "button",
+            },
+          ],
+          "props": {
+            "id": "export.completed",
+            "role": "status",
+            "style": {
+              "display": "flex",
+              "flexDirection": "column",
+              "gap": {
+                "token": "metrics.inset",
+              },
+            },
+          },
+          "text": "",
+          "type": "div",
+        },
+      ],
+      "props": {
+        "anchor": 0,
+        "aria-modal": true,
+        "data-pm-component": "sheet-anchor",
+        "data-pm-system-placement": "system",
+        "focusRequest": "export.kind",
+        "focusScope": true,
+        "id": "export.sheet",
+        "label": "Export",
+        "metadata": {
+          "export": {
+            "dismissEscape": true,
+            "dismissOutside": false,
+            "initialFocus": "export.kind",
+            "inset": "metrics.sheet_inset",
+            "width": "metrics.sheet_width_wide",
+          },
+        },
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            "Escape",
+          ],
+        },
+        "role": "dialog",
+        "style": {
+          "background": {
+            "token": "colors.panel",
+          },
+          "gap": {
+            "token": "metrics.inset",
+          },
+          "padding": {
+            "token": "metrics.sheet_inset",
+          },
+          "width": {
+            "token": "metrics.sheet_width_wide",
+          },
+        },
+      },
+      "text": "",
+      "type": "anchored",
+    },
+  ],
+  "props": {},
+  "text": "",
+  "type": "root",
+}
+`;
 
 exports[`wire snapshot: cancelled (sheet absent) 1`] = `[]`;
 
@@ -36226,6 +39397,143 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
             },
             {
               "children": [
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Queue",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Render Pending",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "push-button",
+                            "disabled": true,
+                            "id": "export.queue.render",
+                            "label": "Render Pending",
+                            "metadata": {
+                              "pmKit": {
+                                "buttonRole": "normal",
+                              },
+                            },
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "style": {
+                          "alignItems": "center",
+                          "display": "flex",
+                          "flexDirection": "row",
+                          "justifyContent": "space-between",
+                        },
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "The render queue is empty.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "id": "export.queue.rows",
+                        "style": {
+                          "display": "flex",
+                          "flexDirection": "column",
+                          "maxHeight": {
+                            "token": "metrics.sheet_body_max",
+                          },
+                        },
+                      },
+                      "text": "",
+                      "type": "scroll",
+                    },
+                  ],
+                  "props": {
+                    "label": "Queue",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "column",
+                      "gap": {
+                        "token": "metrics.gap",
+                      },
+                      "paddingLeft": {
+                        "token": "metrics.inset",
+                      },
+                      "paddingRight": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
                 {
                   "children": [
                     {
@@ -38983,6 +42291,46 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                     "disabled": false,
                     "id": "export.cancel",
                     "label": "Cancel",
+                    "metadata": {
+                      "pmKit": {
+                        "buttonRole": "normal",
+                      },
+                    },
+                    "style": {
+                      "color": {
+                        "token": "colors.text",
+                      },
+                      "fontSize": {
+                        "token": "typography.body",
+                      },
+                      "height": {
+                        "token": "metrics.control",
+                      },
+                      "minHeight": {
+                        "token": "metrics.hit",
+                      },
+                      "minWidth": {
+                        "token": "metrics.hit",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "button",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "props": {},
+                      "text": "Add to Queue",
+                      "type": "text",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "push-button",
+                    "disabled": false,
+                    "id": "export.queue.add",
+                    "label": "Add to Queue",
                     "metadata": {
                       "pmKit": {
                         "buttonRole": "normal",

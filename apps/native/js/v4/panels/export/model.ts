@@ -92,7 +92,17 @@ export type Run =
   /** `offline`: refused because clips are offline; Export Without Them applies. */
   | { phase: "failed"; message: string; offline?: boolean }
   | { phase: "cancelled" };
+export type QueueJob = {
+  id: number;
+  name: string;
+  format: string;
+  path: string;
+  status: "Pending" | "Rendering" | "Done" | "Failed" | "Cancelled";
+  progress: number;
+  error: string;
+};
 export interface ExportSnapshot {
+  queue?: QueueJob[];
   version: 1;
   /** Monotonic export-observation sequence, independent of document revision. */
   sequence: number;
@@ -428,8 +438,7 @@ export class ExportModel {
       this.remembered[kindOf(this.options.format)] = this.options.format;
       this.validateSize();
     }
-    if (next.run.phase === "cancelled")
-      this.open = false;
+    if (next.run.phase === "cancelled") this.open = false;
     this.changed();
   }
   async connect(subscriptionId: string) {
@@ -440,6 +449,7 @@ export class ExportModel {
       ["export"],
     );
     if (this.disposed) await this.stop();
+    else await this.command("export.queue.list");
   }
   async command(id: string, args: Json = {}) {
     if (this.disposed) throw new Error("Export panel retired");
@@ -671,8 +681,23 @@ export class ExportModel {
       this.accept((await this.command("export.cancel")).value);
     }
   }
+  async addToQueue() {
+    if (!this.canExport) return;
+    this.busy = true;
+    this.changed();
+    try {
+      await this.command("export.queue.add", { options: json(this.options) });
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  async queueAction(id: number, action: string) {
+    await this.command("export.queue.action", { id, action });
+  }
   async showInFinder() {
-    if (this.current.run.phase === "done") await this.command("export.showInFinder");
+    if (this.current.run.phase === "done")
+      await this.command("export.showInFinder");
   }
   async dismissCompleted() {
     if (this.current.run.phase !== "done") return;

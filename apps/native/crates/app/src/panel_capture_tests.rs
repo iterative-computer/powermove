@@ -62,6 +62,15 @@ fn capture_builtin_panels() {
                         }
                     }
                 }
+                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                    let ticket = r.runtime.observe_render_queue(serde_json::json!([
+                        {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
+                        {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
+                        {"id":3,"name":"Yesterday","format":"mp4","path":"/Exports/Yesterday.mp4","status":"Done","progress":1.,"error":""},
+                        {"id":4,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Failed","progress":0.,"error":"Missing media"}
+                    ])).unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())

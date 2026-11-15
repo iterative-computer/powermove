@@ -236,6 +236,7 @@ test("hover/focus use system controls; op tree stays stable, with one selected k
     "export.preset",
     "export.presetName",
     "export.cancel",
+    "export.queue.add",
     "export.start",
   ]);
   expect(after.ax.find((n: any) => n.id === segment.id)).toMatchObject({
@@ -318,11 +319,12 @@ test("Return in preset field saves without starting export; Save joins focus ord
   await f.root.flush();
   let row = check(replay(f.commits));
   expect(
-    row.focusOrder.map((id: number) => row.nodes[id].props.id).slice(-4),
+    row.focusOrder.map((id: number) => row.nodes[id].props.id).slice(-5),
   ).toEqual([
     "export.presetName",
     "export.savePreset",
     "export.cancel",
+    "export.queue.add",
     "export.start",
   ]);
   await event(f.root, named(f.root, "export.presetName").id, "keydown", {
@@ -379,7 +381,7 @@ test("drag/drop, multi-select and 60k rows are N/A; the sheet declares no list o
   // sheet and its footer stay on screen.
   expect(
     nodes.filter((n) => n.type === "scroll").map((n) => n.props.id),
-  ).toEqual(["export.options"]);
+  ).toEqual(["export.options", "export.queue.rows"]);
   expect(JSON.stringify(f.commits)).not.toMatch(
     /dragstart|dragover|drop|multiselect/,
   );
@@ -557,5 +559,59 @@ test("the dynamic range opens on what the host chose: the project's Output", asy
   const f = await mounted(seed);
   expect(f.model.options.dynamicRange).toBe("hlg");
   expect(named(f.root, "export.dynamicRange").props.value).toBe("hlg");
+  await f.root.dispose();
+});
+
+test("queue shows progress, pending controls, failed retry and completed Finder action", async () => {
+  const seed = initial();
+  seed.queue = [
+    {
+      id: 1,
+      name: "Opening",
+      format: "mp4",
+      path: "/Exports/Opening.mp4",
+      status: "Rendering",
+      progress: 0.42,
+      error: "",
+    },
+    {
+      id: 2,
+      name: "Logo",
+      format: "prores",
+      path: "/Exports/Logo.mov",
+      status: "Pending",
+      progress: 0,
+      error: "",
+    },
+    {
+      id: 3,
+      name: "Yesterday",
+      format: "mp4",
+      path: "/Exports/Yesterday.mp4",
+      status: "Done",
+      progress: 1,
+      error: "",
+    },
+    {
+      id: 4,
+      name: "Credits",
+      format: "mp4",
+      path: "/Exports/Credits.mp4",
+      status: "Failed",
+      progress: 0,
+      error: "Missing media",
+    },
+  ];
+  const f = await mounted(seed);
+  expect(named(f.root, "queue.cancel.1")).toBeDefined();
+  expect(named(f.root, "queue.cancel.2")).toBeDefined();
+  expect(named(f.root, "queue.finder.3")).toBeDefined();
+  expect(named(f.root, "queue.retry.4")).toBeDefined();
+  expect(
+    [...f.root.host.nodes.values()].some(
+      (n) => n.props.id === "queue.remove.1",
+    ),
+  ).toBe(false);
+  check(replay(f.commits));
   await f.root.dispose();
 });

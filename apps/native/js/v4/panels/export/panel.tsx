@@ -112,12 +112,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
   useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
   const s = model.state;
   const p = s.project;
-  if (
-    !p ||
-    !model.open ||
-    s.run.phase === "cancelled"
-  )
-    return null;
+  if (!p || !model.open || s.run.phase === "cancelled") return null;
   const o = model.options;
   const busy = model.locked;
   const watch = (job: Promise<unknown>) => {
@@ -244,6 +239,82 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     ? `Can’t export with these settings: ${model.planningError}`
     : (blocked ?? p.summary);
   const timed = timedSummary(summary);
+  const queue = (
+    <div
+      role="group"
+      label="Queue"
+      style={{ ...stack, ...column, gap: token("metrics.gap") }}
+    >
+      <div style={line}>
+        <text style={text}>Queue</text>
+        <Action
+          id="export.queue.render"
+          label="Render Pending"
+          disabled={
+            !(s.queue ?? []).some((j) => j.status === "Pending") ||
+            (s.queue ?? []).some((j) => j.status === "Rendering")
+          }
+          onClick={() => watch(model.command("export.queue.render"))}
+        />
+      </div>
+      <scroll
+        id="export.queue.rows"
+        style={{ ...stack, maxHeight: token("metrics.sheet_body_max") }}
+      >
+        {(s.queue ?? []).length === 0 ? (
+          <text style={detail}>The render queue is empty.</text>
+        ) : null}
+        {(s.queue ?? []).map((job) => (
+          <div
+            key={job.id}
+            style={{ ...stack, ...column, gap: token("metrics.gap") }}
+          >
+            <text
+              style={text}
+            >{`${job.name} · ${job.format.toUpperCase()} · ${job.status}${job.status === "Rendering" ? ` ${Math.round(job.progress * 100)}%` : ""}`}</text>
+            <text style={detail}>{job.path}</text>
+            {job.error ? (
+              <text style={{ ...detail, color: token("colors.danger") }}>
+                {job.error}
+              </text>
+            ) : null}
+            <div style={line}>
+              {job.status === "Failed" || job.status === "Cancelled" ? (
+                <Action
+                  id={`queue.retry.${job.id}`}
+                  label="Retry"
+                  onClick={() => watch(model.queueAction(job.id, "retry"))}
+                />
+              ) : null}
+              {job.status === "Pending" || job.status === "Rendering" ? (
+                <Action
+                  id={`queue.cancel.${job.id}`}
+                  label="Cancel"
+                  onClick={() => watch(model.queueAction(job.id, "cancel"))}
+                />
+              ) : null}
+              {job.status !== "Rendering" ? (
+                <Action
+                  id={`queue.remove.${job.id}`}
+                  label="Remove"
+                  onClick={() => watch(model.queueAction(job.id, "remove"))}
+                />
+              ) : null}
+              {job.status === "Done" ? (
+                <Action
+                  id={`queue.finder.${job.id}`}
+                  label="Show in Finder"
+                  onClick={() =>
+                    watch(model.command("export.queue.finder", { id: job.id }))
+                  }
+                />
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </scroll>
+    </div>
+  );
   return (
     <UI.SheetAnchor
       id="export.sheet"
@@ -281,12 +352,24 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
+      {progressSheet || s.run.phase === "done" || model.kind === "project"
+        ? queue
+        : null}
       {s.run.phase === "done" ? (
         <div role="status" id="export.completed" style={body}>
           <text style={text}>Export complete</text>
           <text style={detail}>{s.run.path}</text>
-          <Action id="export.showInFinder" label="Show in Finder" onClick={() => watch(model.showInFinder())} />
-          <Action id="export.done" label="Done" primary onClick={() => watch(model.dismissCompleted())} />
+          <Action
+            id="export.showInFinder"
+            label="Show in Finder"
+            onClick={() => watch(model.showInFinder())}
+          />
+          <Action
+            id="export.done"
+            label="Done"
+            primary
+            onClick={() => watch(model.dismissCompleted())}
+          />
         </div>
       ) : progressSheet ? (
         <>
@@ -458,6 +541,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   maxHeight: token("metrics.sheet_body_max"),
                 }}
               >
+                {queue}
                 <Group label="Output">
                   {select(
                     "format",
@@ -771,6 +855,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 label="Cancel"
                 disabled={busy}
                 onClick={() => watch(model.cancel())}
+              />
+              <Action
+                id="export.queue.add"
+                label="Add to Queue"
+                disabled={!model.canExport}
+                onClick={() => watch(model.addToQueue())}
               />
               <Action
                 id="export.start"

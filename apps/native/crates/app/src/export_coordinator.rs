@@ -355,7 +355,7 @@ impl Controller {
                     runtime.clone(),
                     executor,
                     tasks,
-                    queue_id.map(|id| (worker_queue, id)),
+                    history_id.map(|id| (worker_queue, id)),
                 )
                 .await
             });
@@ -730,6 +730,7 @@ async fn execute_inner(
     queue: Option<&(crate::render_queue::Store, u64)>,
 ) -> Result<Finished, Failure> {
     let TaskAdmission { tasks, ticket } = task;
+    if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -801,7 +802,7 @@ async fn execute_inner(
     let mut cancellation_sent = false;
     let mut queue_foreground = None;
     loop {
-        if queue.is_some() {
+        if frozen.queue.is_some() {
             let foreground = objc2_app_kit::NSRunningApplication::currentApplication().isActive();
             if queue_foreground != Some(foreground) {
                 if let Some(handle) = job.handle.lock().unwrap().as_ref() { handle.queue_foreground(foreground); }

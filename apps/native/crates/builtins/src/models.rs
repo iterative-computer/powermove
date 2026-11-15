@@ -1643,7 +1643,8 @@ impl Backend {
         let time = self.time();
         if matches!(
             command,
-            "export.begin"
+            "export.queue.add"
+                | "export.begin"
                 | "export.retry"
                 | "export.without"
                 | "export.plan"
@@ -2051,6 +2052,10 @@ impl Backend {
                 self.export_snapshot()?
             }
             "export.queue.add" | "export.queue.list" | "export.queue.render" | "export.queue.action" | "export.queue.finder" => {
+                if command == "export.queue.add" {
+                    crate::delivery::options(&args["options"])?.validate()?;
+                    self.native.export["run"] = json!({"phase":"choosingDestination"});
+                }
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }

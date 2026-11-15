@@ -619,3 +619,19 @@ test("the Frame Rate row shows the rate the export uses", () => {
   expect(rateOptions(12)[0]).toEqual({ v: 12, label: "12 fps" });
   expect(rateOptions(12).slice(1)).toEqual(rates);
 });
+
+test("queue submission freezes displayed options without starting a single export", async () => {
+  const f = fixture();
+  await f.model.refreshPlan();
+  await f.model.addToQueue();
+  expect(commands(f)).toContain("export.queue.add");
+  expect(commands(f)).not.toContain("export.begin");
+  const request = f.requests.find(
+    (r) =>
+      r.operation.type === "command" &&
+      r.operation.command === "export.queue.add",
+  )!;
+  expect((request.operation as any).args.options).toEqual(f.model.options);
+  await f.model.queueAction(7, "retry");
+  expect(commands(f)).toContain("export.queue.action");
+});
