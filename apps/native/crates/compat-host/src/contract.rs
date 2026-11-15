@@ -121,6 +121,8 @@ impl PageFace {
 }
 #[derive(Clone, Debug)]
 pub enum HostEvent {
+    /// Native presentation must reconcile acknowledged page geometry.
+    GeometryChanged,
     Ready {
         generation: Generation,
     },

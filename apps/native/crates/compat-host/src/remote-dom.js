@@ -130,8 +130,17 @@
     }));
     call({ kind: "fonts_loaded", panel: 0, payload: { keys: faces.map((face) => face.key) } });
   };
+  const panelLayouts = new PMPanelLayout((frame) => requestAnimationFrame(frame), ({ id, rect }) => {
+    const root = [...document.querySelectorAll('[data-pm-contribution]')]
+      .find((node) => node.getAttribute('data-pm-contribution') === id);
+    if (!root) return false;
+    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box'}))
+      root.style.setProperty(key, value, 'important');
+  }, (placement) => call({kind:'panel_layout_applied', panel:0, payload:placement}));
   const apply = async (event) => {
-    if (event.kind === "fonts") {
+    if (event.kind === "panel_layout") {
+      panelLayouts.enqueue(event.placements);
+    } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
     } else if (event.kind === "create") {
       if (panel !== null)
@@ -165,6 +174,7 @@
             },
           });
         if (!applier.apply(batch)) throw Error("Remote DOM page fault");
+        panelLayouts.refresh();
         applied = batch.seq;
         await drawWaiting();
       } else if (event.kind === "canvas") {

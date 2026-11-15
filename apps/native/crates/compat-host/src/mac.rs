@@ -84,6 +84,8 @@ struct Shared {
     sheets: RefCell<Vec<(Retained<NSWindow>, Retained<WKWebView>)>>,
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
+    layouts: RefCell<BTreeMap<String, (u64, Rect, bool)>>,
+    layout_sequence: Cell<u64>,
     canvases: RefCell<crate::canvas::CanvasResources>,
     /// Faces the page may load by key (`font` route).
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
@@ -122,6 +124,7 @@ impl Shared {
                 return Err(Error::Forbidden);
             }
             self.ready.set(true);
+            self.layouts.borrow_mut().clear();
             // Rebuild roots before asking the bridge for a fresh node snapshot.
             let definitions: Vec<_> = self
                 .panels
@@ -140,6 +143,21 @@ impl Shared {
         if kind == "failure" {
             self.handler
                 .event(HostEvent::Failure("compat_applier_stopped"));
+            return Ok(Value::Null);
+        }
+        if kind == "panel_layout_applied" {
+            let payload = &m["payload"];
+            let id = payload["id"].as_str().ok_or(Error::InvalidRequest)?;
+            let generation = payload["generation"]
+                .as_u64()
+                .ok_or(Error::InvalidRequest)?;
+            if let Some(layout) = self.layouts.borrow_mut().get_mut(id) {
+                if layout.0 == generation {
+                    layout.2 = true;
+                    self.geometry_dirty.set(true);
+                    self.handler.event(HostEvent::GeometryChanged);
+                }
+            }
             return Ok(Value::Null);
         }
         if kind == "fonts_loaded" {
@@ -683,6 +701,8 @@ impl MacDomHost {
             sheets: RefCell::new(vec![]),
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
+            layouts: RefCell::default(),
+            layout_sequence: Cell::new(0),
             canvases: RefCell::new(crate::canvas::CanvasResources::default()),
             fonts: RefCell::default(),
         });
@@ -725,7 +745,10 @@ impl MacDomHost {
         slot.setAccessibilityLabel(Some(&NSString::from_str("Compatibility panels")));
         let host = Self {
             shared,
-            applier: format!("{page_bundle}\n{REMOTE_DOM_SHELL}"),
+            applier: format!(
+                "{page_bundle}\n{}\n{REMOTE_DOM_SHELL}",
+                include_str!("panel-layout.js")
+            ),
             bridge,
             web,
             slot,
@@ -983,6 +1006,42 @@ impl MacDomHost {
             self.fill = fill;
             self.shared.geometry_dirty.set(true);
         }
+    }
+    /// Only the matching layout generation can release its native safety mask.
+    pub fn panel_layout_applied(&self, id: &str, rect: Rect) -> bool {
+        self.shared
+            .layouts
+            .borrow()
+            .get(id)
+            .is_some_and(|(_, placed, applied)| *placed == rect && *applied)
+    }
+    /// Send only changed geometry directly to the page, once per native frame.
+    pub fn place_panels(&mut self, panels: Vec<(String, Rect)>) -> Result<()> {
+        if !self.shared.ready.get() {
+            return Ok(());
+        }
+        let mut layouts = self.shared.layouts.borrow().clone();
+        let mut changed = vec![];
+        layouts.retain(|id, _| panels.iter().any(|(active, _)| active == id));
+        for (id, rect) in panels {
+            if !rect.valid() {
+                return Err(Error::InvalidGeometry);
+            }
+            let previous = layouts.get(&id);
+            if previous.is_some_and(|(_, old, _)| *old == rect) {
+                continue;
+            }
+            let generation = self.shared.layout_sequence.get() + 1;
+            self.shared.layout_sequence.set(generation);
+            layouts.insert(id.clone(), (generation, rect, false));
+            changed.push(json!({"id":id,"generation":generation,"rect":rect}));
+        }
+        if !changed.is_empty() {
+            self.shared
+                .send(json!({"kind":"panel_layout","panel":0,"placements":changed}))?;
+            *self.shared.layouts.borrow_mut() = layouts;
+        }
+        Ok(())
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
@@ -1333,9 +1392,34 @@ mod admission_tests {
                 sheets: RefCell::new(vec![]),
                 geometry_dirty: Cell::new(false),
                 closed: Cell::new(false),
+                layouts: RefCell::default(),
+                layout_sequence: Cell::new(0),
             },
             handler,
         )
+    }
+    #[test]
+    fn panel_layout_acknowledgements_ignore_stale_generations() {
+        let (s, _) = shared(Trust::Trusted);
+        s.layouts
+            .borrow_mut()
+            .insert("logos".into(), (2, Rect::new(0., 0., 100., 80.), false));
+        for generation in [1, 3] {
+            s.handle(
+                &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
+                "payload":{"id":"logos","generation":generation}})
+                .to_string(),
+            )
+            .unwrap();
+            assert!(!s.layouts.borrow()["logos"].2);
+        }
+        s.handle(
+            &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
+            "payload":{"id":"logos","generation":2}})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(s.layouts.borrow()["logos"].2);
     }
     const INPUT: &str =
         r#"{"generation":3,"panel":1,"kind":"remote_dom","payload":{"kind":"event"}}"#;

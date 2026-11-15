@@ -1740,7 +1740,9 @@ impl Controller {
         if !self.extensions.settle_pending && self.extensions.sent.borrow().moving() {
             self.extensions.settle_pending = true;
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(PLACEMENT_LAG + PLACEMENT_LAG / 4).await;
+                cx.background_executor()
+                    .timer(PLACEMENT_LAG + PLACEMENT_LAG / 4)
+                    .await;
                 let _ = this.update(cx, |v, cx| {
                     v.extensions.settle_pending = false;
                     cx.notify();
@@ -1945,7 +1947,12 @@ impl Controller {
             let t = &shell.tokens;
             let c = t.colors.panel;
             let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
-            [channel(16), channel(8), channel(0), f64::from(t.translucency.panel)]
+            [
+                channel(16),
+                channel(8),
+                channel(0),
+                f64::from(t.translucency.panel),
+            ]
         };
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
@@ -1957,7 +1964,8 @@ impl Controller {
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
                 let stage = stage.get().filter(|_| key.is_empty());
-                let to_rect = |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+                let to_rect =
+                    |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
                 let mine: Vec<(&String, Rect)> = bodies
                     .iter()
                     .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
@@ -1978,10 +1986,21 @@ impl Controller {
                     && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
                 .then(|| {
                     mine.iter()
-                        .map(|(id, r)| sent.mask(id, *r))
+                        .map(|(id, r)| {
+                            if host.panel_layout_applied(id, *r) {
+                                *r
+                            } else {
+                                sent.mask(id, *r)
+                            }
+                        })
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
                 });
+                let _ = host.place_panels(
+                    mine.iter()
+                        .map(|(id, rect)| ((*id).clone(), *rect))
+                        .collect(),
+                );
                 let _ = host.set_regions(regions);
                 let _ = host.set_content_regions(content);
                 host.set_fill(Some(fill));
@@ -2180,6 +2199,7 @@ impl Controller {
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),
@@ -2273,12 +2293,18 @@ mod tests {
         let t0 = Instant::now();
         let mut sent = Placements::default();
         // Upper and lower panels, the splitter between them at y = 400.
-        let (upper, lower) = (Rect::new(0., 100., 300., 300.), Rect::new(0., 408., 300., 300.));
+        let (upper, lower) = (
+            Rect::new(0., 100., 300., 300.),
+            Rect::new(0., 408., 300., 300.),
+        );
         sent.record("upper", upper, t0);
         sent.record("lower", lower, t0);
         // Dragged down 120 pt: the upper grows, the lower shrinks from its top.
         let t1 = t0 + Duration::from_millis(16);
-        let (upper2, lower2) = (Rect::new(0., 100., 300., 420.), Rect::new(0., 528., 300., 180.));
+        let (upper2, lower2) = (
+            Rect::new(0., 100., 300., 420.),
+            Rect::new(0., 528., 300., 180.),
+        );
         sent.record("upper", upper2, t1);
         sent.record("lower", lower2, t1);
         let (mu, ml) = (sent.mask("upper", upper2), sent.mask("lower", lower2));

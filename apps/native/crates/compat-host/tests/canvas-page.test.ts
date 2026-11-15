@@ -13,7 +13,7 @@ const built = Bun.spawnSync([
   "--format=iife",
 ]);
 if (!built.success) throw Error(built.stderr.toString());
-const shell = await Bun.file(
+const shell = await Bun.file(new URL("../src/panel-layout.js", import.meta.url)).text() + "\n" + await Bun.file(
   new URL("../src/remote-dom.js", import.meta.url),
 ).text();
 const session = { panel: "synthetic", generation: 1 };
