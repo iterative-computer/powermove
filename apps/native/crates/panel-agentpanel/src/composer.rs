@@ -75,7 +75,7 @@ struct State {
 #[derive(Clone, Debug)]
 pub struct Draft {
     state: State,
-    citations: Vec<Value>,
+    citations: Arc<[Value]>,
     catalog: HashMap<String, Attachment>,
     history: Vec<State>,
     cursor: usize,
@@ -90,7 +90,7 @@ impl Default for Draft {
         };
         Self {
             state: state.clone(),
-            citations: vec![],
+            citations: Arc::from([]),
             catalog: HashMap::new(),
             history: vec![state],
             cursor: 0,
@@ -198,7 +198,7 @@ impl Draft {
                 return Err(Error::Invalid("citation"));
             }
         }
-        self.citations = citations;
+        self.citations = citations.into();
         Ok(())
     }
     pub fn request_text(&self) -> String {
