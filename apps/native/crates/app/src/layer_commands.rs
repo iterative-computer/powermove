@@ -1013,7 +1013,10 @@ pub fn command_plan(
     let selected = published.selection.layers().to_vec();
     if name == "palette.selectLayer" {
         let id = args.first()?.as_str()?;
-        return layers.iter().any(|l| l.id == id).then(|| selection_plan(vec![id.to_owned()]));
+        return layers
+            .iter()
+            .any(|l| l.id == id)
+            .then(|| selection_plan(vec![id.to_owned()]));
     }
     let any = !selected.is_empty();
     let restack = |to| {
@@ -1687,7 +1690,9 @@ pub fn disabled(
     };
     set(
         "studio.view",
-        layers.iter().any(|l| crate::gizmo::is_studio(published, &l.id)),
+        layers
+            .iter()
+            .any(|l| crate::gizmo::is_studio(published, &l.id)),
     );
     for name in SELECTION {
         set(name, chosen);
@@ -1944,5 +1949,53 @@ mod tests;
 
 /// Palette scope follows the open composition, including nested compositions.
 pub fn palette_layers(published: &Published) -> Vec<(String, String)> {
-    published.snapshot.root().map(|root| list_layers(root, None).into_iter().map(|l| (l.id, l.name)).collect()).unwrap_or_default()
+    published
+        .snapshot
+        .root()
+        .map(|root| {
+            list_layers(root, None)
+                .into_iter()
+                .map(|l| (l.id, l.name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Last registered provider wins, just as in the Effects browser.
+pub fn palette_effects(state: &pm_kernel::state::StateSnapshot) -> Vec<(String, String)> {
+    let mut effects = std::collections::BTreeMap::new();
+    for entry in state.registries.get("effects").into_iter().flatten() {
+        effects.insert(
+            entry.id.clone(),
+            entry
+                .definition
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(&entry.id)
+                .to_owned(),
+        );
+    }
+    effects.into_iter().collect()
+}
+/// All selected layers receive the effect together in one undo step.
+pub fn palette_effect_plan(
+    published: &Published,
+    label: &str,
+    mut add: impl FnMut(&str) -> Result<Vec<Command>, String>,
+) -> Result<Option<Plan>, String> {
+    let layers = palette_layers(published);
+    let targets: Vec<_> = published
+        .selection
+        .layers()
+        .iter()
+        .filter(|id| layers.iter().any(|(layer, _)| layer == *id))
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let mut commands = Vec::new();
+    for id in targets {
+        commands.extend(add(id)?);
+    }
+    Ok(Some(plain(&format!("Add {label}"), commands)))
 }

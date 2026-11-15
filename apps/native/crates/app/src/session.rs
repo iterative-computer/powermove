@@ -363,8 +363,16 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
+    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
+        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    }
     fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
-        self.0.read(cx).published.as_deref().map(crate::layer_commands::palette_layers).unwrap_or_default()
+        self.0
+            .read(cx)
+            .published
+            .as_deref()
+            .map(crate::layer_commands::palette_layers)
+            .unwrap_or_default()
     }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
@@ -383,13 +391,15 @@ impl pm_shell::integration::Integration for Bridge {
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
-                    v.open_timer.mark("ghost", serde_json::json!({ "panel": id }));
+                    v.open_timer
+                        .mark("ghost", serde_json::json!({ "panel": id }));
                 }
                 return Some(ghost);
             }
             // The ghost gave way: the real content fades in over it.
             if v.ghosted.remove(id) {
-                v.open_timer.mark("panel_ready", serde_json::json!({ "panel": id }));
+                v.open_timer
+                    .mark("panel_ready", serde_json::json!({ "panel": id }));
                 v.revealed.insert(id.to_owned(), std::time::Instant::now());
             }
             let content = v
@@ -414,7 +424,13 @@ impl pm_shell::integration::Integration for Bridge {
                 return Some(content);
             }
             w.request_animation_frame();
-            Some(div().size_full().opacity(shown).child(content).into_any_element())
+            Some(
+                div()
+                    .size_full()
+                    .opacity(shown)
+                    .child(content)
+                    .into_any_element(),
+            )
         })
     }
     fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
@@ -951,7 +967,11 @@ impl Controller {
     /// A project that was to open here and won't (its replacement was
     /// cancelled): one the kernel already opened for this window closes
     /// again; nothing of it is lost (it was only opened).
-    pub(crate) fn dispose_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
+    pub(crate) fn dispose_pending(
+        &mut self,
+        pending: crate::entry::Pending,
+        cx: &mut Context<Self>,
+    ) {
         let session = match pending {
             crate::entry::Pending::Session(session) => Some(session),
             crate::entry::Pending::Adopt { reply, .. } => match *reply {
@@ -999,11 +1019,7 @@ impl Controller {
     /// One project per window: `next` opens in place of the project shown.
     /// That project closes first as any close does (an unsaved one asks
     /// Save, Don't Save or Cancel); Cancel keeps it and `next` does not open.
-    pub(crate) fn replace_project(
-        &mut self,
-        next: crate::entry::Pending,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn replace_project(&mut self, next: crate::entry::Pending, cx: &mut Context<Self>) {
         match crate::lifecycle::open_plan(
             self.session.is_some(),
             self.opening,
@@ -1154,16 +1170,14 @@ impl Controller {
             // playing and snapping follow at once, where the playhead was;
             // a run in progress carries on at its speed.
             let time = self.time();
-            let playing = self
-                .running()
-                .then(|| {
-                    self.viewer
-                        .as_ref()
-                        .and_then(|v| v.status().clock)
-                        .map(|c| c.rate)
-                        .filter(|rate| *rate != PlaybackRate::STOPPED)
-                        .unwrap_or(PlaybackRate::NORMAL)
-                });
+            let playing = self.running().then(|| {
+                self.viewer
+                    .as_ref()
+                    .and_then(|v| v.status().clock)
+                    .map(|c| c.rate)
+                    .filter(|rate| *rate != PlaybackRate::STOPPED)
+                    .unwrap_or(PlaybackRate::NORMAL)
+            });
             self.published = Some(p.clone());
             self.builtins.natives.published.replace(Some(p.clone()));
             self.bind_composition();
@@ -1175,7 +1189,9 @@ impl Controller {
             }
         }
         if let Some(runtime) = self.builtins.runtime.clone() {
-            if self.linked_sync.update(&p, runtime) { self.media_refresh.reset(); }
+            if self.linked_sync.update(&p, runtime) {
+                self.media_refresh.reset();
+            }
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
@@ -2908,6 +2924,38 @@ impl Controller {
             self.agent_picked(index);
             return true;
         }
+        if cmd.name == "palette.addEffect" {
+            if let (Some(published), Some(runtime), Some(id)) = (
+                self.published.as_deref(),
+                self.builtins.runtime.as_ref(),
+                cmd.args.first().and_then(|a| a.as_str()),
+            ) {
+                let state = self.kernel.state();
+                if let Some((_, label)) = crate::layer_commands::palette_effects(&state)
+                    .into_iter()
+                    .find(|(key, _)| key == id)
+                {
+                    let plan =
+                        crate::layer_commands::palette_effect_plan(published, &label, |layer| {
+                            runtime.effect_commands(
+                                "fxbrowser",
+                                layer,
+                                id,
+                                self.time(),
+                            )
+                        });
+                    match plan {
+                        Ok(Some(plan)) => self.run_layer_plan(plan, cx),
+                        Ok(None) => {}
+                        Err(why) => {
+                            self.message = why;
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         match cmd.name.as_str() {
             "timeline.parentMenu" => {
                 let Some(id) = cmd
@@ -3259,7 +3307,8 @@ impl Controller {
             "revealProject" => match self.path.clone() {
                 Some(path) => crate::platform::reveal(&path),
                 None => {
-                    self.message = "This project is kept in your library, not in a file of its own.".into();
+                    self.message =
+                        "This project is kept in your library, not in a file of its own.".into();
                     cx.notify();
                 }
             },

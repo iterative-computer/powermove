@@ -1392,7 +1392,10 @@ fn linked_folder_save_reopen_resolves_in_place_without_retained_copy() {
         &desk.dir.path().join("cache"),
     )
     .unwrap();
-    assert_eq!(resolution.catalog.originals.values().next(), Some(&image.canonicalize().unwrap()));
+    assert_eq!(
+        resolution.catalog.originals.values().next(),
+        Some(&image.canonicalize().unwrap())
+    );
     assert!(!desk.dir.path().join("media/retained").exists());
     std::fs::remove_file(&image).unwrap();
     let missing = crate::media::for_session(
@@ -1437,7 +1440,11 @@ fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
     let published = desk.published();
     let scene = pm_kernel::commands::scene3d::resolve_scene(&published.snapshot, None, 0.).unwrap();
     assert_eq!(scene.camera_id.as_deref(), Some(ids[0].as_str()));
-    assert!(pm_panel_studio3d::properties::scene_summary(&published).unwrap().is_some());
+    assert!(
+        pm_panel_studio3d::properties::scene_summary(&published)
+            .unwrap()
+            .is_some()
+    );
     desk.undo();
     assert!(desk.layers().is_empty());
     assert_eq!(desk.document(), before);
@@ -1492,10 +1499,97 @@ fn camera_entry_shortcut() {
 
 #[test]
 fn palette_selects_named_layer_and_rejects_missing_layer() {
-    let desk = Desk::new(project(vec![json!({"id":"logo","name":"Logo","type":"solid","dur":10})]));
-    assert_eq!(crate::layer_commands::palette_layers(&desk.published()), vec![("logo".into(), "Logo".into())]);
-    let plan = command_plan("palette.selectLayer", &[json!("logo")], &desk.published(), 0.).unwrap();
-    desk.call(SelectionCall::Layers { ids: plan.select.unwrap(), add: false });
+    let desk = Desk::new(project(vec![
+        json!({"id":"logo","name":"Logo","type":"solid","dur":10}),
+    ]));
+    assert_eq!(
+        crate::layer_commands::palette_layers(&desk.published()),
+        vec![("logo".into(), "Logo".into())]
+    );
+    let plan = command_plan(
+        "palette.selectLayer",
+        &[json!("logo")],
+        &desk.published(),
+        0.,
+    )
+    .unwrap();
+    desk.call(SelectionCall::Layers {
+        ids: plan.select.unwrap(),
+        add: false,
+    });
     assert_eq!(desk.selected(), vec!["logo"]);
-    assert!(command_plan("palette.selectLayer", &[json!("missing")], &desk.published(), 0.).is_none());
+    assert!(
+        command_plan(
+            "palette.selectLayer",
+            &[json!("missing")],
+            &desk.published(),
+            0.
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn palette_effect_applies_to_selection_as_one_undo_step() {
+    use pm_kernel::commands::effects::{AddEffect, saved_builtin_definition};
+    let desk = Desk::new(project(vec![
+        json!({"id":"a","name":"A","type":"solid","dur":10}),
+        json!({"id":"b","name":"B","type":"solid","dur":10}),
+    ]));
+    assert!(
+        crate::layer_commands::palette_effects(&desk.kernel().state())
+            .contains(&("blur".into(), "Gaussian Blur".into()))
+    );
+    assert!(
+        crate::layer_commands::palette_effect_plan(&desk.published(), "Gaussian Blur", |_| panic!(
+            "no selection"
+        ))
+        .unwrap()
+        .is_none()
+    );
+    desk.call(SelectionCall::Layers {
+        ids: vec!["a".into(), "b".into()],
+        add: false,
+    });
+    let p = desk.published();
+    let plan = crate::layer_commands::palette_effect_plan(&p, "Gaussian Blur", |id| {
+        Ok(vec![
+            pm_kernel::EffectCommand::Add(Box::new(AddEffect {
+                layer_id: id.into(),
+                effect_id: pm_kernel::new_id("f"),
+                definition: saved_builtin_definition(&p.snapshot.document, "blur", None, 0., 0.)
+                    .unwrap(),
+                parameters: Default::default(),
+                inputs: None,
+                open: true,
+                enabled: true,
+                enabled_animation: None,
+                index: None,
+            }))
+            .into(),
+        ])
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.label, "Add Gaussian Blur");
+    desk.call(transaction(&plan, Some(p.revision())).unwrap());
+    for id in ["a", "b"] {
+        assert_eq!(
+            layer_of(&desk.published(), id)
+                .get("fx")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    desk.undo();
+    for id in ["a", "b"] {
+        assert!(
+            layer_of(&desk.published(), id)
+                .get("fx")
+                .is_none_or(|fx| fx.as_array().is_some_and(|v| v.is_empty()))
+        );
+    }
 }

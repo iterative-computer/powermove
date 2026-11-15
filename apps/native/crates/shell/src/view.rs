@@ -534,7 +534,16 @@ impl Editor {
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
         MenuState {
-            palette_layers: self.integration.as_ref().map(|i| i.palette_layers(cx)).unwrap_or_default(),
+            palette_effects: self
+                .integration
+                .as_ref()
+                .map(|i| i.palette_effects(cx))
+                .unwrap_or_default(),
+            palette_layers: self
+                .integration
+                .as_ref()
+                .map(|i| i.palette_layers(cx))
+                .unwrap_or_default(),
             panels: panels
                 .ids()
                 .into_iter()
@@ -1925,7 +1934,8 @@ impl Render for Editor {
         // the main viewer, the host draws the others (3d-studio.md §2).
         let viewer = match (&self.host, viewer) {
             (Some(h), Some(r)) if h.borrow().viewer_split.get() > 1 => {
-                let tiles = crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
+                let tiles =
+                    crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
                 let first = tiles[0];
                 *h.borrow().viewer_tiles.borrow_mut() = tiles;
                 Some(first)
@@ -2084,8 +2094,7 @@ impl Render for Editor {
                 }
             })
             .on_mouse_up_all({
-                let listener =
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
+                let listener = cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
                 move |e: &MouseUpEvent, phase, _, w, cx| {
                     if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
                         listener(e, w, cx);
@@ -2119,7 +2128,8 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout.resize(&d, delta, this.dock_bounds, &this.tokens);
+                    this.layout
+                        .resize(&d, delta, this.dock_bounds, &this.tokens);
                     this.save();
                     cx.notify();
                 }
@@ -2413,7 +2423,7 @@ impl Render for Editor {
                                 cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
                                 this.begin_panel_drag(&tabid, e.position, false);
-                        this.watch_release(cx);
+                                this.watch_release(cx);
                                 window.focus(&this.focus, cx);
                                 cx.notify();
                             }),
@@ -2639,13 +2649,11 @@ impl Render for Editor {
                     let half = |first: bool| {
                         let (from, to) = if first { (0., 1.) } else { (1., 0.) };
                         let angle = if d.horizontal { 90. } else { 180. };
-                        div()
-                            .flex_1()
-                            .bg(linear_gradient(
-                                angle,
-                                linear_color_stop(crate::kit::ink(c.accent, from), 0.),
-                                linear_color_stop(crate::kit::ink(c.accent, to), 1.),
-                            ))
+                        div().flex_1().bg(linear_gradient(
+                            angle,
+                            linear_color_stop(crate::kit::ink(c.accent, from), 0.),
+                            linear_color_stop(crate::kit::ink(c.accent, to), 1.),
+                        ))
                     };
                     let bar = div()
                         .absolute()
@@ -2704,7 +2712,8 @@ impl Render for Editor {
                             }
                             _ => return,
                         };
-                        this.layout.resize(&key_divider, delta, this.dock_bounds, &this.tokens);
+                        this.layout
+                            .resize(&key_divider, delta, this.dock_bounds, &this.tokens);
                         this.save();
                         cx.stop_propagation();
                         cx.notify();
@@ -2784,7 +2793,9 @@ impl Render for Editor {
             if let Some(p) = drag.preview {
                 // The original app outlines the panel it lands on or beside.
                 let target = match p.near {
-                    layout::Near::Tab(d, g) | layout::Near::Above(d, g) | layout::Near::Below(d, g) => self
+                    layout::Near::Tab(d, g)
+                    | layout::Near::Above(d, g)
+                    | layout::Near::Below(d, g) => self
                         .geometry
                         .panels
                         .iter()
@@ -2818,7 +2829,11 @@ impl Render for Editor {
                     let spans = self.geometry.tabs.get(&(d, g));
                     let x = spans
                         .and_then(|s| s.iter().find(|(i, ..)| *i == index).map(|(_, l, _)| *l))
-                        .or_else(|| spans.and_then(|s| s.last()).map(|(_, _, r)| r + TAB_SPACING))
+                        .or_else(|| {
+                            spans
+                                .and_then(|s| s.last())
+                                .map(|(_, _, r)| r + TAB_SPACING)
+                        })
                         .unwrap_or(r.x + m.inset);
                     let x = x.min(r.x + r.w - m.hit * 2.).max(r.x);
                     root = root.child(
@@ -3759,10 +3774,7 @@ mod tests {
         // Inside a panel, away from every gap, the cursor is the arrow.
         let panel = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
         cx.simulate_mouse_move(
-            point(
-                px(panel.x + panel.w / 2.),
-                px(panel.y + panel.h / 2.),
-            ),
+            point(px(panel.x + panel.w / 2.), px(panel.y + panel.h / 2.)),
             None,
             none,
         );

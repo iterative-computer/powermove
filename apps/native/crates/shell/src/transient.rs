@@ -196,11 +196,21 @@ mod palette_layer_tests {
     use super::*;
     #[test]
     fn layer_rows_require_a_trimmed_case_insensitive_name_search() {
-        let mut picker = Picker { choices: vec![Choice::new("Logo", "palette.selectLayer:private-id").within("Layer").on_search()], ..Default::default() };
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Logo", "palette.selectLayer:private-id")
+                    .within("Layer")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
         assert!(picker.filtered().is_empty());
         picker.search("  LOG  ".into());
         assert_eq!(picker.filtered(), vec![0]);
-        assert_eq!(picker.navigate("enter").as_deref(), Some("palette.selectLayer:private-id"));
+        assert_eq!(
+            picker.navigate("enter").as_deref(),
+            Some("palette.selectLayer:private-id")
+        );
         picker.search("private-id".into());
         assert!(picker.filtered().is_empty());
     }
