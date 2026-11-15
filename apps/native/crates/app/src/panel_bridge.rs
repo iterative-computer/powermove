@@ -1045,6 +1045,7 @@ fn layout_plan(
                 .then(|| panel["size"].as_f64())
                 .flatten();
             groups.push(layout::Group {
+                flex_basis: None,
                 tabs: vec![pid.into()],
                 active: 0,
                 size: size.map(|s| s as f32),
@@ -1084,6 +1085,7 @@ fn layout_plan(
         dock.groups.insert(
             at,
             layout::Group {
+                flex_basis: None,
                 tabs: vec!["layer-effects".into()],
                 active: 0,
                 size: Some(350.),

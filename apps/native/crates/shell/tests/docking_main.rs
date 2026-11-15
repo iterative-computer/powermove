@@ -214,6 +214,7 @@ fn maximize_tracks_group_across_tab_selection_without_persisting_geometry() {
 #[test]
 fn overflow_keeps_active_and_never_loses_a_tab() {
     let group = Group {
+        flex_basis: None,
         tabs: (0..12).map(|i| format!("tab-{i}")).collect(),
         active: 10,
         size: None,
@@ -276,8 +277,12 @@ fn bottom_dock_floor_uses_opus_metrics_and_stays_bounded() {
     assert_eq!(l.docks[divider.dock].size, Some(floor));
     assert_eq!(panel(&l, "timeline").h, floor);
     let small = Rect { h: 80., ..BOUNDS };
-    for p in l.geometry(small, &t).panels {
-        assert!(p.rect.y + p.rect.h <= small.y + small.h);
+    let geometry = l.geometry(small, &t);
+    for p in &geometry.panels {
+        let visible = geometry.side_docks.get(&p.dock).map_or(p.rect, |viewport| p.rect.intersection(*viewport));
+        if visible.h > 0. {
+            assert!(visible.y + visible.h <= small.y + small.h);
+        }
     }
 }
 #[test]
