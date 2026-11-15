@@ -13,6 +13,7 @@
 pub mod color;
 pub mod motion;
 mod recipe;
+pub mod sketch;
 mod strip;
 pub use color::mix;
 use color::oklch;
@@ -759,7 +760,11 @@ impl Tokens {
     /// the window ground, as the viewer's own header bar shows it, so the
     /// canvas sits inside its panel instead of in a darker hole.
     pub fn viewer_surround(&self) -> u32 {
-        color::mix(self.colors.window, self.colors.panel, self.translucency.panel)
+        color::mix(
+            self.colors.window,
+            self.colors.panel,
+            self.translucency.panel,
+        )
     }
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
         let colors = Colors::of(scheme);
