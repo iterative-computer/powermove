@@ -43,8 +43,14 @@ pub trait Integration {
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
-    /// Recent projects (library id, name), newest first, for the project
-    /// name's menu in the bar.
+    /// Layer ids and names in the active composition.
+    fn palette_effects(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    fn palette_layers(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Recent projects (library id, name), newest first.
     fn recent(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }

@@ -1632,9 +1632,10 @@ impl GizmoSurface {
             let delta = locked_delta(origin, at, mods.shift);
             let axes = [!mods.shift || delta[0] != 0., !mods.shift || delta[1] != 0.];
             let moving = snap::box_points(&drag.poses, delta);
-            let result = snap::snap(
+            let result = snap::snap_with_rulers(
                 &moving,
                 &points,
+                &self.rulers.guides,
                 snap::DISTANCE / frame.scale.max(0.02),
                 axes,
             );

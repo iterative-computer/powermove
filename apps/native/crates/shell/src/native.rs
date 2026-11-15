@@ -98,6 +98,9 @@ impl MenuEntry {
 pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
+    /// Active composition layers offered by the command palette.
+    pub palette_layers: Vec<(String, String)>,
+    pub palette_effects: Vec<(String, String)>,
     pub open: Vec<String>,
     /// Window ▸ Workspace: id, name, built-in (built-ins first).
     pub workspaces: Vec<(String, String, bool)>,
@@ -2344,9 +2347,9 @@ impl Host {
                                 msg_send![&*r, isKindOfClass: NSTextView::class()]
                                     || page.is_some_and(|page| msg_send![&*r, isKindOfClass: page])
                             });
-                            let content = window.contentView().and_then(|v| {
-                                v.hitTest(e.locationInWindow())
-                            });
+                            let content = window
+                                .contentView()
+                                .and_then(|v| v.hitTest(e.locationInWindow()));
                             if editing && content.is_some_and(|hit| std::ptr::eq(&*hit, &*gpui)) {
                                 window.makeFirstResponder(Some(&gpui));
                             }
@@ -2906,7 +2909,10 @@ impl Host {
         // a page (Settings, the Store) by its own name; nothing on Home,
         // whose button is lit.
         let page = pages.1.and_then(|i| pages.0.get(i)).map(|(_, t)| t.clone());
-        let project = tabs.iter().find(|t| t.window == own).map(|t| t.title.clone());
+        let project = tabs
+            .iter()
+            .find(|t| t.window == own)
+            .map(|t| t.title.clone());
         let state = self.window.subtitle().to_string();
         let title: Option<(String, String, bool)> = match (page, project) {
             (Some(page), _) => Some((page, String::new(), false)),
@@ -2984,7 +2990,9 @@ impl Host {
                 label.setAccessibilityElement(false);
                 label
             });
-            let sub_size = sub_label.as_ref().map_or(NSSize::new(0., 0.), |l| l.fittingSize());
+            let sub_size = sub_label
+                .as_ref()
+                .map_or(NSSize::new(0., 0.), |l| l.fittingSize());
             let chevron_room = if menu { CHEVRON + TAB_DOT_GAP } else { 0. };
             let text = name_size.width.max(sub_size.width) - 2. * LABEL_PAD;
             // The name truncates before it would reach the tools.
@@ -2996,7 +3004,13 @@ impl Host {
             let lines = name_size.height + sub_size.height;
             let top = ((height - lines) / 2.).floor();
             let flipped = self.tabs.isFlipped();
-            let at = |y_from_top: f64, h: f64| if flipped { y_from_top } else { height - y_from_top - h };
+            let at = |y_from_top: f64, h: f64| {
+                if flipped {
+                    y_from_top
+                } else {
+                    height - y_from_top - h
+                }
+            };
             name_label.setFrame(NSRect::new(
                 NSPoint::new(TAB_PAD - LABEL_PAD, at(top, name_size.height)),
                 NSSize::new(text_room.min(name_size.width), name_size.height),
@@ -3008,7 +3022,10 @@ impl Host {
             cell.addSubview(&name_label);
             if let Some(label) = &sub_label {
                 label.setFrame(NSRect::new(
-                    NSPoint::new(TAB_PAD - LABEL_PAD, at(top + name_size.height, sub_size.height)),
+                    NSPoint::new(
+                        TAB_PAD - LABEL_PAD,
+                        at(top + name_size.height, sub_size.height),
+                    ),
                     NSSize::new(text_room.min(sub_size.width), sub_size.height),
                 ));
                 cell.addSubview(label);
@@ -3042,14 +3059,16 @@ impl Host {
                 button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
                 button.setToolTip(Some(&NSString::from_str(&name)));
                 button.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
-                button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.project")));
+                button
+                    .setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.project")));
                 let entries = project_menu_entries(&name, &recent);
                 let items = NSMenu::new(mtm);
                 items.setAutoenablesItems(false);
                 items.setAppearance(Some(&self.window.effectiveAppearance()));
                 append_menu(&items, &entries, target, mtm);
                 for item in items.itemArray().to_vec() {
-                    let command = item.representedObject()
+                    let command = item
+                        .representedObject()
                         .and_then(|o| o.downcast::<NSString>().ok())
                         .map(|c| c.to_string());
                     if let Some(chord) = command.as_deref().and_then(project_menu_chord) {
@@ -3824,12 +3843,25 @@ impl Host {
     }
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
-        let mut choices = self.base_choices.clone();
+        let mut choices: Vec<_> = self
+            .base_choices
+            .iter()
+            .cloned()
+            .map(Choice::with_after_effects_terms)
+            .collect();
         choices.retain(|c| {
             !state
                 .disabled
                 .contains(menu::split_palette_command(&c.command).0)
         });
+        choices.extend(state.palette_layers.iter().map(|(id, name)| {
+            Choice::new(
+                name.clone(),
+                menu::palette_command("palette.selectLayer", &[serde_json::json!(id)]),
+            )
+            .within("Layer")
+            .on_search()
+        }));
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
             if open && !crate::layout::closable(id) {
@@ -3849,6 +3881,14 @@ impl Host {
             } else {
                 c
             }
+        }));
+        choices.extend(state.palette_effects.iter().map(|(id, name)| {
+            Choice::new(
+                format!("Effect · {name}"),
+                menu::palette_command("palette.addEffect", &[serde_json::json!(id)]),
+            )
+            .within("Effect")
+            .on_search()
         }));
         for (id, name, _) in &state.workspaces {
             choices.push(Choice::new(name.clone(), format!("workspace:{id}")).within("Workspace"));
@@ -5062,7 +5102,14 @@ impl Popup {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for i in self.model.filtered() {
             let c = &self.model.choices[i];
-            (&c.label, &c.command, &c.category, c.checked, &c.font).hash(&mut h);
+            (
+                c.display_label(&self.model.query),
+                &c.command,
+                &c.category,
+                c.checked,
+                &c.font,
+            )
+                .hash(&mut h);
         }
         self.model.unlisted().hash(&mut h);
         (self.window.frame().size.width as i64).hash(&mut h);
@@ -5168,7 +5215,8 @@ impl Popup {
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
             }
-            let title = popup_label(&c.label, t.typography.body, t.colors.text, mtm);
+            let display_label = c.display_label(&self.model.query);
+            let title = popup_label(&display_label, t.typography.body, t.colors.text, mtm);
             if let Some(family) = &c.font
                 && let Some(face) = NSFontManager::sharedFontManager(mtm)
                     .fontWithFamily_traits_weight_size(
@@ -5194,7 +5242,7 @@ impl Popup {
                 )
             };
             button.setTransparent(true);
-            button.setAccessibilityLabel(Some(&NSString::from_str(&c.label)));
+            button.setAccessibilityLabel(Some(&NSString::from_str(&display_label)));
             button.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
                 "shell.palette.{}",
                 c.command
@@ -5666,7 +5714,8 @@ fn animate_as(
                 let _: () = msg_send![a,setDuration:duration];
                 if menu {
                     let curve = NSString::from_str(if enter { "easeOut" } else { "easeIn" });
-                    let timing: *mut AnyObject = msg_send![objc2::class!(CAMediaTimingFunction),functionWithName:&*curve];
+                    let timing: *mut AnyObject =
+                        msg_send![objc2::class!(CAMediaTimingFunction),functionWithName:&*curve];
                     let _: () = msg_send![a,setTimingFunction:timing];
                     // No spring: a scale left from an earlier open goes too.
                     let _: () = msg_send![&*layer,removeAnimationForKey:&*NSString::from_str("pm.shell.scale")];
@@ -5897,7 +5946,10 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if matches!(spec.command.as_str(), "tools" | "new3d" | "newLayers" | "view3d") {
+            if matches!(
+                spec.command.as_str(),
+                "tools" | "new3d" | "newLayers" | "view3d"
+            ) {
                 // In an auto-enabling menu an item with no action is disabled;
                 // its submenu's own action keeps the parent enabled.
                 if let Some(sub) = item.submenu() {
@@ -6116,7 +6168,10 @@ pub fn project_menu_entries(current: &str, recent: &[(String, String)]) -> Vec<M
             ..MenuEntry::item("Recent", "")
         });
         for (id, name) in others {
-            items.push(MenuEntry::item(name.clone(), format!("openRecentProject:{id}")));
+            items.push(MenuEntry::item(
+                name.clone(),
+                format!("openRecentProject:{id}"),
+            ));
         }
     }
     items.extend([
@@ -6422,6 +6477,9 @@ mod sidebar_rect_tests {
         assert!(x < 0., "leading edge outside: {x}");
         assert!(y < 0., "bottom edge outside: {y}");
         assert!(y + h > height, "top edge outside: {}", y + h);
-        assert!(x + w > f64::from(width + t.metrics.panel_radius), "trailing edge under the sheet's corner");
+        assert!(
+            x + w > f64::from(width + t.metrics.panel_radius),
+            "trailing edge under the sheet's corner"
+        );
     }
 }
