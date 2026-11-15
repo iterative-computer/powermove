@@ -683,3 +683,37 @@ pub(crate) mod tests {
         assert_eq!(set.generation(), Some(seq(10)));
     }
 }
+
+#[cfg(test)]
+mod gradient_stop_protocol_tests {
+    use super::*;
+    #[test]
+    fn stop_collection_roundtrips_and_rejects_invalid_defaults() {
+        let mut d = super::tests::effect("agentRamp");
+        d.params = vec![ParamSpec::GradientStops {
+            key: "stops".into(),
+            default: vec![
+                GradientStop {
+                    position: 0.,
+                    color: [0., 0., 0., 1.],
+                },
+                GradientStop {
+                    position: 1.,
+                    color: [1.; 4],
+                },
+            ],
+        }];
+        assert!(d.validate().is_ok());
+        let raw = serde_json::to_value(&d).unwrap();
+        assert_eq!(raw["params"][0]["type"], "gradientStops");
+        assert_eq!(
+            serde_json::from_value::<DefinitionSnapshot>(raw).unwrap(),
+            d
+        );
+        let ParamSpec::GradientStops { default, .. } = &mut d.params[0] else {
+            unreachable!()
+        };
+        default[0].color[3] = 2.;
+        assert!(d.validate().is_err());
+    }
+}

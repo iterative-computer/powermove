@@ -139,6 +139,24 @@ impl GizmoSurface {
             let Ok(world) = mirror.queries().world_matrix(None, id, time) else {
                 continue;
             };
+            // Never wait for the font registry on the UI thread. Text bounds
+            // come from the pose worker; its completion rereads these controls.
+            let Some(origin) = mirror
+                .queries()
+                .bounds(None, id, time)
+                .ok()
+                .flatten()
+                .map(|b| [b.x0, b.y0])
+                .or_else(|| {
+                    self.poses
+                        .iter()
+                        .find(|p| p.id == *id)
+                        .map(|p| [p.bounds[0], p.bounds[1]])
+                })
+            else {
+                continue;
+            };
+            let world = pm_fx_defs::handles::source_mapping(world, origin).0;
             let mut controls = vec![];
             let mut add = |prefix: String, declarations: Vec<Handle>| {
                 for declaration in declarations {
@@ -285,7 +303,6 @@ impl GizmoSurface {
             self.effect_picker = self.effect_stop;
         }
         cx.notify();
-        self.draw(cx);
     }
     #[cfg(test)]
     pub fn effect_points(&self) -> Vec<[f64; 2]> {
@@ -520,14 +537,17 @@ impl GizmoSurface {
             cx.notify();
             return true;
         }
-        let Some(mut at) = Mapping(drag.original.world).local(self.to_comp(event.position, frame))
-        else {
+        let original = &drag.original;
+        let bindings = original.declaration.points();
+        let mut comp = self.to_comp(event.position, frame);
+        if event.modifiers.shift && matches!(original.declaration, Handle::Line { .. }) {
+            comp = pm_fx_defs::handles::constrain(comp, original.points()[1 - drag.part]);
+        }
+        let Some(mut at) = Mapping(original.world).local(comp) else {
             self.effect_drag = Some(drag);
             return true;
         };
-        let original = &drag.original;
-        let bindings = original.declaration.points();
-        if event.modifiers.shift && bindings.len() == 2 {
+        if event.modifiers.shift && matches!(original.declaration, Handle::Rect { .. }) {
             if let Some(other) = original.point(bindings[1 - drag.part]) {
                 at = pm_fx_defs::handles::constrain(at, other);
             }
@@ -894,50 +914,39 @@ mod captures {
     }
     struct Scene {
         gizmo: Entity<GizmoSurface>,
-        pixels: Arc<Vec<f32>>,
+        image: Arc<Image>,
     }
     impl Render for Scene {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let gizmo = self.gizmo.clone();
-            let pixels = self.pixels.clone();
-            div().size_full().child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, cx| {
-                        // Real headless Gradient Ramp pixels under the production painter.
-                        for y in (0..360).step_by(4) {
-                            for x in (0..640).step_by(4) {
-                                let at = (y * 640 + x) * 4;
-                                let color = [
-                                    pixels[at] as f64,
-                                    pixels[at + 1] as f64,
-                                    pixels[at + 2] as f64,
-                                    pixels[at + 3] as f64,
-                                ];
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(px(x as f32), px(y as f32)),
-                                        size(px(4.), px(4.)),
-                                    ),
-                                    stop_rgba(color),
-                                ));
-                            }
-                        }
-                        gizmo.update(cx, |g, cx| {
-                            g.effects_paint(
-                                ViewFrame {
-                                    origin: point(px(0.), px(0.)),
-                                    scale: 1.,
-                                    size: [640., 360.],
-                                },
-                                window,
-                                cx,
-                            )
-                        });
-                    },
+
+            div()
+                .size_full()
+                .relative()
+                .child(
+                    img(ImageSource::Image(self.image.clone()))
+                        .absolute()
+                        .size_full(),
                 )
-                .size_full(),
-            )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, cx| {
+                            gizmo.update(cx, |g, cx| {
+                                g.effects_paint(
+                                    ViewFrame {
+                                        origin: point(px(0.), px(0.)),
+                                        scale: 1.,
+                                        size: [640., 360.],
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            });
+                        },
+                    )
+                    .size_full(),
+                )
         }
     }
     #[::core::prelude::v1::test]
@@ -981,7 +990,23 @@ mod captures {
                 )
                 .unwrap();
             assert!(rendered.failures.is_empty(), "{:?}", rendered.failures);
-            let pixels = Arc::new(renderer.read_rgba(&rendered).unwrap());
+            let pixels: Vec<u8> = renderer
+                .read_rgba(&rendered)
+                .unwrap()
+                .into_iter()
+                .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
+                .collect();
+            let mut bytes = vec![];
+            {
+                let mut png = png::Encoder::new(&mut bytes, 640, 360);
+                png.set_color(png::ColorType::Rgba);
+                png.set_depth(png::BitDepth::Eight);
+                png.write_header()
+                    .unwrap()
+                    .write_image_data(&pixels)
+                    .unwrap();
+            }
+            let image = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
 
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(gpui_parley::ParleyTextSystem::new(
@@ -1049,10 +1074,13 @@ mod captures {
                         }
                         g
                     });
-                    cx.new(|_| Scene { gizmo, pixels })
+                    cx.new(|_| Scene { gizmo, image })
                 })
                 .unwrap();
-            cx.run_until_parked();
+            for _ in 0..20 {
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             cx.capture_screenshot(window.into())
                 .unwrap()
                 .save(format!(

@@ -131,7 +131,7 @@ fn f(values: &[f64]) -> Call {
 }
 
 /// Shared named-uniform transport for effects and extension fragment layers.
-pub(crate) fn stop_calls(key:&str, stops:super::plan::StopBindings)->Vec<(String,Call)> {
+pub(crate) fn stop_calls(key:&str, stops:&super::plan::StopBindings)->Vec<(String,Call)> {
     let mut calls=vec![(format!("u_{key}Count"),f(&[stops.count as f64]))];
     for i in 0..16 {
         calls.push((format!("u_{key}P{i}"),f(&[stops.positions[i]])));
@@ -144,7 +144,7 @@ pub(crate) fn stop_calls(key:&str, stops:super::plan::StopBindings)->Vec<(String
 /// alias.
 fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, Call)>) {
     for (index, p) in params.iter().enumerate() {
-        if let Binding::Stops(stops)=p.value {calls.extend(stop_calls(&p.key,stops));continue;}
+        if let Binding::Stops(ref stops)=p.value {calls.extend(stop_calls(&p.key,stops));continue;}
         let named = format!("u_{}", p.key);
         let name = if active(program.fragment_block.as_ref(), &named)
             || active(program.vertex_block.as_ref(), &named)
@@ -168,7 +168,7 @@ fn param_calls(program: &GpuProgram, params: &[Param], calls: &mut Vec<(String, 
 /// `shader_layers::fallback::call`).
 fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
     for (index, p) in params.iter().enumerate() {
-        if let Binding::Stops(stops)=p.value {calls.extend(stop_calls(&p.key,stops));continue;}
+        if let Binding::Stops(ref stops)=p.value {calls.extend(stop_calls(&p.key,stops));continue;}
         let name = format!("u_{}|{}{index}", p.key, if p.color { "u_c" } else { "u_p" });
         let call = match p.value {
             Binding::Stops(_) => unreachable!("stop collections bind named uniforms above"),

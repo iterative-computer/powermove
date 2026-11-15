@@ -846,6 +846,7 @@ impl GizmoSurface {
                         s.studio_push_view(cx);
                     }
                     s.draw(cx);
+                    s.effects_reread(cx);
                 }
             });
         })

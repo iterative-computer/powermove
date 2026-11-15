@@ -307,3 +307,22 @@ mod drag_tests {
         }
     }
 }
+
+/// Effects measure pixels from the content's top-left bounds, as the shader's
+/// owner UV mapping does. The transform anchor may be somewhere else entirely.
+pub fn source_mapping(world: [f64; 6], origin: [f64; 2]) -> Mapping {
+    let at = Mapping(world).screen(origin);
+    Mapping([world[0], world[1], world[2], world[3], at[0], at[1]])
+}
+#[cfg(test)]
+mod source_mapping_tests {
+    use super::*;
+    #[test]
+    fn source_origin_and_parent_transform_round_trip_exactly() {
+        let world = [0., 2., -0.5, 0., 200., 100.];
+        let m = source_mapping(world, [-20., 30.]);
+        assert_eq!(m.screen([0., 0.]), [185., 60.]);
+        assert_eq!(m.screen([10., 40.]), Mapping(world).screen([-10., 70.]));
+        assert_eq!(m.local(m.screen([10., 40.])), Some([10., 40.]));
+    }
+}

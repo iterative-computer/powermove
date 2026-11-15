@@ -193,11 +193,20 @@ export type EffectParamDefinition = ParameterPresentation & (
   | { k: string; label: string; def: string; type: 'color' }
   | { k: string; label: string; def: boolean; type: 'toggle' });
 
+/** Positions are pixels from the content bounds' top-left, before layer transforms. */
+export interface ViewerPointBinding { x: string; y: string }
+export type ViewerHandle =
+  | { kind: 'point'; point: ViewerPointBinding }
+  | { kind: 'line'; start: ViewerPointBinding; end: ViewerPointBinding; stops?: string; radial?: string }
+  | { kind: 'angle'; center: ViewerPointBinding; angle: string }
+  | { kind: 'radius'; center: ViewerPointBinding; radius: string }
+  | { kind: 'rect'; start: ViewerPointBinding; end: ViewerPointBinding };
 /**
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
  * preamble (`v_uv`, `v_st`, `u_tex`, `u_res`, `u_texel`, `u_time`, helpers) and
- * a `uniform` declaration for every param named `u_<k>` (float for numbers and
- * toggles, vec3 for colors), plus `u_pass` (int), `u_orig` when `keepOrig`, and
+ * named scalar uniforms `u_<k>` (float for numbers/toggles, vec3 for colors).
+ * Stop collections get `pm_<k>(t)` and their Count/P/C uniforms instead.
+ * It also provides `u_pass` (int), `u_orig` when `keepOrig`, and
  * `u_backdrop` when `backdrop` is enabled. `u_backdrop` contains the pixels
  * accumulated beneath the layer before the effect is applied.
  * `v_uv` is composition-normalized and `v_px` is in composition pixels even
@@ -207,14 +216,6 @@ export type EffectParamDefinition = ParameterPresentation & (
  * shader with `void main` when `rawShader` is true (legacy positional u_p<i>
  * uniforms remain supported for raw shaders).
  */
-/** Positions are layer-local pixels. Scalar bindings name existing numeric params. */
-export interface ViewerPointBinding { x: string; y: string }
-export type ViewerHandle =
-  | { kind: 'point'; point: ViewerPointBinding }
-  | { kind: 'line'; start: ViewerPointBinding; end: ViewerPointBinding; stops?: string; radial?: string }
-  | { kind: 'angle'; center: ViewerPointBinding; angle: string }
-  | { kind: 'radius'; center: ViewerPointBinding; radius: string }
-  | { kind: 'rect'; start: ViewerPointBinding; end: ViewerPointBinding };
 export interface EffectDefinition {
   viewerHandles?: ViewerHandle[];
   id: string;
@@ -276,6 +277,7 @@ export interface TransitionsAPI {
  * without changing the persisted layer shape.
  */
 export interface ExtensionLayerDefinition {
+  viewerHandles?: ViewerHandle[];
   id: string;
   label: string;
   version: number;

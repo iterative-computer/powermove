@@ -432,7 +432,7 @@ pub(crate) fn extension_layer<'d>(
             },
         };
         if matches!(spec, ParamSpec::GradientStops{..}) {
-            if let crate::effects::plan::Binding::Stops(stops)=crate::effects::plan::binding(spec,&value) { calls.extend(crate::effects::exec::stop_calls(k,stops)); }
+            if let crate::effects::plan::Binding::Stops(stops)=crate::effects::plan::binding(spec,&value) { calls.extend(crate::effects::exec::stop_calls(k,&stops)); }
             continue;
         }
         let call = match spec {

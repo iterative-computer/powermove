@@ -3165,3 +3165,30 @@ fn agent_registered_shader_effect_stop_handle_drives_its_collection(cx: &mut Tes
     s.undo(cx);
     assert_eq!(stop_values(&s)[1].position, 0.5);
 }
+
+#[gpui::test]
+fn gradient_handle_shift_constrains_screen_angle_under_nonuniform_layer_transform(
+    cx: &mut TestAppContext,
+) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&gradient_handle_project(false)).unwrap();
+    project["layers"][0]["p"]["scale.x"]["v"] = serde_json::json!(200);
+    project["layers"][0]["p"]["scale.y"]["v"] = serde_json::json!(50);
+    project["layers"][0]["p"]["rotation"]["v"] = serde_json::json!(30);
+    let mut s = stage_on(cx, &project.to_string());
+    let p = ramp_at(&s, 0.);
+    let at = s.point_of(p);
+    s.drag(
+        cx,
+        at,
+        point(px(-30.), px(80.)),
+        Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    let p = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
+    let angle = (p[1][1] - p[0][1]).atan2(p[1][0] - p[0][0]);
+    let step = std::f64::consts::FRAC_PI_4;
+    assert!((angle - (angle / step).round() * step).abs() < 1e-6);
+}
