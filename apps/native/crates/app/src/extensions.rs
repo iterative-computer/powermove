@@ -18,7 +18,7 @@ use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, tr
 use pm_text::host::BrokerResolver;
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     rc::Rc,
@@ -1914,6 +1914,9 @@ impl Controller {
                 return;
             }
         };
+        let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+        let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+        let _ = host.update_native_style(&light, &dark, tokens.scheme);
         let spec = PanelSpec {
             id: PAGE_PANEL,
             label: "Extension panels".into(),
@@ -1922,8 +1925,11 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
-        // An export's page keeps running for its job, the window hidden or not.
-        if key.starts_with(EXPORT_PAGE) && host.begin_background_job(false).is_err() {
+        // Exports and explicit background review launches keep WebKit working
+        // while the editor is occluded; neither activates or parks the window.
+        let background_review = cfg!(debug_assertions)
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
+        if (key.starts_with(EXPORT_PAGE) || background_review) && host.begin_background_job(false).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
         let shell = self.host.borrow();
@@ -1941,19 +1947,19 @@ impl Controller {
         let bodies = shell.native_panels.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
-        // The panels' ground under the page (`translucency.panel` over the
-        // window's material, as the shell paints a panel).
-        let fill = {
-            let t = &shell.tokens;
-            let c = t.colors.panel;
-            let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
-            [
-                channel(16),
-                channel(8),
-                channel(0),
-                f64::from(t.translucency.panel),
-            ]
-        };
+        // Native panel over native window tint, over the shared material.
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(&shell.tokens)));
+        let themed_fill = fill.clone();
+        let themed_views = self.extensions.views.clone();
+        shell.native_style = Some(Rc::new(move |tokens| {
+            themed_fill.set(pm_compat_host::native_style::panel_backing(tokens));
+            let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+            let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+            let css = pm_compat_host::native_style::stylesheet(&light, &dark);
+            for page in themed_views.borrow().values() {
+                let _ = page.borrow().set_native_style(&css, tokens.scheme);
+            }
+        }));
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -2005,7 +2011,7 @@ impl Controller {
                 }
                 let _ = host.set_regions(regions);
                 let _ = host.set_content_regions(content);
-                host.set_fill(Some(fill));
+                host.set_fill(Some(fill.get()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,

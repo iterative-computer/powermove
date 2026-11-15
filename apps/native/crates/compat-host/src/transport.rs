@@ -136,6 +136,14 @@ pub(crate) fn csp(nonce: &str, trust: &Trust) -> String {
     )
 }
 #[cfg(any(target_os = "macos", test))]
+static DEFAULT_NATIVE_CSS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    crate::native_style::stylesheet(
+        &pm_design::Tokens::new(pm_design::Scheme::Light, Default::default()),
+        &pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+    )
+});
+
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn page(
     base: &str,
     nonce: &str,
@@ -144,8 +152,9 @@ pub(crate) fn page(
     trust: &Trust,
 ) -> String {
     let cfg = json!({"base":base,"generation":generation});
+    let native_css = &*DEFAULT_NATIVE_CSS;
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}[data-pm-contribution]{{background:var(--bg-panel,Canvas)}}[data-pm-contribution]>div{{box-sizing:border-box!important;max-width:100%!important;min-width:0!important}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}::-webkit-scrollbar{{width:9px;height:9px}}::-webkit-scrollbar-thumb{{background:color-mix(in srgb,CanvasText 28%,transparent);border-radius:6px;border:2px solid transparent;background-clip:padding-box}}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{{background:transparent}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style id=\"pm-native\">{native_css}</style><style>[data-pm-contribution]>div{{box-sizing:border-box!important;max-width:100%!important;min-width:0!important}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
         csp(nonce, trust),
         nonce,
         cfg,

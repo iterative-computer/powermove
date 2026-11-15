@@ -12,10 +12,57 @@
   // child web view); the root moves into that document, styles and theme with
   // it, and the sheet closes when the extension's realm removes the root.
   const sheets = new Map();
+  let nativeCSS = document.getElementById("pm-native")?.textContent || "";
+  let nativeScheme = document.documentElement.dataset.pmScheme || "light";
+  const nativeStyle = (doc) => {
+    const root = doc.documentElement;
+    root.dataset.pmScheme = nativeScheme;
+    root.style.colorScheme = nativeScheme;
+    root.dataset.theme = nativeScheme;
+    let style = doc.getElementById("pm-native");
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = "pm-native";
+      doc.head.prepend(style);
+    }
+    const mode = root.dataset.pmStyle || "full";
+    const css =
+      mode === "none"
+        ? ""
+        : mode === "tokens-only"
+          ? nativeCSS.split("@layer pm-base")[0]
+          : nativeCSS;
+    if (style.textContent !== css) style.textContent = css;
+  };
+  const watchNativeStyle = (doc) => {
+    new MutationObserver(() => nativeStyle(doc)).observe(doc.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-pm-style"],
+    });
+    nativeStyle(doc);
+  };
+  watchNativeStyle(document);
+  let scrolling;
+  document.addEventListener(
+    "scroll",
+    () => {
+      document.documentElement.classList.add("pm-scrolling");
+      clearTimeout(scrolling);
+      scrolling = setTimeout(
+        () => document.documentElement.classList.remove("pm-scrolling"),
+        700,
+      );
+    },
+    true,
+  );
+
   const present = (root) => {
     if (sheets.has(root)) return;
     const frame = root.getAttribute("data-pm-modal-frame") || "{}";
-    const child = window.open("about:blank#pm-modal=" + encodeURIComponent(frame), "_blank");
+    const child = window.open(
+      "about:blank#pm-modal=" + encodeURIComponent(frame),
+      "_blank",
+    );
     if (!child) return;
     sheets.set(root, child);
     const doc = child.document;
@@ -25,14 +72,20 @@
         doc.documentElement.setAttribute(attribute.name, attribute.value);
     for (const style of document.querySelectorAll("style"))
       doc.head.append(doc.importNode(style, true));
+    watchNativeStyle(doc);
     doc.body.append(doc.adoptNode(root));
     // The sheet's input reaches the realm as the panel's own.
     applier?.attachWindow(child);
     doc.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") root.querySelector("[data-pm-modal-dismiss]")?.click();
+      if (event.key === "Escape")
+        root.querySelector("[data-pm-modal-dismiss]")?.click();
     });
     new MutationObserver(() => {
-      if (!root.isConnected || root.ownerDocument !== doc || root.parentNode !== doc.body)
+      if (
+        !root.isConnected ||
+        root.ownerDocument !== doc ||
+        root.parentNode !== doc.body
+      )
         dismissSheet(root);
     }).observe(doc.body, { childList: true });
   };
@@ -61,9 +114,13 @@
       }
   }).observe(document, { childList: true, subtree: true });
   for (const type of ["load", "error"])
-    window.addEventListener(type, (event) => {
-      if (resourceImages.has(event.target)) event.stopImmediatePropagation();
-    }, true);
+    window.addEventListener(
+      type,
+      (event) => {
+        if (resourceImages.has(event.target)) event.stopImmediatePropagation();
+      },
+      true,
+    );
   const call = (value) => {
     const request = new XMLHttpRequest();
     request.open(
@@ -85,12 +142,15 @@
     while (waiting.length && waiting[0].dom_sequence <= applied) {
       const event = waiting.shift();
       const node = applier?.node(event.node);
-      let failed = !!node && node.localName !== "canvas" && node.localName !== "img";
+      let failed =
+        !!node && node.localName !== "canvas" && node.localName !== "img";
       if (node?.localName === "img") {
         // The realm's image: its own bytes under a page-local URL. Its load is
         // the realm's, so the page's load and error never reach the extension.
         try {
-          const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+          const response = await fetch(base + "canvas?q=" + event.resource, {
+            cache: "no-store",
+          });
           if (!response.ok) throw Error(String(response.status));
           const previous = resourceImages.get(node);
           const url = URL.createObjectURL(await response.blob());
@@ -105,30 +165,50 @@
         node.height = event.height;
         if (event.width && event.height) {
           try {
-            const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+            const response = await fetch(base + "canvas?q=" + event.resource, {
+              cache: "no-store",
+            });
             if (!response.ok) throw Error(String(response.status));
             const bitmap = await createImageBitmap(await response.blob());
-            try { node.getContext("2d").drawImage(bitmap, 0, 0); }
-            finally { bitmap.close(); }
+            try {
+              node.getContext("2d").drawImage(bitmap, 0, 0);
+            } finally {
+              bitmap.close();
+            }
           } catch (_) {
             failed = true;
           }
         }
       }
-      call({ kind: "canvas_applied", panel, payload: {resource:event.resource, failed} });
+      call({
+        kind: "canvas_applied",
+        panel,
+        payload: { resource: event.resource, failed },
+      });
     }
   };
   // The engine's faces for the project's text, under the names its CSS uses,
   // so a hidden element an extension measures lays out as the engine draws.
   // Later batches wait for them: no read measures a fallback meanwhile.
   const loadFonts = async (faces) => {
-    await Promise.all(faces.map(async (face) => {
-      const font = new FontFace(face.family, `url("${base}font?q=${encodeURIComponent(face.key)}")`,
-        { weight: String(face.weight), style: face.style });
-      document.fonts.add(font);
-      try { await font.load(); } catch (_) {}
-    }));
-    call({ kind: "fonts_loaded", panel: 0, payload: { keys: faces.map((face) => face.key) } });
+    await Promise.all(
+      faces.map(async (face) => {
+        const font = new FontFace(
+          face.family,
+          `url("${base}font?q=${encodeURIComponent(face.key)}")`,
+          { weight: String(face.weight), style: face.style },
+        );
+        document.fonts.add(font);
+        try {
+          await font.load();
+        } catch (_) {}
+      }),
+    );
+    call({
+      kind: "fonts_loaded",
+      panel: 0,
+      payload: { keys: faces.map((face) => face.key) },
+    });
   };
   const panelLayouts = new PMPanelLayout((frame) => requestAnimationFrame(frame), ({ id, rect }) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
@@ -182,6 +262,11 @@
       panelLayouts.enqueue(event.placements);
     } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
+    } else if (event.kind === "theme") {
+      nativeCSS = event.css;
+      nativeScheme = event.scheme;
+      nativeStyle(document);
+      for (const child of sheets.values()) nativeStyle(child.document);
     } else if (event.kind === "create") {
       if (panel !== null)
         throw Error("Dedicated remote DOM page already owns a panel");
@@ -264,7 +349,8 @@
       new MutationObserver((records) => {
         for (const record of records)
           for (const node of record.addedNodes)
-            if (node.nodeType === 1 && node.matches?.("[data-pm-modal]")) present(node);
+            if (node.nodeType === 1 && node.matches?.("[data-pm-modal]"))
+              present(node);
       }).observe(document.body, { childList: true });
       call({ kind: "ready", panel: 0, payload: { origin: location.origin } });
       void poll();
