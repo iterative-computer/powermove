@@ -640,6 +640,7 @@ impl Controller {
             .as_ref()
             .is_some_and(|s| self.kernel.published(&s.project).is_none())
         {
+            self.linked_sync = Default::default();
             self.session = None;
         }
         self.mcp.bind_window(self.window_key, self.session.clone());
@@ -803,6 +804,7 @@ impl Controller {
             .as_ref()
             .and_then(|s| self.kernel.published(&s.project));
         if p.is_none() {
+            self.linked_sync = Default::default();
             self.session = None;
         }
         // A second Quit's own prompt on this window (Quit Now, while the
@@ -925,6 +927,7 @@ impl Controller {
             let result = discard_close(&kernel, session).await;
             let _ = this.update(cx, |v, cx| match result {
                 Ok(()) => {
+                    v.linked_sync = Default::default();
                     v.session = None;
                     v.mcp.bind_window(v.window_key, None);
                     v.complete_close(intent, cx);
@@ -987,6 +990,7 @@ impl Controller {
                         popout.shutdown();
                     }
                     v.close_studio_panes();
+                    v.linked_sync = Default::default();
                     v.session = None;
                     v.published = None;
                     v.media_refresh.reset();

@@ -134,15 +134,7 @@ impl Controller {
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
-                    v.import(
-                        ImportRequest {
-                            paths,
-                            folder,
-                            keep_folders: true,
-                            ..Default::default()
-                        },
-                        cx,
-                    );
+                    v.link_media_folders(paths, folder, cx);
                 });
             }
         })
@@ -233,7 +225,9 @@ impl Controller {
         as_folder: bool,
         cx: &mut Context<Self>,
     ) {
-        self.import_drop(paths, as_folder, None, folder, cx);
+        let (dirs, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
+        if !dirs.is_empty() { self.link_media_folders(dirs, folder.clone(), cx); }
+        if !files.is_empty() { self.import_drop(files, as_folder, None, folder, cx); }
     }
     /// Media dropped on the timeline: Finder files at the time and place in
     /// the stack under the pointer, or the Project panel's dragged items.
@@ -860,5 +854,20 @@ mod drop_tests {
         std::fs::write(mixed.join("intro.png"), b"png").unwrap();
         std::fs::write(mixed.join("music.wav"), b"wav").unwrap();
         assert!(!crate::media_sequence::candidate(&folder_frames(&mixed)));
+    }
+}
+
+impl Controller {
+    fn link_media_folders(&mut self, paths: Vec<PathBuf>, folder: Option<String>, cx: &mut Context<Self>) {
+        let (Some(runtime), Some(p)) = (self.builtins.runtime.clone(), self.published.clone()) else { return; };
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move {
+                runtime.link_folders(p.snapshot.doc_id, &paths, folder, &std::sync::atomic::AtomicBool::new(false))
+            }).await;
+            let _ = this.update(cx, |v, cx| {
+                if let Err(error) = result { v.message = error; }
+                v.refresh(cx);
+            });
+        }).detach();
     }
 }

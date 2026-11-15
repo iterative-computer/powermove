@@ -2650,3 +2650,11 @@ mod tests {
         );
     }
 }
+
+/// Probe a linked original without retaining or copying its bytes.
+pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
+    let (kind, _) = classify(path).ok_or("Unsupported media")?;
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let (record, _) = metadata(path, kind, size, Default::default())?;
+    Ok(crate::data::wire(&record))
+}

@@ -42,6 +42,19 @@ const huge = projection(Array.from({ length: 12 }, (_, i) => asset(`a${i}`)));
 huge.page.total = 60_000;
 huge.page.next = 12;
 const cases: [string, Projection | null, Partial<ProjectViewProps>?][] = [
+  ...(["Synced", "Syncing", "NotFound"] as const).flatMap((sync) => {
+    const row = folder();
+    if ("Folder" in row.data) {
+      row.data.Folder.link = { path: "/synthetic/Finder" };
+      row.data.Folder.sync = sync;
+    }
+    const grid = projection([row]);
+    const list = projection([row]);
+    return [
+      [`linked-${sync}-grid`, grid, { viewMode: "grid" }],
+      [`linked-${sync}-list`, list, { viewMode: "list" }],
+    ] as [string, Projection, Partial<ProjectViewProps>][];
+  }),
   ["no-project", null],
   ["empty-project", projection()],
   ["empty-folder", inFolder],

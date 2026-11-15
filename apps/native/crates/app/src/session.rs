@@ -47,6 +47,7 @@ pub struct Controller {
     pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
+    pub(crate) linked_sync: crate::linked_sync::Sync,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     /// The Project panel grid's thumbnails.
     pub(crate) thumbs: crate::media_thumbs::Thumbs,
@@ -779,6 +780,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             media: MediaCatalog::default(),
+            linked_sync: Default::default(),
             media_refresh: Default::default(),
             thumbs: Default::default(),
             media_base: MediaCatalog::default(),
@@ -1065,6 +1067,7 @@ impl Controller {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
         let Some(session) = &self.session else {
+            self.linked_sync = Default::default();
             cx.notify();
             return;
         };
@@ -1145,6 +1148,9 @@ impl Controller {
             if let Some(rate) = playing {
                 self.transport(TransportCommand::Play { rate });
             }
+        }
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            if self.linked_sync.update(&p, runtime) { self.media_refresh.reset(); }
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.

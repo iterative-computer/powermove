@@ -832,8 +832,13 @@ impl MediaPanel {
                     .assets
                     .get(&id)
                     .and_then(|a| a.source_path.clone())
+                    .or_else(|| c.folders.get(&id).and_then(|f| f.link.as_ref()).map(|l| l.path.clone()))
                     .ok_or(Error::MissingItem)?;
-                self.select(&id, Modifiers::default(), &mut out.effects);
+                if c.folders.contains_key(&id) {
+                    self.select_exclusive(ItemId::Folder(id.clone()), &mut out.effects);
+                } else {
+                    self.select(&id, Modifiers::default(), &mut out.effects);
+                }
                 out.effects.push(Effect::Reveal { id, path });
             }
             Download(id) => {

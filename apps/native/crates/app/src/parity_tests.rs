@@ -1343,3 +1343,72 @@ fn project_bins_native_edits_survive_save_reopen_and_history() {
     assert_eq!(saved.folders, c.folders);
     assert_eq!(saved.assets["a"].folder, c.assets["a"].folder);
 }
+
+#[test]
+fn linked_folder_save_reopen_resolves_in_place_without_retained_copy() {
+    let desk = Desk::new(
+        json!({"id":"linked","compId":"c","w":64,"h":64,"fps":30,"dur":1,"layers":[],"assets":{}}),
+    );
+    let root = desk.dir.path().join("Finder");
+    std::fs::create_dir(&root).unwrap();
+    let image = root.join("still.png");
+    std::fs::write(
+        &image,
+        crate::mcp_services::png(&[12, 34, 56, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let panels = pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    panels
+        .link_folders(
+            desk.published().snapshot.doc_id,
+            &[root.clone()],
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    let before = desk.document();
+    let reopened = desk.reopened();
+    let after = reopened.published.snapshot.document.to_value().unwrap();
+    assert_eq!(before.get("assetFolders"), after.get("assetFolders"));
+    assert_eq!(before.get("assets"), after.get("assets"));
+    let asset = after
+        .get("assets")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap()
+        .1;
+    assert!(asset.get("originalVersion").is_none());
+    assert!(asset.get("sourceFile").is_some());
+    let resolution = crate::media::for_session(
+        &reopened.published.snapshot,
+        &reopened.published.media,
+        reopened.published.path.as_deref(),
+        &desk.dir.path().join("cache"),
+    )
+    .unwrap();
+    assert_eq!(resolution.catalog.originals.values().next(), Some(&image.canonicalize().unwrap()));
+    assert!(!desk.dir.path().join("media/retained").exists());
+    std::fs::remove_file(&image).unwrap();
+    let missing = crate::media::for_session(
+        &reopened.published.snapshot,
+        &reopened.published.media,
+        reopened.published.path.as_deref(),
+        &desk.dir.path().join("cache"),
+    )
+    .unwrap();
+    assert!(missing.catalog.originals.is_empty());
+    assert_eq!(
+        reopened
+            .published
+            .snapshot
+            .document
+            .to_value()
+            .unwrap()
+            .get("assets"),
+        after.get("assets")
+    );
+    panels.close();
+}

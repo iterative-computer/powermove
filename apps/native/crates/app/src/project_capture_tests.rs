@@ -218,6 +218,14 @@ fn capture_project_panel() {
                     Default::default(),
                     pm_panel_media::readiness::ObservedRuntime::new(stamp, states),
                 );
+                if std::env::var("PM_PROJECT_LINKED").is_ok() {
+                    let state = match std::env::var("PM_PROJECT_SYNC").as_deref() {
+                        Ok("missing") => pm_panel_media::FolderSync::NotFound,
+                        Ok("syncing") => pm_panel_media::FolderSync::Syncing,
+                        _ => pm_panel_media::FolderSync::Synced,
+                    };
+                    r.runtime.update_folder_sync(std::collections::BTreeMap::from([("fFootage".into(), state.clone()), ("fBroll".into(), state)]));
+                }
                 let first = publication(&r);
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
