@@ -333,3 +333,14 @@ impl Delegate {
         unsafe { msg_send![super(this), init] }
     }
 }
+
+/// Export notices share the native center and only appear in the background.
+pub fn export_finished(success: bool, body: &str, cx: &mut App) {
+    if frontmost() { return; }
+    let Some(center) = cx.global::<State>().center.as_ref() else { return; };
+    let mut notice = CompletionNotice::finished(
+        "export".into(), "export".into(), "export".into(), String::new());
+    notice.title = if success { "Export complete" } else { "Export failed" }.into();
+    notice.body = body.into();
+    center.deliver(&notice);
+}

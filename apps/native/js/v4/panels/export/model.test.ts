@@ -311,13 +311,17 @@ test("subscriptions accept real host publications and reject stale/retired gener
   await f.model.dispose();
   expect(await f.publish(initial())).toBe(false);
 });
-test("completion closes and permits another export only after native reset", async () => {
+test("completion stays visible and permits another export only after native reset", async () => {
   const f = fixture();
   await f.model.connect("export.fixture");
   await f.model.show();
   const s = initial();
   s.run = { phase: "done", path: "fixture.mp4" };
   await f.publish(s);
+  expect(f.model.open).toBe(true);
+  await f.model.showInFinder();
+  expect(commands(f)).toContain("export.showInFinder");
+  await f.model.dismissCompleted();
   expect(f.model.open).toBe(false);
   await f.model.show();
   expect(f.model.canExport).toBe(true);

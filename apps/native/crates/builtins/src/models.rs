@@ -2042,6 +2042,14 @@ impl Backend {
                 self.command_reply(command)?
             }
             // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.showInFinder" => {
+                if self.native.export["run"]["phase"] != "done" {
+                    return Err("No completed export to reveal".into());
+                }
+                let path = self.native.export["run"]["path"].clone();
+                self.native.platform.push((command.into(), json!({"path":path})));
+                self.export_snapshot()?
+            }
             "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?

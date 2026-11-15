@@ -115,7 +115,6 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
   if (
     !p ||
     !model.open ||
-    s.run.phase === "done" ||
     s.run.phase === "cancelled"
   )
     return null;
@@ -282,7 +281,14 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
-      {progressSheet ? (
+      {s.run.phase === "done" ? (
+        <div role="status" id="export.completed" style={body}>
+          <text style={text}>Export complete</text>
+          <text style={detail}>{s.run.path}</text>
+          <Action id="export.showInFinder" label="Show in Finder" onClick={() => watch(model.showInFinder())} />
+          <Action id="export.done" label="Done" primary onClick={() => watch(model.dismissCompleted())} />
+        </div>
+      ) : progressSheet ? (
         <>
           <div data-pm-slot="body" style={{ ...body, ...column }}>
             {s.run.phase === "rendering" && s.run.preview ? (

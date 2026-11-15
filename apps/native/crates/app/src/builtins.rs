@@ -1718,6 +1718,12 @@ impl Controller {
                     }
                     Ok(Value::Null)
                 }
+                "export.showInFinder" => {
+                    if let Some(path) = request.input["path"].as_str() {
+                        crate::platform::reveal(std::path::Path::new(path));
+                    }
+                    Ok(Value::Null)
+                }
                 "export.reveal" => {
                     self.show_builtin("export", window, cx);
                     Ok(Value::Null)

@@ -345,11 +345,12 @@ impl Controller {
                         Err(error)
                             if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
                         {
+                            crate::notifications::export_finished(false, error, cx);
                             v.message = error.clone();
                         }
                         Ok(finished) => {
-                            v.close_export_sheet(cx);
                             let line = finished.line();
+                            crate::notifications::export_finished(true, &line, cx);
                             // A long export ends while the user is
                             // elsewhere, and a file with something to say
                             // (its sound clipped) is worth reading: the line

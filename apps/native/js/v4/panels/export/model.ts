@@ -428,7 +428,7 @@ export class ExportModel {
       this.remembered[kindOf(this.options.format)] = this.options.format;
       this.validateSize();
     }
-    if (next.run.phase === "done" || next.run.phase === "cancelled")
+    if (next.run.phase === "cancelled")
       this.open = false;
     this.changed();
   }
@@ -670,6 +670,15 @@ export class ExportModel {
       this.changed();
       this.accept((await this.command("export.cancel")).value);
     }
+  }
+  async showInFinder() {
+    if (this.current.run.phase === "done") await this.command("export.showInFinder");
+  }
+  async dismissCompleted() {
+    if (this.current.run.phase !== "done") return;
+    this.open = false;
+    this.changed();
+    await this.command("export.dismiss");
   }
   async closeFailure() {
     if (this.current.run.phase !== "failed" || this.busy) return;
