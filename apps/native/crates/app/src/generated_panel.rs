@@ -99,7 +99,7 @@ fn build_surface(
     }).detach();
     let age = state.started.elapsed().as_secs_f32();
     let elapsed = state.changed.elapsed().as_secs_f32();
-    build_frame(state, rect, t, playing, age, elapsed, fraction)
+    build_frame(state, rect, t, playing, age, elapsed, fraction, false)
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
@@ -111,12 +111,14 @@ fn build_frame(
     age: f32,
     elapsed: f32,
     fraction: f32,
+    ink_only: bool,
 ) -> AnyElement {
     let light = t.scheme == pm_design::Scheme::Light;
     let reduced = t.accessibility.reduce_motion;
     let row_height = BUILD_ROW;
     let height = (rect.h - t.metrics.header).max(0.);
     let dim = panel_build::playback(playing).0;
+    let surface = slot_surface(t, Some(&state));
     div().absolute().inset_0().occlude().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
@@ -128,36 +130,70 @@ fn build_frame(
                     window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
                 };
                 let ready = state.stage == panel_build::Stage::Ready;
-                let field = if ready { 1. - panel_build::fade(elapsed, 0.36) } else { 1. };
-                for dot in panel_build::draw_dots(size, age, None, light, reduced, playing).into_iter().filter(|_| field > 0.) {
-                    paint(dot.center[0] - dot.radius, dot.center[1] - dot.radius,
-                        dot.radius * 2., dot.radius * 2., dot.radius,
-                        if light { 0x000000 } else { 0xffffff }, dot.alpha * field);
-                }
-                if !ready && state.stage != panel_build::Stage::Wake {
-                    let mut rows = vec![state.row];
-                    rows.extend(state.pending.iter().copied().filter(|row| *row > state.row).take(2));
-                    for row in rows {
-                        let row_y = BUILD_HEADER + (row as f32 + 0.5) * BUILD_ROW;
-                        let erasure = if row == state.row && state.stage == panel_build::Stage::Ink {
-                            1. - panel_build::fade(elapsed - 0.06, 0.22)
-                        } else { 1. };
-                        for dot in panel_build::sketch_dots(size, row_y, erasure * dim) {
-                            paint(dot.center[0]-dot.radius, dot.center[1]-dot.radius, dot.radius*2., dot.radius*2., dot.radius,
-                                if light { 0x8f7868 } else { 0xc4aa96 }, dot.alpha);
+                let inner = (size[0]-32.).max(0.);
+                let track_start = 16. + inner*0.38;
+                let [mut lx, mut ly] = match state.stage {
+                    panel_build::Stage::Wake => [32., 21.],
+                    panel_build::Stage::Ink => [track_start + inner*0.44*fraction*panel_build::ink_ease(elapsed/0.28), y],
+                    panel_build::Stage::Rest => [16., (y+BUILD_ROW).min(size[1]-16.)],
+                    _ => [16. + inner * (elapsed.fract() * 0.94), y],
+                };
+                lx = lx.clamp(16., (size[0]-16.).max(16.));
+                ly = ly.clamp(16., (size[1]-16.).max(16.));
+                let breath = if state.stage == panel_build::Stage::Rest {
+                    0.21 + 0.05*(elapsed*std::f32::consts::PI).sin()
+                } else { 0.4 };
+                let cooling = if state.stage == panel_build::Stage::Ink { panel_build::afterglow((elapsed-0.28).max(0.)) } else { 1. };
+                let light_alpha = if ready { 1. - panel_build::fade(elapsed, 0.16) } else { panel_build::fade(age, 0.24) };
+                if !ink_only {
+                    // GPUI quads use source-over. Precompose additive radiance
+                    // against this known surface, under text and real controls.
+                    if !reduced && light_alpha > 0. {
+                        let radius = if size[0] < 200. { 32. } else { 44. };
+                        let mut yy = (ly-radius).max(2.);
+                        while yy < (ly+radius).min(size[1]-2.) {
+                            let mut xx = (lx-radius).max(2.);
+                            while xx < (lx+radius).min(size[0]-2.) {
+                                let distance = ((xx+1.5-lx).powi(2)+(yy+1.5-ly).powi(2)).sqrt();
+                                let glow = (1.-distance/radius).max(0.).powf(2.2)*breath*cooling*dim*light_alpha;
+                                if glow > 0.001 && panel_build::inside_slot([xx,yy], size, 10.) && panel_build::inside_slot([xx+3.,yy+3.], size, 10.) {
+                                    if light { paint(xx,yy,3.,3.,0.,0xf0580a,glow.min(0.22)); }
+                                    else {
+                                        let add = |shift: u32, strength: f32| (((surface>>shift)&255) as f32 + strength*glow).min(255.) as u32;
+                                        let color = (add(16,240.)<<16)|(add(8,88.)<<8)|add(0,10.);
+                                        paint(xx,yy,3.,3.,0.,color,1.);
+                                    }
+                                }
+                                xx += 3.;
+                            }
+                            yy += 3.;
+                        }
+                    }
+                    let field = if ready { 1. - panel_build::fade(elapsed, 0.36) } else { 1. };
+                    for dot in panel_build::draw_dots(size, age, None, light, reduced, playing) {
+                        paint(dot.center[0]-dot.radius, dot.center[1]-dot.radius, dot.radius*2., dot.radius*2., dot.radius,
+                            if light { 0x000000 } else { 0xffffff }, dot.alpha*field);
+                    }
+                    if !ready && state.stage != panel_build::Stage::Wake {
+                        let mut rows = vec![state.row];
+                        rows.extend(state.pending.iter().copied().filter(|row| *row > state.row).take(2));
+                        for row in rows {
+                            let row_y = BUILD_HEADER + (row as f32+0.5)*BUILD_ROW;
+                            let erasure = if row == state.row && state.stage == panel_build::Stage::Ink { 1.-panel_build::fade(elapsed-0.06,0.22) } else { 1. };
+                            for dot in panel_build::sketch_dots(size,row_y,erasure*dim) {
+                                let d = ((dot.center[0]-lx).powi(2)+(dot.center[1]-ly).powi(2)).sqrt();
+                                let heat = if reduced { 0. } else { (1.-d/36.).max(0.)*cooling };
+                                let color = pm_design::mix(if light {0x8f7868} else {0xc4aa96},0xffb27a,heat);
+                                paint(dot.center[0]-dot.radius,dot.center[1]-dot.radius,dot.radius*2.,dot.radius*2.,dot.radius,color,dot.alpha + heat*0.65*dim);
+                            }
                         }
                     }
                 }
-                if !reduced && !ready {
-                    let x = 12. + (size[0] - 24.).max(0.) * panel_build::ink_ease((elapsed % 1.).min(1.));
-                    // Concentric normal-blend quads form a quiet, bounded halo.
-                    for radius in [24., 16., 8., 3.] {
-                        if panel_build::inside_slot([x-radius, y-radius], size, 8.) && panel_build::inside_slot([x+radius, y+radius], size, 8.) {
-                            paint(x-radius, y-radius, radius*2., radius*2., radius, 0xf0580a, dim * if light { 0.055 } else { 0.09 });
-                        }
-                    }
+                if ink_only && !reduced && light_alpha > 0. {
+                    paint(lx-4.,ly-4.,8.,8.,4.,0xffb27a,0.3*dim*light_alpha*cooling);
+                    paint(lx-1.5,ly-1.5,3.,3.,1.5,0xfff4ea,dim*light_alpha*cooling);
                 }
-                if state.stage == panel_build::Stage::Ink {
+                if ink_only && state.stage == panel_build::Stage::Ink {
                     let [x, width] = panel_build::ink_track(size[0], fraction, elapsed, reduced);
                     let color = panel_build::ink_color(elapsed, light, reduced);
                     let alpha = dim * (1. - panel_build::fade(elapsed - 0.58, 0.3));
@@ -802,8 +838,11 @@ fn render(
         .map(|b| {
             let control = &def["controls"][b.row];
             let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
-            build_surface(b.clone(), rect, &t, v.running(), control_fraction(control, &current), window, cx)
+            let fraction = control_fraction(control, &current);
+            (build_surface(b.clone(), rect, &t, v.running(), fraction, window, cx),
+             build_frame(b.clone(), rect, &t, v.running(), b.started.elapsed().as_secs_f32(), b.changed.elapsed().as_secs_f32(), fraction, true))
         });
+    let (under, over) = match overlay { Some((under,over)) => (Some(under),Some(over)), None => (None,None) };
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -827,6 +866,7 @@ fn render(
         .h(px((rect.h - m.header).max(0.)))
         .overflow_y_scroll()
         .text_size(px(ty.body))
+        .children(under)
         .child(panel_title(def, &t).opacity(if build.as_ref().is_some_and(|b| b.stage == panel_build::Stage::Wake) { panel_build::fade(build.as_ref().unwrap().started.elapsed().as_secs_f32(), 0.24) } else { 1. }));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
         body = body.child(
@@ -1128,7 +1168,7 @@ fn render(
         };
         body = body.child(element.opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
     }
-    if let Some(overlay) = overlay { body = body.child(overlay); }
+    if let Some(overlay) = over { body = body.child(overlay); }
     body.into_any_element()
 }
 
@@ -1370,12 +1410,16 @@ mod panel_build_capture {
     impl Render for Frame {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
             let mut body = gpui::div().relative().w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).bg(gpui::rgb(super::slot_surface(&self.tokens, Some(&self.state))))
-                .font_family(pm_design::TEXT_FONT).child(panel_title(&self.definition, &self.tokens));
+                .font_family(pm_design::TEXT_FONT);
+            let rect = pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header };
+            let fraction = super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"]);
+            body = body.child(build_frame(self.state.clone(), rect, &self.tokens, false, self.age, self.elapsed, fraction, false));
+            body = body.child(panel_title(&self.definition, &self.tokens).opacity(if self.state.stage == panel_build::Stage::Wake { panel_build::fade(self.age,0.24) } else {1.}));
             for (index, control) in self.definition["controls"].as_array().unwrap().iter().enumerate() {
                 body = body.child(slider_control(control, &control["def"], &self.tokens)
                     .opacity(control_opacity(Some(&self.state), index, self.tokens.accessibility.reduce_motion)));
             }
-            body = body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed, super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"])));
+            body = body.child(build_frame(self.state.clone(), rect, &self.tokens, false, self.age, self.elapsed, fraction, true));
             gpui::div().size_full().p(px(16.)).bg(gpui::rgb(if self.tokens.scheme == Scheme::Light { 0xececec } else { 0x151515 })).child(body)
 
         }
@@ -1403,6 +1447,7 @@ mod panel_build_capture {
                 let mut builds = std::collections::HashMap::new();
                 publication(&mut builds, &json!({"custom":[]}), &json!({"custom":[{"id":"capture", "controls":[{"type":"slider"},{"type":"slider"},{"type":"slider"}]}]}));
                 let mut state = builds.remove("capture").unwrap();
+                state.changed -= std::time::Duration::from_millis(241);
                 state.tick();
                 assert_eq!(state.stage, panel_build::Stage::Sketch);
                 state.stage = stage;

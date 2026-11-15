@@ -233,17 +233,17 @@ impl State {
     pub fn tick(&mut self) {
         let age = self.changed.elapsed().as_secs_f32();
         match self.stage {
-            Stage::Wake | Stage::Rest if !self.pending.is_empty() => {
+            Stage::Wake | Stage::Rest if !self.pending.is_empty() && (self.stage == Stage::Rest || age >= 0.24) => {
                 let row = self.pending.pop_front().unwrap();
                 self.event("plan", row);
             }
-            Stage::Sketch if age >= 0.12 => self.event("commit", self.row),
+            Stage::Sketch if age >= 0.65 => self.event("commit", self.row),
             Stage::Ink if age >= 0.58 => {
                 if let Some(row) = self.pending.pop_front() { self.event("plan", row); }
                 else if self.complete { self.event("ready", self.row); }
                 else if age >= 2. { self.event("rest", self.row); }
             }
-            Stage::Wake | Stage::Rest if self.complete => self.event("ready", self.row),
+            Stage::Wake | Stage::Rest if self.complete && self.pending.is_empty() => self.event("ready", self.row),
             _ => {}
         }
     }
@@ -256,10 +256,11 @@ mod wiring_tests {
     fn publications_queue_every_ink_before_ready() {
         let mut s = State::default();
         s.published([0, 1], true);
+        s.changed -= std::time::Duration::from_millis(241);
         for row in 0..2 {
             s.tick();
             assert_eq!((s.stage, s.row), (Stage::Sketch, row));
-            s.changed -= std::time::Duration::from_millis(121);
+            s.changed -= std::time::Duration::from_millis(651);
             s.tick();
             assert_eq!(s.stage, Stage::Ink);
             s.changed -= std::time::Duration::from_millis(581);
