@@ -2394,3 +2394,17 @@ fn a_focused_axis_plots_its_whole_track_as_v1() {
         ]
     );
 }
+
+#[test]
+fn a_graph_marquee_that_picks_nothing_keeps_the_layers_whose_curves_show() {
+    // The graph plots the selected layer's curves; a box drawn in it must
+    // not deselect the layer before it picks a key (the curves would vanish).
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    let mut marquee = MarqueeSession::begin(&c.model, false, true);
+    let live = marquee.update(vec![], vec![]);
+    run(&mut c, live);
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+    run(&mut c, marquee.finish());
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+}

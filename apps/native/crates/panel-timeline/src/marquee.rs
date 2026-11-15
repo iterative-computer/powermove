@@ -39,7 +39,9 @@ impl MarqueeSession {
                 keys.push(pair.clone());
             }
         }
-        let mut selected_layers = if self.additive {
+        // In the graph a box that has picked nothing yet keeps the layers:
+        // their curves stay shown for the box to pick from (v1).
+        let mut selected_layers = if self.additive || (self.graph && keys.is_empty()) {
             self.layers.clone()
         } else {
             Vec::new()
@@ -62,11 +64,11 @@ impl MarqueeSession {
         if !self.graph || self.additive {
             return Plan::default();
         }
-        let keys = if self.picked.is_empty() {
-            self.keys.clone()
-        } else {
-            self.picked.clone()
-        };
+        if self.picked.is_empty() {
+            // Nothing picked: the selection the box started from.
+            return selection(self.layers.clone(), self.keys.clone());
+        }
+        let keys = self.picked.clone();
         let layers = unique_ids(keys.iter().map(|(layer, _)| layer.clone()));
         selection(layers, keys)
     }
