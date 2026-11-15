@@ -1715,11 +1715,32 @@ pub fn bring_session_window(id: u64) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    if let Some(window) =
-        number.and_then(|n| NSApplication::sharedApplication(mtm).windowWithWindowNumber(n))
-    {
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(window) = number.and_then(|n| app.windowWithWindowNumber(n)) else {
+        return;
+    };
+    if app.isActive() {
         select_window_tab(&window);
+        return;
     }
+    // Launched in the background: `present` would send it to the back.
+    // It goes just above the app's own front window (never above another
+    // app's) and is key when the app comes forward.
+    unsafe {
+        let group: *mut AnyObject = msg_send![&*window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: &*window];
+        }
+    }
+    let front = app
+        .orderedWindows()
+        .to_vec()
+        .into_iter()
+        .find(|w| w.isVisible() && w.windowNumber() != window.windowNumber());
+    if let Some(front) = front {
+        window.orderWindow_relativeTo(NSWindowOrderingMode::Above, front.windowNumber());
+    }
+    window.makeKeyWindow();
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {
@@ -1746,6 +1767,27 @@ fn alike_ends(title: &str, tabs: &[Tab]) -> bool {
     let mine = ends(title);
     tabs.iter()
         .any(|t| t.title != title && ends(&t.title) == mine)
+}
+/// What a tab shows when its name would read like another tab's however it
+/// is cut (copies: "Accept — Recovered — Native", "Accept — Native"): the
+/// name from the word where the two part, after an ellipsis, so the part
+/// that tells them apart is what shows. `None`: the name as it is.
+fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
+    if !alike_ends(title, tabs) {
+        return None;
+    }
+    let chars: Vec<char> = title.chars().collect();
+    let shared = tabs
+        .iter()
+        .filter(|t| t.title != title && alike_ends(&t.title, tabs))
+        .map(|t| chars.iter().zip(t.title.chars()).take_while(|(a, b)| **a == *b).count())
+        .max()?;
+    // Back to the start of the word where they part.
+    let start = chars[..shared.min(chars.len())]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |i| i + 1);
+    (start > 0).then(|| format!("…{}", chars[start..].iter().collect::<String>()))
 }
 /// Takes `window` out of its tab group into a window of its own (Move Tab to
 /// New Window, a tab torn off the strip, Separate Windows chosen). The
@@ -3285,16 +3327,19 @@ impl Host {
         let labels: Vec<(Retained<NSTextField>, NSSize)> = tabs
             .iter()
             .map(|tab| {
-                let label = NSTextField::labelWithString(&NSString::from_str(&tab.title), mtm);
+                let distinct = distinct_title(&tab.title, &tabs);
+                let label = NSTextField::labelWithString(
+                    &NSString::from_str(distinct.as_deref().unwrap_or(&tab.title)),
+                    mtm,
+                );
                 label.setFont(Some(&NSFont::systemFontOfSize_weight(
                     t.typography.title as f64,
                     unsafe { NSFontWeightRegular },
                 )));
                 // Cut in the middle, so a name's start and end both stay;
-                // where that would read like another tab's name (copies:
-                // "Accept — Recovered — Native", "Accept — Native"), cut
-                // at the end so the part that tells them apart shows.
-                label.setLineBreakMode(if alike_ends(&tab.title, &tabs) {
+                // where that would read like another tab's name, the name
+                // from where they part, cut at its end (`distinct_title`).
+                label.setLineBreakMode(if distinct.is_some() {
                     NSLineBreakMode::ByTruncatingTail
                 } else {
                     NSLineBreakMode::ByTruncatingMiddle
@@ -6995,7 +7040,7 @@ mod tab_layout_tests {
 
     #[test]
     fn copies_that_would_read_alike_cut_at_the_end() {
-        use super::{Tab, alike_ends};
+        use super::{Tab, alike_ends, distinct_title};
         let tab = |title: &str| Tab {
             window: 0,
             title: title.into(),
@@ -7012,6 +7057,21 @@ mod tab_layout_tests {
         assert!(!alike_ends("Paper", &tabs));
         // The same name twice is not told apart by cutting: middle as ever.
         assert!(!alike_ends("Paper", &[tab("Paper"), tab("Paper")]));
+        // What shows: each from the word where they part.
+        assert_eq!(
+            distinct_title("Accept — Recovered — Native", &tabs).as_deref(),
+            Some("…Recovered — Native")
+        );
+        assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
+        assert_eq!(distinct_title("Paper", &tabs), None);
+        let runs = [
+            tab("Accept - acceptance run eleven copy one - Native"),
+            tab("Accept - acceptance run eleven copy two - Native"),
+        ];
+        assert_eq!(
+            distinct_title(&runs[1].title, &runs).as_deref(),
+            Some("…two - Native")
+        );
     }
 
     #[test]
