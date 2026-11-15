@@ -258,6 +258,7 @@ const ROLES: &[(&str, &str)] = &[
         "Space between turns in the Agent conversation",
     ),
     ("metrics.tree_indent", "Indent per outline level"),
+    ("metrics.timeline_indent", "Timeline layer nesting indent per depth, capped at four levels"),
     (
         "metrics.kind_badge",
         "Layer-kind badge square in the timeline and Project list",

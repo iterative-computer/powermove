@@ -513,3 +513,27 @@ test("graph switch is icon-only and retains its accessible toggle", async () => 
   expect(byId(root, "timeline:graph").props["aria-pressed"]).toBe(true);
   await root.dispose();
 });
+
+test("group children retain the number column and shift right at depths 0/1/2", async () => {
+  const { root } = recorder();
+  for (const depth of [0, 1, 2]) {
+    const row = { ...layer(), depth };
+    await root.render(
+      <TimelinePanel
+        frame={{ ...frame(), window: { total: 1, first: 0, rows: [row] } }}
+        send={() => {}}
+      />,
+    );
+    const indents = [...root.host.nodes.values()].filter(
+      (n) => n.props.metadata?.timelineIndent !== undefined,
+    );
+    expect(indents.length).toBe(1);
+    const spacers = indents[0].children.filter(
+      (n) => n.props.style?.width?.token === "metrics.timeline_indent",
+    );
+    expect(spacers.length).toBe(depth);
+    expect(spacers.length * 12).toBe([0, 12, 24][depth]);
+    expect(JSON.stringify(tree(root))).toContain("01");
+  }
+  await root.dispose();
+});

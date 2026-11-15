@@ -178,6 +178,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
+| `metrics.timeline_indent` | Timeline layer nesting indent per depth, capped at four levels | 12 | 12 | 12 | 12 |
 | `metrics.titlebar` | Title bar band of a plain panel window; content starts below it | 28 | 28 | 28 | 28 |
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |

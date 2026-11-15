@@ -416,29 +416,46 @@ function Layer({
             {String(row.index).padStart(2, "0")}
           </text>
         )}
-        {row.canOpen ? (
-          <Icon
-            id={`timeline:disclosure:${row.id}`}
-            label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-            symbol={row.expanded ? "chevron.down" : "chevron.right"}
-            quiet
-            tint={row.selected ? "colors.accent_text" : undefined}
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-          />
-        ) : (
-          // The disclosure column stays reserved so badges and names align.
-          <div
-            role="presentation"
-            style={{
-              width: t("metrics.hit"),
-              minWidth: t("metrics.hit"),
-              flexShrink: 0,
-              height: t("metrics.hit"),
-            }}
-          />
-        )}
+        <div
+          role="presentation"
+          metadata={{ timelineIndent: row.depth }}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            flexShrink: 0,
+          }}
+        >
+          {Array.from({ length: Math.min(4, row.depth) }, (_, depth) => (
+            <div
+              key={depth}
+              role="presentation"
+              style={{ width: t("metrics.timeline_indent"), flexShrink: 0 }}
+            />
+          ))}
+          {row.canOpen ? (
+            <Icon
+              id={`timeline:disclosure:${row.id}`}
+              label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+              symbol={row.expanded ? "chevron.down" : "chevron.right"}
+              quiet
+              tint={row.selected ? "colors.accent_text" : undefined}
+              tabIndex={-1}
+              send={send}
+              intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+            />
+          ) : (
+            // The disclosure column stays reserved so badges and names align.
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                flexShrink: 0,
+                height: t("metrics.hit"),
+              }}
+            />
+          )}
+        </div>
         <div
           role="presentation"
           attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}

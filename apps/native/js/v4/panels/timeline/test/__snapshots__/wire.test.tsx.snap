@@ -1271,32 +1271,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -2090,7 +2106,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.muted",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -2102,32 +2118,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.accent_text",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -2148,7 +2180,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -2186,7 +2218,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -2237,7 +2269,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2265,7 +2297,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2293,7 +2325,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2350,10 +2382,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.selected_fill",
+                                "token": "colors.timeline_selected",
                               },
                               "color": {
-                                "token": "colors.text",
+                                "token": "colors.accent_text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -2946,32 +2978,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -3790,32 +3838,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -4631,32 +4695,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -5711,32 +5791,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -6594,32 +6690,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -7432,7 +7544,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.muted",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -7444,32 +7556,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.accent_text",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -7490,7 +7618,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -7528,7 +7656,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -7579,7 +7707,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7625,7 +7753,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7682,10 +7810,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.selected_fill",
+                                "token": "colors.timeline_selected",
                               },
                               "color": {
-                                "token": "colors.text",
+                                "token": "colors.accent_text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -7722,7 +7850,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.muted",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -7734,32 +7862,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:kicker",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.accent_text",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:kicker",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -7780,7 +7924,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -7818,7 +7962,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent_text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -7869,7 +8013,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7915,7 +8059,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.accent_text",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7972,10 +8116,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.selected_fill",
+                                "token": "colors.timeline_selected",
                               },
                               "color": {
-                                "token": "colors.text",
+                                "token": "colors.accent_text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -8576,32 +8720,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -9407,32 +9567,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29990",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29990",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -9694,32 +9870,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29991",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29991",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -9981,32 +10173,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29992",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29992",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10268,32 +10476,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29993",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29993",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10555,32 +10779,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29994",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29994",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10842,32 +11082,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29995",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29995",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11129,32 +11385,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29996",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29996",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11416,32 +11688,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29997",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29997",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11703,32 +11991,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29998",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29998",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11990,32 +12294,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-29999",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-29999",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12277,32 +12597,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30000",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30000",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12564,32 +12900,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30001",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30001",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12851,32 +13203,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30002",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30002",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13138,32 +13506,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30003",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30003",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13425,32 +13809,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30004",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30004",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13712,32 +14112,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30005",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30005",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13999,32 +14415,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30006",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30006",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14286,32 +14718,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30007",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30007",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14573,32 +15021,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30008",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30008",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14860,32 +15324,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30009",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30009",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15147,32 +15627,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30010",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30010",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15434,32 +15930,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30011",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30011",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15721,32 +16233,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30012",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30012",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16008,32 +16536,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30013",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30013",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16295,32 +16839,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30014",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30014",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16582,32 +17142,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30015",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30015",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16869,32 +17445,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30016",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30016",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17156,32 +17748,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30017",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30017",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17443,32 +18051,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30018",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30018",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17730,32 +18354,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:row-30019",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:row-30019",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -18591,32 +19231,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -19452,32 +20108,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -21039,32 +21711,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -21955,32 +22643,48 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "type": "text",
                                 },
                                 {
+                                  "children": [
+                                    {
+                                      "props": {
+                                        "data-pm-component": "toolbar-item",
+                                        "id": "timeline:disclosure:layer:headline",
+                                        "label": "Expand Headline",
+                                        "metadata": {
+                                          "designTodo": "T1",
+                                          "requiredSymbol": "chevron.right",
+                                        },
+                                        "style": {
+                                          "color": {
+                                            "token": "colors.muted",
+                                          },
+                                          "minHeight": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "minWidth": {
+                                            "token": "metrics.hit",
+                                          },
+                                          "symbolSize": {
+                                            "token": "metrics.symbol_inline",
+                                          },
+                                        },
+                                        "tabIndex": -1,
+                                        "title": "Expand Headline",
+                                      },
+                                      "type": "button",
+                                    },
+                                  ],
                                   "props": {
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:disclosure:layer:headline",
-                                    "label": "Expand Headline",
                                     "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "chevron.right",
+                                      "timelineIndent": 0,
                                     },
+                                    "role": "presentation",
                                     "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_inline",
-                                      },
+                                      "display": "flex",
+                                      "flexDirection": "row",
+                                      "flexShrink": 0,
                                     },
-                                    "tabIndex": -1,
-                                    "title": "Expand Headline",
                                   },
-                                  "type": "button",
+                                  "type": "div",
                                 },
                                 {
                                   "props": {

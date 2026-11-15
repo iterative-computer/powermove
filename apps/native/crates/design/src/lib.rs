@@ -351,6 +351,8 @@ pub struct Metrics {
     pub agent_gap: f32,
     /// Indent per outline level.
     pub tree_indent: f32,
+    /// Electron timeline nesting: 12 points per depth, capped at four levels.
+    pub timeline_indent: f32,
     /// Layer-kind badge square (timeline, Project list).
     pub kind_badge: f32,
     /// Minimum Project grid thumbnail width.
@@ -867,6 +869,7 @@ impl Tokens {
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
+                timeline_indent: 12.,
                 kind_badge: 18.,
                 thumbnail_min: 120.,
                 sheet_inset: 20.,
@@ -1059,6 +1062,7 @@ impl Tokens {
         typography.title: size, typography.reading: size, typography.heading: size,
         typography.display: size,
         colors.media_badge: color,
+        metrics.timeline_indent: size,
         metrics.kind_badge: size,
         metrics.thumbnail_min: size,
         metrics.status_dot: size,
