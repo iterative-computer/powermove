@@ -264,6 +264,7 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        self.poll_linked_sync(cx);
         self.wire_effect_desk();
         let check = runtime.clone();
         let mounting = project.clone();
@@ -321,6 +322,7 @@ impl Controller {
                             .as_ref()
                             .is_some_and(|r| std::ptr::eq(Arc::as_ptr(r), runtime.as_ptr()))
                         {
+                            v.poll_linked_sync(cx);
                             v.drain_builtins(cx);
                         }
                     })

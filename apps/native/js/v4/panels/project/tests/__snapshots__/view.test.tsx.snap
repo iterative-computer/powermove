@@ -1,5 +1,4127 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
+exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Linked · 4 items",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Linked · 4 items",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "link",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.secondary",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Linked · 4 items",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Linked · 4 items",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Linked · 4 items",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "link",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.secondary",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Linked · 4 items",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Syncing…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Syncing…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "arrow.triangle.2.circlepath",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.secondary",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Syncing…",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Syncing…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Syncing…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "arrow.triangle.2.circlepath",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.secondary",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Syncing…",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Folder not found",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Folder not found",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "link.badge.plus",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.danger",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.danger",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Folder not found",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 1,
+          "label": "Open",
+        },
+        {
+          "id": 2,
+          "label": "Rename",
+        },
+        {
+          "id": 9,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 11,
+      "label": "Shots, folder, 4 items",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "Shots",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Folder not found",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Folder not found",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "focusOrder": [
+    6,
+    7,
+    8,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "data-pm-slot": "header",
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "style": {
+                    "color": {
+                      "token": "colors.text",
+                    },
+                    "fontSize": {
+                      "token": "typography.title",
+                    },
+                    "fontWeight": {
+                      "token": "typography.semibold_weight",
+                    },
+                  },
+                },
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project",
+                    [],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "data-pm-drop": "files",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "metadata": {
+                    "fixedItems": true,
+                  },
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "flexGrow": 1,
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Folder": "f",
+                            },
+                          },
+                          "data-pm-drop": "files",
+                          "id": "media:{"Folder":"f"}",
+                          "label": "Shots, folder, 4 items",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexDirection": "column",
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "gap": {
+                              "token": "metrics.media_inset",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                            "overflow": "hidden",
+                            "paddingBottom": {
+                              "token": "metrics.inset",
+                            },
+                          },
+                          "tabIndex": -1,
+                          "title": "Linked to /synthetic/Finder. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.",
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "alignItems": "center",
+                                "background": {
+                                  "token": "colors.fill",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                                "display": "flex",
+                                "flexGrow": 1,
+                                "justifyContent": "center",
+                                "overflow": "hidden",
+                                "position": "relative",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "folder",
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.muted",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.media_folder_glyph",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "attr": {
+                                    "symbol": "link.badge.plus",
+                                  },
+                                  "style": {
+                                    "bottom": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "color": {
+                                      "token": "colors.danger",
+                                    },
+                                    "position": "absolute",
+                                    "right": {
+                                      "token": "metrics.media_inset",
+                                    },
+                                    "symbolSize": {
+                                      "token": "metrics.symbol_inline",
+                                    },
+                                  },
+                                },
+                                "",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.text",
+                                    },
+                                    "flexShrink": 1,
+                                    "fontSize": {
+                                      "token": "typography.body",
+                                    },
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Shots",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.danger",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                    "whiteSpace": "nowrap",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Folder not found",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                      [
+                        "div",
+                        {
+                          "style": {
+                            "flexBasis": {
+                              "token": "metrics.thumbnail_min",
+                            },
+                            "flexGrow": 1,
+                            "flexShrink": 1,
+                          },
+                        },
+                        "",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
 exports[`no-project: op tree, real validator and AX projection 1`] = `
 {
   "ax": [

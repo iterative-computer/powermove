@@ -2154,3 +2154,23 @@ fn open_bin_survives_undo_and_reopens_with_breadcrumbs() {
     panel.dispatch(&restored, &r, Input::OpenFolder(Some("new-bin".into()))).unwrap();
     assert_eq!(panel.folder.as_deref(), Some("new-bin"));
 }
+
+#[test]
+fn linked_folder_rename_is_display_only_and_removal_unlinks_descendants() {
+    let mut value = parse(PROJECT).unwrap();
+    for id in ["f1", "f2"] {
+        value.as_object_mut().unwrap().get_mut("assetFolders").unwrap().as_object_mut().unwrap().get_mut(id).unwrap().as_object_mut().unwrap().insert("link", parse(r#"{"path":"/synthetic/Finder","ino":123}"#).unwrap());
+    }
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let h = actor.handle();
+    h.open("P", OpenSource::Untitled(value)).wait().unwrap().unwrap();
+    let link = current(&h).folders["f1"].link.clone();
+    applied(&h, &current(&h).prepare(Edit::RenameFolder { id:"f1".into(), name:"Display only".into() }).unwrap());
+    assert_eq!(current(&h).folders["f1"].link, link);
+    applied(&h, &current(&h).prepare(Edit::DeleteFolder { id:"f1".into() }).unwrap());
+    assert!(current(&h).folders["f2"].link.is_none());
+    assert!(current(&h).assets.contains_key("e"));
+    history(&h, HistoryCall::Undo);
+    assert_eq!(current(&h).folders["f1"].link, link);
+    assert!(current(&h).folders["f2"].link.is_some());
+}

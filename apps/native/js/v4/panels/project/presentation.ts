@@ -189,7 +189,10 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
     return row && "Folder" in row.data ? "New Folder Inside" : "New Folder";
   if ("OpenFolder" in command) return "Open";
   if ("RenameFolder" in command) return "Rename";
-  if ("DeleteFolder" in command) return "Delete Folder";
+  if ("DeleteFolder" in command)
+    return row && "Folder" in row.data && row.data.Folder.link
+      ? "Remove Linked Folder"
+      : "Delete Folder";
   if ("MoveOut" in command) return "Move Out of Folder";
   if ("OpenComposition" in command) return "Open in Timeline";
   if ("CompositionSettings" in command) return "Composition Settings…";
@@ -219,7 +222,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
   if ("Folder" in row.data)
     return [
       {
-        label: "Delete Folder",
+        label: row.data.Folder.link ? "Remove Linked Folder" : "Delete Folder",
         symbol: "trash",
         input: { Invoke: { DeleteFolder: row.data.Folder.id } },
       },

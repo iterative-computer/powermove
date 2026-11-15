@@ -1539,6 +1539,8 @@ impl Builtins {
             let backend = entry.shared().backend.clone();
             let mut backend = backend.shared();
             backend.native.originals = originals.clone();
+            let mut observed = observed.clone();
+            observed.folders = backend.native.media_runtime.folders.clone();
             if backend.native.media_runtime != observed {
                 backend.native.media_runtime = observed.clone();
                 backend.native.media_sequence += 1;
@@ -2574,4 +2576,32 @@ fn timeline_patch(input: &Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+pub mod linked_folders;
+
+impl Builtins {
+    pub fn update_folder_sync(&self, mut folders: BTreeMap<String, pm_panel_media::FolderSync>) {
+        if let Some(p) = self.broker.kernel.published(&self.broker.project) {
+            if let Some(value) = p.snapshot.document.to_value() {
+                let (all, roots) = linked_folders::linked(&crate::data::wire(&value));
+                for f in all.values() {
+                    for root in &roots {
+                        if f.path.starts_with(&all[root].path) {
+                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.broker.all_entries() {
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
+            if backend.native.media_runtime.folders != folders {
+                backend.native.media_runtime.folders = folders.clone();
+                backend.native.media_sequence += 1;
+            }
+        }
+        (self.broker.wake)();
+    }
 }
