@@ -91,6 +91,7 @@ mod providers;
 mod publish;
 mod raster_overrides;
 mod render_frames;
+mod recent_work;
 mod rows;
 mod session;
 mod shader_panel;

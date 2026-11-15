@@ -92,6 +92,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
         ._delegate
         .resolve_quit_events(true);
@@ -471,6 +472,8 @@ fn finish_quit(cx: &mut App) {
                     window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
                 }
                 allow_quit(cx);
+                // Restart and Bring In: Powermove opens again once this ends.
+                crate::recent_work::relaunch_if_requested();
                 cx.quit();
             }
             other => {

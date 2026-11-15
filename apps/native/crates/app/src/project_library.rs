@@ -1497,6 +1497,8 @@ impl Render for ProjectLibrary {
             .opening()
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
+        // Newer work in the original app: one quiet line, never in the way.
+        let recent = opening.is_none() && crate::recent_work::newer();
         let tr = t.translucency;
         if self.new_project.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
@@ -1701,6 +1703,37 @@ impl Render for ProjectLibrary {
                     .role(Role::Status)
                     .aria_label(name.clone())
                     .child(name)
+            }))
+            .children(recent.then(|| {
+                div()
+                    .id("home-recent-work")
+                    .debug_selector(|| "home-recent-work".into())
+                    .flex()
+                    .min_w(px(0.))
+                    .gap(px(t.space.sm))
+                    .text_role(&t, Text::Body)
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{} {}",
+                        crate::recent_work::NOTICE,
+                        crate::recent_work::NOTICE_ACTION
+                    ))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(rgb(c.secondary))
+                            .child(crate::recent_work::NOTICE),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(c.accent))
+                            .child(crate::recent_work::NOTICE_ACTION),
+                    )
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        (v.sink)(Outbound::Command("bringInRecentWork"), cx)
+                    }))
             }))
             .child(div().flex_1())
             // The sort is a text action: it opens our menu.

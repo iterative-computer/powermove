@@ -303,6 +303,11 @@ impl Controller {
                     }
                 }
                 Outbound::HideHome => v.hide_home(cx),
+                // Home's line about newer work in the original app.
+                Outbound::Command("bringInRecentWork") => {
+                    let window = v.host.borrow().window.clone();
+                    v.bring_in_recent_work(window, cx);
+                }
                 Outbound::Command(name) => v.host.borrow().send_command(name, vec![]),
                 // Ghost loading from Home: a window with no project shows the
                 // editor's ghost at once (one with a project keeps it until

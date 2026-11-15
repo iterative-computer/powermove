@@ -175,7 +175,7 @@ pub enum DeltaPrepared {
     /// Library state is merged; `delta_media` finishes the capture.
     MediaPending,
 }
-fn lease(native: &Path) -> Result<File> {
+pub(crate) fn lease(native: &Path) -> Result<File> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -385,8 +385,9 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
     }
 }
 
-/// App launch path: an unchanged source costs a metadata walk, nothing else.
-/// A pending capture from an interrupted launch still gets finished.
+/// An unchanged source costs a metadata walk, nothing else; a changed one is
+/// captured and merged. Not the app's launch path: launches only finish a
+/// capture already taken (`later::resume_pending`).
 pub fn delta_if_changed(
     config: &Config,
     mut hook: impl FnMut(Event) -> Result<()>,
