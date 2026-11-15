@@ -25,6 +25,20 @@ impl State {
         let paint = crate::composition::open_paint(self.key());
         self.geometry.set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
     }
+    /// Powermove P-SLOT-LAZY: a control joins the window the first time a
+    /// paint shows it. AppKit lays out every view in the window, hidden or
+    /// not, and on macOS 27 a control's first layout builds its SwiftUI
+    /// graph (a millisecond or more each): a list of a few hundred rows made
+    /// them all at once though only those on screen were ever shown.
+    fn attach(&self) {
+        if let Some(content) = self.gpui.window().and_then(|w| w.contentView()) {
+            content.addSubview_positioned_relativeTo(
+                &self.wrapper,
+                NSWindowOrderingMode::Above,
+                Some(&self.gpui),
+            );
+        }
+    }
     /// Where the last complete paint put this control, if it staged it.
     fn placed(&self) -> Option<(NSRect, NSRect)> {
         let last = crate::composition::last_paint(self.key());
@@ -86,13 +100,6 @@ impl NativeControlSlot {
             geometry: Cell::new(None),
             staged: Cell::new(None),
         });
-        if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
-            content.addSubview_positioned_relativeTo(
-                &state.wrapper,
-                NSWindowOrderingMode::Above,
-                Some(gpui),
-            );
-        }
         SLOTS.with(|s| {
             s.borrow_mut()
                 .entry(gpui as *const NSView as usize)
@@ -184,6 +191,9 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         if state.control.frame() != local {
             state.control.setFrame(local);
             moved = true;
+        }
+        if !hidden && unsafe { state.wrapper.superview() }.is_none() {
+            state.attach();
         }
         if state.wrapper.isHidden() != hidden {
             state.wrapper.setHidden(hidden);

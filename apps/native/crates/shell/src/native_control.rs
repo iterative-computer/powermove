@@ -338,6 +338,33 @@ pub struct ControlSpec<'a> {
     pub well: bool,
 }
 
+/// What a button's or a switch's size follows: one made with the same
+/// look is the same size, so it is measured once (`measured`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Look {
+    kind: u8,
+    title: String,
+    symbol: Option<String>,
+    glass: bool,
+    font: u32,
+}
+thread_local! {
+    static MEASURED: std::cell::RefCell<std::collections::HashMap<Look, (NSSize, NSSize)>> =
+        std::cell::RefCell::default();
+}
+/// A button's frame as `sizeToFit` sets it and its fitting size, measured
+/// the first time its look is made: each measure is a layout pass on
+/// macOS 27 (about two milliseconds), and Settings › Shortcuts alone makes
+/// a few hundred buttons of two looks.
+fn measured(look: Look, control: &NSControl) -> (NSSize, NSSize) {
+    if let Some(sizes) = MEASURED.with_borrow(|m| m.get(&look).copied()) {
+        return sizes;
+    }
+    control.sizeToFit();
+    let sizes = (control.frame().size, control.fittingSize());
+    MEASURED.with_borrow_mut(|m| m.insert(look, sizes));
+    sizes
+}
 impl NativeControl {
     pub fn new(
         spec: ControlSpec<'_>,
@@ -495,23 +522,28 @@ impl NativeControl {
                 Control::Slider(v)
             }
             Kind::Checkbox | Kind::Radio | Kind::Push => {
-                let v = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(if matches!(kind, Kind::Checkbox | Kind::Radio) {
-                            ""
-                        } else {
-                            label
-                        }),
-                        Some(&target),
-                        Some(sel!(act:)),
-                        mtm,
-                    )
-                };
+                // Not `buttonWithTitle:target:action:`, which sizes the
+                // button as it makes it: a measure is a layout pass of its
+                // own on macOS 27, and a list of rows makes the same button
+                // hundreds of times (`measured`).
+                let v = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                }
+                v.setTitle(&NSString::from_str(
+                    if matches!(kind, Kind::Checkbox | Kind::Radio) {
+                        ""
+                    } else {
+                        label
+                    },
+                ));
                 if matches!(kind, Kind::Checkbox) {
                     v.setButtonType(NSButtonType::Switch);
                 } else if matches!(kind, Kind::Radio) {
                     v.setButtonType(NSButtonType::Radio);
                 } else {
+                    v.setButtonType(NSButtonType::MomentaryPushIn);
                     v.setBezelStyle(if glass {
                         NSBezelStyle::Glass
                     } else {
@@ -544,7 +576,6 @@ impl NativeControl {
                     }
                 }
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                v.sizeToFit();
                 Control::Button(v)
             }
             Kind::Search => {
@@ -594,7 +625,6 @@ impl NativeControl {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
                 }
-                v.sizeToFit();
                 Control::Switch(v)
             }
         };
@@ -606,7 +636,30 @@ impl NativeControl {
             .setAccessibilityIdentifier(Some(&NSString::from_str(identifier)));
         control.enabled(!disabled);
         control.value(value, &options);
-        let intrinsic = control.view().fittingSize();
+        let sized: Option<&NSControl> = match &control {
+            Control::Button(v) => Some(v.as_ref()),
+            Control::Switch(v) => Some(v.as_ref()),
+            _ => None,
+        };
+        let intrinsic = match sized {
+            Some(sized) => {
+                let look = Look {
+                    kind: kind as u8,
+                    title: if matches!(kind, Kind::Push) {
+                        label.to_owned()
+                    } else {
+                        String::new()
+                    },
+                    symbol: symbol.map(str::to_owned),
+                    glass,
+                    font: t.typography.body.to_bits(),
+                };
+                let (frame, fitting) = measured(look, sized);
+                sized.setFrameSize(frame);
+                fitting
+            }
+            None => control.view().fittingSize(),
+        };
         let width = if matches!(kind, Kind::Popup) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else if matches!(kind, Kind::Slider | Kind::Search) {

@@ -45,10 +45,14 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
     "extension-authored",
   );
   expect(requests.map((r) => r.operation.type)).toEqual(
-    Array(4).fill("settings.get"),
+    Array(5).fill("settings.get"),
   );
   expect(model.rows.find((r) => r.id === "cloud-media")?.value).toBe(false);
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
+  // Projects open in tabs unless Separate Windows was chosen.
+  expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
+    "tabs",
+  );
 });
 test("preferences persist immediately through serialized v4 host acknowledgements", async () => {
   const { model, settings, requests } = fixture();
@@ -56,13 +60,15 @@ test("preferences persist immediately through serialized v4 host acknowledgement
   expect(await model.write("preview-memory", 0)).toBe(true);
   expect(await model.write("cloud-media", true)).toBe(true);
   expect(await model.write("restore-windows", false)).toBe(true);
+  expect(await model.write("open-projects-in", "windows")).toBe(true);
   expect([...settings]).toEqual([
     ["themeMode", "dark"],
     ["previewMemoryMiB", 0],
     ["autoDownloadCloudMedia", true],
     ["restoreWindows", false],
+    ["openProjectsIn", "windows"],
   ]);
-  expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3]);
+  expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3, 4]);
 });
 test("failed acknowledgement keeps the last accepted value and allows retry", async () => {
   const f = fixture();
