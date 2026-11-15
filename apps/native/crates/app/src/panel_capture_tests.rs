@@ -4,7 +4,7 @@
 //! tests. Run on demand:
 //! `PM_PANEL_CAPTURE=/tmp/pm-shots/panels cargo test -p pm-native-app capture_builtin_panels -- --ignored`
 use crate::v4_view::{Natives, SurfaceView};
-use crate::v4_view_tests::{publication, rig, rig_project, PROJECT};
+use crate::v4_view_tests::{PROJECT, publication, rig, rig_project};
 use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
 use std::sync::Arc;
@@ -37,17 +37,35 @@ fn capture_builtin_panels() {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let r = if let Ok(path) = std::env::var("PM_PANEL_CAPTURE_PROJECT") {
                     rig_project(panel, &std::fs::read_to_string(path).unwrap())
-                } else { rig(panel, 8) };
+                } else {
+                    rig(panel, 8)
+                };
                 if let Ok(layer) = std::env::var("PM_PANEL_CAPTURE_LAYER") {
-                    r.kernel.call(PROJECT, pm_kernel::Request::new(pm_kernel::Caller::native(),
-                        pm_kernel::SelectionCall::Layers { ids: vec![layer], add: false }))
-                        .wait().unwrap().unwrap();
+                    r.kernel
+                        .call(
+                            PROJECT,
+                            pm_kernel::Request::new(
+                                pm_kernel::Caller::native(),
+                                pm_kernel::SelectionCall::Layers {
+                                    ids: vec![layer],
+                                    add: false,
+                                },
+                            ),
+                        )
+                        .wait()
+                        .unwrap()
+                        .unwrap();
                     for (_, ticket) in r.runtime.publish() {
                         let ticket = ticket.unwrap();
-                        while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                        while ticket.try_take().is_none() {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
-                let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(h);
+                let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(h);
                 let first = publication(&r);
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(

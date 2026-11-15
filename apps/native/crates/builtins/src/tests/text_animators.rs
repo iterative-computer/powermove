@@ -109,16 +109,47 @@ fn properties_adds_a_preset_animator_with_font_sized_channels_and_removes_it() {
     assert_eq!(added["p"]["duration"]["v"], 0.8);
     // `round(size * 0.6)` at the text's size of 40.
     assert_eq!(added["p"]["y"]["v"], 24.);
-    let mut model = pm_panel_inspector::Inspector::new(kernel.published("synthetic").unwrap(), Default::default());
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
     let mut presenter = properties::Properties::default();
     let snapshot = presenter.snapshot(&mut model, 0., false).unwrap();
-    let section = snapshot["sections"].as_array().unwrap().iter().find(|s| s["id"] == "animators").unwrap();
+    let section = snapshot["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "animators")
+        .unwrap();
     let rows = section["animators"][0]["rows"].as_array().unwrap();
-    for label in ["Based on", "Order", "Ease", "Amount", "Start", "Duration", "Stagger", "Position Y", "Opacity"] {
-        assert!(rows.iter().any(|r| r["label"] == label), "missing animator control {label}");
+    for label in [
+        "Based on",
+        "Order",
+        "Ease",
+        "Amount",
+        "Start",
+        "Duration",
+        "Stagger",
+        "Position Y",
+        "Opacity",
+    ] {
+        assert!(
+            rows.iter().any(|r| r["label"] == label),
+            "missing animator control {label}"
+        );
     }
     let row = rows.iter().find(|r| r["label"] == "Position Y").unwrap();
-    let request = presenter.write(&mut model, Caller::native(), row["control"]["axes"][0]["binding"]["handle"].as_str().unwrap(), 42.0.into(), 0.).unwrap();
+    let request = presenter
+        .write(
+            &mut model,
+            Caller::native(),
+            row["control"]["axes"][0]["binding"]["handle"]
+                .as_str()
+                .unwrap(),
+            42.0.into(),
+            0.,
+        )
+        .unwrap();
     let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
     assert_eq!(animators(&kernel)[0]["p"]["y"]["v"], 42.);

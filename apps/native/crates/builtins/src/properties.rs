@@ -529,38 +529,96 @@ impl Properties {
                 let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
                 let mut animators = vec![];
                 for animator in record["d"]["animators"].as_array().into_iter().flatten() {
-                    let Some(id) = animator["id"].as_str() else { continue };
+                    let Some(id) = animator["id"].as_str() else {
+                        continue;
+                    };
                     let mut rows = vec![];
                     for (field, label, default, choices) in [
-                        ("unit", "Based on", "characters", vec!["characters", "words", "lines"]),
-                        ("order", "Order", "forward", vec!["forward", "reverse", "center", "edges", "random"]),
-                        ("shape", "Shape", "square", vec!["square", "rampUp", "rampDown", "triangle", "round"]),
-                        ("easing", "Ease", "cubicOut", vec!["expoOut", "cubicOut", "cubicInOut", "cubicIn", "backOut", "spring", "power", "linear"]),
+                        (
+                            "unit",
+                            "Based on",
+                            "characters",
+                            vec!["characters", "words", "lines"],
+                        ),
+                        (
+                            "order",
+                            "Order",
+                            "forward",
+                            vec!["forward", "reverse", "center", "edges", "random"],
+                        ),
+                        (
+                            "shape",
+                            "Shape",
+                            "square",
+                            vec!["square", "rampUp", "rampDown", "triangle", "round"],
+                        ),
+                        (
+                            "easing",
+                            "Ease",
+                            "cubicOut",
+                            vec![
+                                "expoOut",
+                                "cubicOut",
+                                "cubicInOut",
+                                "cubicIn",
+                                "backOut",
+                                "spring",
+                                "power",
+                                "linear",
+                            ],
+                        ),
                     ] {
                         let mode = animator["mode"].as_str().unwrap_or("range");
-                        if (field == "shape" && mode != "range") || (field == "easing" && mode != "stagger") { continue; }
+                        if (field == "shape" && mode != "range")
+                            || (field == "easing" && mode != "stagger")
+                        {
+                            continue;
+                        }
                         let path = format!("animator.{id}.{field}");
                         let lease = self.control_lease(&path);
-                        let value = animator[field].as_str().or_else(|| animator["p"][field]["v"].as_str()).unwrap_or(default);
+                        let value = animator[field]
+                            .as_str()
+                            .or_else(|| animator["p"][field]["v"].as_str())
+                            .unwrap_or(default);
                         rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"control":{"kind":"choice","binding":lease,"value":value,"options":choices}}));
                     }
                     for (key, label, unit) in [
-                        ("amount", "Amount", "%"), ("delay", "Start", "s"),
-                        ("duration", "Duration", "s"), ("stagger", "Stagger", "s"),
-                        ("start", "Range start", "%"), ("end", "Range end", "%"),
-                        ("offset", "Range offset", "%"), ("smoothness", "Softness", "%"),
-                        ("speed", "Speed", ""), ("spread", "Spread", ""),
-                        ("x", "Position X", "px"), ("y", "Position Y", "px"),
-                        ("opacity", "Opacity", "%"), ("scale", "Scale", "%"),
-                        ("rotation", "Rotation", "°"), ("skew", "Skew", "°"), ("blur", "Blur", "px"),
-                        ("tracking", "Tracking", "px"), ("color", "Color", ""),
+                        ("amount", "Amount", "%"),
+                        ("delay", "Start", "s"),
+                        ("duration", "Duration", "s"),
+                        ("stagger", "Stagger", "s"),
+                        ("start", "Range start", "%"),
+                        ("end", "Range end", "%"),
+                        ("offset", "Range offset", "%"),
+                        ("smoothness", "Softness", "%"),
+                        ("speed", "Speed", ""),
+                        ("spread", "Spread", ""),
+                        ("x", "Position X", "px"),
+                        ("y", "Position Y", "px"),
+                        ("opacity", "Opacity", "%"),
+                        ("scale", "Scale", "%"),
+                        ("rotation", "Rotation", "°"),
+                        ("skew", "Skew", "°"),
+                        ("blur", "Blur", "px"),
+                        ("tracking", "Tracking", "px"),
+                        ("color", "Color", ""),
                     ] {
-                        if animator["p"].get(key).is_none() { continue; }
+                        if animator["p"].get(key).is_none() {
+                            continue;
+                        }
                         let path = format!("ta.{id}.{key}");
                         let binding = Binding::Property(PropertyId::new(&layer, &path));
-                        let state = model.binding_state(&binding, time).map_err(|e| e.to_string())?;
+                        let state = model
+                            .binding_state(&binding, time)
+                            .map_err(|e| e.to_string())?;
                         let lease = self.lease(model, &path, binding)?;
-                        let animation = if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" };
+                        let animation = if state.key_at_playhead {
+                            "key-at-playhead"
+                        } else if state.animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
                         let control = if key == "color" {
                             json!({"kind":"colour","binding":lease,"value":super::data::wire(&state.value)})
                         } else {
@@ -2117,23 +2175,51 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
-        if let Some(control) = self.handles.iter().find(|(_, h)| *h == handle)
-            .and_then(|(path, _)| path.strip_prefix("animator.")) {
+        if let Some(control) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("animator."))
+        {
             let (id, field) = control.rsplit_once('.').ok_or("Invalid animator field")?;
-            if !matches!(field, "unit" | "order" | "shape" | "easing") { return Err("Invalid animator field".into()); }
+            if !matches!(field, "unit" | "order" | "shape" | "easing") {
+                return Err("Invalid animator field".into());
+            }
             let layer = model.primary().ok_or("No selected layer")?.to_owned();
-            if model.selected_layers().len() != 1 || !model.editable(&layer) { return Err("Select one unlocked text layer".into()); }
+            if model.selected_layers().len() != 1 || !model.editable(&layer) {
+                return Err("Select one unlocked text layer".into());
+            }
             let record = model.layer(&layer).map_err(|e| e.to_string())?;
-            let mut animators = record.get("d").and_then(|d| d.get("animators")).cloned().ok_or("No animators")?;
+            let mut animators = record
+                .get("d")
+                .and_then(|d| d.get("animators"))
+                .cloned()
+                .ok_or("No animators")?;
             let list = animators.as_array_mut().ok_or("Invalid animators")?;
-            let animator = list.iter_mut().find(|a| a.get("id").and_then(pm_model::Value::as_str) == Some(id)).ok_or("Animator removed")?;
-            animator.as_object_mut().ok_or("Invalid animator")?.insert(field, value);
+            let animator = list
+                .iter_mut()
+                .find(|a| a.get("id").and_then(pm_model::Value::as_str) == Some(id))
+                .ok_or("Animator removed")?;
+            animator
+                .as_object_mut()
+                .ok_or("Invalid animator")?
+                .insert(field, value);
             let mut patch = pm_model::Map::new();
             patch.insert("animators", animators);
-            return Ok(Request::new(caller, pm_kernel::Call::Transact {
-                label: Some("Edit Text Animator".into()), expected_revision: Some(model.revision()),
-                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Content(pm_kernel::ContentCommand::Set { layer_id: layer, patch, time })]),
-            }));
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Edit Text Animator".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Content(
+                        pm_kernel::ContentCommand::Set {
+                            layer_id: layer,
+                            patch,
+                            time,
+                        },
+                    )]),
+                },
+            ));
         }
         // A variation axis may not be stored yet: set_axis creates it first.
         if let Some((id, _)) = self
