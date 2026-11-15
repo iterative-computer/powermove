@@ -688,7 +688,10 @@ fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
 /// Timeline's expanded rows mount exactly the same field, with a real lease.
 #[gpui::test]
 fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext) {
-    let rig = rig("timeline", 1);
+    let mut project: serde_json::Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["p"]["opacity"]["kf"] =
+        serde_json::json!([{"i":"opacity0","t":0,"v":100}]);
+    let rig = rig_project("timeline", &project.to_string());
     let first = publication(&rig);
     let (view, mut vcx) = window(cx, &rig, first, Default::default());
     vcx.run_until_parked();
