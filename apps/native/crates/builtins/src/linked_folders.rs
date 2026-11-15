@@ -495,6 +495,7 @@ pub enum SyncState {
 /// What a sync did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Synced {
+    pub failed: Vec<(String, String)>,
     pub added: usize,
     pub moved: usize,
     pub missing: usize,
@@ -714,8 +715,14 @@ impl Builtins {
                 }
                 // A file still being written fails to probe; the next event
                 // (its last write) brings it.
-                let Ok(mut record) = asset_record(path, folder, tree.files[path]) else {
-                    continue;
+                let mut record = match asset_record(path, folder, tree.files[path]) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        if crate::media_import::classify(path).is_some_and(|(kind, _)| kind == "model") {
+                            done.failed.push((base(path), error));
+                        }
+                        continue;
+                    }
                 };
                 let id = pm_kernel::new_id("a");
                 record["id"] = json!(id);

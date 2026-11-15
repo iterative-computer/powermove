@@ -69,7 +69,11 @@ impl Controller {
             cx.notify();
             return;
         }
-        let model_extensions = [pm_scene3d::import::path::EXTENSIONS, pm_scene3d::import::path::UNSUPPORTED].concat();
+        let model_extensions = [
+            pm_scene3d::import::path::EXTENSIONS,
+            pm_scene3d::import::path::UNSUPPORTED,
+        ]
+        .concat();
         let rx = platform::import_paths(&self.host.borrow().window, false, true, &model_extensions);
         cx.spawn(async move |this, cx| {
             if let Ok(paths) = rx.recv().await
@@ -889,8 +893,25 @@ impl Controller {
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.message = error;
+                match result {
+                    Ok((_, failed)) => {
+                        for (file, error) in &failed {
+                            v.errors
+                                .borrow_mut()
+                                .push("Import", &format!("{file}: {error}"));
+                        }
+                        if !failed.is_empty() {
+                            v.message = failed
+                                .iter()
+                                .map(|(file, error)| format!("{file}: {error}"))
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                        }
+                    }
+                    Err(error) => {
+                        v.errors.borrow_mut().push("Import", &error);
+                        v.message = error;
+                    }
                 }
                 v.refresh(cx);
             });

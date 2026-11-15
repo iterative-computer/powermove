@@ -13,6 +13,7 @@ pub struct Sync {
     key: Option<(u64, Vec<(String, std::path::PathBuf)>)>,
     cancel: Option<Arc<AtomicBool>>,
     changed: Arc<AtomicU64>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
     seen: u64,
     folders: Option<pm_model::Node>,
     document: u64,
@@ -60,6 +61,7 @@ impl Sync {
             let cancel = Arc::new(AtomicBool::new(false));
             self.cancel = Some(cancel.clone());
             let changed = self.changed.clone();
+            let errors = self.errors.clone();
             let document = p.snapshot.doc_id;
             if roots.is_empty() {
                 runtime.update_folder_sync(Default::default());
@@ -82,6 +84,7 @@ impl Sync {
                         })
                         .collect();
                     let mut trees: BTreeMap<String, Tree> = BTreeMap::new();
+                    let mut reported = std::collections::BTreeSet::new();
                     let mut events: Option<Vec<linked::watch::Event>> = None;
                     loop {
                         if cancel.load(Ordering::Acquire) {
@@ -120,7 +123,19 @@ impl Sync {
                             let found = tree.as_ref().is_some_and(|t| t.dirs.contains_key(path));
                             let mut busy = false;
                             if let Some(tree) = tree {
-                                busy = runtime.sync_linked(document, id, &tree, &cancel).is_err();
+                                match runtime.sync_linked(document, id, &tree, &cancel) {
+                                    Ok(done) => {
+                                        for (file, error) in done.failed {
+                                            let message = format!("{file}: {error}");
+                                            if reported.insert(message.clone()) {
+                                                if let Ok(mut pending) = errors.lock() {
+                                                    pending.push(message);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => busy = true,
+                                }
                                 retry |= busy;
                                 trees.insert(id.clone(), tree);
                             }
@@ -210,7 +225,14 @@ impl crate::session::Controller {
         let Some(p) = self.kernel.published(&session.project) else {
             return;
         };
-        if self.linked_sync.update(&p, runtime) {
+        let changed = self.linked_sync.update(&p, runtime);
+        if let Ok(mut pending) = self.linked_sync.errors.lock() {
+            for message in pending.drain(..) {
+                self.errors.borrow_mut().push("Import", &message);
+                self.message = message;
+            }
+        }
+        if changed {
             self.media_refresh.reset();
             self.refresh_media(cx);
             self.update_builtins(cx);

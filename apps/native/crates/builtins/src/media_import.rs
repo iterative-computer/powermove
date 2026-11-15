@@ -1224,6 +1224,52 @@ mod tests {
         }
     }
     #[test]
+    fn linked_folders_discover_models_and_report_unsupported_new_files() {
+        let f = fixture();
+        let root = f.root.join("Models");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("cube.glb"),
+            pm_scene3d::import::triangle_glb(
+                &[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+                &[0, 1, 2],
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("legacy.usdz"), b"unsupported").unwrap();
+        let (_, failed) = f
+            .runtime
+            .link_folders(document(&f), &[root.clone()], None, &AtomicBool::new(false))
+            .unwrap();
+        assert!(failed[0].1.contains("Export as glTF (.glb)"));
+        let published = f.actor.handle().published("p").unwrap();
+        let wire = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+        assert!(
+            wire["assets"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|a| a["kind"] == "model")
+        );
+        let folder = wire["assetFolders"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap();
+        std::fs::write(root.join("new.stl"), b"unsupported").unwrap();
+        let tree = crate::linked_folders::Tree::scan(&root).unwrap();
+        let done = f
+            .runtime
+            .sync_linked(document(&f), folder, &tree, &AtomicBool::new(false))
+            .unwrap();
+        assert!(
+            done.failed
+                .iter()
+                .any(|(file, error)| file == "new.stl" && error.contains("Export as glTF (.glb)"))
+        );
+    }
+    #[test]
     fn model_filters_and_missing_companions_are_explicit() {
         for ext in pm_scene3d::import::path::EXTENSIONS
             .iter()
