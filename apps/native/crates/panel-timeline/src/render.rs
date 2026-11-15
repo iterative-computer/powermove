@@ -2647,3 +2647,38 @@ pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
         _ => kind,
     }
 }
+
+/// Electron's fixed yellow dashed latch guide (not a theme or viewer token).
+/// This overlay never enters the cached clip artwork or hit-testing plan.
+pub fn snap_guide(v: Viewport, ruler: f64, target: Option<f64>) -> Vec<Op> {
+    let Some(time) = target.filter(|t| t.is_finite()) else {
+        return vec![];
+    };
+    let x = v.x(time);
+    if x < v.layer_column || x > v.width || v.height <= ruler {
+        return vec![];
+    }
+    let clip = Rect::new(
+        v.layer_column,
+        ruler,
+        v.width - v.layer_column,
+        v.height - ruler,
+    );
+    let mut line = Op::new(
+        "snap-guide",
+        "line",
+        Rect::new(x, ruler + 6., 1.5, v.height - ruler - 6.),
+        0xe7c84b,
+    );
+    line.stroke = 1.5;
+    line.detail = json!({"from":[x,ruler+6.],"to":[x,v.height],"dash":[3.,3.]});
+    line.clip = Some(clip);
+    let mut pin = Op::new(
+        "snap-guide-pin",
+        "marker",
+        Rect::new(x - 4., ruler, 8., 7.),
+        0xe7c84b,
+    );
+    pin.clip = Some(clip);
+    vec![line, pin]
+}
