@@ -70,6 +70,19 @@ function Button({
     </UI.PushButton>
   );
 }
+/** A colour as a row says it: Black and White by name, else its hex. */
+function colourName(hex: string) {
+  const v = hex.replace("#", "").slice(0, 6).toLowerCase();
+  if (v === "000000") return "Black";
+  if (v === "ffffff") return "White";
+  return `#${v.toUpperCase()}`;
+}
+/** The row Settings › Project's header card holds. */
+const HEADER_ROW = "project.name";
+/** Rows the design gives a stepper beside the field. */
+const STEPPED = new Set(["project.fps"]);
+/** Short exclusive choices the design shows as a segmented control. */
+const SEGMENTED = new Set(["project.colorDepth"]);
 function RowControl({
   row,
   model,
@@ -105,8 +118,19 @@ function RowControl({
         disabled={disabled}
       />
     ) : null;
+  // AppKit's minimal colour well, its colour named beside it.
   if (row.control === "colour" && typeof row.value === "string")
-    return <UI.ColorWell {...common} minimal value={row.value} />;
+    return (
+      <div style={trailing}>
+        <Copy secondary>{colourName(row.value)}</Copy>
+        <UI.ColorWell
+          {...common}
+          minimal
+          value={row.value}
+          metadata={{ native: true }}
+        />
+      </div>
+    );
   if (row.control === "action") {
     const button = (
       <Button
@@ -133,6 +157,8 @@ function RowControl({
     return <Copy>{typeof row.value === "string" ? row.value : ""}</Copy>;
   // An unknown authored value stays in the service; never coerce it into a default.
   if (!row.binding) return null;
+  // The design's controls: AppKit's bordered fields (a stepper on Frame
+  // Rate), and a segmented control for a short exclusive choice.
   if (row.control === "number" && typeof row.value === "number")
     return (
       <UI.NumberField
@@ -141,10 +167,39 @@ function RowControl({
         min={row.min}
         max={row.max}
         unit={row.unit}
+        metadata={{ form: true, stepper: STEPPED.has(row.id) }}
+        style={{ width: t("metrics.settings_number_field") }}
       />
     );
   if (row.control === "text" && typeof row.value === "string")
-    return <UI.TextField {...common} value={row.value} />;
+    return (
+      <UI.TextField
+        {...common}
+        value={row.value}
+        metadata={{ form: true }}
+        style={{ width: t("metrics.settings_text_field") }}
+      />
+    );
+  if (
+    row.control === "choice" &&
+    row.value !== undefined &&
+    SEGMENTED.has(row.id) &&
+    row.options?.length
+  ) {
+    const options = row.options;
+    return (
+      <UI.SegmentedControl
+        label={row.label}
+        disabled={common.disabled}
+        value={String(row.value)}
+        options={options.map((o) => ({ id: String(o.v), label: o.label }))}
+        onChange={(id) => {
+          const option = options.find((o) => String(o.v) === id);
+          if (option) void model.write(row.id, option.v);
+        }}
+      />
+    );
+  }
   if (row.control === "choice" && row.value !== undefined)
     return (
       <UI.PopUpButton
@@ -223,22 +278,22 @@ function Rows({ children }: { children: ComponentChildren }) {
   return (
     <>
       {rows.flatMap((row, i) =>
-        i === 0
-          ? [row]
-          : [
-              <div
-                key={`separator.${i}`}
-                style={{
-                  height: t("metrics.border"),
-                  marginLeft: t("metrics.inset"),
-                  marginRight: t("metrics.inset"),
-                  background: t("colors.separator"),
-                }}
-              />,
-              row,
-            ],
+        i === 0 ? [row] : [<Separator key={`separator.${i}`} />, row],
       )}
     </>
+  );
+}
+/** The hairline between two rows of a card, inset on both sides. */
+function Separator(_: { key?: string }) {
+  return (
+    <div
+      style={{
+        height: t("metrics.border"),
+        marginLeft: t("metrics.inset"),
+        marginRight: t("metrics.inset"),
+        background: t("colors.separator"),
+      }}
+    />
   );
 }
 /** A group of rows: its name over its card (13 pt medium, outside it). */
@@ -820,6 +875,7 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
   const header = model.publication.header;
   if (!project || !header) return null;
   const projects = header.projects ?? [];
+  const nameRow = model.rows.find((row) => row.id === HEADER_ROW);
   const name = {
     ...text,
     fontSize: t("typography.heading"),
@@ -892,6 +948,11 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
           </div>
         ) : null}
       </div>
+      {/* The project's name is the card's second row, as the design has it. */}
+      {nameRow ? <Separator /> : null}
+      {nameRow ? (
+        <SettingRow row={{ ...nameRow, detail: undefined }} model={model} />
+      ) : null}
     </UI.FormGroup>
   );
 }
@@ -907,7 +968,17 @@ function SectionContent({
       row.section === section &&
       (!model.query.trim() || model.matches.rows.has(row.id)),
   );
-  const rows = model.query.trim() ? matching.slice(0, SEARCH_ROWS) : matching;
+  const searching = !!model.query.trim();
+  // The project's name stands in its header card (not while searching,
+  // where it is a match like any other row).
+  const listed = matching.filter(
+    (row) =>
+      searching ||
+      section !== "project" ||
+      !model.publication.header ||
+      row.id !== HEADER_ROW,
+  );
+  const rows = searching ? listed.slice(0, SEARCH_ROWS) : listed;
   const groups = [...new Set(rows.map((row) => row.group))];
   const speech = model.publication.speech.filter(
     (item) =>
@@ -954,7 +1025,7 @@ function SectionContent({
             ))}
         </Group>
       ))}
-      <More count={matching.length - rows.length} title={copy.title} />
+      <More count={listed.length - rows.length} title={copy.title} />
       {section === "memory" && <MemoryNotes model={model} />}
       {section === "transcription" && speech.length > 0 && (
         <Group title="Models">

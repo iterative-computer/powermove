@@ -279,6 +279,10 @@ pub struct Metrics {
     /// The project's poster in Settings › Project's header card (16:9).
     pub settings_poster_width: f32,
     pub settings_poster_height: f32,
+    /// A Settings row's text field (Name), and its number field with the
+    /// unit beside it (Width, Frame Rate).
+    pub settings_text_field: f32,
+    pub settings_number_field: f32,
     /// Greatest width of the Store's content column (the original app's
     /// 960 pt), centred in its sheet.
     pub store_column: f32,
@@ -802,6 +806,8 @@ impl Tokens {
                 settings_column: 680.,
                 settings_poster_width: 96.,
                 settings_poster_height: 54.,
+                settings_text_field: 220.,
+                settings_number_field: 96.,
                 store_column: 960.,
                 menu_inset: 12.,
                 menu_row: 30.,
