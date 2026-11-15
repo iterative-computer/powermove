@@ -1606,7 +1606,7 @@ mod coordinate_tests {
             .as_mut()
             .unwrap()
             .source
-            .push_str("// kernel uses u_effectScale\n");
+            .push_str("vec2 kernelScale() { return u_effectScale; }\n");
         let mut step = super::super::plan::effect_step(&definition, "blur", &[]);
         for density in [[0.5, 0.25], [1., 1.], [2., 3.]] {
             step.density = density;

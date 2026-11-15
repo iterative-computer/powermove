@@ -394,3 +394,32 @@ fn scaled_viewer_frames_of_every_corpus_effect_are_the_full_frame_resampled() {
     assert!(!results.is_empty(), "corpus effects draw natively");
     assert_resampled(&results, &names);
 }
+
+/// New kernels express offsets as raster texels times u_effectScale.
+#[test]
+fn modern_explicit_blur_scale_is_applied_once() {
+    let old = builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "glow")
+        .unwrap();
+    let source = old.glsl.unwrap().source;
+    let modern = source
+        .replace(
+            "uniform vec2 u_texel;",
+            "uniform vec2 u_texel; uniform vec2 u_effectScale;",
+        )
+        .replace("dir*u_texel*x", "dir*u_texel*u_effectScale*x");
+    assert_ne!(source, modern);
+    let mut def = extension(
+        "synthetic.modern-glow",
+        &modern,
+        json!([]),
+        DefinitionOrigin::Local,
+    );
+    def.params = old.params;
+    def.flags = old.flags;
+    let results = measure(vec![def], &["synthetic.modern-glow".into()]);
+    assert_eq!(results.len(), 1, "the modern glow must render natively");
+    assert_resampled(&results, &HashMap::new());
+}
