@@ -1860,3 +1860,55 @@ mod view_tile_tests {
         assert_eq!(view_tiles(r, 1, 2.), vec![r]);
     }
 }
+
+/// Reserve a build body without changing other tab groups. Unknown targets and
+/// unsupported floating placement fall back beside Properties in the right dock.
+pub fn reserve_build(layout: &mut Layout, id: &str, placement: &serde_json::Value, height: f32) -> serde_json::Value {
+    let beside = placement["beside"].as_str();
+    let tab = placement["tab_in"].as_str();
+    let found = beside.or(tab).and_then(|id| layout.docks.iter().enumerate().find_map(|(d, dock)| dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == id)).map(|g| (d,g))));
+    let requested = placement["dock"].as_str().filter(|d| beside.is_none() && tab.is_none() && ["left", "right", "bottom"].contains(d));
+    let fallback = found.is_none() && requested.is_none();
+    let dock_name = requested.unwrap_or("right");
+    let d = found.map(|p| p.0).unwrap_or_else(|| {
+        layout.docks.iter().position(|d| d.id == dock_name).unwrap_or_else(|| {
+            layout.docks.push(Dock { id: dock_name.into(), size: Some(320.), groups: vec![], collapsed: false }); layout.docks.len()-1
+        })
+    });
+    let dock = &mut layout.docks[d];
+    dock.collapsed = false;
+    if let Some((_, g)) = found.filter(|_| tab.is_some()) {
+        dock.groups[g].tabs.push(id.into());
+        dock.groups[g].active = dock.groups[g].tabs.len()-1;
+        dock.groups[g].collapsed = false;
+        return serde_json::json!({"dock":dock.id,"tab_in":tab,"fallback":false});
+    }
+    let g = found.map(|p| p.1+1).unwrap_or_else(|| if fallback { dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == "inspector")).map(|g| g+1).unwrap_or(dock.groups.len()) } else { dock.groups.len() });
+    dock.groups.insert(g, Group { tabs: vec![id.into()], active: 0, size: Some(height.clamp(120., 1200.)), collapsed: false });
+    let neighbor = g.checked_sub(1).map(|g| dock.groups[g].active().to_owned());
+    serde_json::json!({"dock":dock.id,"beside":neighbor,"fallback":fallback})
+}
+
+pub fn remove_build(layout: &mut Layout, id: &str) {
+    for dock in &mut layout.docks {
+        for group in &mut dock.groups { group.tabs.retain(|p| p != id); group.active = group.active.min(group.tabs.len().saturating_sub(1)); }
+        dock.groups.retain(|g| !g.tabs.is_empty());
+    }
+}
+#[cfg(test)]
+mod build_slot_tests {
+    use super::*;
+    #[test] fn reserves_and_cancels() {
+        let mut l = Layout { version: 1, workspace: "test".into(), docks: vec![] };
+        let used = reserve_build(&mut l, "build", &serde_json::json!({"dock":"left"}), 280.);
+        assert_eq!(used["dock"], "left"); assert_eq!(l.docks[0].groups[0].size, Some(280.));
+        remove_build(&mut l,"build"); assert!(l.docks[0].groups.is_empty());
+    }
+    #[test] fn invalid_falls_back_and_tabs_keep_height() {
+        let mut l = Layout { version: 1, workspace: "test".into(), docks: vec![] };
+        assert_eq!(reserve_build(&mut l,"one",&serde_json::json!({"beside":"missing"}),250.)["fallback"], true);
+        reserve_build(&mut l,"two",&serde_json::json!({"tab_in":"one"}),500.);
+        assert_eq!(l.docks[0].groups.len(),1); assert_eq!(l.docks[0].groups[0].size,Some(250.));
+        assert_eq!(l.docks[0].groups[0].active(),"two");
+    }
+}

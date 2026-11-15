@@ -1712,6 +1712,13 @@ impl Controller {
         .detach();
     }
     /// A panel body is a hole in GPUI; the shared document shows through it.
+    pub(crate) fn extension_build_rendered(&self, id: &str) -> bool {
+        let bodies = self.host.borrow().native_panels.clone();
+        let bodies = bodies.borrow();
+        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else { return false; };
+        self.extensions.page_of(id).is_some_and(|page| page.borrow().panel_layout_applied(id,
+            Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64)))
+    }
     pub fn extension_panel(
         &mut self,
         id: &str,
