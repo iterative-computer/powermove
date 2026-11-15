@@ -1493,3 +1493,34 @@ fn animation_preset_relative_keys_and_missing_effect() {
     assert_eq!(keys[1].get("t").and_then(Value::as_f64),Some(2.5));
     assert_eq!(f.model.effect_ids("a").unwrap().len(),3);
 }
+
+#[test]
+fn animation_preset_selected_parameters_round_trip_keeps_other_defaults() {
+    let mut f = Fixture::new();
+    f.select(&["a"]);
+    let mut def = definition("blur");
+    def.params.push(ParamDefinition {
+        key: "radius".into(), kind: "number".into(), default: 12.into(),
+        min: None, max: None, reference: false,
+    });
+    f.model.register_effect(def);
+    let saved = f.model.capture_preset_parameters(
+        "a", "Amount only", &["f1".into()], &[],
+        Some(&["f1.amount".into()]), true, 2.,
+    ).unwrap();
+    let without = f.model.capture_preset_parameters("a", "No parameters", &["f1".into()], &[], Some(&[]), true, 2.).unwrap();
+    assert!(without.get("effects").unwrap().as_array().unwrap()[0].get("parameters").unwrap().as_object().unwrap().is_empty());
+    let params = saved.get("effects").unwrap().as_array().unwrap()[0].get("parameters").unwrap();
+    assert_eq!(params.as_object().unwrap().len(), 1);
+    assert!(params.get("amount").is_some());
+    assert!(params.get("radius").is_none());
+    let request = f.model.apply_preset(Caller::native(), &saved, &["b".into()], 4.).unwrap();
+    f.run(request);
+    let layer = f.model.layer("b").unwrap();
+    let effects = layer.get("fx").unwrap().as_array().unwrap();
+    let applied = effects.last().unwrap().get("p").unwrap();
+    assert_eq!(applied.get("amount").unwrap().get("v").and_then(Value::as_f64), Some(5.));
+    assert_eq!(applied.get("radius").unwrap().get("v").and_then(Value::as_f64), Some(12.));
+    f.undo();
+    assert_eq!(f.model.effect_ids("b").unwrap().len(), 1);
+}

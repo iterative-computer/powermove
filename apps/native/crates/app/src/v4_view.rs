@@ -3214,6 +3214,7 @@ impl SurfaceView {
     /// A sheet shown in its own window (Export) is the whole window.
     fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {
         node.component == Some(Component::SheetAnchor)
+            && self.publication.panel == "export"
             && window.viewport_size().width <= px(self.table.tokens.metrics.sheet_width_wide + 1.)
     }
     /// An own-window sheet that names its body: the window follows the body's

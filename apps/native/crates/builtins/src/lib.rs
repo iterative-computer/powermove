@@ -2509,11 +2509,15 @@ impl EngineProxy for Broker {
                         .collect::<Vec<_>>()
                 };
                 let saved = m
-                    .capture_preset(
+                    .capture_preset_parameters(
                         &layer,
                         input["name"].as_str().unwrap_or(""),
                         &strings("effects"),
                         &strings("properties"),
+                        input
+                            .get("parameters")
+                            .map(|_| strings("parameters"))
+                            .as_deref(),
                         input["animated"] == true,
                         time,
                     )

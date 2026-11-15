@@ -79,13 +79,63 @@ impl Inspector {
                                 .is_some_and(|id| r.id.path.starts_with(&format!("{id}.")))
                         })
             })
-            .map(|r| Value::from(r.id.path))
+            .map(|r| {
+                let mut p = Map::new();
+                p.insert("label", preset_property_label(&r.id.path).into());
+                p.insert("path", r.id.path.into());
+                Value::Object(p)
+            })
             .collect();
         let mut out = Map::new();
         out.insert("properties", Value::Array(properties));
         out.insert(
             "effects",
-            source.get("fx").cloned().unwrap_or(Value::Array(vec![])),
+            Value::Array(
+                source
+                    .get("fx")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|fx| {
+                        let mut fx = fx.clone();
+                        let kind = fx.get("type").and_then(Value::as_str).unwrap_or("");
+                        let label = self
+                            .definitions
+                            .get(kind)
+                            .map(|d| d.label.clone())
+                            .unwrap_or_else(|| preset_property_label(kind));
+                        let parameters = fx
+                            .get("p")
+                            .and_then(Value::as_object)
+                            .into_iter()
+                            .flatten()
+                            .map(|(k, _)| {
+                                let mut p = Map::new();
+                                p.insert("key", k.clone().into());
+                                p.insert(
+                                    "label",
+                                    self.effect_catalog
+                                        .as_ref()
+                                        .and_then(|c| c.current(kind))
+                                        .and_then(|d| {
+                                            d.params.iter().find(|p| p.k == k.to_string_lossy())
+                                        })
+                                        .map(|p| p.label.clone())
+                                        .unwrap_or_else(|| {
+                                            preset_property_label(&k.to_string_lossy())
+                                        })
+                                        .into(),
+                                );
+                                Value::Object(p)
+                            })
+                            .collect();
+                        let object = fx.as_object_mut().unwrap();
+                        object.insert("label", label.into());
+                        object.insert("parameters", Value::Array(parameters));
+                        fx
+                    })
+                    .collect(),
+            ),
         );
         Ok(Value::Object(out))
     }
@@ -95,6 +145,20 @@ impl Inspector {
         name: &str,
         effects: &[String],
         paths: &[String],
+        animated: bool,
+        time: f64,
+    ) -> Result<Value, InspectorError> {
+        self.capture_preset_parameters(layer, name, effects, paths, None, animated, time)
+    }
+    /// None preserves whole-effect capture for existing callers; Some limits each
+    /// selected effect to the explicitly chosen instance.parameter addresses.
+    pub fn capture_preset_parameters(
+        &mut self,
+        layer: &str,
+        name: &str,
+        effects: &[String],
+        paths: &[String],
+        selected: Option<&[String]>,
         animated: bool,
         time: f64,
     ) -> Result<Value, InspectorError> {
@@ -116,6 +180,9 @@ impl Inspector {
             }
             let mut parameters = Map::new();
             for (key, channel) in fx.get("p").and_then(Value::as_object).into_iter().flatten() {
+                if selected.is_some_and(|paths| !paths.contains(&format!("{id}.{key}"))) {
+                    continue;
+                }
                 parameters.insert(
                     key.clone(),
                     self.capture_preset_channel(
@@ -284,5 +351,27 @@ impl Inspector {
             }
         }
         self.transaction(caller, commands)
+    }
+}
+
+fn preset_property_label(path: &str) -> String {
+    match path {
+        "x" | "position.x" => "Position X".into(),
+        "y" | "position.y" => "Position Y".into(),
+        "sx" | "scale.x" => "Scale X".into(),
+        "sy" | "scale.y" => "Scale Y".into(),
+        "r" | "rotation" => "Rotation".into(),
+        "opacity" => "Opacity".into(),
+        _ => path
+            .split(['.', '_', '-'])
+            .map(|word| {
+                let mut chars = word.chars();
+                chars
+                    .next()
+                    .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
