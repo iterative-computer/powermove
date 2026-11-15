@@ -1084,6 +1084,7 @@ impl Controller {
             .flatten();
         let panel = id.to_owned();
         let surface = view.clone();
+        view.update(cx, |v, _| v.scrolls_in(&handle));
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self

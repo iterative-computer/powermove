@@ -27,8 +27,13 @@ use std::{
     rc::Rc,
 };
 
+/// Panels with more nodes than this make a row's native controls when the
+/// row is first built (Settings › Shortcuts has about 2,600; other pages
+/// 100 to 300).
+const LARGE: usize = 1000;
+
 /// Rows not measured yet that a frame builds anyway, to measure them.
-const MEASURE_PER_FRAME: usize = 16;
+const MEASURE_PER_FRAME: usize = 4;
 
 #[derive(Default)]
 pub(super) struct Cull {
@@ -37,15 +42,34 @@ pub(super) struct Cull {
     extents: Rc<RefCell<HashMap<Id, (f32, f32)>>>,
     /// This frame: nodes left out, and the height each stands in at.
     pub(super) culled: HashMap<Id, f32>,
+    /// This frame: scrollers with rows left out.
+    culled_in: std::collections::HashSet<Id>,
     /// This frame: nodes whose place is recorded, and their scroller.
     measured: HashMap<Id, ScrollHandle>,
     /// Native controls not made yet: made when their row is first built.
     pub(super) deferred: HashMap<Id, Kind>,
     /// Some row stands in at an estimate: another frame measures more.
     pending: bool,
+    /// The scroller of a body that scrolls around the panel (Settings in a
+    /// panel), and its offset when the panel was last laid out: a wheel step
+    /// moves the panel before it is drawn again, by the difference.
+    outer: Option<(ScrollHandle, Rc<std::cell::Cell<f32>>)>,
 }
 
 impl Cull {
+    /// Marks the offset of the body around the panel as the panel is laid
+    /// out (with [`SurfaceView::scrolls_in`]).
+    pub(super) fn outer_mark(&self) -> Option<AnyElement> {
+        let (handle, then) = self.outer.clone()?;
+        Some(
+            canvas(
+                move |_, _, _| then.set(clamped(&handle)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .into_any_element(),
+        )
+    }
     /// Forgets nodes that are gone.
     pub(super) fn retain(&mut self, live: impl Fn(&Id) -> bool) {
         self.extents.borrow_mut().retain(|id, _| live(id));
@@ -91,6 +115,7 @@ impl SurfaceView {
     /// builds for the first time.
     pub(super) fn plan_cull(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         self.cull.culled.clear();
+        self.cull.culled_in.clear();
         self.cull.measured.clear();
         self.cull.pending = false;
         if !voiceover_running() {
@@ -117,7 +142,14 @@ impl SurfaceView {
                 // window. A panel whose body scrolls around it (Settings in
                 // a panel) moves the scroller itself; its own offset moves
                 // its content.
-                let (top, offset) = (f32::from(bounds.origin.y), f32::from(handle.offset().y));
+                // Where the scroller is now: where the last layout left it,
+                // moved by the steps of a body around the panel since.
+                // Offsets as the layout will clamp them: a step can leave one
+                // past its end (or above the top) until the next layout.
+                let moved = self.cull.outer.as_ref().map_or(0., |(outer, then)| {
+                    clamped(outer) - then.get()
+                });
+                let (top, offset) = (f32::from(bounds.origin.y) + moved, clamped(&handle));
                 let from = top.max(0.) - top - offset;
                 let to = (top + f32::from(bounds.size.height)).min(window_height) - top - offset;
                 let shown = (to - from).max(0.);
@@ -127,7 +159,11 @@ impl SurfaceView {
                 // and a step past it draws the panel again.
                 let near = (from - shown, to + shown);
                 let mut budget = MEASURE_PER_FRAME;
+                let before = self.cull.culled.len();
                 self.flow(scroller, &handle, 0., near, &extents, &mut budget);
+                if self.cull.culled.len() > before {
+                    self.cull.culled_in.insert(scroller);
+                }
             }
         }
         if self.cull.pending {
@@ -156,9 +192,15 @@ impl SurfaceView {
             .filter(|(id, _)| !self.left_out(**id))
             .map(|(id, kind)| (*id, *kind))
             .collect();
+        let started = std::time::Instant::now();
+        let made = due.len();
         for (id, kind) in due {
             self.cull.deferred.remove(&id);
             self.mount_deferred(id, kind, window, cx);
+        }
+        if crate::diag::enabled() && made > 0 {
+            crate::diag::line(serde_json::json!({"ui": "cull_mount", "controls": made,
+                "ms": started.elapsed().as_secs_f64() * 1000.}));
         }
     }
     /// Lays out the children of node `id` (at `top` in its scroller's
@@ -263,6 +305,24 @@ impl SurfaceView {
     fn leaf(&self) -> f32 {
         self.table.tokens.metrics.row
     }
+    /// The panel sits in a body that scrolls around it (`builtins`): its
+    /// steps move the panel's scrollers before the panel draws again.
+    pub(crate) fn scrolls_in(&mut self, body: &ScrollHandle) {
+        // One body per panel, kept for the panel's life (`builtins::scrolls`).
+        if self.cull.outer.is_none() {
+            self.cull.outer = Some((body.clone(), Default::default()));
+        }
+    }
+    /// Whether this frame leaves rows of scroller `id` out.
+    pub(super) fn culls_in(&self, id: Id) -> bool {
+        self.cull.culled_in.contains(&id)
+    }
+    /// A panel large enough that its controls wait for their rows: a small
+    /// page makes its few before the frame, as any panel does (a pop-up is a
+    /// few milliseconds to make, which a frame should not pay).
+    pub(super) fn cull_large(&self) -> bool {
+        self.prepared.nodes.len() > LARGE
+    }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.
     pub(crate) fn culls(&self) -> bool {
@@ -316,6 +376,12 @@ fn stacks(style: &gpui::StyleRefinement) -> bool {
         Some(Display::Block) | None => true,
         _ => false,
     }
+}
+
+/// A scroller's vertical offset within its range, as its layout leaves it.
+fn clamped(handle: &ScrollHandle) -> f32 {
+    let max = f32::from(handle.max_offset().y).max(0.);
+    f32::from(handle.offset().y).clamp(-max, 0.)
 }
 
 /// Whether VoiceOver is running: it reads only what is built.

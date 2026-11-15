@@ -573,7 +573,7 @@ impl SurfaceView {
                 .then(|| control_kind(&self.publication.panel, node))
                 .flatten();
             if let Some(kind) = kind {
-                if !self.controls.contains_key(&id) && self.in_scroller(id) {
+                if !self.controls.contains_key(&id) && self.cull_large() && self.in_scroller(id) {
                     // Made when its row is first built (`v4_cull`).
                     self.cull.deferred.insert(id, kind);
                 } else {
@@ -1470,7 +1470,11 @@ impl SurfaceView {
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
-        for control in self.controls.values() {
+        for (id, control) in &self.controls {
+            // A control whose row is left out stays where it is: hidden.
+            if self.left_out(*id) {
+                continue;
+            }
             control.read(cx).keep(window);
         }
         for field in self.fields.values() {
@@ -2228,7 +2232,17 @@ impl SurfaceView {
             }
             // A wheel step only moves the content (a native view inside
             // draws on its own and keeps the full redraw).
-            if !self.holds_native(id) {
+            // Nor does one whose content fits it while it leaves rows out
+            // (`v4_cull`: a page in a body that scrolls around it): a wheel
+            // step the layer replays carries its offset past its range until
+            // the next layout, showing rows that are not built. A scroller
+            // that scrolls keeps the layer: what it records past its edges
+            // (one viewport) is what the culling builds.
+            let fits = self
+                .scrolls
+                .get(&id)
+                .is_some_and(|s| s.max_offset().y <= px(0.));
+            if !self.holds_native(id) && !(fits && self.culls_in(id)) {
                 element = element.scroll_layer();
             }
             if follows {
@@ -3484,6 +3498,7 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.cull.outer_mark())
     }
 }
 pub(crate) struct Tooltip {
