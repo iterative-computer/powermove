@@ -1330,7 +1330,7 @@ mod panel_build_capture {
                 let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
                 let window = cx.open_window(size(px(320.), px(360.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed })).unwrap();
                 for _ in 0..4 { cx.run_until_parked(); }
-                window.update(&mut cx, |_, window, cx| { window.refresh(); window.draw(cx); }).unwrap();
+                cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
                 cx.run_until_parked();
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 assert!(image.pixels().any(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0), "empty {name}");
