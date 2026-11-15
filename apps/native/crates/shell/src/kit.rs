@@ -265,6 +265,25 @@ impl Kit {
         label: impl Into<SharedString>,
         selected: bool,
     ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, selected, None)
+    }
+    /// Destructive actions share the icon-button recipe, with danger ink on hover.
+    pub fn destructive_icon_button(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+    ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, false, Some(self.t.colors.danger))
+    }
+    fn icon_button_tinted(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+        selected: bool,
+        hover_ink: Option<u32>,
+    ) -> Stateful<Div> {
         let (t, id, label) = (&self.t, id.into(), label.into());
         let (c, m) = (&t.colors, &t.metrics);
         let k = key(&id);
@@ -285,7 +304,13 @@ impl Kit {
                 symbol,
                 m.symbol_panel,
                 Weight::Regular,
-                if selected { c.text } else { c.secondary },
+                if selected {
+                    c.text
+                } else if self.hovered(k) > 0.01 {
+                    hover_ink.unwrap_or(c.secondary)
+                } else {
+                    c.secondary
+                },
             ))
             .when(selected, |d| {
                 d.bg(rgb(c.raised)).elevated(t, Elevation::Raised)
@@ -446,6 +471,7 @@ impl Kit {
     /// field, and a right-aligned shortcut hint.
     pub fn search(&self, field: Option<Entity<TextField>>, hint: Option<&str>) -> Div {
         let t = &self.t;
+        let missing = field.is_none();
         let (c, m) = (&t.colors, &t.metrics);
         div()
             .flex()
@@ -458,7 +484,20 @@ impl Kit {
             .rounded(px(m.control_radius))
             .bg(ink(c.text, t.translucency.hover))
             .child(self.symbol("magnifyingglass", m.symbol_inline, Weight::Medium, c.muted))
-            .child(div().flex_1().min_w(px(0.)).children(field))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .children(field)
+                    .when(missing, |d| {
+                        d.child(
+                            div()
+                                .text_role(t, Text::Body)
+                                .text_color(rgb(c.faint))
+                                .child("Search"),
+                        )
+                    }),
+            )
             .children(hint.map(|hint| {
                 div()
                     .flex_none()
@@ -1111,4 +1150,14 @@ fn empty_state_at_scale(t: &Tokens, scale: f32, symbol: &str, title: &str, detai
                 .text_color(rgb(c.muted))
                 .child(detail.to_string()),
         )
+}
+
+/// A trailing shelf count, sharing Home's caption and tabular figures.
+pub fn shelf_count(t: &Tokens, count: usize) -> Div {
+    div()
+        .flex_none()
+        .text_role(t, Text::Caption)
+        .font_features(tabular())
+        .text_color(rgb(t.colors.muted))
+        .child(count.to_string())
 }

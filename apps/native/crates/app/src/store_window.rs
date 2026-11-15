@@ -1738,7 +1738,7 @@ impl Render for StoreWindow {
 
 /// A listing's artwork when it has none: two hues fixed by its repository
 /// (v1.2.0's `artFor`), as a diagonal ramp.
-fn art(seed: &str) -> (u32, u32) {
+pub(crate) fn art(seed: &str) -> (u32, u32) {
     let mut hash: u32 = 0x811c_9dc5;
     for unit in seed.encode_utf16() {
         hash ^= u32::from(unit);
