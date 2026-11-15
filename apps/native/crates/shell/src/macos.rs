@@ -148,9 +148,10 @@ pub fn tokens() -> Tokens {
     };
     theme::tokens(scheme, native::settings())
 }
-/// Reopens the saved windows (all of them only when the system keeps windows
-/// on quit; see `Session::restore_plan`). With no session, one new window.
+/// Reopens the saved windows and tabs, every one (as v1 did), with the one
+/// that was in front in front again. With no session, one new window.
 fn restore_session(cx: &mut App) {
+    let mut front = None;
     let plan = view::session_path()
         .filter(|p| p.exists())
         .and_then(|p| match session::Session::load(&p) {
@@ -161,6 +162,7 @@ fn restore_session(cx: &mut App) {
             }
         })
         .map(|s| {
+            front = s.key;
             if crate::tabs_mode() {
                 s.restore_plan_tabs(keeps_windows())
             } else {
@@ -176,18 +178,24 @@ fn restore_session(cx: &mut App) {
         let leader = state.tab_group;
         open_editor_window(cx, true, Some(state), leader);
     }
-}
-/// System Settings ▸ Desktop & Dock ▸ “Close windows when quitting an application”
-/// off ⇒ `NSQuitAlwaysKeepsWindows`. `PM_NATIVE_RESTORE=all|one` overrides it.
-fn keeps_windows() -> bool {
-    match std::env::var("PM_NATIVE_RESTORE").as_deref() {
-        Ok("all") => return true,
-        Ok("one") => return false,
-        _ => {}
+    // Once the tabs have joined their groups (a turn later), the window that
+    // was in front comes forward again, its tab the one shown.
+    if let Some(id) = front {
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = cx.update(|_| native::bring_session_window(id));
+        })
+        .detach();
     }
-    use objc2_foundation::{NSString, NSUserDefaults};
-    NSUserDefaults::standardUserDefaults()
-        .boolForKey(&NSString::from_str("NSQuitAlwaysKeepsWindows"))
+}
+/// Every window and tab comes back on relaunch with its project, as v1
+/// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
+/// windows when quitting an application”. `PM_NATIVE_RESTORE=one` brings
+/// back the front window alone (tests, reviews).
+fn keeps_windows() -> bool {
+    std::env::var("PM_NATIVE_RESTORE").as_deref() != Ok("one")
 }
 /// A new editor window, cascaded from the key one (File ▸ New Window).
 pub fn open_editor(cx: &mut App) {

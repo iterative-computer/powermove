@@ -776,6 +776,12 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    // Every tab of the group draws the strip again and records its group in
+    // the session (a relaunch brings the tabs back together).
+    for tab in tab_windows(&lead) {
+        route(tab.windowNumber(), "syncTabs".into());
+        route(tab.windowNumber(), "persistSession".into());
+    }
     hide_system_tab_bar(&lead);
     hide_system_tab_bar(window);
     if app.isActive() {
@@ -1690,6 +1696,19 @@ fn route(number: isize, name: String) {
             let _ = tx.try_send(Command { name, args: vec![], token: None });
         }
     });
+}
+/// After a relaunch: the window with session id `id` (the one that was in
+/// front) comes forward, its tab the one its group shows.
+pub fn bring_session_window(id: u64) {
+    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if let Some(window) =
+        number.and_then(|n| NSApplication::sharedApplication(mtm).windowWithWindowNumber(n))
+    {
+        select_window_tab(&window);
+    }
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {
@@ -3082,7 +3101,16 @@ impl Host {
         edited: bool,
         path: Option<&std::path::Path>,
     ) {
-        HOME_WINDOWS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
+        let was_home = HOME_WINDOWS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
+        // A tab that showed only Home now holds a project: the group's other
+        // strips show its tab.
+        if was_home {
+            for tab in tab_windows(&self.window) {
+                if tab.windowNumber() != self.window.windowNumber() {
+                    route(tab.windowNumber(), "syncTabs".into());
+                }
+            }
+        }
         self.window.setTitle(&NSString::from_str(title));
         self.window.setDocumentEdited(edited);
         self.window.setSubtitle(&NSString::from_str(subtitle));
