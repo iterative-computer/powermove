@@ -543,7 +543,8 @@ impl Automation {
                     body: WriteBody::Commands(commands),
                     expected_revision: Some(expected_revision),
                 },
-            ),
+            )
+            .outside_revision(expected_revision),
         )
     }
     pub(crate) fn apply_body(
@@ -563,7 +564,8 @@ impl Automation {
                     body,
                     expected_revision: Some(expected),
                 },
-            ),
+            )
+            .outside_revision(expected),
         )
     }
     fn call(&mut self, id: &str, mut request: Request) -> Result<Ack> {

@@ -234,3 +234,23 @@ mod tests {
         assert_eq!(q.pending(), 0);
     }
 }
+
+// Focus is transient host state. A property text editor registers while its
+// uncommitted text owns the value; no document revision or UI wake is emitted.
+fn fields() -> &'static std::sync::Mutex<HashSet<(String, String)>> {
+    static FIELDS: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, String)>>> =
+        std::sync::OnceLock::new();
+    FIELDS.get_or_init(Default::default)
+}
+pub fn touch_field(project: &str, field: &str, active: bool) {
+    let mut fields = fields().lock().unwrap();
+    let key = (project.into(), field.into());
+    if active {
+        fields.insert(key);
+    } else {
+        fields.remove(&key);
+    }
+}
+pub fn typing(project: &str) -> bool {
+    fields().lock().unwrap().iter().any(|(id, _)| id == project)
+}

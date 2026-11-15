@@ -145,3 +145,147 @@ fn a_deleted_agent_target_returns_target_removed() {
     drop(h);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn attached_fixture() -> (
+    std::path::PathBuf,
+    Arc<Mutex<Automation>>,
+    pm_kernel::KernelActor,
+    McpSession,
+    String,
+) {
+    use pm_kernel::{
+        KernelActor, KernelConfig,
+        locks::OpenDecision,
+        persistence::DiskFormat,
+        session::{ShellCall, ShellReply},
+    };
+    let root = std::env::temp_dir().join(pm_kernel::new_id("coedit-attached"));
+    std::fs::create_dir_all(&root).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    assert!(matches!(
+        actor
+            .handle()
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None
+            })
+            .wait()
+            .unwrap()
+            .unwrap(),
+        ShellReply::Library(OpenDecision::Writable)
+    ));
+    let app = pm_mcp::app_host::Host::new(actor.handle(), root.clone());
+    let mut host = Automation::attached(app, root.join("exports"));
+    let id = host
+        .create_project(&json!({"name":"Synthetic held write"}))
+        .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let host = Arc::new(Mutex::new(host));
+    let mut session = McpSession::new(host.clone());
+    ok(session.call("start_session", json!({"prompt":"Synthetic hold"})));
+    ok(session.call(
+        "apply_commands",
+        json!({"commands":[{"type":"add_layer","id":"L","layerType":"shape","name":"Synthetic"}]}),
+    ));
+    (root, host, actor, session, id)
+}
+#[test]
+fn a_live_interface_lease_holds_an_agent_write_then_lands_after_release() {
+    use pm_kernel::{Caller, GestureCall, Reply, Request};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    let kernel = actor.handle();
+    let ack = kernel
+        .call(
+            &id,
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "User drag".into(),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let Reply::Gesture(gesture) = ack.reply else {
+        panic!("expected gesture");
+    };
+    let release = kernel.clone();
+    let project = id.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release
+            .call(
+                &project,
+                Request::new(Caller::native(), GestureCall::Commit { gesture }),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    });
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    thread.join().unwrap();
+    assert_eq!(result["status"], "applied", "{result}");
+    session.finish(true).unwrap();
+    assert_eq!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+        40
+    );
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn typing_holds_after_four_seconds_and_user_wins_at_release() {
+    use pm_kernel::{Call, Caller, Command, Request, WriteBody};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    pm_mcp::coedit::touch_field(&id, "synthetic-opacity", true);
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    assert_eq!(result["status"], "held", "{result}");
+    actor
+        .handle()
+        .call(
+            &id,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("User value".into()),
+                    body: WriteBody::Commands(vec![Command::SetStaticOpacity {
+                        layer_id: "L".into(),
+                        value: 33.,
+                    }]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    pm_mcp::coedit::touch_field(&id, "synthetic-opacity", false);
+    let result = session
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    assert_eq!(result["coeditNote"]["status"], "dropped", "{result}");
+    assert_eq!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+        33
+    );
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}

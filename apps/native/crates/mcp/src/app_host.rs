@@ -29,6 +29,7 @@ pub struct Host {
     pending_opens: Mutex<crate::recovery::PendingOpens>,
     pub closing: AtomicBool,
     paused: Mutex<std::collections::HashSet<String>>,
+    held: Mutex<std::collections::HashSet<String>>,
     recent_turn: Mutex<std::collections::HashMap<String, (pm_kernel::Writer, String)>>,
     pause_changed: std::sync::Condvar,
 }
@@ -109,6 +110,7 @@ impl Host {
             closing: AtomicBool::new(false),
             paused: Mutex::default(),
             recent_turn: Mutex::default(),
+            held: Mutex::default(),
             pause_changed: std::sync::Condvar::new(),
         })
     }
@@ -123,6 +125,12 @@ impl Host {
     }
     /// Pause gates the next tool admission on the MCP worker, never a
     /// transaction in progress or the UI thread.
+    pub fn is_paused(&self, project: &str) -> bool {
+        self.paused.lock().unwrap().contains(project)
+    }
+    pub fn is_held(&self, project: &str) -> bool {
+        self.held.lock().unwrap().contains(project)
+    }
     pub fn toggle_pause(&self, project: &str) -> bool {
         let mut paused = self.paused.lock().unwrap();
         let active = if paused.remove(project) {
@@ -147,6 +155,17 @@ impl Host {
     /// Presence is view-only. Hidden projects discard events; returning to a
     /// tab never replays an old sketch. Wake the window without changing focus.
     pub fn publish_presence(&self, event: crate::presence::Presence) {
+        match event.kind {
+            crate::presence::Kind::Held => {
+                self.held.lock().unwrap().insert(event.project.clone());
+            }
+            crate::presence::Kind::Landed
+            | crate::presence::Kind::Dropped
+            | crate::presence::Kind::RunEnd => {
+                self.held.lock().unwrap().remove(&event.project);
+            }
+            _ => {}
+        }
         let tx = {
             let windows = self.windows.lock().unwrap();
             windows

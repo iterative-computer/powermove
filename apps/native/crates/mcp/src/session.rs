@@ -10,6 +10,9 @@ use std::{
     },
 };
 
+mod hold;
+use hold::PendingHold;
+
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
     "open_panel",
@@ -90,6 +93,8 @@ struct Active {
     focus: Vec<String>,
     time: f64,
     known_layers: std::collections::HashSet<String>,
+    owned_scopes: Vec<Vec<pm_model::patch::PathPart>>,
+    observed_revision: u64,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -102,6 +107,9 @@ pub struct McpSession {
     agent_token: Option<String>,
     writer: u32,
     closed: bool,
+    pending: Option<PendingHold>,
+    bypass_hold: bool,
+    hold_note: Option<Value>,
 }
 fn next_writer() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1000);
@@ -115,6 +123,9 @@ impl McpSession {
             agent_token: None,
             writer: next_writer(),
             closed: false,
+            pending: None,
+            bypass_hold: false,
+            hold_note: None,
         }
     }
     pub fn tools(&self) -> Value {
@@ -124,7 +135,7 @@ impl McpSession {
         self.agent_token = Some(token.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
-        if name == "project_memory" {
+        if name == "project_memory" && self.pending.is_none() {
             return match self.project_memory(&args) {
                 Ok(value) => crate::success_model(&value),
                 Err(error) => failure(error),
@@ -194,6 +205,21 @@ impl McpSession {
         Ok(())
     }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
+        if !self.take_hold(name == "finish_session")? {
+            return Ok(
+                json!({"status":"held","reason":"Your previous write is still waiting; do not retry it."}),
+            );
+        }
+        if let Some(result) = self.defer_if_touched(name, args)? {
+            return Ok(result);
+        }
+        let mut result = self.dispatch_inner(name, args)?;
+        if let Some(note) = self.hold_note.take() {
+            result["coeditNote"] = note;
+        }
+        Ok(result)
+    }
+    fn dispatch_inner(&mut self, name: &str, args: &Value) -> Result<Value> {
         if name == "project_memory" {
             return self
                 .project_memory(args)
@@ -998,6 +1024,7 @@ impl McpSession {
                 };
                 let tx = session.transaction.as_mut().unwrap();
                 tx.revision = ack.revision;
+                session.observed_revision = ack.revision;
                 tx.label = label.clone();
                 if let Some(app) = host.coedit_host() {
                     app.record_turn(
@@ -1212,11 +1239,14 @@ impl McpSession {
             panel_actions: false,
             time,
             known_layers,
+            owned_scopes: Vec::new(),
+            observed_revision: baseline,
             focus: Vec::new(),
         });
         Ok(result)
     }
     pub fn finish(&mut self, commit: bool) -> Result<Value> {
+        self.take_hold(true)?;
         let Some(mut session) = self.active.take() else {
             return Ok(json!({"changed":false}));
         };
@@ -1384,6 +1414,7 @@ impl McpSession {
         Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
     }
     pub fn close(&mut self) -> Result<()> {
+        self.cancel_hold();
         // In-app Stop preserves every acknowledged edit. Explicit rollback
         // and external MCP disconnect retain their existing contract.
         let result = self.finish(self.agent_token.is_some()).map(|_| ());
@@ -1408,7 +1439,40 @@ fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
     }
     Ok(())
 }
+fn observe_foreign(session: &mut Active, host: &Automation, id: &str) {
+    let Some(app) = host.coedit_host() else {
+        return;
+    };
+    let Some(publication) = app.kernel.published(id) else {
+        return;
+    };
+    if publication.entry.is_some() || crate::coedit::typing(id) {
+        return;
+    }
+    for change in publication
+        .changes
+        .iter()
+        .filter(|c| c.revision > session.observed_revision)
+    {
+        let human = match &change.cause {
+            pm_kernel::ChangeCause::Write { origin, .. }
+            | pm_kernel::ChangeCause::Edit { origin, .. }
+            | pm_kernel::ChangeCause::Restore { origin, .. } => *origin == Origin::Interface,
+            pm_kernel::ChangeCause::Undo { .. }
+            | pm_kernel::ChangeCause::Redo { .. }
+            | pm_kernel::ChangeCause::GestureStep { .. } => true,
+            _ => false,
+        };
+        if human {
+            session
+                .owned_scopes
+                .extend(change.ops.iter().map(|o| o.path().to_vec()));
+        }
+    }
+    session.observed_revision = publication.revision();
+}
 fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
+    observe_foreign(session, host, id);
     let revision = host.revision(id)?;
     session.baseline = revision;
     if let Some(tx) = &mut session.transaction
