@@ -179,22 +179,30 @@ impl AgentInk {
                 if active.event.kind == Kind::Create
                     && op.id == format!("clip:{}", active.event.layer)
                 {
-                    if reduced {
-                        op.color = pm_design::color::mix(
-                            palette.ink,
-                            op.color,
-                            (age / 160.).clamp(0., 1.) as f32,
-                        );
-                    } else if age < 400. {
-                        op.opacity = 0.;
+                    let dry = if reduced {
+                        (age / 160.).clamp(0., 1.)
                     } else {
-                        let grow = ((age - 400.) / 280.).clamp(0., 1.);
-                        op.bounds.width *= 1. - (1. - grow).powi(3);
-                        op.color = pm_design::color::mix(
-                            palette.ink,
-                            op.color,
-                            ((age - 680.) / 300.).clamp(0., 1.) as f32,
-                        );
+                        ((age - 680.) / 300.).clamp(0., 1.)
+                    } as f32;
+                    op.color = pm_design::color::mix(palette.ink, op.color, dry);
+                    // Native clips use their gradient/rim detail, rather than
+                    // the flat op colour. Dry that same paint, too.
+                    for key in ["top", "bottom", "ring", "light", "grid"] {
+                        if let Some(rgb) = op.detail[key].as_u64() {
+                            op.detail[key] = serde_json::json!(pm_design::color::mix(
+                                palette.ink,
+                                rgb as u32,
+                                dry,
+                            ));
+                        }
+                    }
+                    if !reduced {
+                        if age < 400. {
+                            op.opacity = 0.;
+                        } else {
+                            let grow = ((age - 400.) / 280.).clamp(0., 1.);
+                            op.bounds.width *= 1. - (1. - grow).powi(3);
+                        }
                     }
                 }
                 if active.event.kind == Kind::Key && op.id.starts_with("key:") && animated < 8 {

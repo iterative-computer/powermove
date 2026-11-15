@@ -95,3 +95,25 @@ fn effect_cpu_p95_stays_under_four_tenths_of_a_millisecond() {
     let p95 = times[times.len() * 95 / 100];
     assert!(p95 <= 0.4, "headless effect p95 {p95:.3} ms exceeds 0.4 ms");
 }
+
+#[test]
+fn created_bar_inks_the_native_gradient_then_restores_its_colours() {
+    let t = Tokens::new(Scheme::Dark, Default::default());
+    let scene = scene(&t);
+    let baseline = scene.prepare(fixture::viewport(&t), &t).unwrap();
+    let normal = baseline.ops.iter().find(|o| o.id == "clip:L").unwrap();
+    let mut ink = AgentInk::default();
+    ink.receive(event(Kind::Create), 0);
+    let mut f = baseline.clone();
+    ink.paint(&mut f, &scene, &t, 530);
+    let wet = f.ops.iter().find(|o| o.id == "clip:L").unwrap();
+    assert_eq!(wet.detail["top"], t.sketch().ink);
+    assert_eq!(wet.detail["bottom"], t.sketch().ink);
+    assert!(wet.bounds.width < normal.bounds.width);
+    let mut f = baseline.clone();
+    ink.paint(&mut f, &scene, &t, 1000);
+    let dry = f.ops.iter().find(|o| o.id == "clip:L").unwrap();
+    assert_eq!(dry.detail["top"], normal.detail["top"]);
+    assert_eq!(dry.detail["bottom"], normal.detail["bottom"]);
+    assert_eq!(dry.bounds.width, normal.bounds.width);
+}

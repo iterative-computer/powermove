@@ -4696,8 +4696,9 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         "clip" => {
             let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
             let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
-            let tint =
-                |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
+            let tint = |rgb: u32, a: f64| {
+                rgba((rgb << 8) | ((a * op.opacity).clamp(0., 1.) * 255.).round() as u32)
+            };
             let radius = px(op.radius as f32).min(area.size.height / 2.);
             let smoothing = t.radius.smoothing;
             let ring = px(number("ringWidth").max(1.) as f32);
@@ -4720,8 +4721,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 PaintQuad::new(area)
                     .background(linear_gradient(
                         180.,
-                        linear_color_stop(tint(hex("top"), op.opacity), 0.),
-                        linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
+                        linear_color_stop(tint(hex("top"), 1.), 0.),
+                        linear_color_stop(tint(hex("bottom"), 1.), 1.),
                     ))
                     .corner_radii(radius)
                     .corner_smoothing(smoothing),
@@ -4756,9 +4757,9 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 area,
                 radius,
                 smoothing,
-                (hex("ring"), number("ringAlpha") as f32),
+                (hex("ring"), (number("ringAlpha") * op.opacity) as f32),
                 ring,
-                (hex("light"), number("lightAlpha") as f32),
+                (hex("light"), (number("lightAlpha") * op.opacity) as f32),
                 window,
             );
         }
