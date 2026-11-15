@@ -1,4 +1,5 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
+pub mod agent_launcher;
 pub mod agent_menu;
 pub mod area;
 #[cfg(target_os = "macos")]
@@ -46,11 +47,11 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    viewer_preference, set_viewer_preference, one_project_per_window, opens_in_place, project_menu_entries,
-    ADD, AgentStatus, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,
-    send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
-    zoom_limit,
+    ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
+    check_view3d, document_subtitle, native_color, one_project_per_window, opens_in_place,
+    popover_frame, project_menu_entries, request_close, resize_from_top, send_menu_command,
+    set_viewer_preference, sidebar_frame, system_accent, viewer_preference, viewer_slot,
+    viewer_window, window_backdrop, zoom_limit,
 };
 
 #[cfg(all(test, target_os = "macos"))]

@@ -908,15 +908,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
-        let (working, attention, elapsed, background) = runtime.agent_status();
-        self.host
-            .borrow_mut()
-            .set_agent_status(pm_shell::AgentStatus {
-                working,
-                attention,
-                elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
-                background,
-            });
+        self.sync_agent_launcher(cx);
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
         if painters != self.builtins.painters
@@ -1159,6 +1151,32 @@ impl Controller {
         })
         .detach();
     }
+    fn sync_agent_launcher(&self, cx: &App) {
+        let Some(runtime) = &self.builtins.runtime else { return; };
+        let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
+        let panel_open =
+            self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
+        self.host
+            .borrow_mut()
+            .set_agent_launcher(pm_shell::agent_launcher::Snapshot {
+                tasks: tasks
+                    .into_iter()
+                    .map(|(id, title, step, started_at, attention, running)| {
+                        pm_shell::agent_launcher::Task {
+                            id,
+                            title,
+                            step,
+                            started_at,
+                            attention,
+                            running,
+                        }
+                    })
+                    .collect(),
+                panel_open,
+                revision,
+                active_thread,
+            });
+    }
     /// Whether the Agent popover is showing (or on its way).
     pub fn agent_open(&self, cx: &App) -> bool {
         self.builtins.opening_windows.contains("agent")
@@ -1186,6 +1204,7 @@ impl Controller {
             return;
         };
         let _ = handle.update(cx, |_, w, _| w.remove_window());
+        self.sync_agent_launcher(cx);
         self.update_builtins(cx);
         gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
         cx.notify();
@@ -1270,6 +1289,7 @@ impl Controller {
             return;
         };
         self.builtins.opening_windows.insert(id.into());
+        if id == "agent" { self.sync_agent_launcher(cx); }
         let owner = cx.entity();
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
