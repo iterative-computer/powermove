@@ -2536,6 +2536,12 @@ impl Controller {
             self.message = "Finish the recovery decision or current save first".into();
             return;
         }
+        // An edit left open (its owner never ended it: no button is held,
+        // nothing is typed) would refuse the save: it is finished first, as
+        // Undo does, and the save takes it.
+        if self.edit_left_open(cx) {
+            self.call(Call::History(HistoryCall::Seal), cx);
+        }
         let path = as_path.clone();
         if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
             return;
