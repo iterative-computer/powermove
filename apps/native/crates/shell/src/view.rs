@@ -319,6 +319,7 @@ impl Editor {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
         let mut written = self.layout.clone();
+        for id in self.agent_build_slots.keys() { layout::remove_build(&mut written, id); }
         for (id, (place, showing)) in &self.parked {
             written.insert_at(id, *place);
             // It was the stack's showing tab: the saved stack still shows it,
@@ -1480,8 +1481,7 @@ impl Editor {
     }
     /// Persist the final id in exactly the pre-reserved build geometry.
     pub fn commit_agent_panel_layout(&mut self, cx: &mut Context<Self>) {
-        let record = workspace::write(&self.layout, &self.record);
-        self.commit(record);
+        self.save();
         cx.notify();
     }
     /// set_panel_layout: `docks` become a new workspace (a copy of this one,
@@ -3027,6 +3027,29 @@ mod keyboard_tests {
             args: vec![],
             token: None,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn panel_build_slot_stays_transient_and_handoff_preserves_geometry() {
+        let mut cx = app();
+        let window = cx.open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx))
+        }).unwrap();
+        window.update(&mut cx, |v, _, cx| {
+            v.reserve_agent_panel("test-build", &serde_json::json!({"beside":"inspector"}), 280.);
+            let (dock, group, tab) = v.layout.find("test-build").unwrap();
+            let before = v.layout.docks[dock].groups[group].clone();
+            v.save();
+            assert!(!v.record.to_string().contains("test-build"));
+            v.layout.docks[dock].groups[group].tabs[tab] = "test-final".into();
+            v.release_agent_panel("test-build");
+            v.commit_agent_panel_layout(cx);
+            let (d, g, _) = v.layout.find("test-final").unwrap();
+            assert_eq!((d,g),(dock,group));
+            assert_eq!(v.layout.docks[d].groups[g].size,before.size);
+            assert!(v.record.to_string().contains("test-final"));
+            assert!(!v.record.to_string().contains("test-build"));
+        }).unwrap();
     }
 
     /// At launch an extension's panels park while its realm starts, then come

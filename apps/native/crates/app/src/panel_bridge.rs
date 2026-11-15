@@ -434,7 +434,12 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                             e.commit_agent_panel_layout(cx);
                         } else { e.release_agent_panel(&id); cx.notify(); }
                     });
-                    c.update(cx, |v, cx| { v.agent_panel_builds.remove(&id); v.panel_builds.remove(&id); cx.notify(); });
+                    c.update(cx, |v, cx| {
+                        if let Some(build) = v.agent_panel_builds.remove(&id) {
+                            if let Some(target) = build.target { v.panel_builds.remove(&target); }
+                        }
+                        v.panel_builds.remove(&id); cx.notify();
+                    });
                     Ok(())
                 })?;
             }
