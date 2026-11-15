@@ -172,3 +172,19 @@ fn selection_inside_document_edit_is_suppressed() {
     send(&mut k, layers(&["a"]));
     assert_eq!(count(&k), 0);
 }
+
+#[test]
+fn restore_keeps_key_ids_and_owners_even_when_the_layer_is_missing() {
+    let mut k = kernel();
+    send(
+        &mut k,
+        SelectionCall::Preview(vec![SelectionCall::LayerKeys(vec![(
+            "deleted".into(),
+            "key".into(),
+        )])]),
+    );
+    let before = selection(&k);
+    send(&mut k, SelectionCall::Clear);
+    send(&mut k, HistoryCall::Undo);
+    assert_eq!(selection(&k), before);
+}

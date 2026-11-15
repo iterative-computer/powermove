@@ -166,6 +166,11 @@ impl Selection {
         self.key_layers.clear();
     }
 
+    /// History restores key ids and owners verbatim; only layer picks are filtered.
+    pub(crate) fn restore_live_layers(&mut self, layers: &HashSet<String>) {
+        self.layers.retain(|id| layers.contains(id));
+    }
+
     /// Drops layer ids not in `layers` and key ids not in `keys` (when
     /// given). Returns whether anything went.
     pub(crate) fn prune(

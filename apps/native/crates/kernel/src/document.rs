@@ -2235,7 +2235,7 @@ impl DocumentStore {
             .root()
             .map(|r| model::layer_ids(r, None))
             .unwrap_or_default();
-        selection.prune(&live, None);
+        selection.restore_live_layers(&live);
         self.selection = selection;
         self.emit(StoreEvent::SelectionChanged);
     }
