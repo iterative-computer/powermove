@@ -1025,7 +1025,15 @@ export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
             // A readable form column centred in the sheet, as the original
             // app's Settings: however wide the window, labels and their
             // controls stay close enough to read as pairs.
-            <div style={{ display: "flex", justifyContent: "center" }}>
+            // Its natural height (never shrunk to the viewport): the scroll
+            // scrolls it, and a list inside keeps the rows it shows.
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
               <div
                 style={{
                   ...column,
