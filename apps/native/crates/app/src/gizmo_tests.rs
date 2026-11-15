@@ -2807,3 +2807,19 @@ fn ortho_and_roll_from_camera_view_leave_the_shot_untouched(cx: &mut TestAppCont
         assert_eq!(stored(&s, "cam"), before);
     }
 }
+
+#[gpui::test]
+fn two_d_three_d_returns_to_camera_after_the_last_layer_is_removed(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
+    for _ in 0..3 { undo_3d(&mut s, cx); }
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.update(cx, |g, cx| {
+        g.refresh(cx);
+        !g.studio_active() && !g.studio_free()
+    }));
+    s.surface.update(&mut s.vcx, |g, cx| {
+        g.studio_setting("look", "toggle", cx);
+        assert!(!g.studio_free());
+    });
+}

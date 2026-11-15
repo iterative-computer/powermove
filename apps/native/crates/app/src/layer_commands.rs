@@ -1653,6 +1653,7 @@ pub fn disabled(
         off.extend(PLANNED.iter().map(|c| (*c).to_owned()));
         off.extend(DOCUMENT.iter().map(|c| (*c).to_owned()));
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
+        off.insert("studio.view".into());
         off.insert("text.editSelected".into());
         return off;
     };
@@ -1675,6 +1676,10 @@ pub fn disabled(
             off.insert(name.to_owned());
         }
     };
+    set(
+        "studio.view",
+        layers.iter().any(|l| crate::gizmo::is_studio(published, &l.id)),
+    );
     for name in SELECTION {
         set(name, chosen);
     }
