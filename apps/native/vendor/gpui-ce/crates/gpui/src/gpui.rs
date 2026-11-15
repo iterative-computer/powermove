@@ -51,6 +51,8 @@ pub mod profiler;
 pub mod queue;
 mod resize;
 mod scene;
+mod scroll_layer;
+pub use scroll_layer::ScrollLayerId;
 mod shared_uri;
 mod spring;
 mod style;
