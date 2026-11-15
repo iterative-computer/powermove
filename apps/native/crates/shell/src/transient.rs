@@ -135,7 +135,12 @@ impl Picker {
             .filter_map(|(i, c)| {
                 if c.search_only {
                     let query = self.query.trim().to_lowercase();
-                    return (!query.is_empty() && c.label.to_lowercase().contains(&query))
+                    let name = if c.category == "Effect" {
+                        c.label.strip_prefix("Effect · ").unwrap_or(&c.label)
+                    } else {
+                        &c.label
+                    };
+                    return (!query.is_empty() && name.to_lowercase().contains(&query))
                         .then_some((2, i));
                 }
                 let label = rank(&c.label, &self.query);
@@ -297,5 +302,30 @@ mod palette_alias_tests {
         let choice = Choice::new("New Null Object", "newNull").with_after_effects_terms();
         assert_eq!(choice.display_label("Null Object"), "New Null Object");
         assert_eq!(choice.display_label(""), "New Null Object");
+    }
+}
+
+#[cfg(test)]
+mod palette_effect_tests {
+    use super::*;
+    #[test]
+    fn effects_search_definition_names_and_preserve_electron_wording() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Effect · Gaussian Blur", "palette.addEffect")
+                    .within("Effect")
+                    .on_search(),
+            ],
+            ..Default::default()
+        };
+        assert!(picker.filtered().is_empty());
+        picker.search("GAUSSIAN".into());
+        assert_eq!(picker.filtered(), vec![0]);
+        assert_eq!(
+            picker.choices[0].display_label("GAUSSIAN"),
+            "Effect · Gaussian Blur"
+        );
+        picker.search("Effect".into());
+        assert!(picker.filtered().is_empty());
     }
 }

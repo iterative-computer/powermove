@@ -1588,3 +1588,27 @@ fn palette_effect_applies_to_selection_as_one_undo_step() {
         );
     }
 }
+
+#[test]
+fn palette_layers_stay_inside_active_nested_composition() {
+    let desk = Desk::new(json!({
+        "id":"desk", "compId":"nested", "w":640, "h":360, "fps":30, "dur":10, "assets":{},
+        "comps": {
+            "main": {"id":"main", "w":640, "h":360, "fps":30, "dur":10, "layers":[{"id":"outside", "name":"Logo", "type":"solid", "dur":10}]},
+            "nested": {"id":"nested", "w":640, "h":360, "fps":30, "dur":10, "layers":[{"id":"inside", "name":"Logo", "type":"solid", "dur":10}]}
+        }
+    }));
+    assert_eq!(
+        crate::layer_commands::palette_layers(&desk.published()),
+        vec![("inside".into(), "Logo".into())]
+    );
+    assert!(
+        command_plan(
+            "palette.selectLayer",
+            &[json!("outside")],
+            &desk.published(),
+            0.
+        )
+        .is_none()
+    );
+}
