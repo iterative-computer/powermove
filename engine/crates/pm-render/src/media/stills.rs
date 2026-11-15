@@ -173,7 +173,15 @@ fn decode(
 ) -> Answer {
     let path = &key.0;
     let current = || shared.epoch.load(Ordering::Acquire) == epoch;
-    let estimate = pm_media::image::imageio::decoded_bytes_estimate(path).ok();
+    // A preview is charged as a preview: estimated whole, every still on a
+    // heavy project outgrew the allowance (a few MB while playing), so none
+    // was decoded ahead and the frame meeting it decoded it (50-90 ms).
+    // Its real size is checked against the allowance again once decoded.
+    let estimate = match key.3.edge {
+        Some(edge) => pm_media::image::imageio::preview_bytes_estimate(path, edge),
+        None => pm_media::image::imageio::decoded_bytes_estimate(path),
+    }
+    .ok();
     let reserved = match estimate {
         Some(size) => {
             let admitted = shared
@@ -736,6 +744,35 @@ mod tests {
         settle(&mut prefetch);
         let still = prefetch.take(&path, stamp, interpreted, None).unwrap();
         assert_eq!(still.frame.format.width, w);
+    }
+
+    /// A preview is admitted at the preview's size: a still whose whole
+    /// decode outgrows the allowance (a heavy project's few MB while
+    /// playing) is still decoded ahead at the edge its frame reads.
+    #[test]
+    fn a_preview_is_admitted_at_its_own_size() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let whole = pm_media::image::imageio::decoded_bytes_estimate(&path).unwrap();
+        let (w, h) = pm_media::image::imageio::pixel_size(&path).unwrap();
+        let edge = (w.max(h) / 4).next_power_of_two();
+        let ask = StillAsk {
+            edge: Some(edge),
+            ..Default::default()
+        };
+        let mut prefetch = StillPrefetch::with_limits(whole / 2, READY_TTL);
+        prefetch.request(&path, stamp, ask, &pool);
+        settle(&mut prefetch);
+        assert!(
+            prefetch.take(&path, stamp, ask, Some(edge)).is_some(),
+            "decoded ahead within half the whole still's bytes"
+        );
+        // The whole still, asked for as such, still does not fit.
+        prefetch.request(&path, (stamp.0, stamp.1 + 1), StillAsk::default(), &pool);
+        settle(&mut prefetch);
+        assert!(prefetch
+            .take(&path, (stamp.0, stamp.1 + 1), StillAsk::default(), None)
+            .is_none());
     }
 
     /// A still no frame takes leaves after the TTL, with its bytes, and
