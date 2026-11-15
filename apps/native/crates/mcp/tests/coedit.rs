@@ -409,3 +409,28 @@ fn coedit_paused_worker_observes_panel_stop_without_a_resume() {
     drop(actor);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn stopping_a_bound_run_drops_its_held_write_without_waiting_for_blur() {
+    let (root, host, actor, mut session, id) = attached_fixture();
+    pm_mcp::coedit::touch_field(&id, "synthetic-stop", true);
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    assert_eq!(result["status"], "held");
+    let started = std::time::Instant::now();
+    session.close().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_ne!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+        40
+    );
+    pm_mcp::coedit::touch_field(&id, "synthetic-stop", false);
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
