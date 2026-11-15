@@ -621,8 +621,9 @@ impl Backend {
                 let prepared = catalog
                     .prepare(edit.clone())
                     .map_err(|e| format!("{e:?}"))?;
-                self.native.project_reply =
-                    Some(serde_json::to_value(reply).map_err(|e| e.to_string())?);
+                let mut saved = serde_json::to_value(reply).map_err(|e| e.to_string())?;
+                saved["delete_message"] = json!(prepared.delete_message);
+                self.native.project_reply = Some(saved);
                 return Ok(NativeCommand::Kernel(project_edit_request(
                     edit,
                     &prepared,

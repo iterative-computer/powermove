@@ -7,6 +7,7 @@
 // the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
 // "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
 
+mod action_toast;
 mod access;
 mod after_open;
 mod agent_clients;

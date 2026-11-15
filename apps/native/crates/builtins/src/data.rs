@@ -75,6 +75,7 @@ struct Inflight {
     reply: SyncSender<HostAck>,
     pending: Pending<Result<Ack, KernelFailure>>,
     plan: Option<pm_panel_inspector::v4_effects::Plan>,
+    delete_message: Option<String>,
 }
 struct StateInflight {
     request: HostRequest,
@@ -552,6 +553,17 @@ impl Backend {
                 {
                     return Err(format!("Notes remain applied but could not be saved: {message}. Read the latest notes before retrying."));
                 }
+                if matches!(&item.request.operation, HostOperation::Command { command, .. } if command == "panel.project")
+                    && matches!(ack.reply, Reply::Applied { .. })
+                    && let Some(message) = item.delete_message
+                    && let Some(p) = self.published()
+                    && p.revision() == ack.revision
+                {
+                    self.native.platform.push(("project.effect".into(), serde_json::to_value(pm_panel_media::HostRequest {
+                        owner: pm_panel_media::Stamp { project: p.project.clone(), document: p.snapshot.doc_id, revision: ack.revision },
+                        effect: pm_panel_media::Effect::Deleted { message },
+                    }).map_err(|e| e.to_string())?));
+                }
                 if let Some(plan) = item.plan {
                     self.panel
                         .acknowledge(self.model.as_mut().ok_or("No open project")?, plan, &ack)
@@ -849,7 +861,11 @@ impl KernelData for Data {
                 *expected_revision = Some(request.expected_revision);
             }
             let pending = b.kernel.call(&b.identity.project, next);
+            let delete_message = if matches!(&request.operation, HostOperation::Command { command, .. } if command == "panel.project") {
+                b.native.project_reply.as_mut().and_then(|v| v.as_object_mut()).and_then(|v| v.remove("delete_message")).and_then(|v| v.as_str().map(str::to_owned))
+            } else { None };
             b.pending.push(Inflight {
+                delete_message,
                 request,
                 reply,
                 pending,

@@ -79,6 +79,10 @@ pub enum HostEffect {
     },
     /// Standard medium announcement; errors are high priority.
     Announce(String),
+    Deleted {
+        id: String,
+        message: String,
+    },
     /// Technical gap only, never displayed as product copy.
     IntegrationGap(&'static str),
     /// The Error Log keeps why a kernel operation failed, never alert copy.
@@ -377,6 +381,9 @@ impl<P: LibraryPort> LibraryController<P> {
             _ => None,
         }
     }
+    pub fn restore_deleted(&mut self, id: String) -> Result<(), Failure> {
+        self.send(Command::PutBack(id))
+    }
     fn send(&mut self, command: Command) -> Result<(), Failure> {
         if self.mutation.is_some() {
             return Err(Failure::Busy);
@@ -458,6 +465,13 @@ impl<P: LibraryPort> LibraryController<P> {
             let request = self.mutation.take().expect("matching request");
             match completion.result {
                 Ok(outcome) => {
+                    if let Command::Trash(id) = &request.command {
+                        let name = self.row(id).map_or_else(|_| "project".to_owned(), |r| r.name.clone());
+                        self.effects.push_back(HostEffect::Deleted {
+                            id: id.clone(),
+                            message: format!("Deleted {name}"),
+                        });
+                    }
                     if let Command::Create(_) = &request.command {
                         self.form = None;
                         self.effects.push_back(HostEffect::CloseNewProject);

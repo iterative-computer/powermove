@@ -118,6 +118,7 @@ pub struct HostRequest {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
+    Deleted { message: String },
     ClearPreview,
     ShowPreview(String),
     TogglePreview(String),

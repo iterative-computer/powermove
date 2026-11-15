@@ -75,6 +75,7 @@ pub enum Outbound {
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
 pub struct ProjectLibrary {
     pub controller: LibraryController<KernelLibraryPort>,
+    delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     sink: Sink,
     tokens: Tokens,
     focus: FocusHandle,
@@ -172,6 +173,7 @@ impl ProjectLibrary {
         let layout = Layout::from_key(&setting("projectsView"));
         Self {
             controller,
+            delete_toast: None,
             sink,
             tokens,
             focus: cx.focus_handle(),
@@ -303,6 +305,13 @@ impl ProjectLibrary {
                 );
             }
             HostEffect::FocusProject(id) => (self.sink)(Outbound::FocusProject(id), cx),
+            HostEffect::Deleted { id, message } => {
+                if let Some(window) = self.parent() { crate::v4_native::announce(&window, &message); }
+                let weak = cx.entity().downgrade();
+                self.delete_toast = Some(cx.new(|cx| crate::action_toast::ToastView::new(message, move |cx| {
+                    let _ = weak.update(cx, |v, cx| { let _ = v.controller.restore_deleted(id.clone()); cx.notify(); });
+                }, cx)));
+            }
             HostEffect::Announce(text) => {
                 if let Some(window) = self.parent() {
                     crate::v4_native::announce(&window, &text);
@@ -1967,6 +1976,7 @@ impl Render for ProjectLibrary {
         let menu = self.menu_overlay(&kit, cx);
         div()
             .id("home")
+            .relative()
             .debug_selector(|| "home".into())
             .size_full()
             .flex()
@@ -1978,6 +1988,7 @@ impl Render for ProjectLibrary {
             .child(sidebar)
             .child(content)
             .children(menu)
+            .children(self.delete_toast.clone())
             .child(kit.settle())
     }
 }

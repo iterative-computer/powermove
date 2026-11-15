@@ -163,6 +163,7 @@ pub struct Controller {
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
     pub message: String,
+    pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
@@ -461,6 +462,9 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| {
             v.page_element(w, cx).or_else(|| v.home_element(w, cx))
         })
+    }
+    fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
+        self.0.read(cx).delete_toast.clone().map(|v| v.into_any_element())
     }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
@@ -915,6 +919,7 @@ impl Controller {
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
+            delete_toast: None,
             path: None,
             recent: vec![],
             library: None,

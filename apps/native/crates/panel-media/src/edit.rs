@@ -73,6 +73,8 @@ pub struct Destination {
 pub struct PreparedEdit {
     pub stamp: Stamp,
     pub label: String,
+    /// Whole-file deletion only; emitted after an applied acknowledgement.
+    pub delete_message: Option<String>,
     pub(crate) next: Value,
     pub created: Option<String>,
     pub removed_layers: Vec<String>,
@@ -122,6 +124,23 @@ impl PreparedEdit {
 
 impl Catalog {
     pub fn prepare(&self, edit: Edit) -> Result<PreparedEdit, Error> {
+        let delete_message = match &edit {
+            Edit::DeleteAssets { ids, .. } if !ids.is_empty() => {
+                let unique: HashSet<_> = ids.iter().collect();
+                if unique.len() == 1 {
+                    self.assets
+                        .get(&ids[0])
+                        .map(|a| format!("Deleted {}", a.name))
+                } else {
+                    Some(format!("Deleted {} items", unique.len()))
+                }
+            }
+            Edit::DeleteComposition { id } => self
+                .compositions
+                .get(id)
+                .map(|a| format!("Deleted {}", a.name)),
+            _ => None,
+        };
         let mut next = (*self.root).clone();
         let mut created = None;
         let mut removed_layers = vec![];
@@ -159,10 +178,17 @@ impl Catalog {
                 let folder = self.folders.get(&id).ok_or(Error::MissingItem)?;
                 let parent = folder.parent.as_deref();
                 if folder.link.is_some() {
-                    let descendants: Vec<_> = self.folders.keys().filter(|candidate| self.path(Some(candidate)).iter().any(|f| f.id == id)).cloned().collect();
+                    let descendants: Vec<_> = self
+                        .folders
+                        .keys()
+                        .filter(|candidate| self.path(Some(candidate)).iter().any(|f| f.id == id))
+                        .cloned()
+                        .collect();
                     for child in descendants {
                         if let Some(value) = ensure_map(&mut next, "assetFolders").get_mut(&child) {
-                            if let Some(map) = value.as_object_mut() { map.remove("link"); }
+                            if let Some(map) = value.as_object_mut() {
+                                map.remove("link");
+                            }
                         }
                     }
                 }
@@ -257,6 +283,7 @@ impl Catalog {
         Ok(PreparedEdit {
             stamp: self.stamp.clone(),
             label: label.into(),
+            delete_message,
             next,
             created,
             removed_layers,
@@ -377,6 +404,7 @@ impl Catalog {
         }
         Ok(PreparedEdit {
             stamp: self.stamp.clone(),
+            delete_message: None,
             label: if replace.is_some() {
                 "Replace Media"
             } else {
