@@ -210,61 +210,38 @@ impl PanelLibrary {
             editor.read(cx).host.borrow().send_command(&command, vec![]);
         }
     }
-    fn panel_card(&self, card: &PanelCard, _kit: &Kit, _scale: f32, _width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let t = &self.tokens;
-        let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
-        let (label, glyph) = if card.open {
-            (format!("Show {} in Workspace", card.title), "Show")
-        } else {
-            (format!("Add {} to Workspace", card.title), "Add")
-        };
+    fn panel_card(&self, card: &PanelCard, kit: &Kit, scale: f32, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let t = &kit.t; let c = &t.colors;
+        let (w,h) = cover_size(panel_size(&card.id), scale, width);
+        let key = kit::key(&format!("library-cover-{}", card.id));
+        let hover = kit.hovered(key);
         let command = format!("panel:activate:{}", card.id);
-        div()
-            .id(SharedString::from(format!("library-panel-{}", card.id)))
-            .role(Role::ListItem)
-            .aria_label(card.title.clone())
-            .flex()
-            .flex_col()
-            .gap(px(m.gap))
-            .flex_none()
-            .w(px(m.thumbnail_min * 1.5))
-            .p(px(m.gap))
-            .rounded(px(m.control_radius))
-            .bg(rgb(c.panel_secondary))
-            .child(div().truncate().child(card.title.clone()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(m.gap))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(ty.reading))
-                            .text_color(rgb(c.secondary))
-                            .child(if card.open { "In Workspace" } else { "" }),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("library-panel-{}-add", card.id)))
-                            .role(Role::Button)
-                            .aria_label(label)
-                            .flex_none()
-                            .h(px(m.control))
-                            .px(px(m.inset))
-                            .flex()
-                            .items_center()
-                            .rounded(px(m.control_radius))
-                            .bg(rgb(c.field))
-                            .hover_style(|s| s.bg(rgb(c.hover)))
-                            .text_size(px(ty.reading))
-                            .child(glyph)
-                            .on_click(cx.listener(move |v, _, _, cx| v.send(command.clone(), cx))),
-                    ),
-            )
-            .into_any_element()
+        let click = command.clone();
+        let label = format!("{} {} in Workspace", if card.open { "Show" } else { "Add" }, card.title);
+        let art = card.origin != Origin::BuiltIn;
+        let (from,to) = crate::store_window::art(&card.id);
+        let cover = div().id(SharedString::from(format!("library-panel-{}", card.id)))
+            .role(Role::Button).aria_label(label.clone())
+            .relative().w(px(w)).h(px(h)).flex().flex_col().items_center().justify_center().gap(px(12.))
+            .corner(t, t.radius.lg).bg(rgb(c.panel))
+            .elevated(t, if hover > 0.1 { pm_design::Elevation::Menu } else { pm_design::Elevation::Raised })
+            .when(art, |d| d.bg(linear_gradient(135.,linear_color_stop(rgb(from),0.),linear_color_stop(rgb(to),1.))))
+            .child(kit.symbol(pm_shell::symbol::panel_symbol(&card.id),26.,Weight::Regular,if art { 0xffffff } else { c.muted }))
+            .child(div().w(px(w*0.85)).truncate().text_center().text_role(t,Text::Body).text_color(if art {kit::ink(0xffffff,0.94)} else {rgb(c.secondary).into()}).child(card.title.clone()))
+            .child(div().absolute().top(px(8.)).right(px(8.)).opacity(hover)
+                .child(kit.icon_button(format!("library-add-{}",card.id),if card.open {"eye"} else {"plus"},label,false)
+                    .bg(rgb(c.floating)).on_click(cx.listener(move |v,_,_,cx| {cx.stop_propagation();v.send(command.clone(),cx)}))))
+            .on_click(cx.listener(move |v,_,_,cx| v.send(click.clone(),cx)));
+        div().flex_none().w(px(w)).flex().flex_col().child(kit.track_hover(cover,key))
+            .child(self.ledge(kit,card.title.clone(),None,w)).into_any_element()
+    }
+    fn ledge(&self, kit: &Kit, title: String, detail: Option<String>, width: f32) -> Div {
+        let t = &kit.t;
+        div().w(px(width)).h(px(42.)).px(px(14.)).flex().flex_col().justify_center()
+            .corner(t,t.radius.lg)
+            .bg(linear_gradient(180.,linear_color_stop(kit::ink(t.colors.text,0.),0.),linear_color_stop(kit::ink(t.colors.text,if t.accessibility.increase_contrast {t.translucency.selected} else {t.translucency.hover}),0.75)))
+            .child(div().truncate().text_role(t,Text::Body).child(title))
+            .children(detail.map(|s| div().truncate().text_role(t,Text::Caption).text_color(rgb(t.colors.muted)).child(s)))
     }
     fn workspace_card(&self, card: &WorkspaceCard, cx: &mut Context<Self>) -> AnyElement {
         let t = &self.tokens;
