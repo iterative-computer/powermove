@@ -798,7 +798,7 @@ pub(super) fn create(cx: &mut Cx<'_>, comp_id: &str, s: &NewComp) -> Result<(), 
 }
 
 /// `PM.Comps.duplicate(id)`.
-fn duplicate(cx: &mut Cx<'_>, comp_id: &str, new_id: &str) -> Result<(), CommandError> {
+pub(super) fn duplicate(cx: &mut Cx<'_>, comp_id: &str, new_id: &str) -> Result<(), CommandError> {
     let mut copy = cx.comp_node(Some(comp_id))?.to_value();
     if comp_ids(cx).iter().any(|c| c == new_id) {
         return Err(CommandError::Invalid(format!(

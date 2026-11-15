@@ -5084,12 +5084,15 @@ dependencies = [
  "pm-fx-defs",
  "pm-model",
  "pm-protocol",
+ "pm-render",
  "pm-scene3d",
  "pm-text",
+ "pm-time",
  "pm-wasm",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "zstd",
 ]
 
