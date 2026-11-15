@@ -1694,6 +1694,7 @@ mod capture_tests {
 #[cfg(test)]
 mod scrolling_tests {
     use super::*;
+    use ::core::prelude::v1::test;
     fn fixture(cx: &mut Context<PanelLibrary>) -> PanelLibrary {
         let panels = (0..29)
             .map(|i| PanelCard {
