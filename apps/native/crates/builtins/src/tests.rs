@@ -787,7 +787,7 @@ fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
     assert_eq!((x("a"), x("b"), x("c")), (100., 300., 500.));
     assert_eq!(
         published.history.undo_label.as_deref(),
-        Some("Distribute Layers")
+        Some("Distribute Horizontally")
     );
 }
 

@@ -21,14 +21,42 @@ pub enum AlignMode {
     Bottom,
 }
 
+impl AlignMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Align Left",
+            Self::HorizontalCenter => "Align Horizontal Centres",
+            Self::Right => "Align Right",
+            Self::Top => "Align Top",
+            Self::VerticalCenter => "Align Vertical Centres",
+            Self::Bottom => "Align Bottom",
+        }
+    }
+}
+
 /// How Distribute spaces the layers (`pm_edit::align::Spread`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spread {
     /// Edges or centers at equal steps between the two outermost layers.
     Position(AlignMode),
-    /// Equal gaps between neighbouring boxes.
+    /// Equal spacing between anchors along the selected axis.
     HorizontalSpace,
     VerticalSpace,
+}
+
+impl Spread {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Position(m) => match m {
+                AlignMode::Left | AlignMode::HorizontalCenter | AlignMode::Right => {
+                    "Distribute Horizontally"
+                }
+                _ => "Distribute Vertically",
+            },
+            Self::HorizontalSpace => "Distribute Horizontally",
+            Self::VerticalSpace => "Distribute Vertically",
+        }
+    }
 }
 
 /// Transform commands. Locked layers refuse.
@@ -49,19 +77,15 @@ pub enum TransformCommand {
     /// (`centerAnchor`). Locked layers and layers without bounds are
     /// skipped. Label "Center Anchor Point".
     CenterAnchor { layer_ids: Vec<String>, time: f64 },
-    /// The alignment strip's Align (`pm_edit::align::align`): the layers'
-    /// common box meets the composition frame's edge or center, every layer
-    /// moving by the same world delta, written as `set_property` on
-    /// position (keyed when animated, overriding hand-edit markers as the strip
-    /// does). Text needs the host's fonts. Label "Align Layers".
+    /// Align projected anchors to the comp for one editable layer, or to the
+    /// selected anchor extent for several. Position writes form one undo step.
     Align {
         layer_ids: Vec<String>,
         mode: AlignMode,
         time: f64,
     },
     /// Distribute (`pm_edit::align::distribute`): at least three layers;
-    /// the outermost stay. Text needs the host's fonts. Label "Distribute
-    /// Layers".
+    /// the outermost anchors stay.
     Distribute {
         layer_ids: Vec<String>,
         spread: Spread,
@@ -74,8 +98,8 @@ impl TransformCommand {
         match self {
             TransformCommand::Nudge { .. } => "Nudge",
             TransformCommand::CenterAnchor { .. } => "Center Anchor Point",
-            TransformCommand::Align { .. } => "Align Layers",
-            TransformCommand::Distribute { .. } => "Distribute Layers",
+            TransformCommand::Align { mode, .. } => mode.label(),
+            TransformCommand::Distribute { spread, .. } => spread.label(),
         }
         .to_owned()
     }
@@ -230,8 +254,22 @@ fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(),
     Ok(())
 }
 
-/// Align or distribute through the engine's kernel, then the moves as
-/// property writes.
+/// Position coordinates mapped to composition pixels, including enclosing
+/// groups, parenting and perspective. The layer's own anchor cancels its own
+/// transform at this point, so its position is the point to project.
+fn position_plane<'d>(
+    s: &mut pm_eval::Scope<'_, 'd>,
+    layer: &'d pm_model::Node,
+    time: f64,
+) -> pm_eval::JsResult<pm_eval::space3d::Mat3> {
+    if s.is_3d_layer(layer)? {
+        s.plane_matrix(layer, time, true)
+    } else {
+        let m = s.transform_parent_matrix(layer, time, None)?;
+        Ok([m[0], m[1], 0.0, m[2], m[3], 0.0, m[4], m[5], 1.0])
+    }
+}
+
 fn align(
     cx: &mut Cx<'_>,
     layer_ids: &[String],
@@ -239,50 +277,137 @@ fn align(
     spread: Option<pm_edit::align::Spread>,
     time: f64,
 ) -> Result<(), CommandError> {
+    use pm_edit::align::{Mode, Spread};
+    use pm_eval::space3d::{inverse_plane, project_point};
     let time = values::finite(time, "time")?;
     let Some(first) = layer_ids.first() else {
         return Ok(());
     };
     let comp = cx.find(first)?.comp_id;
     let mut indexes = Vec::new();
-    let mut has_text = false;
     for id in layer_ids {
         let loc = cx.find(id)?;
-        cx.check_lock(&loc, id)?;
-        if loc.comp_id != comp {
-            continue;
+        if loc.comp_id == comp && cx.check_lock(&loc, id).is_ok() && !indexes.contains(&loc.index) {
+            indexes.push(loc.index);
         }
-        let layer = cx.layer_node(&loc)?;
-        has_text |= layer.get("type").and_then(crate::model::str_of) == Some("text");
-        indexes.push(loc.index);
     }
     let ids = cx.layer_ids(comp.as_deref());
-    let mut measure = cx.measure(has_text)?;
-    let moves = cx.kernel(comp.as_deref(), |edit| match (mode, spread) {
-        (Some(m), _) => pm_edit::align::align(
-            edit,
-            &indexes,
-            m,
-            time,
-            &mut *measure,
-            &mut pm_eval::bounds::NoHost,
-        ),
-        (_, Some(s)) => pm_edit::align::distribute(
-            edit,
-            &indexes,
-            s,
-            time,
-            &mut *measure,
-            &mut pm_eval::bounds::NoHost,
-        ),
-        _ => Ok(Vec::new()),
+    let (mut points, size) = cx.kernel(comp.as_deref(), |edit| {
+        edit.read(|s| {
+            let mut points = Vec::new();
+            for &i in &indexes {
+                let l = &s.layers()[i];
+                if pm_eval::node::is_str(pm_eval::node::member(Some(l), "type"), "audio") {
+                    continue;
+                }
+                let m = position_plane(s, l, time)?;
+                if inverse_plane(&m).is_none() {
+                    continue;
+                }
+                let x = s.value3d(l, "position.x", time, 0.0)?;
+                let y = s.value3d(l, "position.y", time, 0.0)?;
+                let (x, y) = project_point(&m, x, y);
+                if !x.is_finite() || !y.is_finite() {
+                    continue;
+                }
+                // Ancestors must be written first. Re-evaluate the child's plane
+                // afterwards so selecting both never applies the parent's move twice.
+                let mut ancestors = Vec::new();
+                let mut pending = s.group_ancestors(l)?;
+                pending.extend(s.parent_by_id(l));
+                while let Some(p) = pending.pop() {
+                    let Some(j) = s.layers().iter().position(|n| std::ptr::eq(n, p)) else {
+                        continue;
+                    };
+                    if ancestors.contains(&j) {
+                        continue;
+                    }
+                    ancestors.push(j);
+                    pending.extend(s.group_ancestors(p)?);
+                    pending.extend(s.parent_by_id(p));
+                }
+                points.push((i, x, y, ancestors.len()));
+            }
+            Ok((points, s.comp_size()))
+        })
     })?;
-    cx.check_fonts()?;
-    for m in moves {
-        let Some(id) = ids.get(m.layer) else { continue };
-        let mut c = SetProperty::new(id.clone(), m.channel, m.value, time);
-        c.preserve_hand_edits = false;
-        properties::set_property(cx, &c)?;
+    if points.is_empty() {
+        return Ok(());
+    }
+    let horizontal = match (mode, spread) {
+        (Some(m), _) | (_, Some(Spread::Position(m))) => {
+            matches!(m, Mode::Left | Mode::HCenter | Mode::Right)
+        }
+        (_, Some(Spread::HorizontalSpace)) => true,
+        _ => false,
+    };
+    let coordinate = |p: &(usize, f64, f64, usize)| if horizontal { p.1 } else { p.2 };
+    let lo = points.iter().map(&coordinate).fold(f64::INFINITY, f64::min);
+    let hi = points
+        .iter()
+        .map(&coordinate)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut targets = Vec::new();
+    if let Some(mode) = mode {
+        let (lo, hi) = if points.len() == 1 {
+            (0.0, if horizontal { size.0 } else { size.1 })
+        } else {
+            (lo, hi)
+        };
+        let target = match mode {
+            Mode::Left | Mode::Top => lo,
+            Mode::Right | Mode::Bottom => hi,
+            _ => (lo + hi) / 2.0,
+        };
+        for &(i, x, y, depth) in &points {
+            targets.push((
+                i,
+                if horizontal { target } else { x },
+                if horizontal { y } else { target },
+                depth,
+            ));
+        }
+    } else {
+        if points.len() < 3 {
+            return Ok(());
+        }
+        points.sort_by(|a, b| coordinate(a).total_cmp(&coordinate(b)));
+        for (k, &(i, x, y, depth)) in points.iter().enumerate() {
+            let target = lo + (hi - lo) * k as f64 / (points.len() - 1) as f64;
+            targets.push((
+                i,
+                if horizontal { target } else { x },
+                if horizontal { y } else { target },
+                depth,
+            ));
+        }
+    }
+    targets.sort_by_key(|p| p.3);
+    for (i, x, y, _) in targets {
+        let next = cx.kernel(comp.as_deref(), |edit| {
+            edit.read(|s| {
+                let l = &s.layers()[i];
+                let m = position_plane(s, l, time)?;
+                let Some(inv) = inverse_plane(&m) else {
+                    return Ok(None);
+                };
+                let (x, y) = project_point(&inv, x, y);
+                let old_x = s.value3d(l, "position.x", time, 0.0)?;
+                let old_y = s.value3d(l, "position.y", time, 0.0)?;
+                Ok(Some((x, y, old_x, old_y)))
+            })
+        })?;
+        let Some((x, y, old_x, old_y)) = next else {
+            continue;
+        };
+        for (channel, value, old) in [("position.x", x, old_x), ("position.y", y, old_y)] {
+            if !value.is_finite() || (value - old).abs() < 1e-9 {
+                continue;
+            }
+            let mut c = SetProperty::new(ids[i].clone(), channel, value, time);
+            c.preserve_hand_edits = false;
+            properties::set_property(cx, &c)?;
+        }
     }
     Ok(())
 }

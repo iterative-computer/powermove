@@ -1072,7 +1072,7 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     );
     assert_eq!(
         desk.published().history.undo_label.as_deref(),
-        Some("Distribute Layers")
+        Some("Distribute Horizontally")
     );
     desk.undo();
     assert_eq!(desk.document(), before);
@@ -1083,19 +1083,10 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     let off =
         crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default());
     assert!(off.contains("distributeLayers") && !off.contains("alignLayers"));
-    // Align: the selection's box meets the composition's edge, each layer
-    // moving by the same amount.
+    // Each selected anchor meets the leftmost selected anchor.
     desk.run("alignLayers", &[json!("left")], 0.);
-    let (a, b) = (x(&desk, "a"), x(&desk, "b"));
-    assert!(a < 100., "moved left: {a}");
-    assert_eq!(b - a, 50., "the pair keeps its spacing");
-    assert_eq!(
-        desk.published().history.undo_label.as_deref(),
-        Some("Align Layers")
-    );
-    desk.run("alignLayers", &[json!("right")], 0.);
-    assert!(x(&desk, "b") > 150.);
-    desk.undo();
+    assert_eq!((x(&desk, "a"), x(&desk, "b")), (100., 100.));
+    assert_eq!(desk.published().history.undo_label.as_deref(), Some("Align Left"));
     desk.undo();
     assert_eq!(desk.document(), before);
 }

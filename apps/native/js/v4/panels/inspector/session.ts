@@ -204,7 +204,7 @@ export class InspectorSession {
       (intent.type === "align" || intent.type === "distribute") &&
       (this.snapshot.target.kind !== "layers" ||
         this.snapshot.target.first.audio ||
-        this.snapshot.target.first.locked)
+        (this.snapshot.target.first.locked && this.snapshot.target.count === 1))
     )
       return false;
     // Distribute spaces three or more layers; the outermost stay.

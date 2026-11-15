@@ -118,7 +118,7 @@ export const alignmentButtons: {
   },
   { id: "bottom", label: "Align Bottom", symbol: "align.vertical.bottom" },
 ];
-/** Equal gaps between three or more selected layers. */
+/** Evenly space the anchors of three or more selected layers. */
 export const distributeButtons: {
   id: "horizontal" | "vertical";
   label: string;
@@ -255,13 +255,13 @@ function AlignmentStrip({
                 key={button.id}
                 id={`align:${button.id}`}
                 label={button.label}
-                tooltip={`${button.label}\nTo composition`}
+                tooltip={`${button.label}\nAnchor points · ${target.count === 1 ? "To composition" : "To selection"}`}
                 symbol={button.symbol}
                 style={{
                   flexGrow: 1,
                   symbolSize: token("metrics.symbol_inline"),
                 }}
-                disabled={target.first.locked}
+                disabled={target.first.locked && target.count === 1}
                 tabIndex={alignmentButtons[focused].id === button.id ? 0 : -1}
                 onActivate={() =>
                   session.send({ type: "align", alignment: button.id })
@@ -271,7 +271,7 @@ function AlignmentStrip({
           </div>
         ),
       )}
-      {/* Equal gaps between three or more layers, the outermost staying
+      {/* Evenly spaced anchors, the outermost staying
           put. The well keeps its place with fewer, its buttons dimmed. */}
       <div style={{ ...horizontal, ...well, gap: token("metrics.gap") }}>
         {distributeButtons.map((button) => (
@@ -279,9 +279,9 @@ function AlignmentStrip({
             key={button.id}
             id={`distribute:${button.id}`}
             label={button.label}
-            tooltip={`${button.label}\nEqual gaps between three or more layers`}
+            tooltip={`${button.label}\nEvenly space anchor points`}
             symbol={button.symbol}
-            disabled={target.first.locked || target.count < 3}
+            disabled={target.count < 3}
             tabIndex={-1}
             onActivate={() =>
               session.send({ type: "distribute", axis: button.id })

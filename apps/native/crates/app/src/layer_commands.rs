@@ -1167,7 +1167,7 @@ pub fn command_plan(
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
         "rippleDelete" => ripple_delete(&layers, &selected),
         // The Properties alignment strip, for the palette and agents: the
-        // selection's box meets the composition's edge or centre.
+        // selection's anchors meet the target edge or centre.
         "alignLayers" => {
             let mode = match args.first().and_then(serde_json::Value::as_str)? {
                 "left" => AlignMode::Left,
@@ -1180,7 +1180,7 @@ pub fn command_plan(
             };
             any.then(|| {
                 plain(
-                    "Align Layers",
+                    mode.label(),
                     vec![
                         TransformCommand::Align {
                             layer_ids: selected,
@@ -1192,7 +1192,7 @@ pub fn command_plan(
                 )
             })
         }
-        // Equal gaps between three or more layers; the outermost stay.
+        // Evenly spaced anchors; the outermost stay.
         "distributeLayers" => {
             let spread = match args.first().and_then(serde_json::Value::as_str)? {
                 "horizontal" => Spread::HorizontalSpace,
@@ -1201,7 +1201,7 @@ pub fn command_plan(
             };
             (selected.len() >= 3).then(|| {
                 plain(
-                    "Distribute Layers",
+                    spread.label(),
                     vec![
                         TransformCommand::Distribute {
                             layer_ids: selected,

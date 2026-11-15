@@ -43,6 +43,10 @@ const PROJECT: &str = r##"{
 /// Every transform channel `PM.mkLayer` creates, filled in where the
 /// fixture leaves it out (real layers always have them).
 fn store() -> DocumentStore {
+    store_with(|_| {})
+}
+
+fn store_with(change: impl FnOnce(&mut Value)) -> DocumentStore {
     let mut project = parse(PROJECT).unwrap();
     let defaults = [
         ("perspective", 50.0),
@@ -89,6 +93,7 @@ fn store() -> DocumentStore {
             }
         }
     }
+    change(&mut project);
     DocumentStore::new_untitled(project)
 }
 
@@ -907,31 +912,245 @@ fn key_drags_restart_from_the_pointer_down_state() {
     assert_eq!(s.history().len(), 1);
 }
 
+fn projected_anchor(s: &DocumentStore, id: &str) -> (f64, f64) {
+    let loc = pm_kernel::model::find_layer(s.root().unwrap(), id).unwrap();
+    let snapshot = s.snapshot();
+    let mut edit =
+        pm_edit::Edit::new(&snapshot.document, "C1", "C1", None, Default::default()).unwrap();
+    edit.read(|scope| {
+        let l = &scope.layers()[loc.index];
+        let x = scope.value3d(l, "anchor.x", 0.0, 0.0)?;
+        let y = scope.value3d(l, "anchor.y", 0.0, 0.0)?;
+        let m = scope.plane_matrix(l, 0.0, false)?;
+        Ok(pm_eval::space3d::project_point(&m, x, y))
+    })
+    .unwrap()
+}
+
+fn close(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+}
+
 #[test]
-fn align_moves_the_common_box_to_the_frame_edge_once() {
-    use pm_kernel::TransformCommand;
-    use pm_kernel::commands::transform::AlignMode;
+fn anchor_align_single_off_centre_and_one_named_undo_step() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
+    let mut s = store_with(|p| {
+        let l = &mut p
+            .as_object_mut()
+            .unwrap()
+            .get_mut("layers")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()[1];
+        l.as_object_mut()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("anchor.x", parse(r#"{"v":137,"kf":[]}"#).unwrap());
+    });
+    let original = layer(&s, "box");
+    run(
+        &mut s,
+        TransformCommand::Align {
+            layer_ids: vec!["box".into()],
+            mode: AlignMode::HorizontalCenter,
+            time: 0.0,
+        },
+    );
+    close(projected_anchor(&s, "box").0, 100.0);
+    assert_eq!(s.history().len(), 1);
+    assert_eq!(s.history().undo_label(), Some("Align Horizontal Centres"));
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "box"), original);
+}
+
+#[test]
+fn anchor_align_selection_left_skips_locked_and_is_idempotent() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
     let mut s = store();
-    let align = || TransformCommand::Align {
-        layer_ids: vec!["box".into(), "top".into()],
-        mode: AlignMode::Right,
+    let original = layer(&s, "locked");
+    let command = || TransformCommand::Align {
+        layer_ids: vec!["box".into(), "locked".into(), "top".into()],
+        mode: AlignMode::Left,
         time: 0.0,
     };
-    let (bx, tx) = (
-        num(&layer(&s, "box"), &["p", "position.x", "v"]),
-        num(&layer(&s, "top"), &["p", "position.x", "v"]),
-    );
-    run(&mut s, align());
-    let (bx2, tx2) = (
-        num(&layer(&s, "box"), &["p", "position.x", "v"]),
-        num(&layer(&s, "top"), &["p", "position.x", "v"]),
-    );
-    assert_ne!(bx, bx2, "the selection moved");
-    assert!(
-        ((bx2 - bx) - (tx2 - tx)).abs() < 1e-9,
-        "both by the same delta"
-    );
+    run(&mut s, command());
+    close(projected_anchor(&s, "box").0, 10.0);
+    close(projected_anchor(&s, "top").0, 10.0);
+    assert_eq!(layer(&s, "locked"), original);
+    assert_eq!(s.history().len(), 1);
     let before = s.revision();
-    run(&mut s, align());
-    assert_eq!(s.revision(), before, "already aligned");
+    run(&mut s, command());
+    assert_eq!(s.revision(), before);
+}
+
+#[test]
+fn anchor_align_parent_and_child_3d_projection() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
+    for three_d in [false, true] {
+        let mut s = store_with(|p| {
+            let layers = p
+                .as_object_mut()
+                .unwrap()
+                .get_mut("layers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            let parent = layers[0].as_object_mut().unwrap();
+            parent.insert("threeD", Value::Bool(three_d));
+            let props = parent.get_mut("p").unwrap().as_object_mut().unwrap();
+            for (key, v) in [
+                ("rotation", 27.0),
+                ("rotation.y", 32.0),
+                ("position.z", 130.0),
+                ("scale.x", 170.0),
+            ] {
+                props.insert(key, parse(&format!(r#"{{"v":{v},"kf":[]}}"#)).unwrap());
+            }
+            let child = layers[1].as_object_mut().unwrap();
+            child.insert("parent", Value::from("top"));
+            child.insert("threeD", Value::Bool(three_d));
+        });
+        let a = projected_anchor(&s, "top");
+        let b = projected_anchor(&s, "box");
+        let target = (a.0 + b.0) / 2.0;
+        // Child first in selection deliberately exercises ancestor ordering.
+        run(
+            &mut s,
+            TransformCommand::Align {
+                layer_ids: vec!["box".into(), "top".into()],
+                mode: AlignMode::HorizontalCenter,
+                time: 0.0,
+            },
+        );
+        close(projected_anchor(&s, "top").0, target);
+        close(projected_anchor(&s, "box").0, target);
+        close(projected_anchor(&s, "top").1, a.1);
+        close(projected_anchor(&s, "box").1, b.1);
+        assert_eq!(s.history().len(), 1);
+    }
+}
+
+#[test]
+fn anchor_distribute_spaces_anchors_and_undoes_once() {
+    use pm_kernel::{TransformCommand, commands::transform::Spread};
+    let mut s = store();
+    let original = layer(&s, "top");
+    run(
+        &mut s,
+        TransformCommand::Distribute {
+            layer_ids: vec!["box".into(), "bottom".into(), "top".into()],
+            spread: Spread::HorizontalSpace,
+            time: 0.0,
+        },
+    );
+    close(projected_anchor(&s, "bottom").0, 0.0);
+    close(projected_anchor(&s, "top").0, 25.0);
+    close(projected_anchor(&s, "box").0, 50.0);
+    assert_eq!(s.history().len(), 1);
+    assert_eq!(s.history().undo_label(), Some("Distribute Horizontally"));
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "top"), original);
+}
+
+#[test]
+fn anchor_align_all_edges_centres_and_group_anchor() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
+    for (mode, expected, horizontal) in [
+        (AlignMode::Left, 0., true),
+        (AlignMode::Right, 200., true),
+        (AlignMode::HorizontalCenter, 100., true),
+        (AlignMode::Top, 0., false),
+        (AlignMode::Bottom, 100., false),
+        (AlignMode::VerticalCenter, 50., false),
+    ] {
+        let mut s = store_with(|p| {
+            let layers = p
+                .as_object_mut()
+                .unwrap()
+                .get_mut("layers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            layers[0]
+                .as_object_mut()
+                .unwrap()
+                .insert("type", Value::from("group"));
+            layers[1]
+                .as_object_mut()
+                .unwrap()
+                .insert("group", Value::from("top"));
+        });
+        run(
+            &mut s,
+            TransformCommand::Align {
+                layer_ids: vec!["top".into()],
+                mode,
+                time: 0.0,
+            },
+        );
+        let anchor = projected_anchor(&s, "top");
+        close(if horizontal { anchor.0 } else { anchor.1 }, expected);
+        // The member keeps its local Position when the group moves.
+        close(num(&layer(&s, "box"), &["p", "position.x", "v"]), 50.);
+    }
+}
+
+#[test]
+fn anchor_distribute_parented_3d_on_both_axes() {
+    use pm_kernel::{TransformCommand, commands::transform::Spread};
+    for horizontal in [true, false] {
+        let mut s = store_with(|p| {
+            let layers = p
+                .as_object_mut()
+                .unwrap()
+                .get_mut("layers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            for i in [0, 1, 5] {
+                let l = layers[i].as_object_mut().unwrap();
+                l.insert("threeD", Value::Bool(true));
+                let props = l.get_mut("p").unwrap().as_object_mut().unwrap();
+                props.insert(
+                    "position.z",
+                    parse(&format!(r#"{{"v":{},"kf":[]}}"#, i * 90)).unwrap(),
+                );
+            }
+            layers[1]
+                .as_object_mut()
+                .unwrap()
+                .insert("parent", Value::from("top"));
+        });
+        let before: Vec<_> = ["top", "box", "bottom"]
+            .iter()
+            .map(|id| projected_anchor(&s, id))
+            .collect();
+        let coord = |p: &(f64, f64)| if horizontal { p.0 } else { p.1 };
+        let lo = before.iter().map(coord).fold(f64::INFINITY, f64::min);
+        let hi = before.iter().map(coord).fold(f64::NEG_INFINITY, f64::max);
+        run(
+            &mut s,
+            TransformCommand::Distribute {
+                layer_ids: vec!["box".into(), "top".into(), "bottom".into()],
+                spread: if horizontal {
+                    Spread::HorizontalSpace
+                } else {
+                    Spread::VerticalSpace
+                },
+                time: 0.0,
+            },
+        );
+        let mut after: Vec<_> = ["top", "box", "bottom"]
+            .iter()
+            .map(|id| coord(&projected_anchor(&s, id)))
+            .collect();
+        after.sort_by(f64::total_cmp);
+        for (k, value) in after.iter().enumerate() {
+            close(*value, lo + (hi - lo) * k as f64 / 2.);
+        }
+        assert_eq!(s.history().len(), 1);
+    }
 }
