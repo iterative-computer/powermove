@@ -184,16 +184,18 @@ pub struct State {
     pub row: usize,
     pub pending: std::collections::VecDeque<usize>,
     pub complete: bool,
+    pub committed: std::collections::BTreeMap<usize, std::time::Instant>,
 }
 impl Default for State {
     fn default() -> Self {
         let now = std::time::Instant::now();
-        Self { stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false }
+        Self { stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
     }
 }
 impl State {
     pub fn event(&mut self, event: &str, row: usize) {
         if let Some(stage) = stage(event) {
+            if stage == Stage::Ink { self.committed.insert(row, std::time::Instant::now()); }
             self.stage = stage;
             self.row = row;
             self.changed = std::time::Instant::now();

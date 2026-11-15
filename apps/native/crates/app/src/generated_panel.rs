@@ -115,12 +115,12 @@ fn build_frame(
     let row_height = t.metrics.row;
     let height = (rect.h - t.metrics.header).max(0.);
     let dim = panel_build::playback(playing).0;
-    div().w_full().h(px(height)).overflow_hidden().rounded(px(8.))
+    div().absolute().inset_0().occlude().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
             let y = ((state.row as f32 + 0.5) * row_height).min((size[1] - 8.).max(0.));
             window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
-                window.paint_quad(PaintQuad::new(bounds).corner_radii(px(8.)).background(rgb(if light { 0xfafafa } else { 0x1c1c1c })));
+
                 let mut paint = |x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, alpha: f32| {
                     let b = Bounds::new(bounds.origin + point(px(x), px(y)), gpui::size(px(w), px(h)));
                     window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
@@ -140,12 +140,6 @@ fn build_frame(
                         }
                     }
                 }
-                for row in 0..state.row {
-                    let row_y = (row as f32 + 0.5) * row_height;
-                    if row_y + 3. < size[1] {
-                        paint(12., (row_y-3.).max(0.), (size[0]-24.).max(0.), 6., 3., if light { 0x111111 } else { 0xf2f2f2 }, dim);
-                    }
-                }
                 if state.stage == panel_build::Stage::Ink {
                     let progress = if reduced { 1. } else { panel_build::ink_ease(elapsed / 0.28) };
                     let color = panel_build::ink_color(elapsed, light, reduced);
@@ -153,6 +147,49 @@ fn build_frame(
                 }
             });
         }).w_full().h_full()).into_any_element()
+}
+
+const BUILD_ROW: f32 = 32.;
+const BUILD_HEADER: f32 = 42.;
+const BUILD_INSET: f32 = 16.;
+
+fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
+    div().h(px(BUILD_HEADER)).flex_none().px(px(BUILD_INSET)).flex().items_center()
+        .text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.colors.text))
+        .child(def["title"].as_str().unwrap_or("Controls").to_owned())
+}
+
+/// The actual generated slider's label, track, value fill and numeric text.
+/// Sharing this element prevents capture-only stand-ins from drifting from UI.
+fn slider_control(control: &Value, current: &Value, t: &pm_design::Tokens) -> Div {
+    let fraction = control_fraction(control, current);
+    let text = format!("{}{}", shown(current), control["unit"].as_str().unwrap_or(""));
+    div().h(px(BUILD_ROW)).flex_none().px(px(BUILD_INSET)).child(
+        div().relative().size_full().text_size(px(12.)).text_color(rgb(t.colors.secondary))
+            .child(div().absolute().left_0().top_0().h_full().w(relative(0.34)).flex().items_center()
+                .truncate().child(control["label"].as_str().unwrap_or("").to_owned()))
+            .child(div().absolute().left(relative(0.38)).top(px(15.)).w(relative(0.44)).h(px(2.))
+                .rounded(px(1.)).bg(pm_shell::kit::ink(t.colors.text, 0.14))
+                .child(div().h_full().w(relative(fraction)).rounded(px(1.)).bg(rgb(t.colors.text))))
+            .child(div().absolute().left(relative(0.87)).top_0().h_full().w(relative(0.13)).flex()
+                .items_center().justify_end().text_size(px(11.)).text_color(rgb(t.colors.text))
+                .font_family(pm_design::MONO_FONT).child(text)))
+}
+
+fn control_fraction(control: &Value, current: &Value) -> f32 {
+    match (control["min"].as_f64(), control["max"].as_f64(), current.as_f64()) {
+        (Some(lo), Some(hi), Some(value)) if hi > lo => ((value-lo)/(hi-lo)).clamp(0., 1.) as f32,
+        _ => 0.5,
+    }
+}
+
+fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bool) -> f32 {
+    let Some(build) = build else { return 1.; };
+    if build.stage == panel_build::Stage::Ready { return 1.; }
+    build.committed.get(&index).map_or(0., |at| {
+        let age = at.elapsed().as_secs_f32();
+        if reduced { panel_build::reveal(age, true) } else { panel_build::fade(age, 0.28) }
+    })
 }
 
 /// What a control reads and writes.
@@ -734,9 +771,9 @@ fn render(
     use pm_shell::kit::ink;
     let t = v.host.borrow().tokens.clone();
     let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
-    if let Some(build) = v.panel_builds.get(id).filter(|b| b.stage != panel_build::Stage::Ready) {
-        return build_surface(build.clone(), rect, &t, v.running(), window, cx);
-    }
+    let build = v.panel_builds.get(id).cloned();
+    let overlay = build.as_ref().filter(|b| b.stage != panel_build::Stage::Ready || b.changed.elapsed().as_secs_f32() < 0.36)
+        .map(|b| build_surface(b.clone(), rect, &t, v.running(), window, cx));
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -755,11 +792,12 @@ fn render(
         .id(SharedString::from(format!("generated-{id}")))
         .flex()
         .flex_col()
+        .relative().bg(rgb(c.panel)).rounded(px(t.radius.lg))
         .w_full()
         .h(px((rect.h - m.header).max(0.)))
-        .py(px(m.gap))
         .overflow_y_scroll()
-        .text_size(px(ty.body));
+        .text_size(px(ty.body))
+        .child(panel_title(def, &t).opacity(if build.as_ref().is_some_and(|b| b.stage == panel_build::Stage::Wake) { panel_build::fade(build.as_ref().unwrap().started.elapsed().as_secs_f32(), 0.24) } else { 1. }));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
         body = body.child(
             div()
@@ -882,6 +920,15 @@ fn render(
                     .text_color(rgb(c.text))
                     .child(readout(v, control["source"].as_str().unwrap_or(""))),
             ),
+            "slider" => {
+                let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
+                let text = shown(&current);
+                div().child(slider_control(control, &current, &t).id(SharedString::from(eid))
+                    .role(Role::Slider).aria_label(label.clone())
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.generated_edit(panel.clone(), index, text.clone(), cx)
+                    })))
+            }
             "button" => {
                 let accent = control["primary"] == true && primaries == 1;
                 div().px(px(m.inset)).py(px(m.gap / 2.)).child(
@@ -1049,8 +1096,9 @@ fn render(
                 }),
             },
         };
-        body = body.child(element);
+        body = body.child(element.opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
     }
+    if let Some(overlay) = overlay { body = body.child(overlay); }
     body.into_any_element()
 }
 
@@ -1282,19 +1330,23 @@ mod tests {
 
 #[cfg(test)]
 mod panel_build_capture {
-    use super::{build_frame, panel_build, publication};
+    use super::{build_frame, panel_build, publication, panel_title, slider_control, control_opacity};
     use gpui::{AppContext, HeadlessAppContext, IntoElement, ParentElement, Render, Styled, px, size};
     use pm_design::{Accessibility, Scheme, Tokens};
     use serde_json::json;
     use std::sync::Arc;
 
-    struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32 }
+    struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32, definition: serde_json::Value }
     impl Render for Frame {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            gpui::div().size_full().bg(gpui::rgb(self.tokens.colors.panel)).child(build_frame(
-                self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header },
-                &self.tokens, false, self.age, self.elapsed,
-            ))
+            let mut body = gpui::div().relative().size_full().bg(gpui::rgb(self.tokens.colors.panel))
+                .font_family(pm_design::TEXT_FONT).child(panel_title(&self.definition, &self.tokens));
+            for (index, control) in self.definition["controls"].as_array().unwrap().iter().enumerate() {
+                body = body.child(slider_control(control, &control["def"], &self.tokens)
+                    .opacity(control_opacity(Some(&self.state), index, self.tokens.accessibility.reduce_motion)));
+            }
+            body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed))
+
         }
     }
 
@@ -1324,8 +1376,17 @@ mod panel_build_capture {
                 assert_eq!(state.stage, panel_build::Stage::Sketch);
                 state.stage = stage;
                 state.row = row;
+                let count = if stage == panel_build::Stage::Ready { 5 } else { row };
+                for index in 0..count { state.committed.insert(index, std::time::Instant::now() - std::time::Duration::from_secs(2)); }
+                if stage == panel_build::Stage::Ink { state.committed.insert(row, std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed)); }
+                let definition = json!({"title":"Colour grade","controls":[
+                    {"type":"slider","label":"Exposure","def":0.35,"min":-1,"max":1},
+                    {"type":"slider","label":"Contrast","def":12,"min":0,"max":30},
+                    {"type":"slider","label":"Saturation","def":108,"min":0,"max":135},
+                    {"type":"slider","label":"Warmth","def":5600,"min":2000,"max":8000},
+                    {"type":"slider","label":"Tint","def":-4,"min":-10,"max":20}]});
                 let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
-                let window = cx.open_window(size(px(320.), px(360.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed })).unwrap();
+                let window = cx.open_window(size(px(320.), px(360.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed, definition })).unwrap();
                 for _ in 0..4 { cx.run_until_parked(); }
                 cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
                 cx.run_until_parked();
