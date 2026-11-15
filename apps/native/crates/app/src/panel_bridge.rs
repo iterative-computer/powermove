@@ -1501,6 +1501,7 @@ fn input_steps(args: &Value, points: &[Point<Pixels>]) -> Vec<Step> {
     if args["action"] == "scroll" {
         let dy = -args["deltaY"].as_f64().unwrap_or(0.) as f32;
         steps.push(Step::Event(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            is_momentum: false,
             position: first,
             delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
             modifiers,

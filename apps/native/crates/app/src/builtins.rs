@@ -2100,6 +2100,7 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        self.host.borrow_mut().defer_viewer_raster(after.is_some());
         if let Some(host) = &self.extensions.host {
             host.shell_state(serde_json::json!({
                 "zoom": self.view.zoom.unwrap_or(1.),
@@ -2112,7 +2113,28 @@ impl Controller {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
             }
-            let Ok(pending) = this.update(cx, |v, _| v.write_ui()) else {
+            let Ok(pending) = this.update(cx, |v, cx| {
+                if after.is_some() {
+                    let layer = metal::MetalLayer::new();
+                    let old = v.host.borrow().viewer_layer();
+                    if pm_engine_service::layers::configure_layer(
+                        objc2::MainThreadMarker::new().unwrap(),
+                        &layer,
+                        &old.device(),
+                    )
+                    .is_ok()
+                        && v.host.borrow_mut().stage_viewer_raster(layer.clone())
+                        && let Some(viewer) = &v.viewer
+                    {
+                        let crop = v.host.borrow().viewer_crop.get().map(|[x, y, canvas_width, canvas_height]| pm_engine_service::Crop { x, y, canvas_width, canvas_height });
+                        let _ = viewer.retarget(layer, crop);
+                        v.builtins.frame_outline = Default::default();
+                    }
+                }
+                v.host.borrow_mut().defer_viewer_raster(false);
+                cx.notify();
+                v.write_ui()
+            }) else {
                 return;
             };
             if let Some(pending) = pending {
@@ -2513,6 +2535,11 @@ impl crate::gizmo::Host for ControllerDelegate {
             let center = v.viewer_center();
             v.view.navigate(change, center, limit);
             v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
+            if matches!(change, crate::gizmo::Navigate::Zoom { .. }) {
+                let mut host = v.host.borrow_mut();
+                host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
+                host.place_cached_viewer();
+            }
             cx.notify();
         });
     }

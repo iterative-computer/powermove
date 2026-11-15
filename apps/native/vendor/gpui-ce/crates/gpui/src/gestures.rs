@@ -1008,6 +1008,7 @@ fn scroll_event(
     touch_phase: TouchPhase,
 ) -> ScrollWheelEvent {
     ScrollWheelEvent {
+        is_momentum: false,
         position,
         delta: ScrollDelta::Pixels(delta),
         modifiers: Modifiers::default(),
