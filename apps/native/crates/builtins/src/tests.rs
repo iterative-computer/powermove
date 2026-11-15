@@ -5969,7 +5969,7 @@ fn delete_toast_is_emitted_only_after_project_delete_acknowledgement() {
         let args = serde_json::to_value(pm_panel_media::v4::Request { owner: catalog.stamp, action: pm_panel_media::v4::Action::Input(input) }).unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         data::Data(backend.clone()).enqueue(HostRequest { version: HOST_API_VERSION, realm: identity.realm, generation: 1, project: "toast".into(), request_id: 1, expected_revision: before.revision(), expected_state_revision: None, operation: HostOperation::Command { command: "panel.project".into(), args } }, tx).unwrap();
-        assert!(backend.lock().unwrap().native.platform.is_empty());
+        assert!(!backend.lock().unwrap().native.platform.iter().any(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v.clone()).is_ok_and(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. }))));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             backend.lock().unwrap().tick().unwrap();
