@@ -1966,6 +1966,9 @@ impl Controller {
                 let _ = host.set_regions(regions);
                 let _ = host.set_content_regions(content);
                 host.set_fill(Some(fill));
+                // The ground is the panels': the viewer's stage shows the
+                // viewer through the page, never under a panel's tint.
+                let _ = host.set_fill_regions(Some(mine.iter().map(|(_, r)| *r).collect()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,
