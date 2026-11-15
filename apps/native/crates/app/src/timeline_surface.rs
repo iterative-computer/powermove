@@ -198,6 +198,10 @@ enum Job {
         channel: String,
         keys: Vec<String>,
     },
+    FocusGraph {
+        layer: String,
+        channel: String,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewed {
@@ -1187,6 +1191,13 @@ impl TimelineSurface {
             channel,
             keys,
         });
+        self.pump(cx);
+    }
+    /// A property keyed from Properties (its diamond): the graph plots its
+    /// track, as a press on its row there did in v1 (`focusGraph`), without
+    /// opening the graph.
+    pub fn focus_graph(&mut self, layer: String, channel: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::FocusGraph { layer, channel });
         self.pump(cx);
     }
     /// Playing, the view turns a page to keep the head in sight, as v1: once
@@ -2731,6 +2742,10 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             let effects = client.dispatch(plan).await.map_err(text)?;
             client.publish_view().await.map_err(text)?;
             Ok(effects)
+        }
+        Job::FocusGraph { layer, channel } => {
+            client.model.graph_focus = Some((layer, channel));
+            Ok(vec![])
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};
