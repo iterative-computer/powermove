@@ -392,14 +392,13 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         let item = all.iter().find(|i| i.command == command).unwrap();
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
-    // Workspace and panel menus exist (HIG placement). One project per
-    // window: no window tabs, so no tab items at all.
-    for c in ["toggleTabBar:", "newTab", "mergeAllWindows:", "nextTab", "moveTabToNewWindow"] {
-        assert!(all.iter().all(|i| i.command != c), "{c}");
-    }
-    for c in ["panels", "workspaces"] {
+    // Workspace and panel menus exist (HIG placement), and v1's tab items
+    // (Open Projects In: Tabs, the default). The system's own tab bar stays
+    // hidden behind the toolbar's tabs: no Show Tab Bar.
+    for c in ["newTab", "mergeAllWindows:", "nextTab", "moveTabToNewWindow", "panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");
     }
+    assert!(all.iter().all(|i| i.command != "toggleTabBar:"));
 }
 
 #[test]
