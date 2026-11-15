@@ -13,6 +13,23 @@ use pm_protocol::{
 use pm_shell::{Command as ShellCommand, Host};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
+/// Cancellation wins even if the sheet's abort callback also sent an answer.
+/// Poll both channels so Quit wakes a wait whose sheet was never visible.
+pub(crate) async fn recovery_answer<A>(
+    answer: &async_channel::Receiver<Option<A>>,
+    cancellation: &async_channel::Receiver<()>,
+) -> Result<Option<A>, ()> {
+    use std::future::Future;
+    let mut answer = std::pin::pin!(answer.recv());
+    let mut cancellation = std::pin::pin!(cancellation.recv());
+    std::future::poll_fn(|cx| {
+        if cancellation.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(()));
+        }
+        answer.as_mut().poll(cx).map(|answer| Ok(answer.ok().flatten()))
+    }).await
+}
+
 #[derive(Clone)]
 struct CompositionView {
     time: f64,
@@ -61,6 +78,8 @@ pub struct Controller {
     /// Window ▸ Background Tasks, while open.
     pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
+    /// Cancels only the unanswered recovery choice, never an in-flight save.
+    pub(crate) recovery_cancel: Option<async_channel::Sender<()>>,
     /// Held while a project opens and its panels settle: no App Nap or
     /// background throttling.
     pub(crate) busy: Option<crate::platform::Busy>,
@@ -830,6 +849,7 @@ impl Controller {
             pro_media,
             tasks_window: None,
             opening: false,
+            recovery_cancel: None,
             busy: None,
             opening_name: None,
             ghost_aspect: None,
@@ -1856,6 +1876,7 @@ impl Controller {
         self.begin_ghost(&name, None, cx);
         cx.spawn(async move |this, cx| {
             let _operation = operation;
+            let mut cancelled = false;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
@@ -1873,6 +1894,11 @@ impl Controller {
                     r
                 });
                 if let Some(recovery) = recovery {
+                    let ticket = match reply {
+                        ShellReply::RecoveryRequired { ticket, .. } => ticket.clone(),
+                        _ => unreachable!(),
+                    };
+                    let (cancel, cancellation) = async_channel::bounded(1);
                     let answer = this.update(cx, |v, _| {
                         if let ShellReply::RecoveryRequired {
                             recovery: RecoveryResult::Unrecoverable { reason, .. },
@@ -1889,22 +1915,59 @@ impl Controller {
                             );
                         }
                         v.recovery_pending = true;
+                        v.recovery_cancel = Some(cancel);
+                        let kind = match reply {
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Recovered { .. }, .. } => "recover",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::OfferCopy { .. }, .. } => "offer_copy",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Unrecoverable { .. }, .. } => "unrecoverable",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::FromOtherFile { .. }, .. } => "other_file",
+                            _ => "none",
+                        };
+                        v.open_timer.mark("recovery_question", serde_json::json!({"kind":kind}));
                         v.mcp.awaiting_recovery(Some(name.clone()));
                         recovery.alert.sheet(&v.host.borrow().window)
                     });
                     let response = match answer {
-                        Ok(rx) => rx.recv().await.ok().flatten(),
-                        Err(_) => None,
+                        Ok(rx) => match recovery_answer(&rx, &cancellation).await {
+                            Ok(answer) => answer,
+                            Err(()) => {
+                                cancelled = true;
+                                // Await acknowledgement before releasing the fence:
+                                // no prepared file lock can outlive this open.
+                                let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                                None
+                            }
+                        },
+                        Err(_) => {
+                            let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                            None
+                        },
                     };
                     let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                     if let Some(call) = response.and_then(|action| recovery.decision(action)) {
                         result = kernel.shell(call).await;
+                    } else if !cancelled {
+                        let _ = kernel.shell(ShellCall::CancelRecovery { ticket }).await;
                     }
                 }
             }
+            // Keep the operation fence through this final state update. The
+            // quit retries after the task has finished and released it.
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
+                v.recovery_cancel = None;
+                if cancelled {
+                    v.busy = None;
+                    v.settling = None;
+                    v.open_timer.mark("cancelled", serde_json::json!({}));
+                    v.mcp.awaiting_recovery(None);
+                    v.after_open.fail();
+                    v.end_ghost(cx);
+                    v.message = "Opening cancelled. Recovery data is kept.".into();
+                    cx.notify();
+                    return;
+                }
                 // Panels say it's opening until they've mounted for the project.
                 v.settling = match &result {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
