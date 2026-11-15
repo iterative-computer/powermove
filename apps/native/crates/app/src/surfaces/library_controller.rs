@@ -469,8 +469,16 @@ impl<P: LibraryPort> LibraryController<P> {
                                 Command::Open(id) => self.rows.iter().find(|r| &r.id == id),
                                 _ => None,
                             };
+                            // A new project opens under the name typed in
+                            // its sheet (PM-380).
+                            let typed = match &request.command {
+                                Command::Create(values) if !values.name.trim().is_empty() => {
+                                    Some(values.name.trim().to_owned())
+                                }
+                                _ => None,
+                            };
                             let (name, file) = row.map_or_else(
-                                || ("Untitled".into(), None),
+                                || (typed.unwrap_or_else(|| "Untitled".into()), None),
                                 |r| (r.name.clone(), r.file.clone()),
                             );
                             self.effects.push_back(HostEffect::OpenEditor {

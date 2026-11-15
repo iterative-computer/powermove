@@ -497,8 +497,14 @@ define_class!(
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
                 if name == "settings" {
+                    // A Settings window of its own closes; an editor window
+                    // showing the Settings page is titled "Settings" too, and
+                    // its controller toggles the page (PM-292).
                     let app = NSApplication::sharedApplication(self.mtm());
-                    if let Some(w) = app.keyWindow() && w.title().to_string() == "Settings" {
+                    if let Some(w) = app.keyWindow()
+                        && w.title().to_string() == "Settings"
+                        && !ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber()))
+                    {
                         w.performClose(None);
                         return;
                     }
@@ -748,6 +754,9 @@ pub fn apply_tabs_mode(tabs: bool) {
             continue;
         }
         let group = tab_windows(&window);
+        // The windows the tabs become cascade from the first, so each one
+        // shows instead of lying exactly over it.
+        let mut at = window.cascadeTopLeftFromPoint(NSPoint::ZERO);
         for other in group.iter().skip(1) {
             // A tab with no project (Home alone, never shown as a tab) goes;
             // a project's tab becomes its own window.
@@ -755,6 +764,8 @@ pub fn apply_tabs_mode(tabs: bool) {
                 request_close(other);
             } else {
                 detach_tab(other);
+                at = other.cascadeTopLeftFromPoint(at);
+                route(other.windowNumber(), "persistSession".into());
             }
         }
     }

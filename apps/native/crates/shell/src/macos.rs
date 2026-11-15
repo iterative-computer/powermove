@@ -174,6 +174,14 @@ fn restore_session(cx: &mut App) {
         open_editor_window(cx, true, None, None);
         return;
     }
+    // The window (or tab group) that was in front opens last, so it lies
+    // over the others from the start: separate windows each take the front
+    // as they open.
+    let group = |s: &session::WindowState| s.tab_group.unwrap_or(s.id);
+    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
+    let (mut plan, last): (Vec<_>, Vec<_>) =
+        plan.into_iter().partition(|s| Some(group(s)) != front_group);
+    plan.extend(last);
     for state in plan {
         let leader = state.tab_group;
         open_editor_window(cx, true, Some(state), leader);
