@@ -252,9 +252,13 @@ fn tabs_mode_restores_tab_groups_leaders_first() {
     assert_eq!(plan[at(2)].tab_group, Some(1));
     assert_eq!(plan[at(4)].tab_group, Some(1));
     assert_eq!(plan[at(3)].tab_group, None);
-    // "Close windows when quitting": the key window alone, untabbed.
+    // "Close windows when quitting": the key window with its tabs.
     let one = s.restore_plan_tabs(false);
-    assert_eq!((one.len(), one[0].id, one[0].tab_group), (1, 4, None));
+    assert_eq!(one.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 2, 4]);
+    let mut lone = s.clone();
+    lone.key = Some(3);
+    let one = lone.restore_plan_tabs(false);
+    assert_eq!((one.len(), one[0].id, one[0].tab_group), (1, 3, None));
 }
 
 #[test]

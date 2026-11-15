@@ -108,22 +108,24 @@ impl Session {
         kept
     }
     /// Tabs mode: the windows to reopen with their tab groups as they were
-    /// (`all == false`: the key window's alone). Each entry has a sane frame;
-    /// a group's leader comes before its members, so `addTabbedWindow`
-    /// always has the leader open.
+    /// (`all == false`, the system's "Close windows when quitting": the key
+    /// window with its tabs). Each entry has a sane frame; a group's leader
+    /// comes before its members, so `addTabbedWindow` always has the leader
+    /// open.
     pub fn restore_plan_tabs(&self, all: bool) -> Vec<WindowState> {
         let mut list: Vec<WindowState> = if all {
             self.windows.clone()
         } else {
-            self.key
+            let group = |w: &WindowState| w.tab_group.unwrap_or(w.id);
+            let key = self
+                .key
                 .and_then(|k| self.windows.iter().find(|w| w.id == k))
                 .or_else(|| self.windows.first())
+                .map(group);
+            self.windows
+                .iter()
+                .filter(|w| Some(group(w)) == key)
                 .cloned()
-                .map(|w| WindowState {
-                    tab_group: None,
-                    ..w
-                })
-                .into_iter()
                 .collect()
         };
         let ids: Vec<u64> = list.iter().map(|w| w.id).collect();

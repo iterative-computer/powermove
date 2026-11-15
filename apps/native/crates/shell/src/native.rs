@@ -2547,6 +2547,23 @@ impl Host {
                     }
                     let chord = chord(e);
                     if e.r#type() == NSEventType::KeyDown {
+                        // ⌃Tab shows the next project tab, as in v1 (M029,
+                        // M030), when the window has tabs; else, like ⌃F6, it
+                        // moves between panels.
+                        if matches!(chord.as_str(), "ctrl+tab" | "ctrl+shift+tab")
+                            && crate::tabs_mode()
+                            && tab_windows(&window).len() > 1
+                        {
+                            host.borrow().send_command(
+                                if chord.contains("shift") {
+                                    "previousTab"
+                                } else {
+                                    "nextTab"
+                                },
+                                vec![],
+                            );
+                            return std::ptr::null_mut();
+                        }
                         if matches!(
                             chord.as_str(),
                             "ctrl+f6" | "ctrl+shift+f6" | "ctrl+tab" | "ctrl+shift+tab"
