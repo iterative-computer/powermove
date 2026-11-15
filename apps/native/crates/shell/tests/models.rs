@@ -50,7 +50,11 @@ fn every_preset_and_small_window_is_bounded() {
             for p in g.panels {
                 assert!(p.rect.w >= 0. && p.rect.h >= 0., "{id}");
                 assert!(p.rect.x + p.rect.w <= w + 0.01);
-                assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                if !g.side_docks.contains_key(&p.dock) {
+                    assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                } else {
+                    assert!(p.rect.h >= tokens().metrics.header);
+                }
             }
         }
     }

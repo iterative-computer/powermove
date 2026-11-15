@@ -47,6 +47,16 @@ pub fn outside(area: Rect, holes: &[Rect]) -> Vec<Rect> {
     out
 }
 impl Rect {
+    pub fn intersection(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        Self {
+            x,
+            y,
+            w: ((self.x + self.w).min(other.x + other.w) - x).max(0.),
+            h: ((self.y + self.h).min(other.y + other.h) - y).max(0.),
+        }
+    }
     pub fn contains(self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -141,6 +151,7 @@ pub struct Divider {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
+    pub side_docks: std::collections::BTreeMap<usize, Rect>,
     pub panels: Vec<Placement>,
     pub dividers: Vec<Divider>,
     /// The tabs (or the lone title) each header shows, as drawn: per
@@ -373,7 +384,12 @@ impl Layout {
             let rect = rects[&di];
             let n = d.groups.len();
             let space = (rect.h - gap * (n - 1) as f32).max(0.);
-            let heights = group_heights(&d.groups, space, t);
+            let heights = if matches!(d.id.as_str(), "left" | "right") {
+                out.side_docks.insert(di, rect);
+                side_group_heights(&d.groups, space, t)
+            } else {
+                group_heights(&d.groups, space, t)
+            };
             let mut y = rect.y;
             for (gi, _) in d.groups.iter().enumerate() {
                 let h = heights[gi];
@@ -552,10 +568,7 @@ impl Layout {
             let other: f32 = geometry
                 .panels
                 .iter()
-                .filter(|p| {
-                    p.dock != divider.dock
-                        && is_band(&self.docks[p.dock].id)
-                })
+                .filter(|p| p.dock != divider.dock && is_band(&self.docks[p.dock].id))
                 .map(|p| p.rect.h + gap)
                 .sum();
             // The original app: at least `band_least` (and its panels'
@@ -633,9 +646,11 @@ impl Layout {
     ) -> Option<DropPreview> {
         // A folded panel is not a zone (its header is all there is of it):
         // the dock around it places the panel above or below it.
-        if let Some(p) = geometry.panels.iter().find(|p| {
-            p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed
-        }) {
+        if let Some(p) = geometry
+            .panels
+            .iter()
+            .find(|p| p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed)
+        {
             return Some(self.panel_zone(geometry, p, x, y, t, true));
         }
         self.off_panel_target(geometry, bounds, x, y, t)
@@ -831,9 +846,9 @@ impl Layout {
                     h: (a.y + a.h).max(b.y + b.h) - a.y.min(b.y),
                 });
                 column.is_some_and(near)
-                    || panels.iter().any(|r| {
-                        (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM
-                    })
+                    || panels
+                        .iter()
+                        .any(|r| (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM)
             }
             _ => false,
         };
@@ -954,9 +969,10 @@ impl Layout {
         let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
         // Over the very stack being moved: it is already there.
         if whole
-            && geometry.panels.iter().any(|p| {
-                (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1)
-            })
+            && geometry
+                .panels
+                .iter()
+                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
         {
             return DropOutcome::Here;
         }
@@ -1465,7 +1481,9 @@ impl Layout {
                     None => self.add_dock(dock_for(edge.dock_id(), single())),
                 }
             }
-            DropTarget::Beside { dock, .. } => self.insert_at(id, DropTarget::Split { dock, group: 0 }),
+            DropTarget::Beside { dock, .. } => {
+                self.insert_at(id, DropTarget::Split { dock, group: 0 })
+            }
         }
     }
     /// Adds a dock where its id puts it: a left dock is the first column.
@@ -1573,6 +1591,36 @@ fn dock_floor(d: &Dock, t: &Tokens) -> f32 {
 /// flexible ones share the rest, and every group keeps its least height
 /// while there is room for it (sized groups give way first, then flexible
 /// ones share what is left). Nothing overlaps or is lost.
+fn side_group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
+    let mut heights: Vec<f32> = groups
+        .iter()
+        .map(|g| {
+            if g.collapsed {
+                t.metrics.header
+            } else {
+                g.size.unwrap_or(200.).max(if g.size.is_some() {
+                    group_least(g, t)
+                } else {
+                    200.
+                })
+            }
+        })
+        .collect();
+    let flex = groups
+        .iter()
+        .filter(|g| !g.collapsed && g.size.is_none())
+        .count();
+    let extra = (space - heights.iter().sum::<f32>()).max(0.);
+    if flex > 0 {
+        for (g, h) in groups.iter().zip(&mut heights) {
+            if !g.collapsed && g.size.is_none() {
+                *h += extra / flex as f32;
+            }
+        }
+    }
+    heights
+}
+
 fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
     // A folded group is its header, however the rest share the room.
     if groups.iter().any(|g| g.collapsed) {
@@ -1963,7 +2011,12 @@ mod view_tile_tests {
     use super::*;
     #[test]
     fn four_views_tile_two_by_two_with_gaps() {
-        let r = Rect { x: 10., y: 20., w: 402., h: 202. };
+        let r = Rect {
+            x: 10.,
+            y: 20.,
+            w: 402.,
+            h: 202.,
+        };
         let t = view_tiles(r, 4, 2.);
         assert_eq!(t.len(), 4);
         assert_eq!((t[0].w, t[0].h), (200., 100.));
