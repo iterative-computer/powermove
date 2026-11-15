@@ -9,6 +9,12 @@ const row = {
 } as const;
 const stack = { display: "flex", flexDirection: "column" } as const;
 const body = { color: t("colors.text"), fontSize: t("typography.body") };
+const sectionLabel = {
+  color: t("colors.secondary"),
+  fontSize: t("typography.minimum"),
+  fontWeight: t("typography.semibold_weight"),
+  fontVariantNumeric: "tabular-nums",
+};
 const caption = { color: t("colors.muted"), fontSize: t("typography.minimum") };
 export const jobActions = (status: QueueJob["status"]) =>
   status === "Rendering" || status === "Pending"
@@ -156,7 +162,7 @@ function JobRow({
         >{`${jobFormat(job)} · ${filename}`}</text>
       </div>
       {rendering ? (
-        <div style={{ ...row, gap: t("space.md"), flexShrink: 0 }}>
+        <div style={{ ...row, gap: t("space.sm"), flexShrink: 0 }}>
           <UI.ProgressRow
             id={`queue.bar.${job.id}`}
             label={`${job.name} progress`}
@@ -174,6 +180,7 @@ function JobRow({
         </div>
       ) : (
         <text
+          id={`queue.time.${job.id}`}
           style={{
             ...caption,
             fontVariantNumeric: "tabular-nums",
@@ -237,9 +244,10 @@ export function RenderQueue({
             ...row,
             justifyContent: "space-between",
             height: t("metrics.hit"),
+            marginBottom: t("space.xs"),
           }}
         >
-          <text style={body}>{`Queue · ${pending.length}`}</text>
+          <text style={sectionLabel}>{`Queue · ${pending.length}`}</text>
           <UI.PushButton
             id="export.queue.render"
             label="Render Pending"
@@ -273,9 +281,10 @@ export function RenderQueue({
             ...row,
             justifyContent: "space-between",
             height: t("metrics.hit"),
+            marginBottom: t("space.xs"),
           }}
         >
-          <text style={body}>History</text>
+          <text style={sectionLabel}>History</text>
           <UI.ToolbarItem
             id="export.queue.clear"
             label="Clear"

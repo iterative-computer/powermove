@@ -193,6 +193,7 @@ mod tests {
         assert_eq!(q.take_pending().unwrap().unwrap().0, a);
         q.finish(a, "Done", String::new()).unwrap();
         q.action(b, "cancel").unwrap();
+        assert!(q.rows.iter().find(|r|r.id == b).unwrap().finished_at > 0);
         assert_eq!(q.take_pending().unwrap().unwrap().0, c);
         q.action(c, "cancel").unwrap();
         assert!(q.cancelled(c));

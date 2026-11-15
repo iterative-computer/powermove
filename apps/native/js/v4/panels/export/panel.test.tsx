@@ -630,9 +630,12 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
     progress: 0.42,
     error: "",
     finishedAt:
-      status === "Done" || status === "Failed" ? 1700000000 + index : 0,
+      status === "Done" || status === "Failed" || status === "Cancelled"
+        ? 1700000000 + index
+        : 0,
   }));
   const f = await mounted(seed);
+  expect(named(f.root, "queue.time.5").textContent).not.toBe("");
   const expected = [
     ["cancel"],
     ["cancel"],
