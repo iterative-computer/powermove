@@ -251,7 +251,7 @@ mod project_layout_tests {
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
 type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
-type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, Option<String>);
 pub struct Builtins {
     agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
@@ -962,13 +962,13 @@ impl Builtins {
         let observed = (|| {
             let entries = self.broker.entries.try_lock().ok()?;
             let Some(entry) = entries.get("agent").cloned() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new())));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
             };
             drop(entries);
             let backend = entry.try_lock().ok()?.backend.clone();
             let backend = backend.try_lock().ok()?;
             let Some(agent) = backend.native.agent.clone() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new())));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
             };
             drop(backend);
             let state = agent.try_lock().ok()?;
@@ -992,6 +992,7 @@ impl Builtins {
                 session.elapsed_ms(agent_host::now_ms()),
                 background,
                 (tasks, revision, panel.active_id().into()),
+                session.run.as_ref().map(|_| if !session.activity.is_empty() { session.activity.clone() } else { session.progress.last().cloned().unwrap_or_else(|| "Agent working".into()) }),
             ))
         })();
         if let Some(observed) = observed {
@@ -1104,19 +1105,7 @@ impl Builtins {
         backend.native.project.panel.drag.clone()
     }
     pub fn agent_progress(&self) -> Option<String> {
-        let (agent, _) = self.agent_state().ok()?;
-        let state = agent.shared();
-        let session = state.panel.session(state.panel.active_id()).ok()?;
-        session.run.as_ref()?;
-        Some(if !session.activity.is_empty() {
-            session.activity.clone()
-        } else {
-            session
-                .progress
-                .last()
-                .cloned()
-                .unwrap_or_else(|| "Agent working".into())
-        })
+        self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).5.clone()
     }
     pub fn project_id(&self) -> &str {
         &self.broker.project
@@ -1310,7 +1299,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
-            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()))),
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), None)),
             pool,
             broker,
             realms: Mutex::default(),

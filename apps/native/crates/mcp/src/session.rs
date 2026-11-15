@@ -1209,7 +1209,7 @@ impl McpSession {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
         crate::validation::session("start_session", args)?;
-        let host = self
+        let mut host = self
             .host
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
