@@ -29,6 +29,7 @@ pub struct Launcher {
     pub receiving_at: Option<u64>,
     pub done_at: Option<u64>,
     seen_attention: Vec<String>,
+    initialized: bool,
 }
 impl Launcher {
     pub fn update(&mut self, next: Snapshot, now: u64) {
@@ -41,7 +42,8 @@ impl Launcher {
             self.done_at = Some(now);
             self.unseen = !next.panel_open;
         }
-        if (next.revision != self.snapshot.revision
+        if ((next.revision != self.snapshot.revision
+            && (self.initialized || next.tasks.iter().any(|t| t.running)))
             || (self.snapshot.panel_open && !next.tasks.is_empty()))
             && !next.panel_open
         {
@@ -58,6 +60,7 @@ impl Launcher {
             self.unseen = false;
             self.receiving_at = None;
         }
+        self.initialized = true;
         self.snapshot = next;
     }
     pub fn tone(&self) -> Tone {
@@ -160,6 +163,19 @@ mod tests {
         for now in [0, 1000, u64::MAX] {
             assert!(!l.requests_frames(now, false));
         }
+    }
+    #[test]
+    fn restored_idle_history_requests_zero_frames() {
+        let mut launcher = Launcher::default();
+        launcher.update(
+            Snapshot {
+                revision: 50,
+                ..Default::default()
+            },
+            1000,
+        );
+        assert_eq!(launcher.receiving_at, None);
+        assert!(!launcher.requests_frames(1000, false));
     }
     #[test]
     fn running_and_multi_task() {
