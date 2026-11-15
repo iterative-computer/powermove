@@ -24,6 +24,7 @@ pub struct Rulers {
     pub shown: bool,
     pub grid: bool,
     pub guides: Vec<RulerGuide>,
+    pub guides_locked: bool,
     /// The guide the pointer carries (a new one came out of a ruler).
     pub dragging: Option<usize>,
     /// The pointer over the viewer, for the rulers' marks.
@@ -79,6 +80,7 @@ impl GizmoSurface {
     }
     /// The guide within reach of `p`, by index.
     fn guide_at(&self, p: Point<Pixels>, frame: ViewFrame) -> Option<usize> {
+        if self.rulers.guides_locked { return None; }
         let reach = self.tokens.metrics.hit as f64 / 4.;
         self.rulers
             .guides
@@ -97,6 +99,7 @@ impl GizmoSurface {
     }
     /// A press in a ruler starts a guide; a press on a guide carries it.
     pub(super) fn rulers_down(&mut self, p: Point<Pixels>, frame: ViewFrame) -> bool {
+        if self.rulers.guides_locked { return false; }
         if let Some(axis) = self.in_band(p) {
             let at = self.comp_along(axis, p, frame);
             self.rulers.guides.push(RulerGuide { axis, at });
@@ -350,5 +353,28 @@ mod tests {
         assert_eq!(settle(538., 1080., 4.), 540.);
         assert_eq!(settle(1077.5, 1080., 4.), 1080.);
         assert_eq!(settle(300.4, 1080., 4.), 300.);
+    }
+}
+
+impl Rulers {
+    pub fn toggle_locked(&mut self) {
+        self.guides_locked = !self.guides_locked;
+        self.dragging = None;
+    }
+}
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn locking_cancels_drag_and_preserves_guides() {
+        let mut rulers = Rulers::default();
+        rulers.guides.push(RulerGuide { axis: Axis::Horizontal, at: 42. });
+        rulers.dragging = Some(0);
+        rulers.toggle_locked();
+        assert!(rulers.guides_locked);
+        assert_eq!(rulers.dragging, None);
+        assert_eq!(rulers.guides[0].at, 42.);
+        rulers.toggle_locked();
+        assert!(!rulers.guides_locked);
     }
 }

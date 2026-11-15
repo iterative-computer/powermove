@@ -541,6 +541,7 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         view("Show Rulers", "viewer.rulers"),
         view("Show Grid", "viewer.grid"),
         view("Clear Guides", "viewer.clearGuides"),
+        view("Lock/Unlock Guides", "viewer.lockGuides"),
         view("Show Safe Areas", "viewer.safeAreas"),
         view("Show Guides", "viewer.guides"),
         view("Show RGB", "viewer.showRGB"),

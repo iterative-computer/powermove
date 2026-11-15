@@ -919,6 +919,10 @@ impl GizmoSurface {
         self.rulers.grid = grid;
         cx.notify();
     }
+    pub fn toggle_guides_locked(&mut self, cx: &mut Context<Self>) {
+        self.rulers.toggle_locked();
+        cx.notify();
+    }
     /// View ▸ Clear Guides.
     pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
         self.rulers.guides.clear();

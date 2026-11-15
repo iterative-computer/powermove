@@ -3242,6 +3242,7 @@ impl Controller {
             | "viewer.showRangeOverlay"
             | "viewer.rulers"
             | "viewer.grid"
+            | "viewer.lockGuides"
             | "viewer.clearGuides"
             | "viewer.popout"
             | "viewer.toggleProxies"
