@@ -417,13 +417,40 @@ impl TimelineModel {
                 edit(KeyframeCommand::Delete { key_ids: keys }.into())
             }
             "delete" => {
-                let locked = self
+                let roots: Vec<_> = self
                     .index
-                    .expanded_ids(&layers)
+                    .layers
                     .iter()
-                    .filter_map(|id| self.index.layer(id))
-                    .filter(|l| l.effectively_locked)
-                    .count();
+                    .filter(|l| {
+                        if !layers.contains(&l.id) {
+                            return false;
+                        }
+                        let mut next = l.group.as_deref();
+                        let mut seen = std::collections::HashSet::new();
+                        while let Some(id) = next {
+                            if !seen.insert(id) {
+                                break;
+                            }
+                            if layers.iter().any(|selected| selected == id) {
+                                return false;
+                            }
+                            next = self.index.layer(id).and_then(|g| g.group.as_deref());
+                        }
+                        true
+                    })
+                    .collect();
+                let skipped: Vec<_> = roots
+                    .into_iter()
+                    .filter(|l| {
+                        self.index
+                            .expanded_ids(&[l.id.clone()])
+                            .iter()
+                            .filter_map(|id| self.index.layer(id))
+                            .any(|child| child.effectively_locked)
+                    })
+                    .collect();
+                let locked = skipped.len();
+                let groups = skipped.iter().all(|l| l.kind == "group");
                 let mut plan = if layers.iter().any(|id| self.index.layer(id).is_some()) {
                     edit(LayerCommand::Delete { layer_ids: layers }.into())
                 } else {
@@ -432,7 +459,12 @@ impl TimelineModel {
                 if locked > 0 {
                     plan.effects.push(HostEffect::Status(format!(
                         "Skipped {locked} locked {}",
-                        if locked == 1 { "layer" } else { "layers" }
+                        match (groups, locked) {
+                            (true, 1) => "group",
+                            (true, _) => "groups",
+                            (false, 1) => "layer",
+                            (false, _) => "layers",
+                        }
                     )));
                 }
                 plan

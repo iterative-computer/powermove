@@ -1236,24 +1236,28 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
     for (comp, ids) in by_comp {
         let layers = cx.layer_stack(comp.as_deref());
         let base: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let expanded = expand_groups(&layers, &base);
-        let find = |id: &str| layers.iter().find(|l| values::text(l, "id") == Some(id));
-        let locked: Vec<&Value> = expanded
-            .iter()
-            .filter_map(|id| find(id))
-            .filter(|l| is_locked_in(&layers, l))
-            .collect();
-        // Filter after expansion, once: re-expanding editable groups would
-        // silently put their locked descendants back into the deletion set.
-        let gone: HashSet<String> = expanded
-            .iter()
-            .filter(|id| {
-                !locked
+        // Normalize overlapping selections first. A protected selected group
+        // protects its entire subtree, including separately selected children.
+        let roots = layers.iter().filter(|l| {
+            values::text(l, "id").is_some_and(|id| base.contains(id))
+                && !ancestors(&layers, l)
                     .iter()
-                    .any(|l| values::text(l, "id") == Some(id.as_str()))
-            })
-            .cloned()
-            .collect();
+                    .any(|g| values::text(g, "id").is_some_and(|id| base.contains(id)))
+        });
+        let mut gone = HashSet::new();
+        for root in roots {
+            let id = values::text(root, "id").unwrap();
+            let subtree = expand_groups(&layers, &HashSet::from([id]));
+            let protected = subtree.iter().any(|id| {
+                layers
+                    .iter()
+                    .find(|l| values::text(l, "id") == Some(id.as_str()))
+                    .is_some_and(|l| is_locked_in(&layers, l))
+            });
+            if !protected {
+                gone.extend(subtree);
+            }
+        }
         if gone.is_empty() {
             continue;
         }
@@ -1262,17 +1266,6 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         let path = cx.layers_path(comp.as_deref());
         for (index, l) in layers.iter().enumerate() {
             let id = values::text(l, "id");
-            if !id.is_some_and(|i| gone.contains(i))
-                && values::text(l, "group").is_some_and(|g| gone.contains(g))
-            {
-                let mut group = values::text(l, "group");
-                while let Some(g) = group.filter(|g| gone.contains(*g)) {
-                    group = find(g).and_then(|ancestor| values::text(ancestor, "group"));
-                }
-                let mut at = path.clone();
-                at.extend([PathPart::Index(index as f64), "group".into()]);
-                cx.set(at, group.map_or(Value::Null, values::s))?;
-            }
             if !id.is_some_and(|i| gone.contains(i))
                 && values::text(l, "parent").is_some_and(|p| gone.contains(p))
             {

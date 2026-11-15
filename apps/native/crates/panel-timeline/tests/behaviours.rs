@@ -2652,3 +2652,29 @@ fn delete_groups_adapter_ignores_stale_ids_after_external_edit_and_undo() {
     assert!(c.model.index.layer("a").is_some());
     assert!(c.model.index.layer("b").is_none());
 }
+
+#[test]
+fn delete_groups_adapter_counts_protected_group_once_and_keeps_its_children() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"locked","type":"shape","group":"n","lock":true,"p":{}},
+      {"id":"editable-child","type":"shape","group":"g","p":{}},
+      {"id":"other","type":"shape","p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "locked", "editable-child", "other"]);
+    assert_eq!(
+        command(&mut c, "delete", 0.),
+        vec![HostEffect::Status("Skipped 1 locked group".into())]
+    );
+    for id in ["g", "n", "locked", "editable-child"] {
+        assert!(c.model.index.layer(id).is_some(), "{id}");
+    }
+    assert!(c.model.index.layer("other").is_none());
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}

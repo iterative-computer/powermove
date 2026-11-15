@@ -1001,27 +1001,67 @@ fn delete_groups_skips_locked_instead_of_rejecting_the_selection() {
 }
 
 #[test]
-fn delete_groups_preserves_locked_descendants_without_dangling_group() {
-    let mut s = delete_groups_store();
-    run(
-        &mut s,
-        patch(
-            "child",
-            LayerPatch {
-                locked: Some(true),
-                ..Default::default()
-            },
-        ),
-    );
+fn delete_groups_transformed_group_with_locked_child_is_skipped_with_world_pose_unchanged() {
+    let mut project = parse(PROJECT).unwrap();
+    let layers = project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    // An actual translated, rotated, nonuniformly scaled group.
+    layers[0]
+        .as_object_mut()
+        .unwrap()
+        .insert("type", Value::String("group".into()));
+    for (path, value) in [
+        ("position.x", 230.),
+        ("position.y", 80.),
+        ("rotation", 35.),
+        ("scale.x", 170.),
+        ("scale.y", 65.),
+    ] {
+        layers[0]
+            .as_object_mut()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("v", Value::Number(value));
+    }
+    layers[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("group", Value::String("top".into()));
+    layers[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("lock", Value::Bool(true));
+    let mut s = DocumentStore::new_untitled(project);
     let before = s.root().unwrap().to_value();
+    let group = layer(&s, "top");
+    let child = layer(&s, "box");
+    let pose = s.queries().world_matrix(None, "box", 0.).unwrap();
     run(
         &mut s,
         LayerCommand::Delete {
-            layer_ids: vec!["g".into(), "child".into()],
+            layer_ids: vec!["top".into(), "box".into(), "clip".into()],
         },
     );
-    assert!(ids(&s).contains(&"child".into()));
-    assert!(get(&layer(&s, "child"), &["group"]).is_null());
+    assert_eq!(layer(&s, "top"), group);
+    assert_eq!(layer(&s, "box"), child);
+    assert_eq!(s.queries().world_matrix(None, "box", 0.).unwrap(), pose);
+    assert!(
+        !ids(&s).contains(&"clip".into()),
+        "unrelated editable layers still delete"
+    );
+    assert_eq!(s.history().len(), 1);
     s.undo().unwrap();
     assert_eq!(s.root().unwrap().to_value(), before);
 }
