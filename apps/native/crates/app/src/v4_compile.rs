@@ -162,6 +162,11 @@ pub enum Kit {
         values: Vec<f64>,
         channel: usize,
     },
+    /// An easing curve `[x1, y1, x2, y2]`: the editor, or a thumbnail.
+    Ease {
+        curve: [f64; 4],
+        thumbnail: bool,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
@@ -1070,6 +1075,19 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 .unwrap_or(0)
                 .min(3) as usize,
         },
+        Some(component @ (Component::EaseCurve | Component::EaseThumbnail)) => {
+            let n = numbers(value);
+            let at = |i: usize, default: f64| {
+                n.get(i)
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            Kit::Ease {
+                curve: [at(0, 0.), at(1, 0.), at(2, 1.), at(3, 1.)],
+                thumbnail: component == Component::EaseThumbnail,
+            }
+        }
         Some(Component::DisclosureButton) => {
             Kit::Disclosure(node.props.get("aria-expanded") == Some(&Value::Bool(true)))
         }

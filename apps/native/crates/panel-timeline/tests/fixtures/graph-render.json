@@ -1,15 +1,15 @@
 [
   {
-    "id": "graph-grid:0",
+    "id": "graph-ground",
     "shape": "rect",
     "bounds": [
       320.0,
-      406.3888888888889,
+      120.0,
       640.0,
-      1.0
+      320.0
     ],
-    "color": 10263449,
-    "opacity": 0.5,
+    "color": 1841431,
+    "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
     "text": null,
@@ -17,19 +17,203 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      120.0,
       640.0,
-      204.0
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:1",
+    "shape": "rect",
+    "bounds": [
+      320.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:2",
+    "shape": "rect",
+    "bounds": [
+      420.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:3",
+    "shape": "rect",
+    "bounds": [
+      520.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:4",
+    "shape": "rect",
+    "bounds": [
+      620.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:5",
+    "shape": "rect",
+    "bounds": [
+      720.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:6",
+    "shape": "rect",
+    "bounds": [
+      820.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-time:7",
+    "shape": "rect",
+    "bounds": [
+      920.0,
+      120.0,
+      1.0,
+      320.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-grid:0",
+    "shape": "rect",
+    "bounds": [
+      320.0,
+      424.0,
+      640.0,
+      1.0
+    ],
+    "color": 16119284,
+    "opacity": 0.32,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
     ]
   },
   {
     "id": "graph-value:0",
     "shape": "text",
     "bounds": [
-      326.0,
-      392.08888965182837,
+      325.0,
+      406.2000005245209,
       640.0,
-      14.299999237060547
+      14.299999475479126
     ],
     "color": 10263449,
     "opacity": 1.0,
@@ -42,22 +226,22 @@
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-grid:0.5",
+    "id": "graph-grid:0.2",
     "shape": "rect",
     "bounds": [
       320.0,
-      330.0,
+      372.0,
       640.0,
       1.0
     ],
     "color": 16119284,
-    "opacity": 0.07000000029802322,
+    "opacity": 0.05,
     "radius": 0.0,
     "stroke": 0.0,
     "text": null,
@@ -65,34 +249,178 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      120.0,
       640.0,
-      204.0
+      320.0
     ]
   },
   {
-    "id": "graph-value:0.5",
+    "id": "graph-value:0.2",
     "shape": "text",
     "bounds": [
-      326.0,
-      315.70000076293945,
+      325.0,
+      354.2000005245209,
       640.0,
-      14.299999237060547
+      14.299999475479126
     ],
     "color": 10263449,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
-    "text": "0.5",
+    "text": "0.2",
     "fontSize": 11.0,
     "detail": {
       "tabular": true
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
+    ]
+  },
+  {
+    "id": "graph-grid:0.4",
+    "shape": "rect",
+    "bounds": [
+      320.0,
+      319.0,
+      640.0,
+      1.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-value:0.4",
+    "shape": "text",
+    "bounds": [
+      325.0,
+      301.2000005245209,
+      640.0,
+      14.299999475479126
+    ],
+    "color": 10263449,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": "0.4",
+    "fontSize": 11.0,
+    "detail": {
+      "tabular": true
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-grid:0.6",
+    "shape": "rect",
+    "bounds": [
+      320.0,
+      267.0,
+      640.0,
+      1.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-value:0.6",
+    "shape": "text",
+    "bounds": [
+      325.0,
+      249.20000052452087,
+      640.0,
+      14.299999475479126
+    ],
+    "color": 10263449,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": "0.6",
+    "fontSize": 11.0,
+    "detail": {
+      "tabular": true
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-grid:0.8",
+    "shape": "rect",
+    "bounds": [
+      320.0,
+      214.0,
+      640.0,
+      1.0
+    ],
+    "color": 16119284,
+    "opacity": 0.05,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-value:0.8",
+    "shape": "text",
+    "bounds": [
+      325.0,
+      196.20000052452087,
+      640.0,
+      14.299999475479126
+    ],
+    "color": 10263449,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": "0.8",
+    "fontSize": 11.0,
+    "detail": {
+      "tabular": true
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
     ]
   },
   {
@@ -100,12 +428,12 @@
     "shape": "rect",
     "bounds": [
       320.0,
-      253.61111111111111,
+      162.0,
       640.0,
       1.0
     ],
     "color": 16119284,
-    "opacity": 0.07000000029802322,
+    "opacity": 0.05,
     "radius": 0.0,
     "stroke": 0.0,
     "text": null,
@@ -113,19 +441,19 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      120.0,
       640.0,
-      204.0
+      320.0
     ]
   },
   {
     "id": "graph-value:1",
     "shape": "text",
     "bounds": [
-      326.0,
-      239.31111187405057,
+      325.0,
+      144.20000052452087,
       640.0,
-      14.299999237060547
+      14.299999475479126
     ],
     "color": 10263449,
     "opacity": 1.0,
@@ -138,24 +466,24 @@
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "curve:a:position.x",
+    "id": "curve:x",
     "shape": "curve",
     "bounds": [
       320.0,
-      220.0,
+      120.0,
       640.0,
-      220.0
+      320.0
     ],
-    "color": 15894660,
+    "color": 15951984,
     "opacity": 1.0,
     "radius": 0.0,
-    "stroke": 1.5,
+    "stroke": 1.35,
     "text": null,
     "fontSize": 0.0,
     "detail": {
@@ -163,20 +491,20 @@
         {
           "from": [
             320.0,
-            406.3888888888889
+            424.0
           ],
           "to": [
             520.0,
-            253.61111111111111
+            162.0
           ],
           "controls": [
             [
               370.0,
-              406.3888888888889
+              424.0
             ],
             [
               470.0,
-              253.61111111111111
+              162.0
             ]
           ]
         }
@@ -184,21 +512,109 @@
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "curve-end:a:position.x",
+    "id": "graph-tangent:key:out",
+    "shape": "line",
+    "bounds": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ],
+    "color": 15190091,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 1.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": {
+      "from": [
+        320.0,
+        424.0
+      ],
+      "to": [
+        370.0,
+        424.0
+      ],
+      "dash": [
+        2.0,
+        2.0
+      ]
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-handle:key:out",
+    "shape": "circle",
+    "bounds": [
+      367.0,
+      421.0,
+      6.0,
+      6.0
+    ],
+    "color": 15190091,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": {
+      "keyline": 15190091,
+      "keylineWidth": 1.0
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-key:key",
+    "shape": "graph-vertex",
+    "bounds": [
+      316.0,
+      420.0,
+      8.0,
+      8.0
+    ],
+    "color": 15951984,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": {
+      "kind": "bezier",
+      "ring": 6483592
+    },
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-end:x",
     "shape": "text",
     "bounds": [
       320.0,
-      238.31111187405057,
+      141.70000052452087,
       624.0,
-      14.299999237060547
+      14.299999475479126
     ],
-    "color": 15894660,
+    "color": 15951984,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
@@ -210,132 +626,67 @@
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-tangent:k1:out",
-    "shape": "line",
-    "bounds": [
-      320.0,
-      220.0,
-      640.0,
-      220.0
-    ],
-    "color": 15319898,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 1.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": {
-      "from": [
-        320.0,
-        406.3888888888889
-      ],
-      "to": [
-        370.0,
-        406.3888888888889
-      ],
-      "dash": 2.0
-    },
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-handle:k1:out",
+    "id": "graph-now:x",
     "shape": "circle",
     "bounds": [
-      367.0,
-      403.3888888888889,
+      417.0,
+      290.0,
       6.0,
       6.0
     ],
-    "color": 15319898,
+    "color": 15951984,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
     "text": null,
     "fontSize": 0.0,
-    "detail": {
-      "keyline": 15319898,
-      "keylineWidth": 1.0
-    },
+    "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-key:k1",
-    "shape": "graph-key",
+    "id": "graph-now-value:x",
+    "shape": "text",
     "bounds": [
-      316.0,
-      402.3888888888889,
-      8.0,
-      8.0
+      427.0,
+      273.7000005245209,
+      120.0,
+      14.299999475479126
     ],
-    "color": 15894660,
+    "color": 15951984,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
-    "text": null,
-    "fontSize": 0.0,
+    "text": "0.5",
+    "fontSize": 11.0,
     "detail": {
-      "shape": "bezier",
-      "selected": true,
-      "ring": 16409360
+      "tabular": true
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-key:k2",
-    "shape": "graph-key",
-    "bounds": [
-      516.0,
-      249.61111111111111,
-      8.0,
-      8.0
-    ],
-    "color": 15894660,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 0.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": {
-      "shape": "bezier",
-      "selected": true,
-      "ring": 16409360
-    },
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-box",
+    "id": "graph-selection-fill",
     "shape": "rect",
     "bounds": [
-      312.0,
-      245.61111111111111,
-      216.0,
-      168.7777777777778
+      300.0,
+      250.0,
+      100.0,
+      80.0
     ],
     "color": 16409360,
     "opacity": 0.12,
@@ -346,19 +697,19 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-box-edge:n",
-    "shape": "line",
+    "id": "graph-selection",
+    "shape": "ring",
     "bounds": [
-      320.0,
-      220.0,
-      640.0,
-      220.0
+      300.0,
+      250.0,
+      100.0,
+      80.0
     ],
     "color": 16409360,
     "opacity": 1.0,
@@ -367,128 +718,24 @@
     "text": null,
     "fontSize": 0.0,
     "detail": {
-      "from": [
-        312.0,
-        245.61111111111111
-      ],
-      "to": [
-        528.0,
-        245.61111111111111
-      ],
-      "dash": 3.0
+      "dash": [
+        3.0,
+        3.0
+      ]
     },
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-box-edge:e",
-    "shape": "line",
-    "bounds": [
-      320.0,
-      220.0,
-      640.0,
-      220.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 1.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": {
-      "from": [
-        528.0,
-        245.61111111111111
-      ],
-      "to": [
-        528.0,
-        414.3888888888889
-      ],
-      "dash": 3.0
-    },
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-box-edge:s",
-    "shape": "line",
-    "bounds": [
-      320.0,
-      220.0,
-      640.0,
-      220.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 1.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": {
-      "from": [
-        528.0,
-        414.3888888888889
-      ],
-      "to": [
-        312.0,
-        414.3888888888889
-      ],
-      "dash": 3.0
-    },
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-box-edge:w",
-    "shape": "line",
-    "bounds": [
-      320.0,
-      220.0,
-      640.0,
-      220.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 1.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": {
-      "from": [
-        312.0,
-        414.3888888888889
-      ],
-      "to": [
-        312.0,
-        245.61111111111111
-      ],
-      "dash": 3.0
-    },
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-transform-handle:nw",
+    "id": "graph-transform-handle:0",
     "shape": "rect",
     "bounds": [
-      309.0,
-      242.61111111111111,
+      297.0,
+      247.0,
       6.0,
       6.0
     ],
@@ -501,17 +748,17 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-transform-handle:n",
+    "id": "graph-transform-handle:1",
     "shape": "rect",
     "bounds": [
-      417.0,
-      242.61111111111111,
+      347.0,
+      247.0,
       6.0,
       6.0
     ],
@@ -524,17 +771,17 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-transform-handle:ne",
+    "id": "graph-transform-handle:2",
     "shape": "rect",
     "bounds": [
-      525.0,
-      242.61111111111111,
+      397.0,
+      247.0,
       6.0,
       6.0
     ],
@@ -547,16 +794,39 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-transform-handle:e",
+    "id": "graph-transform-handle:3",
     "shape": "rect",
     "bounds": [
-      525.0,
+      397.0,
+      287.0,
+      6.0,
+      6.0
+    ],
+    "color": 16409360,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-transform-handle:4",
+    "shape": "rect",
+    "bounds": [
+      397.0,
       327.0,
       6.0,
       6.0
@@ -570,85 +840,16 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-transform-handle:se",
+    "id": "graph-transform-handle:5",
     "shape": "rect",
     "bounds": [
-      525.0,
-      411.3888888888889,
-      6.0,
-      6.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 0.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": null,
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-transform-handle:s",
-    "shape": "rect",
-    "bounds": [
-      417.0,
-      411.3888888888889,
-      6.0,
-      6.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 0.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": null,
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-transform-handle:sw",
-    "shape": "rect",
-    "bounds": [
-      309.0,
-      411.3888888888889,
-      6.0,
-      6.0
-    ],
-    "color": 16409360,
-    "opacity": 1.0,
-    "radius": 0.0,
-    "stroke": 0.0,
-    "text": null,
-    "fontSize": 0.0,
-    "detail": null,
-    "clip": [
-      320.0,
-      248.0,
-      640.0,
-      204.0
-    ]
-  },
-  {
-    "id": "graph-transform-handle:w",
-    "shape": "rect",
-    "bounds": [
-      309.0,
+      347.0,
       327.0,
       6.0,
       6.0
@@ -662,17 +863,63 @@
     "detail": null,
     "clip": [
       320.0,
-      248.0,
+      148.0,
       640.0,
-      204.0
+      292.0
     ]
   },
   {
-    "id": "graph-legend-ground",
+    "id": "graph-transform-handle:6",
+    "shape": "rect",
+    "bounds": [
+      297.0,
+      327.0,
+      6.0,
+      6.0
+    ],
+    "color": 16409360,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-transform-handle:7",
+    "shape": "rect",
+    "bounds": [
+      297.0,
+      287.0,
+      6.0,
+      6.0
+    ],
+    "color": 16409360,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      148.0,
+      640.0,
+      292.0
+    ]
+  },
+  {
+    "id": "graph-legend",
     "shape": "rect",
     "bounds": [
       320.0,
-      220.0,
+      120.0,
       640.0,
       28.0
     ],
@@ -683,32 +930,80 @@
     "text": null,
     "fontSize": 0.0,
     "detail": null,
-    "clip": null
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
   },
   {
-    "id": "graph-legend",
-    "shape": "legend",
+    "id": "graph-legend-rule",
+    "shape": "rect",
     "bounds": [
       320.0,
-      220.0,
+      120.0,
+      640.0,
+      1.0
+    ],
+    "color": 16119284,
+    "opacity": 0.07000000029802322,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      320.0
+    ]
+  },
+  {
+    "id": "graph-legend-swatch:Position X",
+    "shape": "rect",
+    "bounds": [
+      332.0,
+      131.0,
+      10.0,
+      2.0
+    ],
+    "color": 15951984,
+    "opacity": 1.0,
+    "radius": 0.0,
+    "stroke": 0.0,
+    "text": null,
+    "fontSize": 0.0,
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
       640.0,
       28.0
+    ]
+  },
+  {
+    "id": "graph-legend:Position X",
+    "shape": "text",
+    "bounds": [
+      347.0,
+      128.0,
+      88.8,
+      14.299999475479126
     ],
     "color": 11842482,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
-    "text": null,
+    "text": "Position X",
     "fontSize": 11.0,
-    "detail": {
-      "items": [
-        {
-          "color": 15894660,
-          "text": "X Position"
-        }
-      ],
-      "inset": 12.0
-    },
-    "clip": null
+    "detail": null,
+    "clip": [
+      320.0,
+      120.0,
+      640.0,
+      28.0
+    ]
   }
 ]

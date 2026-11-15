@@ -2,7 +2,7 @@ use crate::snap::{Anchor, DirectionalSnap, Edge, Target};
 use crate::{GraphDisplay, GraphMode, PropertyFacts, TimelineIndex, TimelineMode, TimelineModel};
 use pm_kernel::commands::{
     comps::CompPatch,
-    keyframes::{CopiedKey, EaseSide, EaseSpec, HandleValue},
+    keyframes::{CopiedKey, EaseSide, EaseSpec, HandleValue, TemporalEase},
     layers::{LayerPatch, ParentChange},
     properties::SetProperty,
 };
@@ -1045,6 +1045,59 @@ pub struct Drag {
     pub property_values: std::collections::HashMap<(String, String), f64>,
     selected_property_keys: std::collections::HashSet<String>,
     property_keys: std::collections::HashMap<(String, String), Vec<(String, f64)>>,
+    /// A key drag in the Speed Graph: each key side's speed and influence at
+    /// the press. A vertical drag there changes speeds (as v1 does), never
+    /// the keys' values.
+    speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
+    /// A handle drag: its key's layer-local time and value, and the other
+    /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
+    handle_key: Option<(f64, f64, Option<TemporalEase>)>,
+}
+/// Each side's ease of the keys `ids` as the graph shows it: the speed (value
+/// units per second) and influence (percent) of its direction handle, so a
+/// linear side reads its real chord speed, not a stored zero.
+fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, TemporalEase)> {
+    let mut out = vec![];
+    for id in ids {
+        let Some((_, channel, _)) = index.key(id) else {
+            continue;
+        };
+        let Some(i) = channel.keys.iter().position(|k| &k.id == id) else {
+            continue;
+        };
+        let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
+        let points = pm_kernel::commands::keyframes::handle_points(&stored);
+        let key = &channel.keys[i];
+        let Some(value) = key.value.as_f64() else {
+            continue;
+        };
+        for (side, neighbour) in [
+            (EaseSide::In, i.checked_sub(1)),
+            (
+                EaseSide::Out,
+                Some(i + 1).filter(|n| *n < channel.keys.len()),
+            ),
+        ] {
+            let slot = if side == EaseSide::In { 0 } else { 1 };
+            let (Some((t, v)), Some(n)) = (points.get(i).and_then(|p| p[slot]), neighbour) else {
+                continue;
+            };
+            let reach = t - key.time;
+            let span = (channel.keys[n].time - key.time).abs();
+            if reach.abs() < 1e-9 || span < 1e-9 {
+                continue;
+            }
+            out.push((
+                id.clone(),
+                side,
+                TemporalEase {
+                    speed: (v - value) / reach,
+                    influence: (reach.abs() / span * 100.).clamp(0.1, 100.),
+                },
+            ));
+        }
+    }
+    out
 }
 impl Drag {
     /// Captures identities and baselines once; never keeps a writer lease itself.
@@ -1243,7 +1296,31 @@ impl Drag {
         } else {
             None
         };
+        let speed_eases = match &kind {
+            DragKind::GraphKeys { ids } if model.graph_mode == GraphMode::Speed => {
+                Some(key_eases(index, ids))
+            }
+            _ => None,
+        };
+        let handle_key = match &kind {
+            DragKind::Handle { id, side } => index.key(id).and_then(|(_, _, key)| {
+                let value = key.value.as_f64()?;
+                let other = if *side == EaseSide::In {
+                    EaseSide::Out
+                } else {
+                    EaseSide::In
+                };
+                let opposite = key_eases(index, std::slice::from_ref(id))
+                    .into_iter()
+                    .find(|(_, s, _)| *s == other)
+                    .map(|(_, _, e)| e);
+                Some((key.time, value, opposite))
+            }),
+            _ => None,
+        };
         Ok(Self {
+            handle_key,
+            speed_eases,
             kind,
             start: index.clone(),
             snap: DirectionalSnap::default(),
@@ -1530,14 +1607,37 @@ impl Drag {
                 }
                 .into(),
             ),
-            DragKind::GraphKeys { ids } => out.push(
-                KeyframeCommand::GraphMove {
-                    key_ids: ids.clone(),
-                    delta,
-                    value_delta: sample.value_delta,
+            DragKind::GraphKeys { ids } => {
+                // In the Speed Graph the vertical axis is speed: the keys
+                // keep their values and each side's speed moves instead.
+                let speeds = self.speed_eases.as_ref();
+                out.push(
+                    KeyframeCommand::GraphMove {
+                        key_ids: ids.clone(),
+                        delta,
+                        value_delta: if speeds.is_some() {
+                            0.
+                        } else {
+                            sample.value_delta
+                        },
+                    }
+                    .into(),
+                );
+                for (id, side, ease) in speeds.into_iter().flatten() {
+                    out.push(
+                        KeyframeCommand::SetHandle {
+                            key_id: id.clone(),
+                            side: *side,
+                            value: HandleValue::Ease(TemporalEase {
+                                speed: ease.speed + sample.value_delta,
+                                influence: ease.influence,
+                            }),
+                            split: false,
+                        }
+                        .into(),
+                    );
                 }
-                .into(),
-            ),
+            }
             DragKind::StretchKeys {
                 ids,
                 anchor_time,
@@ -1583,18 +1683,46 @@ impl Drag {
             DragKind::Handle { id, side } => {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
+                let (t, mut v) = (sample.handle_time, sample.handle_value);
+                // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
+                if let Some((_, key_value, _)) = self.handle_key
+                    && sample.modifiers.shift
+                {
+                    v = key_value;
+                }
                 out.push(
                     KeyframeCommand::SetHandle {
                         key_id: id.clone(),
                         side: *side,
-                        value: HandleValue::Point {
-                            t: sample.handle_time,
-                            v: sample.handle_value,
-                        },
+                        value: HandleValue::Point { t, v },
                         split: sample.modifiers.alt,
                     }
                     .into(),
                 );
+                // Unless ⌥ splits them, the other handle stays on the same
+                // tangent through the key, keeping its own length (v1's
+                // `mirroredBezierHandlePoint`).
+                if let Some((key_time, key_value, Some(opposite))) = self.handle_key
+                    && !sample.modifiers.alt
+                    && (t - key_time).abs() > 1e-9
+                {
+                    out.push(
+                        KeyframeCommand::SetHandle {
+                            key_id: id.clone(),
+                            side: if *side == EaseSide::In {
+                                EaseSide::Out
+                            } else {
+                                EaseSide::In
+                            },
+                            value: HandleValue::Ease(TemporalEase {
+                                speed: (v - key_value) / (t - key_time),
+                                influence: opposite.influence,
+                            }),
+                            split: false,
+                        }
+                        .into(),
+                    );
+                }
             }
             DragKind::Property { targets, time } => {
                 for (l, c) in targets {

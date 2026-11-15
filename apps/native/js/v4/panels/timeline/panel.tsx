@@ -267,15 +267,28 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             intent={{ type: "graphOptions" }}
           />
         )}
+        {/* The Graph Editor switch reads as a control, not a mark: its curve
+            glyph with a "Graph" label in the text ink, lit while the graph
+            shows (a lone faint glyph here went unnoticed). */}
         <Icon
           id="timeline:graph"
           label="Graph Editor"
-          title="Graph Editor"
+          title={graph ? "Hide Graph Editor (⇧F3)" : "Show Graph Editor (⇧F3)"}
           symbol="point.topleft.down.to.point.bottomright.curvepath"
           active={graph}
+          primary
           send={send}
           intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
-        />
+        >
+          <text
+            style={{
+              color: t("colors.text"),
+              fontSize: t("typography.reading"),
+            }}
+          >
+            Graph
+          </text>
+        </Icon>
         {(f.shyLayers || f.hideShy) && (
           <Icon
             id="timeline:hide-shy"

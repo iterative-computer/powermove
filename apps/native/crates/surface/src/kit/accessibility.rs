@@ -42,7 +42,7 @@ fn role(node: &Node) -> Role {
         Some(PushButton | ViewerGizmo) => Role::Button,
         Some(Slider) => Role::Slider,
         // Adjusted with the pointer; its values read as text ("Red 0.03…").
-        Some(ColorWheel | CurveEditor) => Role::Group,
+        Some(ColorWheel | CurveEditor | EaseCurve | EaseThumbnail) => Role::Group,
         Some(FormGroup | FormRow | ViewerOverlay) => Role::Group,
         Some(ColourPopover) => Role::Dialog,
         Some(Banner) => Role::Status,

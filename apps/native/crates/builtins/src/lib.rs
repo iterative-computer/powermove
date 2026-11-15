@@ -2298,6 +2298,7 @@ impl EngineProxy for Broker {
                 .inspector_snapshot()
                 .map_err(Error::Host),
             "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
+            "easing.state" => entry.backend.shared().easing_state().map_err(Error::Host),
             "timeline.frame" => entry
                 .backend
                 .shared()
