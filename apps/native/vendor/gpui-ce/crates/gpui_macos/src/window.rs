@@ -1080,7 +1080,7 @@ impl MacWindowState {
                     // on a 120 Hz display (five refreshes, whatever its frame
                     // latency, drawable count or rate range), where a drawable
                     // the view's link asks the layer for reaches the glass in
-                    // two. PM_GPUI_METAL_DISPLAY_LINK=1 measures the old way.
+                    // two or three. PM_GPUI_METAL_DISPLAY_LINK=1 measures the old way.
                     #[cfg(not(feature = "wgpu"))]
                     if std::env::var_os("PM_GPUI_METAL_DISPLAY_LINK").is_some()
                         && self.direct_moved.is_none()
