@@ -157,6 +157,7 @@ pub enum Action {
     Grid,
     ClearGuides,
     LockGuides,
+    Snapping,
     SafeAreas,
     Guides,
     Popout,
@@ -555,7 +556,7 @@ pub fn update_checks(
                     Action::Channels(mode) => *mode == channels,
                     Action::Rulers => rulers,
                     Action::Grid => grid,
-                    Action::ClearGuides | Action::LockGuides => false,
+                    Action::ClearGuides | Action::LockGuides | Action::Snapping => false,
                     Action::ToggleProxies => false,
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
@@ -1050,6 +1051,7 @@ pub fn command_action(command: &str) -> Option<Action> {
         "viewer.grid" => Action::Grid,
         "viewer.clearGuides" => Action::ClearGuides,
         "viewer.lockGuides" => Action::LockGuides,
+        "viewer.snapping" => Action::Snapping,
         "viewer.guides" => Action::Guides,
         "viewer.popout" => Action::Popout,
         "viewer.toggleProxies" => Action::ToggleProxies,
@@ -1090,6 +1092,11 @@ impl Controller {
                 // The composition fits inside the rulers at the next layout.
                 self.apply_viewer_options();
                 cx.notify();
+            }
+            Action::Snapping => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.toggle_snapping(cx));
+                }
             }
             Action::LockGuides => {
                 if let Some(g) = self.builtins.gizmos.clone() {

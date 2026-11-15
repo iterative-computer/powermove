@@ -359,6 +359,7 @@ pub struct GizmoSurface {
     space_panned: bool,
     /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
     rulers: viewer_rulers::Rulers,
+    snapping_enabled: bool,
     cursor: CursorStyle,
     /// Holds the keyboard while flying, so held keys report their release.
     focus: Option<FocusHandle>,
@@ -626,6 +627,7 @@ impl GizmoSurface {
             space_hand: false,
             space_panned: false,
             rulers: Default::default(),
+            snapping_enabled: true,
             cursor: CursorStyle::Arrow,
             focus: None,
             refreshing: false,
@@ -917,6 +919,10 @@ impl GizmoSurface {
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
         self.rulers.shown = shown;
         self.rulers.grid = grid;
+        cx.notify();
+    }
+    pub fn toggle_snapping(&mut self, cx: &mut Context<Self>) {
+        self.snapping_enabled = !self.snapping_enabled;
         cx.notify();
     }
     pub fn toggle_guides_locked(&mut self, cx: &mut Context<Self>) {
@@ -1623,7 +1629,7 @@ impl GizmoSurface {
         let mods = Mods {
             shift: event.modifiers.shift,
             alt: event.modifiers.alt,
-            snap: event.modifiers.platform || event.modifiers.control,
+            snap: snapping_suspended(self.snapping_enabled, event.modifiers.platform || event.modifiers.control),
         };
         // Moves align with the composition and other layers; Command
         // bypasses, and a Shift-locked axis stays put.
@@ -2948,4 +2954,17 @@ pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
             .and_then(|d| d.to_value().as_str().map(str::to_owned))
             .is_some_and(|d| d.starts_with("powermove.3d."))
     })
+}
+
+fn snapping_suspended(enabled: bool, command_held: bool) -> bool { !enabled || command_held }
+#[cfg(test)]
+mod snapping_toggle_tests {
+    use super::*;
+    #[test]
+    fn toggle_and_temporary_suspend_compose() {
+        assert!(!snapping_suspended(true, false));
+        assert!(snapping_suspended(true, true));
+        assert!(snapping_suspended(false, false));
+        assert!(snapping_suspended(false, true));
+    }
 }
