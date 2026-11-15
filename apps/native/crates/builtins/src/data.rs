@@ -61,10 +61,8 @@ pub(crate) fn effect_binding_rows<'a>(
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         == channels.len();
-    (distinct
-        && handles.join("+") == handle
-        && found.iter().all(|p| p["effect"] == *effect))
-    .then_some(found)
+    (distinct && handles.join("+") == handle && found.iter().all(|p| p["effect"] == *effect))
+        .then_some(found)
 }
 pub(crate) fn model(value: &Value) -> Result<pm_model::Value, String> {
     pm_model::json::parse(&value.to_string()).map_err(|e| format!("{e:?}"))
@@ -102,6 +100,7 @@ pub(crate) struct Backend {
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
     last_effects: BTreeMap<String, Value>,
+    pub(crate) presets: Vec<Value>,
     last_registries: Option<Arc<BTreeMap<String, Vec<state::Registration>>>>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
@@ -168,6 +167,7 @@ impl Backend {
             panel_id: panel.into(),
             service_revision: 0,
             last_effects: BTreeMap::new(),
+            presets: Vec::new(),
             last_registries: None,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
@@ -781,6 +781,30 @@ impl KernelData for Data {
                 HostOperation::Edit { label, commands } => {
                     let mut all = vec![];
                     for command in commands {
+                        if command.command == "preset.apply" {
+                            let saved = b
+                                .presets
+                                .iter()
+                                .find(|p| p["id"] == command.args["preset"])
+                                .cloned()
+                                .ok_or("Preset not found")?;
+                            let saved = model(&saved)?;
+                            let caller = b.caller;
+                            let time = b.native.facts["time"].as_f64().unwrap_or(0.);
+                            let m = b.model.as_mut().ok_or("No open project")?;
+                            let targets = m.selected_layers().to_vec();
+                            let next = m
+                                .apply_preset(caller, &saved, &targets, time)
+                                .map_err(|e| e.to_string())?;
+                            if let pm_kernel::Call::Transact {
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                ..
+                            } = next.call
+                            {
+                                all.extend(commands);
+                            }
+                            continue;
+                        }
                         if command.command != "effect.add" {
                             return Err("Unregistered built-in edit".into());
                         }
