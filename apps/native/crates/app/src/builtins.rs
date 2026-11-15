@@ -116,6 +116,9 @@ pub struct Host {
     pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
+    /// Projects whose offline clips the person chose to export without, this
+    /// session: their later exports go without them and say so, not asking again.
+    pub export_without_offline: BTreeSet<String>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,

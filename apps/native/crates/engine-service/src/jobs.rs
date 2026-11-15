@@ -644,6 +644,21 @@ impl std::fmt::Display for OfflineRefusal {
     }
 }
 impl std::error::Error for OfflineRefusal {}
+/// The note an export made without its offline clips carries: which it left out.
+fn left_out_note(clips: &[pm_export::render::OfflineClip]) -> String {
+    let names: Vec<_> = clips.iter().take(3).map(|c| c.name.as_str()).collect();
+    let more = match clips.len().saturating_sub(3) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    match clips.len() {
+        1 => format!("Exported without 1 offline clip: {}.", names.join(", ")),
+        n => format!(
+            "Exported without {n} offline clips: {}{more}.",
+            names.join(", ")
+        ),
+    }
+}
 impl OfflineRefusal {
     fn error(&self, job: &JobId) -> EngineError {
         let assets = self.0.iter().map(|c| AssetId::new(&c.asset)).collect();
@@ -1165,6 +1180,8 @@ pub fn run_child() -> Result<()> {
         if !offline.is_empty() && !request.without_offline && !request.preview {
             return Err(OfflineRefusal(offline).into());
         }
+        // Going without them is said with the file.
+        let left_out = (!offline.is_empty() && !request.preview).then(|| left_out_note(&offline));
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
@@ -1322,10 +1339,9 @@ pub fn run_child() -> Result<()> {
         // What the person is told with the file: sound over full scale,
         // then what the file check noted.
         let report = delivered.report;
-        let notes = report
-            .mix
-            .and_then(|mix| mix.warning())
+        let notes = left_out
             .into_iter()
+            .chain(report.mix.and_then(|mix| mix.warning()))
             .chain(report.notes)
             .collect();
         Ok((delivered.path, notes))
@@ -2837,6 +2853,15 @@ mod tests {
         assert_eq!(
             clips(2).to_string(),
             "2 clips are offline: take 0.mov, take 1.mov. Relink the originals, or export without them."
+        );
+        // Exported without them, the file's notes say which were left out.
+        assert_eq!(
+            left_out_note(&clips(5).0),
+            "Exported without 5 offline clips: take 0.mov, take 1.mov, take 2.mov and 2 more."
+        );
+        assert_eq!(
+            left_out_note(&clips(1).0),
+            "Exported without 1 offline clip: take 0.mov."
         );
     }
     /// A disk that fills during an export stops it; a finished export is
