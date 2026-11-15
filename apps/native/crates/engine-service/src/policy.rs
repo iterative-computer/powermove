@@ -166,6 +166,13 @@ pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
 /// paused one from settling (it may then delay one of the playing frames).
 pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
+/// A drag that went back to full and was slow again at once (a full frame
+/// that just misses its refresh, a reduced one far under it) needs this many
+/// quick reduced frames in a row before full again, doubling with each such
+/// return up to [`MOST_QUICK_STILLS`]: Auto otherwise flips between full and
+/// half every few frames, and every flip converts the clips' frames again.
+const QUICK_STILLS: u32 = 8;
+const MOST_QUICK_STILLS: u32 = 32;
 /// Playing frames at full resolution slower than their content frame this
 /// many times in a row put Auto's playback at [`AUTO_FLOOR`].
 const LATE_PLAYS: u32 = 3;
@@ -189,6 +196,12 @@ pub struct AutoQuality {
     /// Dragged frames are slow at half resolution too: they drag at
     /// [`AUTO_DRAG_FLOOR`].
     slower_stills: bool,
+    /// Quick reduced drag frames in a row, and how many bring a drag back to
+    /// full (one, until a drag is slow again just after coming back).
+    quick_stills: u32,
+    stills_needed: u32,
+    /// The last reduced drag frame brought it back to full.
+    came_back: bool,
     slow_play: bool,
     /// Consecutive full playing frames over their content frame.
     late_plays: u32,
@@ -206,12 +219,28 @@ impl AutoQuality {
         if !cost_ms.is_finite() || !interval_ms.is_finite() || interval_ms <= 0. {
             return;
         }
+        let needed = self.stills_needed.max(1);
         if scale >= 1. {
             self.slow_stills = cost_ms > interval_ms;
             self.slower_stills = false;
+            self.quick_stills = 0;
+            if self.slow_stills && self.came_back {
+                // Slow again at once: the next way back takes a run.
+                self.stills_needed = (needed * QUICK_STILLS).min(MOST_QUICK_STILLS);
+            } else if !self.slow_stills {
+                self.stills_needed = 1;
+            }
+            self.came_back = false;
         } else if scale >= AUTO_FLOOR {
             if cost_ms < UNDER * interval_ms {
-                self.slow_stills = false;
+                self.quick_stills += 1;
+                if self.quick_stills >= needed {
+                    self.slow_stills = false;
+                    self.came_back = true;
+                    self.quick_stills = 0;
+                }
+            } else {
+                self.quick_stills = 0;
             }
             self.slower_stills = cost_ms > SLOW_REDUCED * interval_ms;
         } else if cost_ms < 0.5 * interval_ms {
@@ -389,6 +418,46 @@ mod tests {
         auto.record_still(300., 16.67, 1.);
         auto.record_still(0.8, 16.67, AUTO_FLOOR);
         assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
+    }
+
+    /// A drag whose full frames just miss the refresh and whose reduced ones
+    /// are far under it does not flip between full and half every few
+    /// frames: slow again right after coming back, it stays reduced for a run
+    /// of quick frames (longer each time), and a full frame that fits the
+    /// refresh makes one quick frame enough again.
+    #[test]
+    fn a_drag_does_not_flip_between_full_and_half() {
+        let refresh = 1000. / 120.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(
+            drag(&auto),
+            1.,
+            "an isolated slow frame costs one reduced frame"
+        );
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR, "slow again at once");
+        for _ in 0..QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+            assert_eq!(drag(&auto), AUTO_FLOOR, "a run of quick frames first");
+        }
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(12., refresh, 1.);
+        for _ in 0..MOST_QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+        }
+        assert_eq!(drag(&auto), AUTO_FLOOR, "longer the second time");
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(5., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
+        auto.record_still(12., refresh, 1.);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1., "and one quick frame is enough again");
     }
 
     #[test]
