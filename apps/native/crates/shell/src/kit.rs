@@ -446,6 +446,7 @@ impl Kit {
     /// field, and a right-aligned shortcut hint.
     pub fn search(&self, field: Option<Entity<TextField>>, hint: Option<&str>) -> Div {
         let t = &self.t;
+        let missing = field.is_none();
         let (c, m) = (&t.colors, &t.metrics);
         div()
             .flex()
@@ -458,7 +459,20 @@ impl Kit {
             .rounded(px(m.control_radius))
             .bg(ink(c.text, t.translucency.hover))
             .child(self.symbol("magnifyingglass", m.symbol_inline, Weight::Medium, c.muted))
-            .child(div().flex_1().min_w(px(0.)).children(field))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .children(field)
+                    .when(missing, |d| {
+                        d.child(
+                            div()
+                                .text_role(t, Text::Body)
+                                .text_color(rgb(c.faint))
+                                .child("Search"),
+                        )
+                    }),
+            )
             .children(hint.map(|hint| {
                 div()
                     .flex_none()
@@ -965,7 +979,10 @@ pub fn tabular() -> FontFeatures {
 
 /// A trailing shelf count, sharing Home's caption and tabular figures.
 pub fn shelf_count(t: &Tokens, count: usize) -> Div {
-    div().flex_none().text_role(t, Text::Caption)
-        .font_features(tabular()).text_color(rgb(t.colors.muted))
+    div()
+        .flex_none()
+        .text_role(t, Text::Caption)
+        .font_features(tabular())
+        .text_color(rgb(t.colors.muted))
         .child(count.to_string())
 }

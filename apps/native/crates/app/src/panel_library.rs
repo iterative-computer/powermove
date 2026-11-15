@@ -8,10 +8,10 @@
 //! kernel's workspace store; it keeps no state of its own.
 use crate::session::Controller;
 use gpui::{prelude::*, *};
-use pm_shell::workspace;
+use pm_design::Text;
 use pm_shell::kit::{self, Kit, Recipes};
 use pm_shell::symbol::Weight;
-use pm_design::Text;
+use pm_shell::workspace;
 
 const TITLE: &str = "Panel Library";
 
@@ -165,30 +165,55 @@ pub fn shown_workspaces(
 
 /// Pure shelf geometry, shared with Electron's shelves.ts.
 fn shelf_scale(width: f32) -> f32 {
-    if !width.is_finite() || width <= 0. { 0.5 } else { (width / 1700.).clamp(0.4, 0.56) }
+    if !width.is_finite() || width <= 0. {
+        0.5
+    } else {
+        (width / 1700.).clamp(0.4, 0.56)
+    }
 }
-fn preview_bounds((w,h): (f32,f32)) -> (f32,f32) { (w.min(960.), h.min(720.)) }
-fn cover_size(size: (f32,f32), scale: f32, max_width: f32) -> (f32,f32) {
-    let (w,h) = preview_bounds(size);
-    let fit = scale.min(420./h).min(max_width/w);
-    let next = if fit.is_finite() && fit > 0. { fit } else { scale };
-    ((w*next).round(), (h*next).round())
+fn preview_bounds((w, h): (f32, f32)) -> (f32, f32) {
+    (w.min(960.), h.min(720.))
+}
+fn cover_size(size: (f32, f32), scale: f32, max_width: f32) -> (f32, f32) {
+    let (w, h) = preview_bounds(size);
+    let fit = scale.min(420. / h).min(max_width / w);
+    let next = if fit.is_finite() && fit > 0. {
+        fit
+    } else {
+        scale
+    };
+    ((w * next).round(), (h * next).round())
 }
 fn pack_rows(widths: &[f32], width: f32, gap: f32) -> Vec<Vec<usize>> {
-    let mut rows = Vec::new(); let mut row = Vec::new(); let mut used = 0.;
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut used = 0.;
     for (i, w) in widths.iter().enumerate() {
         let next = if row.is_empty() { *w } else { used + gap + w };
-        if !row.is_empty() && next > width { rows.push(std::mem::take(&mut row)); used = *w; } else { used = next; }
+        if !row.is_empty() && next > width {
+            rows.push(std::mem::take(&mut row));
+            used = *w;
+        } else {
+            used = next;
+        }
         row.push(i);
     }
-    if !row.is_empty() { rows.push(row); } rows
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
-fn panel_size(id: &str) -> (f32,f32) {
-    match id { "timeline" => (960.,360.), "inspector" | "layer-effects" => (320.,600.), "viewer" => (800.,480.), _ => (360.,420.) }
+fn panel_size(id: &str) -> (f32, f32) {
+    match id {
+        "timeline" => (960., 360.),
+        "inspector" | "layer-effects" => (320., 600.),
+        "viewer" => (800., 480.),
+        _ => (360., 420.),
+    }
 }
 
 pub struct PanelLibrary {
-    editor: WeakEntity<Controller>,
+    editor: Option<WeakEntity<Controller>>,
     /// The editor's shell view: its live layout.
     shell: Option<WeakEntity<pm_shell::view::Editor>>,
     page: Page,
@@ -196,107 +221,502 @@ pub struct PanelLibrary {
     search: Option<Entity<pm_shell::text::TextField>>,
     tokens: pm_design::Tokens,
     motion: pm_shell::motion::Motion<u64>,
-    frame_kit: Option<Kit>,
+    focus: std::collections::HashMap<String, FocusHandle>,
+    focused: Option<String>,
+    #[cfg(test)]
+    fixture: Option<(Vec<PanelCard>, Vec<WorkspaceCard>)>,
 }
 impl PanelLibrary {
-    fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> { &mut self.motion }
+    fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
+        &mut self.motion
+    }
     fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.motion.values.borrow_mut().insert(
+            kit::key("library-page-fade"),
+            pm_design::motion::Animated::unit(0.),
+        );
         self.page = page;
         self.query.clear();
-        if let Some(search) = &self.search { search.update(cx, |f, cx| f.set_value("", cx)); }
+        if let Some(search) = &self.search {
+            search.update(cx, |f, cx| f.set_value("", cx));
+        }
         cx.notify();
     }
     fn send(&self, command: String, cx: &mut Context<Self>) {
-        if let Some(editor) = self.editor.upgrade() {
+        if let Some(editor) = self.editor.as_ref().and_then(WeakEntity::upgrade) {
+            if let Some(id) = command.strip_prefix("library-delete:") {
+                editor.update(cx, |v, cx| {
+                    v.confirm_library_panel_delete(id.to_owned(), cx)
+                });
+                return;
+            }
             editor.read(cx).host.borrow().send_command(&command, vec![]);
         }
     }
-    fn panel_card(&self, card: &PanelCard, kit: &Kit, scale: f32, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let t = &kit.t; let c = &t.colors;
-        let (w,h) = cover_size(panel_size(&card.id), scale, width);
+    fn panel_card(
+        &self,
+        card: &PanelCard,
+        kit: &Kit,
+        scale: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = &kit.t;
+        let c = &t.colors;
+        let (w, h) = cover_size(panel_size(&card.id), scale, width);
         let key = kit::key(&format!("library-cover-{}", card.id));
-        let hover = kit.hovered(key);
+        let hover = if self.focused.as_deref() == Some(&card.id) {
+            1.
+        } else {
+            kit.hovered(key)
+        };
         let command = format!("panel:activate:{}", card.id);
         let click = command.clone();
-        let label = format!("{} {} in Workspace", if card.open { "Show" } else { "Add" }, card.title);
+        let keyboard = command.clone();
+        let label = format!(
+            "{} {} in Workspace",
+            if card.open { "Show" } else { "Add" },
+            card.title
+        );
+        let owner = self
+            .editor
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .and_then(|e| {
+                e.read(cx)
+                    .extensions
+                    .stores
+                    .get(&card.id)
+                    .map(|(id, _)| id.clone())
+            });
+        let dimmed = owner.as_ref().is_some_and(|id| {
+            self.editor
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .is_some_and(|e| {
+                    e.read(cx)
+                        .kernel
+                        .state()
+                        .extensions
+                        .get(id)
+                        .is_none_or(|entry| !entry.enabled || !entry.installed)
+                })
+        });
+        let seed = owner.clone().unwrap_or_else(|| card.id.clone());
+        let metadata = owner.as_ref().and_then(|id| {
+            self.editor
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .and_then(|e| {
+                    let state = e.read(cx).kernel.state();
+                    let entry = state.extensions.get(id)?;
+                    let record = entry.source.get("hostRecord").unwrap_or(&entry.source);
+                    let name = record
+                        .get("name")
+                        .and_then(pm_model::Value::as_str)
+                        .unwrap_or(id);
+                    let maker = record.get("maker").and_then(|m| {
+                        m.get("handle")
+                            .and_then(pm_model::Value::as_str)
+                            .or_else(|| m.as_str())
+                    });
+                    let label = maker
+                        .map_or_else(|| name.to_owned(), |maker| format!("{name} · by {maker}"));
+                    let icon = entry
+                        .source
+                        .get("manifest")
+                        .and_then(|m| m.get("icon"))
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned);
+                    Some((label, icon))
+                })
+        });
+        let subline = metadata
+            .as_ref()
+            .map(|(label, _)| label.clone())
+            .or_else(|| owner.clone());
+        let manifest_icon = metadata.as_ref().and_then(|(_, icon)| icon.as_deref());
+        let delete_command = owner
+            .map(|id| format!("extensionArchive.{id}"))
+            .or_else(|| {
+                (card.origin == Origin::Yours).then(|| format!("library-delete:{}", card.id))
+            });
+        let keyboard_delete = delete_command.clone();
         let art = card.origin != Origin::BuiltIn;
-        let (from,to) = crate::store_window::art(&card.id);
-        let cover = div().id(SharedString::from(format!("library-panel-{}", card.id)))
-            .role(Role::Button).aria_label(label.clone())
-            .relative().w(px(w)).h(px(h)).flex().flex_col().items_center().justify_center().gap(px(12.))
-            .corner(t, t.radius.lg).bg(rgb(c.panel))
-            .elevated(t, if hover > 0.1 { pm_design::Elevation::Menu } else { pm_design::Elevation::Raised })
-            .when(art, |d| d.bg(linear_gradient(135.,linear_color_stop(rgb(from),0.),linear_color_stop(rgb(to),1.))))
-            .child(kit.symbol(pm_shell::symbol::panel_symbol(&card.id),26.,Weight::Regular,if art { 0xffffff } else { c.muted }))
-            .child(div().w(px(w*0.85)).truncate().text_center().text_role(t,Text::Body).text_color(if art {kit::ink(0xffffff,0.94)} else {rgb(c.secondary).into()}).child(card.title.clone()))
-            .child(div().absolute().top(px(8.)).right(px(8.)).opacity(hover)
-                .child(kit.icon_button(format!("library-add-{}",card.id),if card.open {"eye"} else {"plus"},label,false)
-                    .bg(rgb(c.floating)).on_click(cx.listener(move |v,_,_,cx| {cx.stop_propagation();v.send(command.clone(),cx)}))))
-            .on_click(cx.listener(move |v,_,_,cx| v.send(click.clone(),cx)));
-        div().flex_none().w(px(w)).flex().flex_col().child(kit.track_hover(cover,key))
-            .child(self.ledge(kit,card.title.clone(),None,w)).into_any_element()
+        let (from, to) = crate::store_window::art(&seed);
+        let cover = div()
+            .id(SharedString::from(format!("library-panel-{}", card.id)))
+            .track_focus(self.focus.get(&card.id).expect("cover focus"))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .tab_index(0)
+            .focus_visible_style(|s| {
+                s.shadow(vec![BoxShadow {
+                    color: rgb(c.focus).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: true,
+                }])
+            })
+            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "enter" {
+                    v.send(keyboard.clone(), cx);
+                    cx.stop_propagation();
+                } else if matches!(e.keystroke.key.as_str(), "backspace" | "delete") {
+                    if let Some(command) = &keyboard_delete {
+                        v.send(command.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                }
+            }))
+            .opacity(if dimmed { 0.62 + hover * 0.18 } else { 1. })
+            .relative()
+            .w(px(w))
+            .h(px(h))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.))
+            .corner(t, t.radius.lg)
+            .bg(rgb(c.panel))
+            .active_style(|s| s.bg(rgb(pm_design::color::mix(c.panel, c.text, 0.04))))
+            .elevated(
+                t,
+                if hover > 0.1 {
+                    pm_design::Elevation::Menu
+                } else {
+                    pm_design::Elevation::Raised
+                },
+            )
+            .when(art, |d| {
+                d.bg(linear_gradient(
+                    135.,
+                    linear_color_stop(rgb(from), 0.),
+                    linear_color_stop(rgb(to), 1.),
+                ))
+            })
+            .child(kit.symbol(
+                pm_shell::symbol::panel_symbol_with_manifest(&card.id, manifest_icon),
+                26.,
+                Weight::Regular,
+                if art { 0xffffff } else { c.muted },
+            ))
+            .child(
+                div()
+                    .w(px(w * 0.85))
+                    .truncate()
+                    .text_center()
+                    .text_role(t, Text::Body)
+                    .font_weight(FontWeight(t.typography.medium_weight))
+                    .text_color(if art {
+                        kit::ink(0xffffff, 0.94)
+                    } else {
+                        rgb(c.secondary).into()
+                    })
+                    .child(card.title.clone()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(8.))
+                    .opacity(hover)
+                    .flex()
+                    .gap(px(4.))
+                    .children(delete_command.map(|command| {
+                        kit.icon_button(
+                            format!("library-delete-{}", card.id),
+                            "trash",
+                            format!("Delete {}", card.title),
+                            false,
+                        )
+                        .bg(rgb(c.floating))
+                        .text_color(rgb(c.danger))
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            cx.stop_propagation();
+                            v.send(command.clone(), cx)
+                        }))
+                    }))
+                    .child(
+                        kit.icon_button(
+                            format!("library-add-{}", card.id),
+                            if card.open { "eye" } else { "plus" },
+                            label,
+                            false,
+                        )
+                        .bg(rgb(c.floating))
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            cx.stop_propagation();
+                            v.send(command.clone(), cx)
+                        })),
+                    ),
+            )
+            .on_click(cx.listener(move |v, _, _, cx| v.send(click.clone(), cx)));
+        div()
+            .flex_none()
+            .w(px(w))
+            .flex()
+            .flex_col()
+            .child(kit.track_hover(cover, key))
+            .child(self.ledge(kit, card.title.clone(), subline, w))
+            .into_any_element()
     }
     fn ledge(&self, kit: &Kit, title: String, detail: Option<String>, width: f32) -> Div {
         let t = &kit.t;
-        div().w(px(width)).h(px(42.)).px(px(14.)).flex().flex_col().justify_center()
-            .corner(t,t.radius.lg)
-            .bg(linear_gradient(180.,linear_color_stop(kit::ink(t.colors.text,0.),0.),linear_color_stop(kit::ink(t.colors.text,if t.accessibility.increase_contrast {t.translucency.selected} else {t.translucency.hover}),0.75)))
-            .child(div().truncate().text_role(t,Text::Body).child(title))
-            .children(detail.map(|s| div().truncate().text_role(t,Text::Caption).text_color(rgb(t.colors.muted)).child(s)))
+        div()
+            .w(px(width))
+            .h(px(42.))
+            .px(px(14.))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .corner(t, t.radius.lg)
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(kit::ink(t.colors.text, 0.), 0.),
+                linear_color_stop(
+                    kit::ink(
+                        t.colors.text,
+                        if t.accessibility.increase_contrast {
+                            t.translucency.selected
+                        } else {
+                            t.translucency.hover
+                        },
+                    ),
+                    0.75,
+                ),
+            ))
+            .child(
+                div()
+                    .truncate()
+                    .text_role(t, Text::Body)
+                    .font_weight(FontWeight(t.typography.medium_weight))
+                    .child(title),
+            )
+            .children(detail.map(|s| {
+                div()
+                    .truncate()
+                    .text_role(t, Text::Caption)
+                    .text_color(rgb(if s == "Active" {
+                        t.colors.accent_text
+                    } else {
+                        t.colors.muted
+                    }))
+                    .child(s)
+            }))
     }
-    fn workspace_card(&self, card: &WorkspaceCard, cx: &mut Context<Self>) -> AnyElement {
-        let kit = self.frame_kit.as_ref().expect("frame kit");
-        let t=&kit.t; let c=&t.colors;
-        let w=200.; let h=125.;
-        let layout = self.editor.upgrade().and_then(|e| e.read(cx).workspace_store().get(&card.id).map(workspace::layout));
+    fn workspace_card(
+        &self,
+        card: &WorkspaceCard,
+        kit: &Kit,
+        scale: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = &kit.t;
+        let c = &t.colors;
+        let (w, h) = cover_size((400., 250.), scale, width);
+        let layout = self
+            .editor
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .and_then(|e| {
+                e.read(cx)
+                    .workspace_store()
+                    .get(&card.id)
+                    .map(workspace::layout)
+            })
+            .or_else(|| workspace::preset(&card.id).as_ref().map(workspace::layout));
+        let names = pm_shell::layout::Panels::new(Vec::new());
         let mut map = div().size_full().flex().gap(px(4.)).p(px(6.));
         if let Some(layout) = layout {
             for dock in &layout.docks {
-                let mut col=div().h_full().flex().flex_col().gap(px(4.));
-                col=if dock.size.is_some() {col.w(px(w*0.22))} else {col.flex_1()};
+                let mut col = div().h_full().flex().flex_col().gap(px(4.));
+                col = if dock.size.is_some() {
+                    col.w(px(w * 0.22))
+                } else {
+                    col.flex_1()
+                };
                 for group in &dock.groups {
-                    let id=group.active();
-                    col=col.child(div().flex_1().min_h(px(0.)).overflow_hidden().flex().items_center().justify_center().gap(px(4.))
-                        .rounded(px((t.radius.lg-6.).max(0.))).bg(kit::ink(c.text,t.translucency.hover))
-                        .child(kit.symbol(pm_shell::symbol::panel_symbol(id),14.,Weight::Regular,c.secondary))
-                        .child(div().truncate().text_role(t,Text::Caption).text_color(rgb(c.secondary)).child(id.to_owned())));
+                    let id = group.active();
+                    col = col.child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(4.))
+                            .rounded(px((t.radius.lg - 6.).max(0.)))
+                            .bg(kit::ink(c.text, t.translucency.hover))
+                            .child(kit.symbol(
+                                pm_shell::symbol::panel_symbol(id),
+                                14.,
+                                Weight::Regular,
+                                c.secondary,
+                            ))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_role(t, Text::Caption)
+                                    .text_color(rgb(c.secondary))
+                                    .child(names.title(id).to_owned()),
+                            ),
+                    );
                 }
-                map=map.child(col);
+                map = map.child(col);
             }
         }
-        let activate=format!("workspace:{}",card.id);
-        let key=kit::key(&format!("workspace-cover-{}",card.id));
-        let (id,name)=(card.id.clone(),card.name.clone());
-        let cover=div().id(SharedString::from(format!("library-workspace-{}",card.id))).relative()
-            .role(Role::Button).aria_label(format!("Activate {}",card.name))
-            .w(px(w)).h(px(h)).corner(t,t.radius.lg).bg(rgb(c.panel)).elevated(t,pm_design::Elevation::Raised)
-            .when(card.active,|d| d.shadow(vec![BoxShadow { color:rgb(c.accent).into(),offset:point(px(0.),px(0.)),blur_radius:px(0.),spread_radius:px(2.),inset:true }]))
+        let activate = format!("workspace:{}", card.id);
+        let keyboard_activate = activate.clone();
+        let keyboard_delete = (!card.builtin).then(|| (card.id.clone(), card.name.clone()));
+        let key = kit::key(&format!("workspace-cover-{}", card.id));
+        let (id, name) = (card.id.clone(), card.name.clone());
+        let cover = div()
+            .id(SharedString::from(format!("library-workspace-{}", card.id)))
+            .relative()
+            .role(Role::Button)
+            .track_focus(self.focus.get(&card.id).expect("workspace focus"))
+            .aria_label(format!("Activate {}", card.name))
+            .tab_index(0)
+            .focus_visible_style(|s| {
+                s.shadow(vec![BoxShadow {
+                    color: rgb(c.focus).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: true,
+                }])
+            })
+            .on_key_down(cx.listener(move |v, event: &KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" => {
+                        v.send(keyboard_activate.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                    "backspace" | "delete" => {
+                        if let Some((id, name)) = &keyboard_delete {
+                            if let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade) {
+                                e.update(cx, |v, cx| {
+                                    v.confirm_workspace_delete(id.clone(), name.clone(), cx)
+                                });
+                            }
+                            cx.stop_propagation();
+                        }
+                    }
+                    _ => {}
+                }
+            }))
+            .w(px(w))
+            .h(px(h))
+            .corner(t, t.radius.lg)
+            .bg(rgb(c.panel))
+            .elevated(t, pm_design::Elevation::Raised)
+            .when(card.active, |d| {
+                d.shadow(vec![BoxShadow {
+                    color: rgb(c.accent).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: true,
+                }])
+            })
             .child(map)
-            .when(!card.builtin,|d| d.child(div().absolute().top(px(8.)).right(px(8.)).opacity(kit.hovered(key))
-                .child(kit.icon_button(format!("workspace-delete-{}",card.id),"trash",format!("Delete {}",card.name),false)
-                .bg(rgb(c.floating)).on_click(cx.listener(move |v,_,_,cx| {cx.stop_propagation();if let Some(e)=v.editor.upgrade(){e.update(cx,|e,cx|e.confirm_workspace_delete(id.clone(),name.clone(),cx));}})))))
-            .on_click(cx.listener(move |v,_,_,cx|v.send(activate.clone(),cx)));
-        div().w(px(w)).flex_none().flex().flex_col().child(kit.track_hover(cover,key))
-            .child(self.ledge(kit,card.name.clone(),Some(if card.active {"Active".into()} else {format!("{} panels",card.panels)}),w)).into_any_element()
+            .when(!card.builtin, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(8.))
+                        .right(px(8.))
+                        .opacity(if self.focused.as_deref() == Some(&card.id) {
+                            1.
+                        } else {
+                            kit.hovered(key)
+                        })
+                        .child(
+                            kit.icon_button(
+                                format!("workspace-delete-{}", card.id),
+                                "trash",
+                                format!("Delete {}", card.name),
+                                false,
+                            )
+                            .bg(rgb(c.floating))
+                            .on_click(cx.listener(
+                                move |v, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(e) = v.editor.as_ref().and_then(WeakEntity::upgrade)
+                                    {
+                                        e.update(cx, |e, cx| {
+                                            e.confirm_workspace_delete(id.clone(), name.clone(), cx)
+                                        });
+                                    }
+                                },
+                            )),
+                        ),
+                )
+            })
+            .on_click(cx.listener(move |v, _, _, cx| v.send(activate.clone(), cx)));
+        div()
+            .w(px(w))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(kit.track_hover(cover, key))
+            .child(self.ledge(
+                kit,
+                card.name.clone(),
+                Some(if card.active {
+                    "Active".into()
+                } else {
+                    format!("{} panels", card.panels)
+                }),
+                w,
+            ))
+            .into_any_element()
     }
-
 }
 impl Render for PanelLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
         let t = self.tokens.clone();
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
-        self.frame_kit = Some(Kit::new(&t, &self.motion, Self::motion, window, cx));
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
         let (ground, ground_alpha) = t.ground();
         let (panels, workspaces) = self
             .editor
-            .upgrade()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
             .map(|e| {
                 let shell = self.shell.as_ref().and_then(WeakEntity::upgrade);
                 cards(e.read(cx), shell.as_ref().map(|s| &s.read(cx).layout))
             })
             .unwrap_or_default();
+        #[cfg(test)]
+        let (panels, workspaces) = self.fixture.clone().unwrap_or((panels, workspaces));
+        for id in panels
+            .iter()
+            .map(|p| &p.id)
+            .chain(workspaces.iter().map(|w| &w.id))
+        {
+            if !self.focus.contains_key(id) {
+                let handle = cx.focus_handle();
+                let focused = id.clone();
+                cx.on_focus(&handle, window, move |v, _, cx| {
+                    v.focused = Some(focused.clone());
+                    cx.notify();
+                })
+                .detach();
+                cx.on_blur(&handle, window, |v, _, cx| {
+                    v.focused = None;
+                    cx.notify();
+                })
+                .detach();
+                self.focus.insert(id.clone(), handle);
+            }
+        }
         let mut sidebar = div()
             .flex()
             .flex_col()
@@ -307,7 +727,7 @@ impl Render for PanelLibrary {
             .pt(px(m.toolbar))
             .px(px(m.gap))
             .bg(pm_shell::view::tint(ground, ground_alpha))
-            .child(kit.search(self.search.clone(), None));
+            .child(kit.search(self.search.clone(), None).h(px(34.)));
         for page in Page::ALL {
             let heading = match page {
                 Page::Panels(None) => Some("PANELS"),
@@ -319,7 +739,9 @@ impl Render for PanelLibrary {
                     div()
                         .pt(px(m.gap))
                         .px(px(m.gap))
-                        .text_size(px(ty.minimum))
+                        .text_role(&t, Text::Caption)
+                        .font_weight(FontWeight(ty.semibold_weight))
+                        .letter_spacing(px(t.text(Text::Caption).size * 0.05))
                         .text_color(rgb(c.faint))
                         .child(heading),
                 );
@@ -328,43 +750,130 @@ impl Render for PanelLibrary {
                 Page::Panels(o) => shown_panels(&panels, o, "").len(),
                 Page::Workspaces(b) => shown_workspaces(&workspaces, b, "").len(),
             };
-            if count == 0 && matches!(page, Page::Panels(Some(Origin::Yours)) | Page::Workspaces(Some(false))) { continue; }
+            if count == 0
+                && matches!(
+                    page,
+                    Page::Panels(Some(Origin::Yours)) | Page::Workspaces(Some(false))
+                )
+            {
+                continue;
+            }
             let symbol = match page {
                 Page::Panels(None) => "square.grid.2x2",
-                Page::Panels(Some(Origin::BuiltIn)) | Page::Workspaces(Some(true)) => "square.stack",
+                Page::Panels(Some(Origin::BuiltIn)) | Page::Workspaces(Some(true)) => {
+                    "square.stack"
+                }
                 Page::Panels(Some(Origin::Yours)) => "wand.and.stars",
                 Page::Panels(Some(Origin::Store)) => "basket",
                 Page::Workspaces(None) => "rectangle.3.group",
                 Page::Workspaces(Some(false)) => "person.crop.circle",
             };
-            sidebar = sidebar.child(kit.row(format!("library-page-{page:?}"), self.page == page)
-                .role(Role::Button).aria_label(format!("{}, {count}", page.title()))
-                .child(kit.symbol(symbol, m.symbol_panel, Weight::Regular, c.muted))
-                .child(div().flex_1().child(page.title()))
-                .child(kit::shelf_count(&t, count))
-                .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))));
+            sidebar = sidebar.child(
+                kit.row(format!("library-page-{page:?}"), self.page == page)
+                    .role(Role::Button)
+                    .aria_label(format!("{}, {count}", page.title()))
+                    .tab_index(0)
+                    .child(kit.symbol(symbol, m.symbol_panel, Weight::Regular, c.muted))
+                    .child(div().flex_1().child(page.title()))
+                    .child(kit::shelf_count(&t, count))
+                    .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
+                        if e.keystroke.key == "enter" {
+                            v.set_page(page, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
+            );
         }
-        sidebar = sidebar.child(div().flex_1()).child(kit.button("library-store", "Browse the Store", kit::Button::Neutral, Some("basket"), None)
-            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))));
+        sidebar = sidebar.child(div().flex_1()).child(
+            kit.button(
+                "library-store",
+                "Browse the Store",
+                kit::Button::Neutral,
+                Some("basket"),
+                None,
+            )
+            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
+        );
         let width = (f32::from(window.viewport_size().width) - m.settings_sidebar - 48.).max(200.);
         let scale = shelf_scale(width);
-        let mut shelf = div().id("library-shelf").role(Role::List).aria_label(self.page.title()).flex().flex_col().gap(px(30.));
+        let mut shelf = div()
+            .id("library-shelf")
+            .role(Role::List)
+            .aria_label(self.page.title())
+            .flex()
+            .flex_col()
+            .gap(px(30.));
         let empty = match self.page {
             Page::Panels(origin) => {
                 let shown = shown_panels(&panels, origin, &self.query);
                 for source in [Origin::BuiltIn, Origin::Yours, Origin::Store] {
-                    if origin.is_some_and(|o| o != source) { continue; }
+                    if origin.is_some_and(|o| o != source) {
+                        continue;
+                    }
                     let books: Vec<_> = shown.iter().filter(|p| p.origin == source).collect();
-                    if books.is_empty() && source != Origin::Store { continue; }
+                    if books.is_empty() && source != Origin::Store {
+                        continue;
+                    }
                     let mut section = div().flex().flex_col().gap(px(12.));
                     if origin.is_none() {
-                        section = section.child(div().flex().items_center().gap(px(8.)).text_role(&t, Text::Title)
-                            .child(Page::Panels(Some(source)).title()).child(kit::shelf_count(&t, books.len())));
+                        section = section.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .text_role(&t, Text::Title)
+                                .child(Page::Panels(Some(source)).title())
+                                .child(kit::shelf_count(&t, books.len())),
+                        );
                     }
-                    let widths: Vec<_> = books.iter().map(|p| cover_size(panel_size(&p.id), scale, width).0).collect();
+                    let mut widths: Vec<_> = books
+                        .iter()
+                        .map(|p| cover_size(panel_size(&p.id), scale, width).0)
+                        .collect();
+                    if source == Origin::Store && self.query.trim().is_empty() {
+                        widths.push(180.);
+                    }
                     for row in pack_rows(&widths, width, 16.) {
-                        section = section.child(div().flex().items_end().gap(px(16.)).mb(px(24.))
-                            .children(row.into_iter().map(|i| self.panel_card(books[i], &kit, scale, width, cx))));
+                        section = section.child(
+                            div().flex().items_end().gap(px(16.)).mb(px(24.)).children(
+                                row.into_iter().map(|i| {
+                                    if i < books.len() {
+                                        self.panel_card(books[i], &kit, scale, width, cx)
+                                    } else {
+                                        div()
+                                            .flex_none()
+                                            .w(px(180.))
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                kit.row("library-find-store", false)
+                                                    .w_full()
+                                                    .h(px(160.))
+                                                    .flex_col()
+                                                    .justify_center()
+                                                    .bg(rgb(c.field))
+                                                    .child(kit.symbol(
+                                                        "basket",
+                                                        26.,
+                                                        Weight::Regular,
+                                                        c.muted,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .text_center()
+                                                            .child("Find panels in the Store"),
+                                                    )
+                                                    .on_click(cx.listener(|v, _, _, cx| {
+                                                        v.send("store".into(), cx)
+                                                    })),
+                                            )
+                                            .child(div().h(px(42.)))
+                                            .into_any_element()
+                                    }
+                                }),
+                            ),
+                        );
                     }
                     shelf = shelf.child(section);
                 }
@@ -372,23 +881,81 @@ impl Render for PanelLibrary {
             }
             Page::Workspaces(builtin) => {
                 let shown = shown_workspaces(&workspaces, builtin, &self.query);
-                let widths = vec![cover_size((400.,250.), scale, width).0; shown.len()];
+                let widths = vec![cover_size((400., 250.), scale, width).0; shown.len()];
                 for row in pack_rows(&widths, width, 16.) {
-                    shelf = shelf.child(div().flex().items_end().gap(px(16.)).children(row.into_iter().map(|i| self.workspace_card(&shown[i], cx))));
+                    shelf = shelf.child(
+                        div().flex().items_end().gap(px(16.)).children(
+                            row.into_iter()
+                                .map(|i| self.workspace_card(&shown[i], &kit, scale, width, cx)),
+                        ),
+                    );
                 }
                 shown.is_empty()
             }
         };
+        let fade = kit.animate(
+            kit::key("library-page-fade"),
+            1.,
+            Some(pm_design::motion::Preset::Show),
+        );
         let body = if empty {
-            let (symbol,heading,detail)=if !self.query.trim().is_empty() {
-                ("magnifyingglass","No Results",format!("Nothing matches “{}”.",self.query))
-            } else {match self.page {
-                Page::Panels(Some(Origin::Yours)) => ("wand.and.stars","No Panels Yet","Panels you make with the agent appear here.".into()),
-                Page::Panels(Some(Origin::Store)) => ("basket","Nothing from the Store",String::new()),
-                Page::Workspaces(Some(false)) => ("rectangle.3.group","No Saved Workspaces",String::new()),
-                _ => ("square.grid.2x2","No Panels Yet",String::new()),
-            }};
-            kit.empty_state(symbol,heading,&detail).flex_1().into_any_element()
+            let (symbol, heading, detail) = if !self.query.trim().is_empty() {
+                (
+                    "magnifyingglass",
+                    "No Results",
+                    format!("Nothing matches “{}”.", self.query),
+                )
+            } else {
+                match self.page {
+                    Page::Panels(Some(Origin::Yours)) => (
+                        "wand.and.stars",
+                        "No Panels Yet",
+                        "Panels you make with the agent appear here.".into(),
+                    ),
+                    Page::Panels(Some(Origin::Store)) => {
+                        ("basket", "Nothing from the Store", String::new())
+                    }
+                    Page::Workspaces(Some(false)) => {
+                        ("rectangle.3.group", "No Saved Workspaces", String::new())
+                    }
+                    _ => ("square.grid.2x2", "No Panels Yet", String::new()),
+                }
+            };
+            kit.empty_state(symbol, heading, &detail)
+                .when(
+                    self.query.trim().is_empty()
+                        && matches!(self.page, Page::Panels(Some(Origin::Store))),
+                    |d| {
+                        d.child(
+                            kit.button(
+                                "empty-store",
+                                "Browse the Store",
+                                kit::Button::Neutral,
+                                Some("basket"),
+                                None,
+                            )
+                            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
+                        )
+                    },
+                )
+                .when(
+                    self.query.trim().is_empty()
+                        && matches!(self.page, Page::Workspaces(Some(false))),
+                    |d| {
+                        d.child(
+                            kit.button(
+                                "empty-save",
+                                "Save Current as New",
+                                kit::Button::Neutral,
+                                Some("plus"),
+                                None,
+                            )
+                            .on_click(cx.listener(|v, _, _, cx| v.send("layout:save".into(), cx))),
+                        )
+                    },
+                )
+                .flex_1()
+                .into_any_element()
         } else {
             div()
                 .id("library-body")
@@ -396,7 +963,9 @@ impl Render for PanelLibrary {
                 .overflow_y_scroll()
                 .px(px(m.inset + m.gap))
                 .pb(px(m.inset))
+                .opacity(fade)
                 .child(shelf)
+                .child(kit.settle())
                 .into_any_element()
         };
         let content = div()
@@ -415,18 +984,40 @@ impl Render for PanelLibrary {
                     .gap(px(m.inset))
                     .h(px(m.toolbar))
                     .px(px(m.inset + m.gap))
-                    .when(matches!(self.page,Page::Workspaces(_)),|d|d.child(kit.button("library-save","Save Current as New",kit::Button::Neutral,Some("plus"),None).on_click(cx.listener(|v,_,_,cx|v.send("layout:save".into(),cx)))))
                     .child(
                         div()
                             .text_size(px(ty.heading))
                             .font_weight(FontWeight(ty.semibold_weight))
                             .child(self.page.title()),
                     )
-
+                    .when(matches!(self.page, Page::Workspaces(_)), |d| {
+                        d.child(
+                            kit.button(
+                                "library-save",
+                                "Save Current as New",
+                                kit::Button::Neutral,
+                                Some("plus"),
+                                None,
+                            )
+                            .on_click(cx.listener(|v, _, _, cx| v.send("layout:save".into(), cx))),
+                        )
+                    }),
             )
             .child(body);
         div()
             .size_full()
+            .id("panel-library-root")
+            .tab_group()
+            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .text_color(rgb(c.text))
             .text_size(px(ty.body))
@@ -436,7 +1027,74 @@ impl Render for PanelLibrary {
     }
 }
 
+/// Preserve unrelated workspace metadata and generated sections when removing one panel.
+fn without_generated_panel(record: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+    if !workspace::generated(record).iter().any(|(p, _)| p == id) {
+        return None;
+    }
+    let mut after = record.clone();
+    after
+        .get_mut("custom")?
+        .as_array_mut()?
+        .retain(|p| p.get("id").and_then(serde_json::Value::as_str) != Some(id));
+    let mut layout = workspace::layout(&after);
+    if layout.open_panels().contains(&id) {
+        layout.close_panel(id).ok()?;
+    }
+    Some(workspace::write(&layout, &after))
+}
+
 impl Controller {
+    /// Generated sections belong to their workspace; delete by stable id after confirmation.
+    fn confirm_library_panel_delete(&mut self, id: String, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button};
+        let store = self.workspace_store();
+        let Some(record) = store
+            .project
+            .iter()
+            .chain(store.offered())
+            .find(|r| workspace::generated(r).iter().any(|(p, _)| p == &id))
+            .cloned()
+        else {
+            return;
+        };
+        let record_id = workspace::record_id(&record).unwrap_or_default().to_owned();
+        let title = workspace::generated(&record)
+            .into_iter()
+            .find(|(p, _)| p == &id)
+            .map(|(_, title)| title)
+            .unwrap_or_else(|| id.clone());
+        let answer=Alert::new(format!("Delete {title}?"),"This removes the panel from its workspace. Your project and its layers will not be deleted.",vec![Button::new("Cancel",false).default().cancel(),Button::new("Delete Panel",true).destructive()]).sheet(&self.host.borrow().window.clone());
+        cx.spawn(async move |this, cx| {
+            if answer.recv().await != Ok(Some(true)) {
+                return;
+            }
+            let _ = this.update(cx, |v, cx| {
+                let store = v.workspace_store();
+                let Some(before) = store
+                    .project
+                    .iter()
+                    .chain(store.offered())
+                    .find(|r| workspace::record_id(r) == Some(record_id.as_str()))
+                    .cloned()
+                else {
+                    return;
+                };
+                let Some(after) = without_generated_panel(&before, &id) else {
+                    return;
+                };
+                let own = store.project.as_ref().and_then(workspace::record_id)
+                    == Some(record_id.as_str());
+                v.write_workspace(if own {
+                    workspace::Write::Active { before, after }
+                } else {
+                    workspace::Write::Upsert(after)
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     /// Window ▸ Panel Library, for this editor; brought forward when open.
     /// Opened after this update ends: the new window's first frame reads
     /// this editor.
@@ -450,7 +1108,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
     if let Some(window) = cx.windows().into_iter().find(|w| {
         w.downcast::<PanelLibrary>()
             .and_then(|l| l.read(cx).ok())
-            .is_some_and(|l| l.editor == me)
+            .is_some_and(|l| l.editor.as_ref() == Some(&me))
     }) {
         let _ = window.update(cx, |_, w, _| w.activate());
         return;
@@ -471,7 +1129,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 appears_transparent: true,
                 ..Default::default()
             }))
-            .window_min_size(Some(size(px(720.),px(400.))))
+            .window_min_size(Some(size(px(720.), px(400.))))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                 point(px(m.toolbar), px(m.toolbar)),
                 size(
@@ -502,6 +1160,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     field.set_placeholder("Search");
                     field
                 });
+                search.update(cx, |field, cx| field.begin_editing(cx));
                 cx.subscribe(&search, |v: &mut PanelLibrary, _, event, cx| {
                     use pm_shell::text::TextEvent;
                     if let TextEvent::Changed(text)
@@ -514,14 +1173,17 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                 })
                 .detach();
                 PanelLibrary {
-                    editor: editor.downgrade(),
+                    editor: Some(editor.downgrade()),
                     shell: shell.as_ref().map(Entity::downgrade),
                     page: Page::Panels(None),
                     query: String::new(),
                     search: Some(search),
                     tokens,
                     motion: Default::default(),
-                    frame_kit: None,
+                    focus: Default::default(),
+                    focused: None,
+                    #[cfg(test)]
+                    fixture: None,
                 }
             })
         },
@@ -578,5 +1240,150 @@ mod tests {
         assert_eq!(ids(None, ""), ["design", "grading"]);
         assert_eq!(ids(Some(false), ""), ["grading"]);
         assert_eq!(ids(Some(true), "grad"), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod shelf_geometry_tests {
+    #[test]
+    fn deleting_a_generated_panel_preserves_other_sections_and_workspace_metadata() {
+        let mut record = pm_shell::workspace::preset("design").unwrap();
+        record["custom"] =
+            serde_json::json!([{"id":"custom-a","title":"A"},{"id":"custom-b","title":"B"}]);
+        record["reviewMetadata"] = serde_json::json!({"keep":true});
+        record["layout"]["docks"][0]["panels"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id":"custom-a","size":100}));
+        let after = super::without_generated_panel(&record, "custom-a").unwrap();
+        assert_eq!(
+            after["custom"],
+            serde_json::json!([{"id":"custom-b","title":"B"}])
+        );
+        assert_eq!(after["reviewMetadata"], record["reviewMetadata"]);
+        assert!(
+            !pm_shell::workspace::layout(&after)
+                .open_panels()
+                .contains(&"custom-a")
+        );
+        assert!(super::without_generated_panel(&after, "custom-a").is_none());
+    }
+    use super::{cover_size, pack_rows, preview_bounds, shelf_scale};
+    #[test]
+    fn scale_clamps_and_handles_invalid_widths() {
+        assert_eq!(shelf_scale(f32::NAN), 0.5);
+        assert_eq!(shelf_scale(0.), 0.5);
+        assert_eq!(shelf_scale(300.), 0.4);
+        assert_eq!(shelf_scale(1700.), 0.56);
+    }
+    #[test]
+    fn covers_crop_then_fit_without_changing_proportions() {
+        assert_eq!(preview_bounds((2000., 1000.)), (960., 720.));
+        assert_eq!(cover_size((960., 360.), 0.5, 240.), (240., 90.));
+        assert_eq!(cover_size((320., 600.), 0.5, 500.), (160., 300.));
+    }
+    #[test]
+    fn rows_pack_greedily_and_allow_oversized_books() {
+        assert_eq!(
+            pack_rows(&[100., 100., 100.], 220., 16.),
+            vec![vec![0, 1], vec![2]]
+        );
+        assert_eq!(pack_rows(&[500., 40.], 200., 16.), vec![vec![0], vec![1]]);
+        assert!(pack_rows(&[], 200., 16.).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::PanelLibrary;
+    use gpui::{AppContext, HeadlessAppContext, px, size};
+    #[test]
+    #[ignore = "writes review PNGs; set PM_LIBRARY_CAPTURE"]
+    fn capture_panel_library() {
+        let dir = std::env::var("PM_LIBRARY_CAPTURE").expect("PM_LIBRARY_CAPTURE");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, scheme, contrast) in [
+            ("light", pm_design::Scheme::Light, false),
+            ("dark", pm_design::Scheme::Dark, false),
+            ("contrast", pm_design::Scheme::Dark, true),
+        ] {
+            for (w, h) in [(900., 600.), (1400., 860.)] {
+                objc2::rc::autoreleasepool(|_| {
+                    let mut cx = HeadlessAppContext::with_platform(
+                        std::sync::Arc::new(
+                            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                                .with_automatic_optical_sizing(),
+                        ),
+                        std::sync::Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let tokens = pm_design::Tokens::new(
+                        scheme,
+                        pm_design::Accessibility {
+                            increase_contrast: contrast,
+                            reduce_motion: true,
+                            ..Default::default()
+                        },
+                    );
+                    let cards = super::panel_cards(
+                        &pm_shell::layout::Panels::new(vec![
+                            ("custom-notes".into(), "My Notes".into()),
+                            ("store-color".into(), "Color Tools".into()),
+                        ]),
+                        &["viewer", "timeline"],
+                        |id| id == "store-color",
+                    );
+                    let workspaces = pm_shell::workspace::BUILTIN
+                        .iter()
+                        .filter_map(|id| pm_shell::workspace::preset(id))
+                        .map(|r| super::WorkspaceCard {
+                            id: pm_shell::workspace::record_id(&r).unwrap().to_owned(),
+                            name: pm_shell::workspace::record_name(&r).to_owned(),
+                            builtin: true,
+                            panels: pm_shell::workspace::layout(&r).open_panels().len(),
+                            active: pm_shell::workspace::record_id(&r) == Some("design"),
+                        })
+                        .collect();
+                    let window = cx
+                        .open_window(size(px(w), px(h)), |_, cx| {
+                            cx.new(|_| PanelLibrary {
+                                editor: None,
+                                shell: None,
+                                page: super::Page::Panels(None),
+                                query: String::new(),
+                                search: None,
+                                tokens,
+                                motion: Default::default(),
+                                focus: Default::default(),
+                                focused: None,
+                                fixture: Some((cards, workspaces)),
+                            })
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/after-{name}-{}x{}.png", w as u32, h as u32))
+                        .unwrap();
+                    window
+                        .update(&mut cx, |view, _, cx| {
+                            view.set_page(super::Page::Workspaces(None), cx)
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!(
+                            "{dir}/after-workspaces-{name}-{}x{}.png",
+                            w as u32, h as u32
+                        ))
+                        .unwrap();
+                });
+            }
+        }
     }
 }
