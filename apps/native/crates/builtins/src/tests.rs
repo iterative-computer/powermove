@@ -24,7 +24,7 @@ fn install_main_effects(
     turn
 }
 #[track_caller]
-fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
+pub(crate) fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(result) = ticket.try_take() {
@@ -34,7 +34,7 @@ fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
         thread::sleep(Duration::from_millis(1));
     }
 }
-fn actor() -> KernelActor {
+pub(crate) fn actor() -> KernelActor {
     let actor = KernelActor::spawn(KernelConfig::default());
     let project=pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
     actor
