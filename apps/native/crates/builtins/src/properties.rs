@@ -504,6 +504,9 @@ impl Properties {
                     }
                     if !axes.is_empty() {
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                        if id == "position" {
+                            row["separateDimensions"] = json!(model.layer(&layer).map_err(|e| e.to_string())?.get("separateDimensions").and_then(pm_model::Value::as_bool).unwrap_or(false));
+                        }
                         if id == "scale" {
                             row["linked"] = json!(
                                 model
@@ -2488,6 +2491,8 @@ impl Properties {
                 Some("reset") => V4Action::Reset(None),
                 Some("remove-expression") => V4Action::Expression(None),
                 Some("link") => V4Action::LinkScale,
+                Some("separate-dimensions") => V4Action::SeparateDimensions,
+                Some(action) if action.starts_with("ease:") => V4Action::Ease(action[5..].into()),
                 Some("show-graph") => V4Action::ShowGraph,
                 _ => return Err("Unknown property action".into()),
             }

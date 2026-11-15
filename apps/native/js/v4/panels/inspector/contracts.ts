@@ -71,6 +71,7 @@ export interface Row {
   hidden?: boolean;
   animation?: "static" | "animated" | "key-at-playhead";
   linked?: boolean;
+  separateDimensions?: boolean;
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
 }
@@ -144,7 +145,9 @@ export type RowAction =
   | "remove-expression"
   | "reset"
   | "show-graph"
-  | "link";
+  | "link"
+  | "separate-dimensions"
+  | `ease:${string}`;
 export type Intent =
   | { type: "key"; row: string; removeAnimation: boolean }
   | { type: "row-action"; row: string; action: RowAction }
