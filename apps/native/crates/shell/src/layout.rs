@@ -63,6 +63,9 @@ impl Rect {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Group {
+    /// A resized fluid side panel keeps a basis while still filling spare room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flex_basis: Option<f32>,
     pub tabs: Vec<String>,
     pub active: usize,
     pub size: Option<f32>,
@@ -165,6 +168,7 @@ fn dock_for(id: &str, g: Group) -> Dock {
 }
 fn group(ids: &[&str], size: Option<f32>) -> Group {
     Group {
+        flex_basis: None,
         tabs: ids.iter().map(|s| s.to_string()).collect(),
         active: 0,
         size,
@@ -207,6 +211,7 @@ impl Layout {
                     g.size.is_none_or(|n| n.is_finite() && n > 0.),
                     "Invalid panel size"
                 );
+                anyhow::ensure!(g.flex_basis.is_none_or(|n| n.is_finite() && n >= 0.), "Invalid fluid panel basis");
                 for id in &g.tabs {
                     anyhow::ensure!(
                         !id.is_empty() && ids.insert(id),
@@ -543,8 +548,11 @@ impl Layout {
                 // A side stack can exceed its viewport. Record the requested
                 // adjacent heights; never turn a fixed neighbour into a fluid
                 // filler, or it would shrink as soon as this splitter moves.
-                d.groups[i].size = Some(upper);
-                d.groups[i + 1].size = Some(total - upper);
+                for (index, height) in [(i, upper), (i + 1, total - upper)] {
+                    let group = &mut d.groups[index];
+                    if group.size.is_none() { group.flex_basis = Some(height); }
+                    else { group.size = Some(height); }
+                }
                 return;
             }
             // Every group at the height it shows; the first that was flexible
@@ -1104,6 +1112,7 @@ impl Layout {
         };
         let moved = if stack {
             Group {
+                flex_basis: source.flex_basis.filter(|_| same_dock),
                 tabs: std::mem::take(&mut source.tabs),
                 active: source.active,
                 size: source.size.filter(|_| same_dock),
@@ -1493,7 +1502,7 @@ fn side_group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
             if g.collapsed {
                 t.metrics.header
             } else {
-                g.size.unwrap_or(200.).max(if g.size.is_some() {
+                g.size.unwrap_or(g.flex_basis.unwrap_or(200.)).max(if g.size.is_some() {
                     group_least(g, t)
                 } else {
                     200.

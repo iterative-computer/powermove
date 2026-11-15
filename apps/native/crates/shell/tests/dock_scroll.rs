@@ -38,6 +38,7 @@ fn tall(editor: &mut Editor) {
     ]
     .into_iter()
     .map(|tabs| Group {
+        flex_basis: None,
         tabs: tabs.into_iter().map(str::to_owned).collect(),
         active: 0,
         size: Some(400.),

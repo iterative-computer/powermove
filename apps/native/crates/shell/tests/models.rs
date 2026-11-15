@@ -551,6 +551,7 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
         let mut layout = Layout::preset("design");
         let di = layout.docks.iter().position(|dock| dock.id == "right").unwrap();
         layout.docks[di].groups = ["inspector", "easing", "fxbrowser"].into_iter().enumerate().map(|(i, id)| Group {
+            flex_basis: None,
             tabs: vec![id.into()], active: 0, size: if i == 0 { first } else { Some(300.) }, collapsed: false,
         }).collect();
         let before = layout.geometry(bounds, &t);
@@ -559,6 +560,13 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
         let original = heights(&before);
         layout.resize(divider, 40., bounds, &t);
         let resized = heights(&layout.geometry(bounds, &t));
+        assert_eq!(layout.docks[di].groups[0].size.is_none(), first.is_none(), "resizing preserves fluid sizing");
+        let saved = pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+        assert_eq!(pm_shell::workspace::layout(&saved).docks[di].groups, layout.docks[di].groups, "workspace keeps fixed heights and fluid basis");
+        if first.is_none() {
+            let larger = layout.geometry(Rect { h: 1400., ..bounds }, &t);
+            assert!(heights(&larger)[0].h > resized[0].h, "fluid panel still fills a taller window");
+        }
         assert_eq!(resized[0].h, original[0].h + 40.);
         assert_eq!(resized[1].h, original[1].h - 40.);
         assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
