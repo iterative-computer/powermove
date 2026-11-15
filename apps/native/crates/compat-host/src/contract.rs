@@ -157,9 +157,27 @@ pub(crate) struct Panels {
     /// One document can show through several shell rectangles. `None` shows its
     /// slots; `Some` is the exact mask, so a document with no region shows nothing.
     pub regions: Option<Vec<Rect>>,
+    /// Background fill excludes transparent overlays such as the viewer stage.
+    pub fill_regions: Option<Vec<Rect>>,
 }
 #[cfg(any(target_os = "macos", test))]
 impl Panels {
+    pub fn set_regions_with_transparent_overlays(
+        &mut self,
+        panels: Vec<Rect>,
+        overlays: Vec<Rect>,
+    ) -> Result<bool> {
+        if panels.len() + overlays.len() > 256 || panels.iter().chain(&overlays).any(|r| !r.valid())
+        {
+            return Err(Error::InvalidGeometry);
+        }
+        let regions = panels.iter().chain(&overlays).copied().collect();
+        let changed =
+            self.regions.as_ref() != Some(&regions) || self.fill_regions.as_ref() != Some(&panels);
+        self.regions = Some(regions);
+        self.fill_regions = Some(panels);
+        Ok(changed)
+    }
     pub fn create(&mut self, spec: PanelSpec) -> Result<()> {
         if self.items.contains_key(&spec.id) {
             return Err(Error::DuplicatePanel);
@@ -230,6 +248,39 @@ mod tests {
         // Every panel closed: the whole-window slot must not unmask the window.
         p.regions = Some(vec![]);
         assert!(p.visible().is_empty());
+    }
+    #[test]
+    fn viewer_stage_stays_visible_without_the_panel_ground() {
+        let panel = Rect::new(0., 0., 100., 400.);
+        let stage = Rect::new(100., 0., 300., 400.);
+        let mut p = Panels {
+            viewport: Rect::new(0., 0., 400., 400.),
+            ..Panels::default()
+        };
+        assert!(
+            p.set_regions_with_transparent_overlays(vec![panel], vec![stage])
+                .unwrap()
+        );
+        assert_eq!(p.visible(), vec![panel, stage]);
+        assert_eq!(p.fill_regions, Some(vec![panel]));
+        assert!(
+            !p.set_regions_with_transparent_overlays(vec![panel], vec![stage])
+                .unwrap()
+        );
+        // Closing every panel must leave a stage-only extension transparent.
+        assert!(
+            p.set_regions_with_transparent_overlays(vec![], vec![stage])
+                .unwrap()
+        );
+        assert_eq!(p.visible(), vec![stage]);
+        assert_eq!(p.fill_regions, Some(vec![]));
+        // An invalid update cannot replace the previous masks.
+        assert!(
+            p.set_regions_with_transparent_overlays(vec![Rect::new(0., 0., -1., 1.)], vec![])
+                .is_err()
+        );
+        assert_eq!(p.visible(), vec![stage]);
+        assert_eq!(p.fill_regions, Some(vec![]));
     }
     #[test]
     fn logical_lifecycle_and_duplicates() {

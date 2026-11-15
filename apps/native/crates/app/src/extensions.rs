@@ -1965,11 +1965,8 @@ impl Controller {
                     .collect();
                 // The page shows through each panel's whole body, on the
                 // panels' ground ...
-                let regions = mine
-                    .iter()
-                    .map(|(_, r)| *r)
-                    .chain(stage.as_ref().map(to_rect))
-                    .collect();
+                let panel_regions = mine.iter().map(|(_, r)| *r).collect();
+                let overlay_regions = stage.as_ref().map(to_rect).into_iter().collect();
                 // ... and its content only within that panel's body and every
                 // place recently sent to the page: a page that has not yet
                 // moved a panel's content (a splitter drag) never shows it
@@ -1982,7 +1979,7 @@ impl Controller {
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
                 });
-                let _ = host.set_regions(regions);
+                let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 let _ = host.set_content_regions(content);
                 host.set_fill(Some(fill));
                 dirty |= host.composition_dirty();
