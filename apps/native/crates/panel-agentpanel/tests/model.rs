@@ -1389,3 +1389,73 @@ fn undoing_composer_typing_keeps_reference_chips() {
     assert_eq!(draft.request_text(), "before");
     assert_eq!(draft.citations(), quote);
 }
+
+#[test]
+fn quotes_from_live_replies_keep_a_resolvable_source_after_finishing_and_reopening() {
+    let mut store = Memory::default();
+    let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "Reference".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    p.save(&mut store, 31).unwrap();
+    let p = Panel::load(&mut store, "p", "t", 32).unwrap();
+    let source = p.session("t").unwrap().draft.citations()[0]["messageId"]
+        .as_str()
+        .unwrap();
+    assert!(source.starts_with("history:"));
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let snapshot = window
+        .snapshot(&p, 0..window.count(&p).unwrap(), 33)
+        .unwrap();
+    assert!(
+        snapshot["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == source)
+    );
+}
+#[test]
+fn steering_with_a_live_quote_sends_its_archived_source_id() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    let effect = p.submit("t", "run1", "request2", 30).unwrap();
+    let EffectKind::Send { text, steer, .. } = effect.kind else {
+        panic!("send");
+    };
+    assert!(steer);
+    assert!(text.contains("history:message-1/step-0:"));
+    assert!(!text.contains(&format!("live:{source}")));
+}

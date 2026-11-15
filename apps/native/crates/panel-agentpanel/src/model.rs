@@ -225,7 +225,43 @@ impl Session {
         }
         if !self.trace.rows.is_empty() {
             let duration = self.run.as_ref().map(|r| now.saturating_sub(r.started_at));
-            self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration}))?;
+            let live_quotes = self.draft.citations().iter().any(|q| {
+                q["messageId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("live:"))
+            });
+            let aliases: Vec<_> = if live_quotes {
+                self.trace
+                    .rows
+                    .page(0..self.trace.rows.len())
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        (
+                            format!("live:{}", row.id),
+                            format!(
+                                "/step-{index}:{}",
+                                row.value["id"].as_str().unwrap_or_default()
+                            ),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let archived = self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration}))?;
+            if live_quotes {
+                let mut quotes = self.draft.citations().to_vec();
+                for quote in &mut quotes {
+                    if let Some((_, suffix)) = aliases
+                        .iter()
+                        .find(|(live, _)| quote["messageId"].as_str() == Some(live.as_str()))
+                    {
+                        quote["messageId"] = json!(format!("history:{archived}{suffix}"));
+                    }
+                }
+                self.draft.set_citations(quotes)?;
+            }
             self.trace = Trace::default();
         }
         Ok(())
@@ -932,8 +968,6 @@ impl Panel {
             return Err(Error::MissingPayload(file.id().into()));
         }
         let text = session.draft.request_text();
-        let citations = session.draft.citations().to_vec();
-        let provider_text = pm_agents::citations::context(&text, &citations);
         let steer = session.run.is_some();
         if steer && target.run.as_deref() != Some(run_id) {
             return Err(Error::Stale);
@@ -943,6 +977,8 @@ impl Panel {
         if steer {
             session.archive_trace(now, true)?;
         }
+        let citations = session.draft.citations().to_vec();
+        let provider_text = pm_agents::citations::context(&text, &citations);
         session.append(json!({"role":"user","text":text,"citations":citations,"attachments":files,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
