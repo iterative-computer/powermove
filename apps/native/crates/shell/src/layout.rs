@@ -526,14 +526,27 @@ impl Layout {
                 return;
             };
             let total = a + b;
+            let side = matches!(self.docks[divider.dock].id.as_str(), "left" | "right");
             let groups = &self.docks[divider.dock].groups;
-            let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[i + 1], t));
+            let least = |g: &Group| {
+                let floor = group_least(g, t);
+                if side && !g.collapsed && g.size.is_none() { floor.max(200.) } else { floor }
+            };
+            let (least_a, least_b) = (least(&groups[i]), least(&groups[i + 1]));
             let upper = if total >= least_a + least_b {
                 (a + delta).clamp(least_a, total - least_b)
             } else {
                 a
             };
             let d = &mut self.docks[divider.dock];
+            if side {
+                // A side stack can exceed its viewport. Record the requested
+                // adjacent heights; never turn a fixed neighbour into a fluid
+                // filler, or it would shrink as soon as this splitter moves.
+                d.groups[i].size = Some(upper);
+                d.groups[i + 1].size = Some(total - upper);
+                return;
+            }
             // Every group at the height it shows; the first that was flexible
             // stays so (it takes exactly that height, and a window resize).
             let flexible = d

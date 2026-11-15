@@ -542,3 +542,25 @@ fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
             && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
     }
 }
+
+#[test]
+fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
+    let t = tokens();
+    let bounds = Rect { x: 0., y: 0., w: 1000., h: 400. };
+    for first in [None, Some(300.)] {
+        let mut layout = Layout::preset("design");
+        let di = layout.docks.iter().position(|dock| dock.id == "right").unwrap();
+        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"].into_iter().enumerate().map(|(i, id)| Group {
+            tabs: vec![id.into()], active: 0, size: if i == 0 { first } else { Some(300.) }, collapsed: false,
+        }).collect();
+        let before = layout.geometry(bounds, &t);
+        let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
+        let heights = |g: &Geometry| g.panels.iter().filter(|p| p.dock == di).map(|p| p.rect).collect::<Vec<_>>();
+        let original = heights(&before);
+        layout.resize(divider, 40., bounds, &t);
+        let resized = heights(&layout.geometry(bounds, &t));
+        assert_eq!(resized[0].h, original[0].h + 40.);
+        assert_eq!(resized[1].h, original[1].h - 40.);
+        assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
+    }
+}
