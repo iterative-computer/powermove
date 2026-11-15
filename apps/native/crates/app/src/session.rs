@@ -3588,6 +3588,19 @@ impl Controller {
                     self.host.borrow().send_command("play", vec![]);
                 }
             }
+            // Space on an item a click left with the keyboard in a panel that
+            // takes keys (a Project card: Quick Look) is the item's: Play
+            // declines and the key reaches it. In the timeline and the viewer
+            // Space plays.
+            "play"
+                if cmd.token.is_some()
+                    && self.builtins.views.iter().any(|(id, v)| {
+                        !matches!(id.as_str(), "timeline" | "viewer")
+                            && v.read(cx).focused_takes_keys(window)
+                    }) =>
+            {
+                return false;
+            }
             // Space held over the viewer is the hand: Play waits for the key
             // to come up (no drag) instead of starting on the way down.
             "play"

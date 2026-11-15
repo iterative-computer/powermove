@@ -1939,6 +1939,14 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// A node of this view that listens for keys has the keyboard (a Project
+    /// card a click focused): its Space is its own (Quick Look), not Play.
+    pub fn focused_takes_keys(&self, window: &Window) -> bool {
+        self.focus.iter().any(|(id, focus)| {
+            focus.is_focused(window)
+                && self.prepared.node(*id).is_some_and(|n| n.events.key_down)
+        })
+    }
     /// The button came up in the window while a scrub or a captured press of
     /// this view still waits for it: its own listener never heard the
     /// release (the panel was drawn again while held). It ends now.
