@@ -2732,7 +2732,7 @@ impl TimelineSurface {
             .collect();
         let camera_index = ids.len() + 1;
         if matches!(context, MenuContext::Empty) {
-            rows.push(serde_json::json!({"label":"New","children":[{"label":"Camera"}]}));
+            rows.push(empty_new_menu());
         }
         let weak = cx.entity().downgrade();
         self.delegate.clone().extension_menu(
@@ -2742,7 +2742,7 @@ impl TimelineSurface {
             cx,
             Box::new(move |index, cx| {
                 if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
-                    let _ = weak.update(cx, |s, cx| s.delegate.run("newCamera", vec![], cx));
+                    let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
                     return;
                 }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
@@ -5154,4 +5154,9 @@ mod edge_scroll_regression {
         assert_eq!(edge_overflow(199., 200., 1000.), -1.);
         assert_eq!(edge_overflow(1001., 200., 1000.), 1.);
     }
+}
+
+pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
+pub(crate) fn empty_new_menu() -> serde_json::Value {
+    serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
 }
