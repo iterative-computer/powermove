@@ -327,6 +327,9 @@ impl SettingsChrome {
         let search = NSSearchField::new(mtm);
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
+        // No accent focus ring (owner rule); the field's own caret and
+        // fill show it has the keyboard.
+        search.setFocusRingType(NSFocusRingType::None);
         unsafe {
             search.setTarget(Some(&chrome));
             search.setAction(Some(sel!(searched:)));
