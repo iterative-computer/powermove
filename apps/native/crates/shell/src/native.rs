@@ -678,7 +678,7 @@ define_class!(
             if let Some((command, _, _)) = TOOLS.get(sender.selectedSegment() as usize)
                 && let Some(tx) = &self.ivars().sender {
                 let double_click = NSApplication::sharedApplication(self.mtm())
-                    .currentEvent().is_some_and(|event| unsafe { event.clickCount() } == 2);
+                    .currentEvent().is_some_and(|event| event.clickCount() == 2);
                 let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
@@ -3908,6 +3908,7 @@ impl Host {
         }
         let mut p = self.palette.borrow_mut();
         if !p.model.open {
+            p.model.recents = load_palette_recents();
             p.model.choices = choices;
         }
         p.toggle();
@@ -4359,6 +4360,7 @@ define_class!(
                 let index = sender.tag() as usize;
                 let chosen = p.model.choices.get(index).map(|c| (c.command.clone(), c.stays));
                 if let Some((command, _)) = &chosen {
+                    if p.anchor.is_none() { save_palette_recent(&mut p.model.recents, command); }
                     let (name, args) = menu::split_palette_command(command);
                     let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
@@ -5653,9 +5655,11 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
+            if self.anchor.is_none() { save_palette_recent(&mut self.model.recents, &name); }
+            let (command, args) = menu::split_palette_command(&name);
             let _ = self.sender.try_send(Command {
-                name,
-                args: vec![],
+                name: command.to_owned(),
+                args,
                 token: None,
             });
         }
@@ -6503,4 +6507,17 @@ mod anchor_toolbar_tests {
         assert_eq!(toolbar_click_command("toolAnchor", false), "toolAnchor");
         assert_eq!(toolbar_click_command("toolSelect", true), "toolSelect");
     }
+}
+
+fn load_palette_recents() -> Vec<String> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    defaults.stringForKey(&NSString::from_str("PowermovePaletteRecents"))
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value.to_string()).ok())
+        .map(|mut ids| { ids.truncate(8); ids }).unwrap_or_default()
+}
+fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
+    crate::transient::remember_command(recents, command);
+    let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
 }

@@ -74,6 +74,7 @@ impl Choice {
 #[derive(Clone, Debug, Default)]
 pub struct Picker {
     pub choices: Vec<Choice>,
+    pub recents: Vec<String>,
     pub query: String,
     /// The keyboard's row, a place in `filtered`.
     pub keyed: Option<usize>,
@@ -171,7 +172,11 @@ impl Picker {
             *at = (*at).min((r, i));
         }
         ranked.sort_by_key(|&(r, i)| (best[self.choices[i].category.as_str()], r, i));
-        ranked.into_iter().map(|(_, i)| i).collect()
+        let mut indices: Vec<_> = ranked.into_iter().map(|(_, i)| i).collect();
+        if self.query.trim().is_empty() {
+            indices.sort_by_key(|&i| self.recents.iter().position(|id| id == &self.choices[i].command).unwrap_or(usize::MAX));
+        }
+        indices
     }
     /// The lit row: the pointer's while it is over one, else the keyboard's.
     pub fn lit(&self) -> Option<usize> {
@@ -327,5 +332,28 @@ mod palette_effect_tests {
         );
         picker.search("Effect".into());
         assert!(picker.filtered().is_empty());
+    }
+}
+
+/// Most recently executed palette commands, newest first.
+pub fn remember_command(recents: &mut Vec<String>, command: &str) {
+    recents.retain(|id| id != command);
+    recents.insert(0, command.to_owned());
+    recents.truncate(8);
+}
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+    #[test]
+    fn recents_are_unique_capped_and_first_only_for_empty_search() {
+        let mut recents = vec![];
+        for i in 0..10 { remember_command(&mut recents, &i.to_string()); }
+        remember_command(&mut recents, "8");
+        assert_eq!(recents.len(), 8);
+        assert_eq!(&recents[..2], &["8", "9"]);
+        let mut picker = Picker { choices: vec![Choice::new("Alpha", "a"), Choice::new("Beta", "8")], recents, ..Default::default() };
+        assert_eq!(picker.filtered(), vec![1, 0]);
+        picker.search("Alpha".into());
+        assert_eq!(picker.filtered(), vec![0]);
     }
 }
