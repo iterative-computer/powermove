@@ -414,6 +414,15 @@ pub struct TextPose {
     pub name: String,
 }
 /// The layer's stored text (`d.text`).
+/// Whether the layer's text read back is an outside edit (undo, the
+/// inspector) the editor should take. Never while a write is on its way, an
+/// input method composes, or the editor holds keys whose change has not been
+/// handled yet (its text is not what was last written): typing faster than
+/// the kernel answers would lose those keys and move the caret, reordering
+/// the next ones.
+fn outside_text(read: &str, editor: &str, written: &str, pending: bool, composing: bool) -> bool {
+    !pending && !composing && editor == written && read != editor
+}
 fn model_text(p: &pm_kernel::Published, id: &str) -> String {
     p.snapshot
         .root()
@@ -714,7 +723,7 @@ impl GizmoSurface {
         if let Some(input) = s.input.clone() {
             // Outside edits (undo, the inspector) flow back into the editor.
             let pending = s.busy || !s.jobs.is_empty();
-            if !pending && !input.composing() && pose.text != input.value() {
+            if outside_text(&pose.text, &input.value(), &s.written, pending, input.composing()) {
                 input.replace_value(&pose.text);
                 s.written = pose.text.clone();
             }
@@ -1546,6 +1555,21 @@ mod tests {
             box_width: 0.,
             box_height: 0.,
         }
+    }
+    /// A read-back replaces the editor's text only for an outside edit: not
+    /// over keys typed but not yet handled, nor while a write is on its way.
+    #[test]
+    fn typed_keys_are_never_replaced_by_an_older_read() {
+        // The editor has "Hell" while the change for the last "l" waits.
+        assert!(!super::outside_text("Hel", "Hell", "Hel", false, false));
+        // A write is on its way.
+        assert!(!super::outside_text("Hel", "Hell", "Hell", true, false));
+        // Composing.
+        assert!(!super::outside_text("Hel", "Hell", "Hell", false, true));
+        // Undo changed the layer while nothing was being typed.
+        assert!(super::outside_text("He", "Hell", "Hell", false, false));
+        // The read agrees.
+        assert!(!super::outside_text("Hell", "Hell", "Hell", false, false));
     }
     #[test]
     fn carets_and_hits_follow_the_engine_lines() {

@@ -62,6 +62,9 @@ pub struct Playhead {
     head: Retained<CAShapeLayer>,
     trail: Retained<CAGradientLayer>,
     spring: Trail,
+    /// The graph's values on the head: a dot and a readout per curve.
+    marks: Vec<(Retained<AnyObject>, Retained<AnyObject>)>,
+    shown: Vec<pm_panel_timeline::graph_render::Mark>,
 }
 impl Playhead {
     /// `line` is the shared playhead layer; the trail goes in under it.
@@ -87,6 +90,8 @@ impl Playhead {
             head,
             trail,
             spring: Trail::default(),
+            marks: vec![],
+            shown: vec![],
         }
     }
     /// Colours follow the tokens (a theme or appearance change).
@@ -179,6 +184,97 @@ impl Playhead {
     }
 }
 impl Playhead {
+    /// The Value Graph's readouts on the head (v1 drawGraphTime): a 6 pt dot
+    /// on each curve in its ink and its value right of the head, in the
+    /// smallest type with tabular digits. `marks` are in window points (y
+    /// down); `height` is the parent's, whose layers count y up.
+    pub fn marks(
+        &mut self,
+        marks: &[pm_panel_timeline::graph_render::Mark],
+        height: f64,
+        scale: f64,
+        t: &pm_design::Tokens,
+    ) {
+        if marks == self.shown.as_slice() {
+            return;
+        }
+        if marks.is_empty() {
+            return self.clear_marks();
+        }
+        let size = t.typography.minimum as f64;
+        let tall = (size * t.typography.dense_leading as f64).ceil();
+        while self.marks.len() < marks.len() {
+            let parent: *mut AnyObject = unsafe { objc2::msg_send![&*self.line, superlayer] };
+            let Some(parent) = (unsafe { parent.as_ref() }) else {
+                return;
+            };
+            let dot: Retained<AnyObject> =
+                unsafe { Retained::from_raw(objc2::msg_send![objc2::class!(CALayer), new]) }.unwrap();
+            let text: Retained<AnyObject> =
+                unsafe { Retained::from_raw(objc2::msg_send![objc2::class!(CATextLayer), new]) }
+                    .unwrap();
+            let font = objc2_app_kit::NSFont::monospacedDigitSystemFontOfSize_weight(
+                size,
+                unsafe { objc2_app_kit::NSFontWeightMedium },
+            );
+            // CATextLayer.font is a CFTypeRef; NSFont is toll-free bridged to CTFont.
+            let font_ref = Retained::as_ptr(&font) as *const std::ffi::c_void;
+            unsafe {
+                let _: () = objc2::msg_send![&*dot, setCornerRadius: 3f64];
+                let _: () = objc2::msg_send![&*text, setFont: font_ref];
+                let _: () = objc2::msg_send![&*text, setFontSize: size];
+                let _: () = objc2::msg_send![&*text, setAlignmentMode: objc2_quartz_core::kCAAlignmentLeft];
+                let _: () = objc2::msg_send![parent, addSublayer: &*dot];
+                let _: () = objc2::msg_send![parent, addSublayer: &*text];
+            }
+            self.marks.push((dot, text));
+        }
+        for (i, (dot, text)) in self.marks.iter().enumerate() {
+            let Some(m) = marks.get(i) else {
+                unsafe {
+                    let _: () = objc2::msg_send![&**dot, setHidden: true];
+                    let _: () = objc2::msg_send![&**text, setHidden: true];
+                }
+                continue;
+            };
+            let ink = colour(m.color, 1.);
+            unsafe {
+                let _: () = objc2::msg_send![&**dot, setBackgroundColor: &*ink];
+                let _: () = objc2::msg_send![&**dot, setFrame: NSRect::new(
+                    NSPoint::new(m.x - 3., height - m.y - 3.), NSSize::new(6., 6.))];
+                let _: () = objc2::msg_send![&**dot, setHidden: false];
+                match m.label {
+                    Some(baseline) => {
+                        // The line box's top sits an ascent above the baseline.
+                        let top = baseline - size;
+                        let string = objc2_foundation::NSString::from_str(&m.text);
+                        let _: () = objc2::msg_send![&**text, setString: &*string];
+                        let _: () = objc2::msg_send![&**text, setForegroundColor: &*ink];
+                        let _: () = objc2::msg_send![&**text, setContentsScale: scale];
+                        let _: () = objc2::msg_send![&**text, setFrame: NSRect::new(
+                            NSPoint::new(m.x + 7., height - top - tall), NSSize::new(120., tall))];
+                        let _: () = objc2::msg_send![&**text, setHidden: false];
+                    }
+                    None => {
+                        let _: () = objc2::msg_send![&**text, setHidden: true];
+                    }
+                }
+            }
+        }
+        self.shown = marks.to_vec();
+    }
+    fn clear_marks(&mut self) {
+        if self.shown.is_empty() {
+            return;
+        }
+        for (dot, text) in &self.marks {
+            unsafe {
+                let _: () = objc2::msg_send![&**dot, setHidden: true];
+                let _: () = objc2::msg_send![&**text, setHidden: true];
+            }
+        }
+        self.shown.clear();
+    }
     /// Scrolled out of the tracks: the line goes, and its trail with it (the
     /// trail is a sibling layer, so hiding the line alone left the glow
     /// sliding over the layer names during playback).
@@ -188,12 +284,19 @@ impl Playhead {
         }
         self.trail.setHidden(true);
         self.spring.reset();
+        self.clear_marks();
     }
 }
 impl Drop for Playhead {
     fn drop(&mut self) {
         self.trail.removeFromSuperlayer();
         self.head.removeFromSuperlayer();
+        for (dot, text) in &self.marks {
+            unsafe {
+                let _: () = objc2::msg_send![&**dot, removeFromSuperlayer];
+                let _: () = objc2::msg_send![&**text, removeFromSuperlayer];
+            }
+        }
     }
 }
 /// v1's playhead pin, `d` pt square in a y-up layer: a flat top, straight

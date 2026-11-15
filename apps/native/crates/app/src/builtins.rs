@@ -411,6 +411,9 @@ impl Controller {
                 state.proxy = status(proxy, &state.proxy);
                 state.optimized = status(optimized, &state.optimized);
                 state.play_original = self.pro_media.plays_original(&project, id);
+                if let Some(key) = self.thumbs.key(id) {
+                    state.poster = Some(key);
+                }
             })
     }
     /// Readiness depends only on the media inputs, so an edit that left them
@@ -744,6 +747,7 @@ impl Controller {
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
+        self.want_thumbnails(cx);
         if self.builtins.updating {
             self.builtins.again = true;
             return;
@@ -1475,7 +1479,7 @@ impl Controller {
             // snapshot, before the panel is marked ready. The request only
             // asks the viewer to measure and edits nothing, so it never
             // waits on the panel.
-            let measure_only = request.operation == "export.estimate";
+            let measure_only = answers_before_ready(&request.operation);
             if !measure_only
                 && (!self.builtins.ready.contains(&request.panel)
                     || self.builtins.generations.get(&request.panel) != Some(&request.generation))
@@ -1563,6 +1567,33 @@ impl Controller {
                                 ),
                                 pm_panel_media::Effect::Renditions { action, assets } => {
                                     self.renditions(action, assets, cx)
+                                }
+                                // Space on the selection: Quick Look, as in Finder.
+                                pm_panel_media::Effect::TogglePreview(id)
+                                | pm_panel_media::Effect::ShowPreview(id) => {
+                                    let selection = self
+                                        .builtins
+                                        .runtime
+                                        .as_ref()
+                                        .map(|r| r.project_selection())
+                                        .unwrap_or_default();
+                                    let names = self.asset_names();
+                                    let files = quick_look_files(
+                                        &selection,
+                                        &id,
+                                        &self.media_base.originals,
+                                    )
+                                    .into_iter()
+                                    .map(|(id, path)| {
+                                        let name = names.get(&id).cloned().unwrap_or_else(|| {
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default()
+                                        });
+                                        (path, name)
+                                    })
+                                    .collect();
+                                    crate::quick_look::toggle(files);
                                 }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
@@ -1916,6 +1947,32 @@ impl Controller {
                 }
                 "agentMenu" => {
                     self.agent_menu(&runtime, &request, cx);
+                    continue;
+                }
+                // The Project panel's list/grid choice, kept in the
+                // profile: `{view}` saves it; without one, the saved one
+                // (list until the person chooses).
+                // The Project panel's list/grid choice, kept per project in
+                // the profile (`Project/view.json`: project id to view):
+                // `{view}` saves the open project's; without one, its saved
+                // choice, a grid until the person chooses (v1.2.0's panel was
+                // a grid).
+                "project.view" => {
+                    let path = self.profile.join("Project").join("view.json");
+                    let project = self.session.as_ref().map(|s| s.project.clone());
+                    let view = request.input["view"].as_str().map(str::to_owned);
+                    let runtime = runtime.clone();
+                    let io = cx
+                        .background_executor()
+                        .spawn(async move { project_view(&path, project.as_deref(), view) });
+                    cx.spawn(async move |this, cx| {
+                        let reply = io.await;
+                        if reply.as_deref() == Ok("grid") {
+                            let _ = this.update(cx, |c, cx| c.show_thumbnails(cx));
+                        }
+                        runtime.platform_reply(request.id, reply.map(Value::from));
+                    })
+                    .detach();
                     continue;
                 }
                 "project.menu" => {
@@ -2871,5 +2928,152 @@ mod follow_selection_tests {
         let next = last_frame.unwrap() + tick;
         assert!(follow_due(last_frame, last_at, seek, now));
         assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}
+
+/// Requests answered while their panel is still mounting: they only read
+/// or measure, never edit. The Export sheet asks for its 3D estimate from its
+/// first snapshot; the Project panel asks for its list/grid choice before
+/// its first render (refused, its grid drew no thumbnails).
+fn answers_before_ready(operation: &str) -> bool {
+    matches!(operation, "export.estimate" | "project.view")
+}
+
+/// The Project panel's view for `project` in the per-project choices at
+/// `path`: `set` saves one, else the saved one (a grid until chosen).
+fn project_view(
+    path: &std::path::Path,
+    project: Option<&str>,
+    set: Option<String>,
+) -> Result<String, String> {
+    let mut choices: serde_json::Map<String, Value> = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let key = project.unwrap_or("");
+    match set {
+        Some(view) if view == "list" || view == "grid" => {
+            choices.insert(key.to_owned(), Value::from(view.clone()));
+            let _ = std::fs::create_dir_all(path.parent().expect("a folder"));
+            std::fs::write(path, Value::Object(choices).to_string())
+                .map(|()| view)
+                .map_err(|e| format!("The view choice wasn't saved: {e}"))
+        }
+        Some(other) => Err(format!("Unknown Project view {other}")),
+        None => Ok(choices
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| *v == "list")
+            .unwrap_or("grid")
+            .to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod project_view_tests {
+    /// The Project panel's first question (its list/grid choice) is answered
+    /// while it mounts; edits still wait for the panel.
+    #[test]
+    fn the_view_choice_is_answered_while_the_panel_mounts() {
+        assert!(super::answers_before_ready("project.view"));
+        assert!(super::answers_before_ready("export.estimate"));
+        assert!(!super::answers_before_ready("project.effect"));
+    }
+    /// Each project keeps its own list/grid choice; one never chosen opens
+    /// as a grid, as v1.2.0's Project panel was.
+    #[test]
+    fn each_project_keeps_its_own_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Project/view.json");
+        let view = |project, set: Option<&str>| {
+            super::project_view(&path, Some(project), set.map(str::to_owned)).unwrap()
+        };
+        assert_eq!(view("a", None), "grid");
+        assert_eq!(view("a", Some("list")), "list");
+        assert_eq!(view("b", None), "grid");
+        assert_eq!(view("a", None), "list");
+        assert_eq!(view("b", Some("grid")), "grid");
+        assert_eq!(view("a", None), "list");
+        assert!(super::project_view(&path, Some("a"), Some("tiles".into())).is_err());
+    }
+}
+
+impl Controller {
+    /// The open project's asset names, by id (what the Project shows).
+    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+        let Some(published) = &self.published else {
+            return Default::default();
+        };
+        let Some(pm_model::doc::NodeKind::Object(assets)) = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.kind())
+        else {
+            return Default::default();
+        };
+        assets
+            .iter()
+            .filter_map(|(id, record)| {
+                let name = record.get("name")?.to_value().as_str()?.to_owned();
+                Some((id.as_str()?.to_owned(), name))
+            })
+            .collect()
+    }
+}
+
+/// The files Quick Look shows for Space on `pressed`: the whole selection
+/// when it holds that item (the arrow keys then move through it), else that
+/// item; each asset's original, an image sequence as its first frame.
+fn quick_look_files(
+    selection: &[String],
+    pressed: &str,
+    originals: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Vec<(String, std::path::PathBuf)> {
+    let ids: Vec<&str> = if selection.iter().any(|s| s == pressed) {
+        selection.iter().map(String::as_str).collect()
+    } else {
+        vec![pressed]
+    };
+    ids.into_iter()
+        .filter_map(|id| Some((id, originals.get(id)?)))
+        .map(|(id, path)| {
+            let file = match pm_media::image::sequence::Manifest::read(path) {
+                Ok(Some(sequence)) => (sequence.first..=sequence.last)
+                    .map(|n| sequence.file(n))
+                    .find(|f| f.is_file())
+                    .unwrap_or_else(|| path.clone()),
+                _ => path.clone(),
+            };
+            (id.to_owned(), file)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod quick_look_tests {
+    /// Space on a selected item shows the selection's originals in order;
+    /// on an item outside the selection, that item alone; items without an
+    /// original (compositions) are left out.
+    #[test]
+    fn quick_look_shows_the_selections_originals() {
+        let originals: std::collections::BTreeMap<String, std::path::PathBuf> = [
+            ("a".to_owned(), "/m/a.mov".into()),
+            ("b".to_owned(), "/m/b.png".into()),
+        ]
+        .into();
+        let selection = ["b".to_owned(), "c".to_owned(), "a".to_owned()];
+        assert_eq!(
+            super::quick_look_files(&selection, "a", &originals),
+            [
+                ("b".to_owned(), std::path::PathBuf::from("/m/b.png")),
+                ("a".to_owned(), "/m/a.mov".into())
+            ]
+        );
+        assert_eq!(
+            super::quick_look_files(&["b".to_owned()], "a", &originals),
+            [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
+        );
     }
 }
