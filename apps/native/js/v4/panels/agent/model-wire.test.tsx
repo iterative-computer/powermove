@@ -87,6 +87,11 @@ async function nativeModel() {
     },
   };
 }
+test("fresh native session publishes Auto to the access picker", async () => {
+  const { model } = await nativeModel();
+  expect(model.inspect().snapshot.settings.access).toBe("auto");
+  model.dispose();
+});
 test("actual Rust model through HostRouter/HostDataService drives Send, Stop, consent and the six-op panel", async () => {
   const f = await nativeModel();
   const commits: Commit[] = [];
@@ -122,7 +127,7 @@ test("actual Rust model through HostRouter/HostDataService drives Send, Stop, co
   expect(f.model.inspect().snapshot.stopping).toBe(true);
   expect(f.pendingEffects).toBe(2);
   await f.model.dispatch({ type: "setAccess", access: "full" });
-  expect(f.model.inspect().snapshot.settings.access).toBe("editor");
+  expect(f.model.inspect().snapshot.settings.access).toBe("auto");
   expect(f.pendingEffects).toBe(3);
   const validated = Bun.spawnSync([process.env.PM_UI_KIT_WIRE!], {
     stdin: new TextEncoder().encode(

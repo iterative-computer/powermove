@@ -61,10 +61,9 @@ impl Settings {
             model: v["model"].as_str().unwrap_or_default().into(),
             effort: v["reasoningEffort"].as_str().unwrap_or_default().into(),
             // A persisted computer grant is intent, never live authority.
-            access: if matches!(v["access"].as_str(), Some("project" | "computer")) {
-                Access::Project
-            } else {
-                Access::Editor
+            access: match v["access"].as_str() {
+                None | Some("project" | "computer") => Access::Project,
+                _ => Access::Editor,
             },
             approval: if v["approvalMode"] == "supervised" {
                 ApprovalMode::Supervised
@@ -753,6 +752,9 @@ impl Panel {
         let actual = record["id"].as_str().expect("validated").to_owned();
         if !self.sessions.contains_key(&actual) {
             let mut session = Session::from_record(&record)?;
+            // New chats start on Auto; saved/reused chats keep their choice.
+            settings.access = Access::Project;
+            settings.approval = ApprovalMode::Auto;
             session.settings = settings;
             session.settings_dirty = true;
             session.catalog = catalog;
