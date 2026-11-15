@@ -200,11 +200,12 @@ mod tests {
     #[test]
     fn a_low_disk_failure_keeps_its_numbers() {
         let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
         let error = anyhow::Error::new(LowDisk {
             needed: 7,
             available: 3,
         });
-        let failure = record_failure(temp.path(), &error).unwrap();
+        let failure = record_failure(&root, &error).unwrap();
         assert_eq!(
             failure.low_disk,
             Some(LowDiskRecord {
@@ -212,10 +213,10 @@ mod tests {
                 available: 3
             })
         );
-        assert_eq!(last_failure(temp.path()), Some(failure));
-        request(temp.path()).unwrap();
-        assert!(requested(temp.path()));
-        assert_eq!(last_failure(temp.path()), None);
+        assert_eq!(last_failure(&root), Some(failure));
+        request(&root).unwrap();
+        assert!(requested(&root));
+        assert_eq!(last_failure(&root), None);
     }
     #[test]
     fn tidy_removes_only_empty_stages() {
