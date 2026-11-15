@@ -526,12 +526,33 @@ impl Properties {
                 }
             }
             if target["first"]["type"] == "text" {
-                let animators = model
-                    .text_animators(&layer)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|(id, name)| json!({"id":id,"name":name}))
-                    .collect::<Vec<_>>();
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let mut animators = vec![];
+                for animator in record["d"]["animators"].as_array().into_iter().flatten() {
+                    let Some(id) = animator["id"].as_str() else { continue };
+                    let mut rows = vec![];
+                    for (key, label, unit) in [
+                        ("amount", "Amount", "%"), ("delay", "Start", "s"),
+                        ("duration", "Duration", "s"), ("stagger", "Stagger", "s"),
+                        ("start", "Range start", "%"), ("end", "Range end", "%"),
+                        ("offset", "Range offset", "%"), ("smoothness", "Softness", "%"),
+                        ("speed", "Speed", ""), ("spread", "Spread", ""),
+                        ("x", "Position X", "px"), ("y", "Position Y", "px"),
+                        ("opacity", "Opacity", "%"), ("scale", "Scale", "%"),
+                        ("rotation", "Rotation", "°"), ("blur", "Blur", "px"),
+                        ("tracking", "Tracking", "px"),
+                    ] {
+                        if animator["p"].get(key).is_none() { continue; }
+                        let path = format!("ta.{id}.{key}");
+                        let binding = Binding::Property(PropertyId::new(&layer, &path));
+                        let state = model.binding_state(&binding, time).map_err(|e| e.to_string())?;
+                        let lease = self.lease(model, &path, binding)?;
+                        let animation = if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" };
+                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,
+                            "control":{"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else {1.0},"precision":2}]}}));
+                    }
+                    animators.push(json!({"id":id,"name":animator["name"],"rows":rows}));
+                }
                 let presets = pm_panel_inspector::text_animators::preset_menu()
                     .into_iter()
                     .map(|(id, label)| json!({"id":id,"label":label,"disabled":id.is_none()}))
