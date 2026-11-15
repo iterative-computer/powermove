@@ -56,3 +56,29 @@ pub use native::{
 
 #[cfg(all(test, target_os = "macos"))]
 mod utility_capture_tests;
+
+// Keep pure model and headless dock regressions available under `cargo test --lib`.
+// The standalone native-window harnesses are intentionally separate.
+#[cfg(test)]
+extern crate self as pm_shell;
+#[cfg(test)]
+#[path = "../tests/models.rs"]
+mod regression_models;
+#[cfg(test)]
+#[path = "../tests/shell2.rs"]
+mod regression_shell2;
+#[cfg(test)]
+#[path = "../tests/shell3.rs"]
+mod regression_shell3;
+#[cfg(test)]
+#[path = "../tests/docking_electron.rs"]
+mod regression_docking_electron;
+#[cfg(test)]
+#[path = "../tests/docking_main.rs"]
+mod regression_docking_main;
+#[cfg(test)]
+#[path = "../tests/docking_feel.rs"]
+mod regression_docking_feel;
+#[cfg(test)]
+#[path = "../tests/dock_scroll.rs"]
+mod regression_dock_scroll;
