@@ -710,8 +710,8 @@ impl MacDomHost {
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));
             web.setUIDelegate(Some(ProtocolObject::from_ref(&*bridge)));
-            // Transparent: panel roots paint their own fill, and the viewer's
-            // stage shows the native viewer through the page.
+            // Transparent: the native dock material supplies panel grounds;
+            // the viewer stage also shows through the page.
             web.setValue_forKey(
                 Some(&NSNumber::new_bool(false)),
                 &NSString::from_str("drawsBackground"),
@@ -751,6 +751,23 @@ impl MacDomHost {
             self.web
                 .loadHTMLString_baseURL(&NSString::from_str(&html), None);
         }
+    }
+    /// Resolved theme tokens, including accessibility, from the owning shell.
+    pub fn update_native_style(
+        &self,
+        light: &pm_design::Tokens,
+        dark: &pm_design::Tokens,
+        scheme: pm_design::Scheme,
+    ) -> Result<()> {
+        self.set_native_style(&crate::native_style::stylesheet(light, dark), scheme)
+    }
+    /// Reuse a generated sheet across every rendering document in a window.
+    pub fn set_native_style(&self, css: &str, scheme: pm_design::Scheme) -> Result<()> {
+        self.shared.send(serde_json::json!({
+            "kind": "theme",
+            "css": css,
+            "scheme": if scheme == pm_design::Scheme::Dark { "dark" } else { "light" },
+        }))
     }
     pub fn web_view(&self) -> &WKWebView {
         &self.web

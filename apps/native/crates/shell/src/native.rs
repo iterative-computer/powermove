@@ -2071,6 +2071,8 @@ pub struct Host {
     pub contributed_choices: Vec<Choice>,
     /// Rectangles of panel bodies a native surface below GPUI draws.
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
+    /// Keeps web panels in sync with resolved appearance and accessibility.
+    pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
@@ -2260,6 +2262,7 @@ impl Host {
             base_choices: choices,
             contributed_choices: vec![],
             native_panels: Rc::default(),
+            native_style: None,
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
@@ -3445,6 +3448,9 @@ impl Host {
         self.document.borrow().clone()
     }
     pub fn update_tokens(&mut self, t: Tokens) {
+        if let Some(update) = &self.native_style {
+            update(&t);
+        }
         appearance(&self.window, &t);
         ground(&self.window, &self.backdrop, &t);
         if let Some(layer) = self.viewer.layer() {

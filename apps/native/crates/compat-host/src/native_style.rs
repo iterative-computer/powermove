@@ -2,6 +2,25 @@
 use pm_design::Tokens;
 use std::fmt::Write;
 
+/// The same source-over stack the shell paints: panel tint over window tint,
+/// then the shared behind-window material. WebKit lives below GPUI's window
+/// tint, so omitting that first tint would expose a different panel ground.
+pub fn panel_backing(t: &Tokens) -> [f64; 4] {
+    let (window, window_alpha) = t.ground();
+    let window_alpha = f64::from(window_alpha);
+    let panel_alpha = f64::from(t.translucency.panel);
+    let alpha = panel_alpha + window_alpha * (1. - panel_alpha);
+    if alpha == 0. {
+        return [0.; 4];
+    }
+    let channel = |shift: u32| {
+        let panel = f64::from((t.colors.panel >> shift) & 255) / 255.;
+        let window = f64::from((window >> shift) & 255) / 255.;
+        (panel * panel_alpha + window * window_alpha * (1. - panel_alpha)) / alpha
+    };
+    [channel(16), channel(8), channel(0), alpha]
+}
+
 pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
     let mut css = String::new();
     for (selector, t) in [(":root", light), (":root[data-pm-scheme=dark]", dark)] {
@@ -44,13 +63,35 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         write!(css, "--pm-space-md:{}px;", t.space.md).unwrap();
         write!(css, "--pm-space-lg:{}px;", t.space.lg).unwrap();
         write!(css, "--pm-space-xl:{}px;", t.space.xl).unwrap();
-        write!(css, "--pm-weight-regular:{};",t.typography.regular_weight).unwrap();
-        write!(css, "--pm-weight-medium:{};",t.typography.medium_weight).unwrap();
-        write!(css, "--pm-weight-semibold:{};",t.typography.semibold_weight).unwrap();
+        write!(css, "--pm-weight-regular:{};", t.typography.regular_weight).unwrap();
+        write!(css, "--pm-weight-medium:{};", t.typography.medium_weight).unwrap();
+        write!(
+            css,
+            "--pm-weight-semibold:{};",
+            t.typography.semibold_weight
+        )
+        .unwrap();
         let (_, width, offset) = t.focus_ring();
-        write!(css, "--pm-focus-width:{width}px;--pm-focus-offset:{offset}px;--pm-dur:{}ms;", if t.accessibility.reduce_motion {0.} else {t.motion.interaction * 1000.}).unwrap();
-        write!(css, "--pm-media-badge:rgb({} {} {} / {});", (t.colors.media_badge >> 16) & 255, (t.colors.media_badge >> 8) & 255, t.colors.media_badge & 255, t.metrics.media_badge_opacity).unwrap();
-        css.push_str("--pm-font:-apple-system,system-ui;--pm-font-mono:ui-monospace,'SF Mono';--pm-ease:ease;");
+        write!(
+            css,
+            "--pm-focus-width:{width}px;--pm-focus-offset:{offset}px;--pm-dur:{}ms;",
+            if t.accessibility.reduce_motion {
+                0.
+            } else {
+                t.motion.interaction * 1000.
+            }
+        )
+        .unwrap();
+        write!(
+            css,
+            "--pm-media-badge:rgb({} {} {} / {});",
+            (t.colors.media_badge >> 16) & 255,
+            (t.colors.media_badge >> 8) & 255,
+            t.colors.media_badge & 255,
+            t.metrics.media_badge_opacity
+        )
+        .unwrap();
+        css.push_str("--pm-font:-apple-system,system-ui;--pm-font-mono:ui-monospace,'SF Mono';--pm-ease:cubic-bezier(.22,1,.36,1);");
         css.push_str("--bg-panel:var(--pm-ground);");
         css.push_str("--bg-panel-2:var(--pm-ground-2);");
         css.push_str("--bg-sunken:var(--pm-ground-2);");
@@ -70,6 +111,22 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         css.push_str("--ease:var(--pm-ease);");
         css.push('}');
     }
+    // `none` on a contribution also stops inherited host variables.
+    css.push_str(":where([data-pm-style=none]){");
+    let token_names: std::collections::BTreeSet<String> = css
+        .split("--")
+        .skip(1)
+        .filter_map(|part| part.split_once(':').map(|(name, _)| name.to_owned()))
+        .filter(|name| name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        .collect();
+    for name in token_names {
+        write!(css, "--{name}:initial;").unwrap();
+    }
+    css.push('}');
     css.push_str(include_str!("pm-native.css"));
     css
 }
+
+#[cfg(test)]
+#[path = "native_style_tests.rs"]
+mod tests;
