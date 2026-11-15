@@ -2209,6 +2209,13 @@ impl SurfaceView {
         }
         (start < end).then_some(start..end)
     }
+    fn plain_or_quote_text(&self, id: Id, text: &SharedString) -> AnyElement {
+        if self.quote_owner(id).is_some() {
+            self.quote_text(id, StyledText::new(text.clone()), text.to_string())
+        } else {
+            text.clone().into_any_element()
+        }
+    }
     fn quote_text(&self, id: Id, mut text: StyledText, plain: String) -> AnyElement {
         let Some(owner) = self.quote_owner(id) else {
             return text.into_any_element();
@@ -2814,11 +2821,7 @@ impl SurfaceView {
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
-                        children.push(self.quote_text(
-                            c.id,
-                            StyledText::new(text.clone()),
-                            text.to_string(),
-                        ));
+                        children.push(self.plain_or_quote_text(c.id, text));
                     }
                 }
                 _ if node.fixed_items => {
@@ -3651,11 +3654,7 @@ impl SurfaceView {
             );
         }
         if let Some(text) = &node.text {
-            element = element.child(self.quote_text(
-                node.id,
-                StyledText::new(text.clone()),
-                text.to_string(),
-            ));
+            element = element.child(self.plain_or_quote_text(node.id, text));
         }
         if let Some(rich) = &node.rich {
             element = element.child(self.quote_text(
