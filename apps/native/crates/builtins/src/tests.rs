@@ -5987,3 +5987,25 @@ fn delete_toast_is_emitted_only_after_project_delete_acknowledgement() {
         assert!(restored.compositions.contains_key("C2"));
     }
 }
+
+#[test]
+fn layer_and_keyframe_deletion_never_emit_delete_toast() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity { realm: "assets".into(), generation: 1, project: "synthetic".into() };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "assets", false).unwrap();
+    let apply = |command: pm_kernel::Command| {
+        let ack = kernel.call("synthetic", Request::new(Caller::native(), pm_kernel::Call::Transact { label: None, expected_revision: None, body: pm_kernel::WriteBody::Commands(vec![command]) })).wait().unwrap().unwrap();
+        assert!(matches!(ack.reply, pm_kernel::Reply::Applied { .. }));
+    };
+    apply(pm_kernel::KeyframeCommand::Add { layer_id: "a".into(), channel: "opacity".into(), time: 0., key_id: "toast-key".into(), value: Some(pm_model::Value::Number(50.)) }.into());
+    for command in [pm_kernel::Command::Keyframe(pm_kernel::KeyframeCommand::Delete { key_ids: vec!["toast-key".into()] }), pm_kernel::Command::Layer(pm_kernel::LayerCommand::Delete { layer_ids: vec!["a".into()] })] {
+        let before = kernel.published("synthetic").unwrap().snapshot.document.to_value().unwrap();
+        apply(command);
+        backend.sync().unwrap();
+        backend.tick().unwrap();
+        assert!(!backend.native.platform.iter().any(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v.clone()).is_ok_and(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. }))));
+        kernel.call("synthetic", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo)).wait().unwrap().unwrap();
+        assert_eq!(kernel.published("synthetic").unwrap().snapshot.document.to_value().unwrap(), before);
+    }
+}
