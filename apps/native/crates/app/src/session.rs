@@ -2937,12 +2937,7 @@ impl Controller {
                 {
                     let plan =
                         crate::layer_commands::palette_effect_plan(published, &label, |layer| {
-                            runtime.effect_commands(
-                                "fxbrowser",
-                                layer,
-                                id,
-                                self.time(),
-                            )
+                            runtime.effect_commands("viewer", layer, id, self.time())
                         });
                     match plan {
                         Ok(Some(plan)) => self.run_layer_plan(plan, cx),

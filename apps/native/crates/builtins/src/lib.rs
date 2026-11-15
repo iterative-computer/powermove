@@ -972,6 +972,7 @@ impl Builtins {
             .backend(panel)
             .map_err(|_| "The Effects panel closed.".to_owned())?;
         let mut backend = backend.shared();
+        backend.sync()?;
         let caller = backend.caller;
         let request = backend
             .model

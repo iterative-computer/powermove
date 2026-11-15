@@ -1531,7 +1531,6 @@ fn palette_selects_named_layer_and_rejects_missing_layer() {
 
 #[test]
 fn palette_effect_applies_to_selection_as_one_undo_step() {
-    use pm_kernel::commands::effects::{AddEffect, saved_builtin_definition};
     let desk = Desk::new(project(vec![
         json!({"id":"a","name":"A","type":"solid","dur":10}),
         json!({"id":"b","name":"B","type":"solid","dur":10}),
@@ -1551,23 +1550,19 @@ fn palette_effect_applies_to_selection_as_one_undo_step() {
         ids: vec!["a".into(), "b".into()],
         add: false,
     });
+    // Only the always-mounted viewer is needed; the Effects panel stays closed.
+    let mut runtime =
+        pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    let ticket = runtime.mount("viewer").unwrap();
+    crate::ticket::answer(
+        ticket,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .unwrap()
+    .unwrap();
     let p = desk.published();
     let plan = crate::layer_commands::palette_effect_plan(&p, "Gaussian Blur", |id| {
-        Ok(vec![
-            pm_kernel::EffectCommand::Add(Box::new(AddEffect {
-                layer_id: id.into(),
-                effect_id: pm_kernel::new_id("f"),
-                definition: saved_builtin_definition(&p.snapshot.document, "blur", None, 0., 0.)
-                    .unwrap(),
-                parameters: Default::default(),
-                inputs: None,
-                open: true,
-                enabled: true,
-                enabled_animation: None,
-                index: None,
-            }))
-            .into(),
-        ])
+        runtime.effect_commands("viewer", id, "blur", 0.)
     })
     .unwrap()
     .unwrap();
