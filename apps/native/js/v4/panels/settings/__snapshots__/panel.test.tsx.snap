@@ -3,37 +3,11 @@
 exports[`empty: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -93,43 +67,17 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -189,43 +137,17 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts" selected
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Accounts"
         div
           div
             div group settings.section.accounts label="Accounts"
-              div
-                text heading
-                  text "Accounts"
-                text
-                  text "Your Powermove account, and the models your agent works with."
               div group label="Powermove Account"
                 text heading
                   text "Powermove Account"
@@ -317,43 +239,17 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                     div
                       button push-button label="Test and Connect" disabled
                         text "Test and Connect"
-Focus: ["settings.search","settings.sections","Bring Sign-Ins from the Original App…"]"
+Focus: ["Bring Sign-Ins from the Original App…"]"
 `;
 
 exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -413,43 +309,17 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -509,43 +379,17 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -605,43 +449,17 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -701,43 +519,17 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -797,75 +589,28 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value="no-fixture-match"
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div status label="No settings found."
           text
             text "No settings found."
-Focus: ["settings.search","settings.sections"]"
+Focus: []"
 `;
 
 exports[`extension-detail: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -925,43 +670,17 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -1021,43 +740,17 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
@@ -1117,43 +810,17 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                         text "Open only the project you were last working on."
                     div
                       button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions" selected
-            text "Extensions"
     div
       scroll group settings.detail label="Extensions"
         div
           div
             div group settings.section.extensions label="Extensions"
-              div
-                text heading
-                  text "Extensions"
-                text
-                  text "Manage extensions and turn them on or off."
               div
                 div
                   input text-field label="Filter extensions" value=""
@@ -1477,50 +1144,17 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                     div
                       button push-button label="Open Store"
                         text "Open Store"
-Focus: ["settings.search","settings.sections","Filter extensions","Extension Type","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
+Focus: ["Filter extensions","Extension Type","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="Project"
-          text
-            text "Project"
-          div list-item listitem settings.nav.project label="Project" selected
-            text "Project"
-          div list-item listitem settings.nav.memory label="Memory"
-            text "Memory"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Project"
         div
           div
             div group settings.section.project label="Project"
-              div
-                text heading
-                  text "Project"
-                text
-                  text "Settings for “Fixture”."
               div group label="Project"
                 text heading
                   text "Project"
@@ -1639,43 +1273,17 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                       text
                         text "Keep the background see-through, with straight alpha."
                     div
-Focus: ["settings.search","settings.sections"]"
+Focus: []"
 `;
 
 exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts" selected
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Shortcuts"
         div
           div
             div group settings.section.shortcuts label="Shortcuts"
-              div
-                text heading
-                  text "Shortcuts"
-                text
-                  text "Keys for every command. Start from After Effects, Premiere Pro, Final Cut Pro or DaVinci Resolve, then change any of them."
               div group label="Layer"
                 text heading
                   text "Layer"
@@ -1735,43 +1343,17 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                         text "⌥⇧S"
                       text
                         text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
-Focus: ["settings.search","settings.sections","Reset","Remove","Change…","Cancel","Change…"]"
+Focus: ["Reset","Remove","Change…","Cancel","Change…"]"
 `;
 
 exports[`transcription available wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
@@ -1785,43 +1367,17 @@ exports[`transcription available wire/AX state 1`] = `
                     div
                       button push-button label="Download"
                         text "Download"
-Focus: ["settings.search","settings.sections","Download"]"
+Focus: ["Download"]"
 `;
 
 exports[`transcription downloading wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
@@ -1837,43 +1393,17 @@ exports[`transcription downloading wire/AX state 1`] = `
                         text "Fixture speech"
                       button push-button label="Cancel"
                         text "Cancel"
-Focus: ["settings.search","settings.sections","Cancel"]"
+Focus: ["Cancel"]"
 `;
 
 exports[`transcription installed wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
@@ -1889,43 +1419,17 @@ exports[`transcription installed wire/AX state 1`] = `
                         text "Use"
                       button push-button label="Delete…"
                         text "Delete…"
-Focus: ["settings.search","settings.sections","Use","Delete…"]"
+Focus: ["Use","Delete…"]"
 `;
 
 exports[`transcription error wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
@@ -1941,5 +1445,5 @@ exports[`transcription error wire/AX state 1`] = `
                         text "Fixture service error"
                       button push-button label="Retry"
                         text "Retry"
-Focus: ["settings.search","settings.sections","Retry"]"
+Focus: ["Retry"]"
 `;

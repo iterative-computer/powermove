@@ -22,6 +22,8 @@ pub mod native_control;
 pub mod scopes;
 pub mod session;
 #[cfg(target_os = "macos")]
+pub mod settings_window;
+#[cfg(target_os = "macos")]
 pub mod symbol;
 #[cfg(target_os = "macos")]
 pub mod text;

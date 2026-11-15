@@ -292,22 +292,24 @@ async function event(
     detail,
   );
 }
-test("native search input, sidebar activation and window shortcuts reach the model", async () => {
+test("the window's native search and sidebar reach the model; its shortcuts stay on the page", async () => {
   const { model, effects } = fixture();
   model.show();
   const { root, commits } = recorder();
   const render = () =>
     root.render(<SettingsPanel model={model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Search", "text-field").id, "input", {
-    value: "instant",
-  });
-  await Promise.resolve();
+  // AppKit's search field and source list (PM-375) act on the model.
+  expect(root.inspect().nodes.some((n) => n.props.label === "Search")).toBe(
+    false,
+  );
+  await model.search("instant");
   await render();
   expect(model.visibleSections).toEqual(["general"]);
   await model.search("");
   await render();
-  await event(root, find(root, "Accounts", "list-item").id, "click");
+  model.select("accounts");
+  await render();
   expect(model.active).toBe("accounts");
   await event(root, find(root, "Settings").id, "keydown", {
     key: "f",
@@ -383,16 +385,10 @@ test("AX contract has labelled groups, selected neutral sidebar, search/list fir
   expect(nodes.find((n) => n.props.id === "settings")?.props.role).toBe(
     "group",
   );
-  expect(find(root, "Settings sections", "list").props.role).toBe("list");
-  expect(find(root, "General", "list-item").props["aria-selected"]).toBe(true);
-  expect(find(root, "General", "list-item").props.style).toHaveProperty(
-    "background",
-    { token: "colors.fill_strong" },
-  );
-  expect(row.focusOrder.slice(0, 2)).toEqual([
-    find(root, "Search", "text-field").id,
-    find(root, "Settings sections", "list").id,
-  ]);
+  // The sections and the search field are AppKit's, beside the page.
+  expect(nodes.some((n) => n.props.label === "Settings sections")).toBe(false);
+  expect(find(root, "General").props.role).toBe("group");
+  expect(row.focusOrder.length).toBeGreaterThan(0);
   expect(
     nodes
       .filter((n) => n.props["data-pm-component"] === "text-field")
@@ -466,19 +462,12 @@ test("actual AccessKit projection contains every node, group labels, selection a
   expect(ax).toHaveLength(root.inspect().nodes.length);
   expect(ax.find((n) => n.label === "Settings")?.role).toBe("Group");
   expect(
-    ax.find((n) => n.label === "Settings sections" && n.role === "List"),
+    ax.find((n) => n.label === "General" && n.role === "Group"),
   ).toBeDefined();
-  expect(
-    ax.find((n) => n.label === "General" && n.role === "ListItem")?.selected,
-  ).toBe(true);
   expect(
     ax.find((n) => n.label === "Appearance" && n.role === "Group"),
   ).toBeDefined();
-  expect(ax.find((n) => n.label === "Search")?.role).toBe("TextInput");
-  expect(focusOrder.slice(0, 2)).toEqual([
-    find(root, "Search", "text-field").id,
-    find(root, "Settings sections", "list").id,
-  ]);
+  expect(focusOrder.length).toBeGreaterThan(0);
   root.dispose();
   f.model.dispose();
 });
@@ -563,7 +552,7 @@ test("frozen-contract native key delivery never requests retroactive cancellatio
   // Plan cancellation from actual accepted listener flags instead of marking
   // every synthetic event already canceled. Modifier-aware native planning is
   // a shell/API request, not a synchronous JS decision.
-  const target = find(root, "Search", "text-field").id;
+  const target = find(root, "Settings").id;
   await root.drive(target, "keydown", { key: "f", metaKey: true });
   expect(f.effects.at(-1)).toEqual(["focus"]);
   expect(root.inspect().fenced).toBe(false);

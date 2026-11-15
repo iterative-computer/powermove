@@ -1,8 +1,8 @@
-//! Settings and the Store open inside the editor window as pages (owner
-//! feedback S2, H6), not as windows of their own: each is a cell in the
-//! toolbar's strip after the projects, and while one shows it fills the
-//! window below the toolbar as Home does. A project's tab (or Home) leaves
-//! it; its cell's close button closes it.
+//! The Store opens inside the editor window as a page (owner feedback H6),
+//! not as a window of its own: a cell in the toolbar's strip after the
+//! projects, and while it shows it fills the window below the toolbar as
+//! Home does. A project's tab (or Home) leaves it; its cell's close button
+//! closes it. (Settings is a window of its own again, PM-375.)
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 

@@ -161,9 +161,18 @@ const trailing = {
   alignItems: "center",
   gap: t("metrics.gap"),
 };
+/** A row's words: they take what the control leaves and wrap in it. */
+const copyColumn = {
+  ...column,
+  flexGrow: 1,
+  flexShrink: 1,
+  // Hidden overflow lets it be narrower than its longest line.
+  overflow: "hidden",
+  gap: t("metrics.border"),
+};
 function RowCopy({ title, detail }: { title: string; detail?: string }) {
   return (
-    <div style={{ ...column, flexGrow: 1, gap: t("metrics.border") }}>
+    <div style={copyColumn}>
       <text style={{ ...text, fontSize: t("typography.title") }}>{title}</text>
       {detail && (
         <text style={{ ...help, fontSize: t("typography.label") }}>
@@ -199,7 +208,7 @@ function SettingRow({
       }}
     >
       {/* Title over its description; the control trails, centred on them. */}
-      <div style={{ ...column, flexGrow: 1, gap: t("metrics.border") }}>
+      <div style={copyColumn}>
         <text style={{ ...text, fontSize: t("typography.title") }}>
           {row.label}
         </text>
@@ -737,38 +746,28 @@ function SectionContent({
       label={copy.title}
       style={{
         ...column,
-        padding: t("metrics.sheet_inset"),
+        paddingTop: t("metrics.gap"),
+        paddingLeft: t("metrics.sheet_inset"),
+        paddingRight: t("metrics.sheet_inset"),
+        paddingBottom: t("metrics.sheet_inset"),
         gap: t("metrics.section_gap"),
       }}
     >
-      <div
-        style={{
-          ...column,
-          gap: t("metrics.border"),
-          paddingLeft: t("metrics.inset"),
-        }}
-      >
+      {/* The toolbar names the section; a search lists several, each
+          under its name. */}
+      {model.query.trim() ? (
         <text
           role="heading"
           style={{
-            fontSize: t("typography.display"),
+            fontSize: t("typography.title"),
             fontWeight: t("typography.semibold_weight"),
             color: t("colors.text"),
+            paddingLeft: t("metrics.inset"),
           }}
         >
           {copy.title}
         </text>
-        <text
-          style={{
-            fontSize: t("typography.reading"),
-            color: t("colors.muted"),
-          }}
-        >
-          {section === "project"
-            ? `Settings for “${model.publication.project!.name}”.`
-            : copy.description}
-        </text>
-      </div>
+      ) : null}
       {groups.map((group) => (
         <UI.FormGroup key={group} title={group}>
           {rows
@@ -810,8 +809,8 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
         widthToken: "metrics.settings_width",
         heightToken: "metrics.settings_height",
       }}
-      // The window is Home's shape: the sections on the window's glass (the
-      // host leaves that column to the sidebar material) and one sheet.
+      // The page of the Settings window: AppKit's sidebar, search field and
+      // toolbar (which names the section) frame it (PM-375).
       style={{ display: "flex" }}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -820,110 +819,13 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
         model.key(event);
       }}
     >
-      <div
-        role="group"
-        label="Settings sections"
-        style={{
-          ...column,
-          width: t("metrics.settings_sidebar"),
-          padding: t("metrics.gap"),
-          // Below the window's buttons, which stand over this column.
-          paddingTop: t("metrics.titlebar"),
-          gap: t("metrics.gap"),
-        }}
-      >
-        {/* A slot of its own height: a search field fills what it is given. */}
-        <div style={{ display: "flex", height: t("metrics.control") }}>
-          <UI.TextField
-            id="settings.search"
-            label="Search"
-            binding={bindings.search}
-            value={model.query}
-            metadata={{
-              searching: model.searching,
-              placeholder: "Search",
-              search: true,
-            }}
-            onInput={(event) => {
-              if (typeof event.value === "string")
-                void model.search(event.value);
-            }}
-          />
-        </div>
-        <UI.List
-          label="Settings sections"
-          id="settings.sections"
-          style={{ minWidth: t("metrics.hit"), minHeight: t("metrics.hit") }}
-          tabIndex={0}
-          preventDefault={{ keydown: ["ArrowUp", "ArrowDown", "Home", "End"] }}
-          onKeyDown={(event) => model.navigate(event.key ?? "")}
-        >
-          {(["Project", "App"] as const)
-            .filter((group) => group === "App" || !!model.publication.project)
-            .map((group) => (
-              <div key={group} role="group" label={group}>
-                {(group !== "Project" || !!model.publication.project) && (
-                  <text
-                    style={{
-                      ...help,
-                      paddingLeft: t("metrics.inset"),
-                      paddingTop: t("metrics.gap"),
-                    }}
-                  >
-                    {group}
-                  </text>
-                )}
-                {model.availableSections
-                  .filter(
-                    (section) =>
-                      ["project", "memory"].includes(section) ===
-                      (group === "Project"),
-                  )
-                  .map((section) => (
-                    <UI.ListItem
-                      key={section}
-                      id={`settings.nav.${section}`}
-                      label={sectionCopy[section].title}
-                      selected={model.active === section}
-                      tabIndex={-1}
-                      metadata={{ symbol: sectionCopy[section].symbol }}
-                      style={{
-                        // The neutral on state, as tabs and segments.
-                        ...(model.active === section
-                          ? { background: t("colors.fill_strong") }
-                          : {}),
-                        ...(model.query.trim() &&
-                        !model.matches.sections.has(section)
-                          ? { color: t("colors.muted") }
-                          : {}),
-                      }}
-                      onSelect={() => model.select(section)}
-                    />
-                  ))}
-              </div>
-            ))}
-        </UI.List>
-      </div>
-      <div
-        style={{
-          display: "flex",
-          flexGrow: 1,
-          flexShrink: 1,
-          paddingTop: t("metrics.gap"),
-          paddingRight: t("metrics.gap"),
-          paddingBottom: t("metrics.gap"),
-        }}
-      >
+      <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
         <scroll
           id="settings.detail"
           role="group"
           label={sectionCopy[model.active].title}
-          style={{
-            flexGrow: 1,
-            flexShrink: 1,
-            background: t("colors.panel"),
-            borderRadius: t("metrics.panel_radius"),
-          }}
+          // A column: the page is as wide as the window leaves it.
+          style={{ ...column, flexGrow: 1, flexShrink: 1 }}
         >
           {model.query.trim() && model.matches.count === 0 ? (
             // settings.md §5: centred reading text, not an empty-state title.
@@ -955,6 +857,7 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
                   ...column,
                   flexGrow: 1,
                   flexShrink: 1,
+                  overflow: "hidden",
                   maxWidth: t("metrics.settings_column"),
                 }}
               >
