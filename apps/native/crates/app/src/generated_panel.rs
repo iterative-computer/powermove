@@ -91,20 +91,32 @@ fn build_surface(
     _window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
-    let light = t.scheme == pm_design::Scheme::Light;
-    let reduced = t.accessibility.reduce_motion;
-    let row_height = t.metrics.row;
-    let height = (rect.h - t.metrics.header).max(0.);
-    let dim = panel_build::playback(playing).0;
     let entity = cx.entity().downgrade();
     cx.spawn(async move |_, cx| {
         cx.background_executor().timer(std::time::Duration::from_millis(if playing { 33 } else { 16 })).await;
         let _ = entity.update(cx, |_, cx| cx.notify());
     }).detach();
+    let age = state.started.elapsed().as_secs_f32();
+    let elapsed = state.changed.elapsed().as_secs_f32();
+    build_frame(state, rect, t, playing, age, elapsed)
+}
+
+/// Fixed event-relative times let headless captures exercise the live painter.
+fn build_frame(
+    state: panel_build::State,
+    rect: pm_shell::layout::Rect,
+    t: &pm_design::Tokens,
+    playing: bool,
+    age: f32,
+    elapsed: f32,
+) -> AnyElement {
+    let light = t.scheme == pm_design::Scheme::Light;
+    let reduced = t.accessibility.reduce_motion;
+    let row_height = t.metrics.row;
+    let height = (rect.h - t.metrics.header).max(0.);
+    let dim = panel_build::playback(playing).0;
     div().w_full().h(px(height)).overflow_hidden().rounded(px(8.))
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
-            let age = state.started.elapsed().as_secs_f32();
-            let elapsed = state.changed.elapsed().as_secs_f32();
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
             let y = ((state.row as f32 + 0.5) * row_height).min((size[1] - 8.).max(0.));
             window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
@@ -113,12 +125,13 @@ fn build_surface(
                     let b = Bounds::new(bounds.origin + point(px(x), px(y)), gpui::size(px(w), px(h)));
                     window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
                 };
-                for dot in panel_build::draw_dots(size, age, Some(y), light, reduced, playing) {
+                let ready = state.stage == panel_build::Stage::Ready;
+                for dot in panel_build::draw_dots(size, age, Some(y), light, reduced, playing).into_iter().filter(|_| !ready) {
                     paint(dot.center[0] - dot.radius, dot.center[1] - dot.radius,
                         dot.radius * 2., dot.radius * 2., dot.radius,
                         if dot.orange { 0xf0580a } else if light { 0x000000 } else { 0xffffff }, dot.alpha);
                 }
-                if !reduced {
+                if !reduced && !ready {
                     let x = 12. + (size[0] - 24.).max(0.) * panel_build::ink_ease((elapsed % 1.).min(1.));
                     // Concentric normal-blend quads form a quiet, bounded halo.
                     for radius in [24., 16., 8., 3.] {
@@ -1081,7 +1094,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn published_controls_drive_build_but_state_edits_do_not() {
+    fn panel_build_publications_ignore_state_edits() {
         let mut builds = std::collections::HashMap::new();
         let before = json!({"custom":[]});
         let after = json!({"custom":[{"id":"new", "controls":[{"type":"slider"},{"type":"number"}]}]});
@@ -1267,5 +1280,63 @@ mod tests {
             "radial"
         );
         assert_eq!(set_fill(f, "type", json!("bogus"))["type"], "solid");
+    }
+}
+
+#[cfg(test)]
+mod panel_build_capture {
+    use super::{build_frame, panel_build, publication};
+    use gpui::{AppContext, HeadlessAppContext, IntoElement, ParentElement, Render, Styled, px, size};
+    use pm_design::{Accessibility, Scheme, Tokens};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32 }
+    impl Render for Frame {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full().bg(gpui::rgb(self.tokens.colors.panel)).child(build_frame(
+                self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header },
+                &self.tokens, false, self.age, self.elapsed,
+            ))
+        }
+    }
+
+    #[test]
+    #[ignore = "writes PNGs; set PM_PANEL_CAPTURE"]
+    fn capture_panel_build_key_frames() {
+        let dir = std::env::var("PM_PANEL_CAPTURE").expect("PM_PANEL_CAPTURE");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, stage, row, elapsed, scheme, reduced) in [
+            ("sketch", panel_build::Stage::Sketch, 2, 0.12, Scheme::Dark, false),
+            ("mid-ink", panel_build::Stage::Ink, 2, 0.14, Scheme::Dark, false),
+            ("dry", panel_build::Stage::Ink, 2, 0.58, Scheme::Dark, false),
+            ("ready", panel_build::Stage::Ready, 3, 0.2, Scheme::Dark, false),
+            ("light-theme", panel_build::Stage::Ink, 2, 0.14, Scheme::Light, false),
+            ("reduced-motion", panel_build::Stage::Ink, 2, 0.2, Scheme::Dark, true),
+        ] {
+            objc2::rc::autoreleasepool(|_| {
+                let mut cx = HeadlessAppContext::with_platform(
+                    Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+                    Arc::new(()), || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+                );
+                // Pump the authored publication before opening/drawing the slot.
+                let mut builds = std::collections::HashMap::new();
+                publication(&mut builds, &json!({"custom":[]}), &json!({"custom":[{"id":"capture", "controls":[{"type":"slider"},{"type":"slider"},{"type":"slider"}]}]}));
+                let mut state = builds.remove("capture").unwrap();
+                state.tick();
+                assert_eq!(state.stage, panel_build::Stage::Sketch);
+                state.stage = stage;
+                state.row = row;
+                let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
+                let window = cx.open_window(size(px(320.), px(360.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed })).unwrap();
+                for _ in 0..4 { cx.run_until_parked(); }
+                window.update(&mut cx, |_, window, cx| { window.refresh(); window.draw(cx); }).unwrap();
+                cx.run_until_parked();
+                let image = cx.capture_screenshot(window.into()).unwrap();
+                assert!(image.pixels().any(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0), "empty {name}");
+                image.save(format!("{dir}/{name}.png")).unwrap();
+                println!("CAPTURE {dir}/{name}.png");
+            });
+        }
     }
 }
