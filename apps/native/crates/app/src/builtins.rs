@@ -241,6 +241,7 @@ impl Controller {
                 return;
             }
         };
+        runtime.set_presets_folder(&self.mcp.profile);
         let mut environment = pm_agents::launch::Environment::current(
             self.mcp.profile.clone(),
             pm_mcp::catalog::names(),

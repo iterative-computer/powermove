@@ -105,6 +105,8 @@ export function labelParts(label: string, query: string) {
   };
 }
 export class EffectsModel {
+  presetRenameBinding = "presets.rename";
+  presetAction?: (id: string, action: string, name?: string) => Promise<void>;
   private items: readonly EffectItem[] = [];
   private byId = new Map<string, EffectItem>();
   private groups: readonly string[] = [];
@@ -446,7 +448,7 @@ export class EffectsModel {
   drag(id: string) {
     const item = this.byId.get(id);
     return item && !item.failed
-      ? { kind: "effect" as const, id: item.id, label: item.label }
+      ? { kind: item.kind, id: item.id, label: item.label }
       : null;
   }
   context(id: string) {
