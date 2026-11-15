@@ -903,6 +903,8 @@ impl Backend {
                 HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
                 HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
                 HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
+                // The editor's own timeline fits its view to the curves.
+                HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
                 other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
             };
@@ -995,17 +997,21 @@ impl Backend {
         self.native.ensure_timeline()?;
         let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
         if args["type"] == "graphOptions" {
-            let context = pm_panel_timeline::Context::Graph { series: 0 };
+            // The curves the graph shows decide Fit and Merge, as on the
+            // graph's own menu: v1 lists both always, dimmed when they do not
+            // apply (Merge wants two curves or more).
+            let series = client.model.graph_series().0.len();
+            let context = pm_panel_timeline::Context::Graph { series };
             let rows: Vec<Value> = client
                 .model
                 .menu(&context)
                 .into_iter()
-                .filter(|item| item.enabled)
                 .map(|item| {
                     json!({
                         "id": item.id,
                         "label": pm_panel_timeline::menu_label(item.id),
                         "checked": item.checked,
+                        "enabled": item.enabled,
                         "intent": {"type":"graphMenu","action":item.id},
                     })
                 })

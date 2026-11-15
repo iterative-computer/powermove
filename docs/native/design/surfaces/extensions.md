@@ -20,14 +20,41 @@ it never interrupts onboarding.
 It copies only extension folders and their receipts. Projects, settings and sign-ins
 are never read for writing.
 
+## Layout (all three screens)
+
+Same window and size as the gate (`welcome_width` × `welcome_height`). The step's
+screens are anchored at the top (`Frame::top`): the title sits at the same height on
+every screen, `toolbar` below the window's top edge, and the buttons sit at
+the bottom, `sheet_inset + inset` above it, so nothing jumps between screens. The
+content column is `sheet_width_wide`.
+
+Rhythm: eyebrow, title and line are one header (8 pt apart, the line at 1.45 leading);
+then `space.xxl` (24 pt) to the counts, `space.xxl` to the lists, `space.xl` (16 pt)
+to the note and the buttons. Each screen leads with the outcome, shows the exceptions
+in full, and lists the rest by name only.
+
+- **Counts**: one card, the counts side by side, each figure at `display` size with its
+  label under it in `c.secondary`; hairline dividers between counts only.
+- **Exceptions**: a heading (`Needs a Look` when something couldn't load, else `Not
+  Brought In`), then one card. Each row: symbol centred on the first line, the
+  extension's display name, its reason on the next line in `c.secondary`. Rows are
+  separated by air (6 pt padding top and bottom), not hairlines.
+- **Names**: a heading (`To Bring In` / `Brought In`), then the display names (the
+  manifest's `name`, else the folder's) in two columns, read down then across. Six show
+  first; `Show All {n}` (accent) opens the rest, `Show Less` closes them.
+- The exceptions and names scroll together in the room between the counts and the
+  buttons. When there's more below, a fade (`form_row` high, window colour) sits at the
+  bottom of that room; rows are never cut off without it.
+
 ## N004 Offer
 
 | | |
 |---|---|
 | Title | `Bring In Your Extensions` |
 | Line | `The original app has {n} extensions that aren’t in Powermove yet. Only extensions are copied. Your projects, settings and sign-ins stay as they are.` |
-| Card | counts, rows only when non-zero: `New`, `Updated in the original app`, `Already in Powermove`, `Skipped` |
-| List | each skipped extension, `{id}: {reason}`, `info.circle`, `c.secondary` |
+| Counts | `New`, `Updated`, `Already in Powermove`, `Skipped` (non-zero only) |
+| Exceptions | `Not Brought In`: each skipped extension and why (`info.circle`) |
+| Names | `To Bring In` |
 | Note | Startup: `Choose Not Now to open your library as it is. You can bring them in later from Settings › Storage.` |
 | Buttons | Startup: `Not Now`, `Bring In Extensions` (default). Settings: `Cancel`, `Bring In Extensions` (default; disabled when nothing is new) |
 
@@ -38,29 +65,24 @@ clears it, so something added to the original app later is offered at startup.
 ## N005 Bringing in
 
 Title `Bringing In Your Extensions`, the same line. One card row with the running bar:
-`Copying` then `Checking`, `{at} of {count}`. The engine copies every extension, then
-checks each one loads in a throwaway runtime (never the open project), with its
-declared dependencies installed first. Status: `Copying {id}…`, `Checking that {id}
-loads…`. No buttons: it is quick, and quitting is safe.
+`Copying` then `Checking that it loads`, with the extension's display name as the
+value. The engine copies every extension, then checks each one loads in a throwaway
+runtime (never the open project), with its declared dependencies installed first. No
+buttons: it is quick, and quitting is safe.
 
 ## N006 Summary
 
-| Result | Title |
-|---|---|
-| Something brought in | `Your Extensions Are In` |
-| Nothing new | `Nothing New to Bring In` |
-| Only failures | `Your Extensions Couldn’t Load` |
-| Stopped (folder unreadable, locked) | `Your Extensions Couldn’t Be Brought In` |
+| Result | Title | Line starts |
+|---|---|---|
+| Something brought in | `Your Extensions Are In` | `Each one was checked and loads.` / `One couldn’t load. The reason is below.` / `{n} couldn’t load. The reasons are below.` |
+| Nothing new | `Nothing New to Bring In` | `They were already in Powermove.` |
+| Only failures | `Your Extensions Couldn’t Load` | as above |
+| Stopped (folder unreadable, locked) | `Your Extensions Couldn’t Be Brought In` | `Nothing in your library changed.` |
 
-Line: `{n} brought in, {n} already in Powermove and {n} couldn’t load. Your original app
-stays unchanged.` (parts that are zero are left out). No counts card: the line has the
-counts, and the room goes to the list. List: every extension with its reason,
-problems first: couldn't load (`exclamationmark.triangle.fill`, `c.warning`), skipped
-and already here (`info.circle`), brought in (`checkmark.circle.fill`, `c.success`).
-
-The list scrolls inside its card, which takes the room left under the counts; each
-line wraps inside the card at any width, the symbol stays on line one, and the
-buttons always stay on screen.
+Every line ends `Your original app stays unchanged.` Counts: `Brought in`, `Couldn’t
+load`, `Already in Powermove`, `Skipped`. Exceptions in order: couldn't load
+(`exclamationmark.triangle.fill`, `c.warning`), skipped, already here (`info.circle`).
+Names: `Brought In`, with no reason repeated.
 
 Buttons: Startup `Open Powermove` (default). Settings `Done`. Stopped: Startup `Try
 Again`, `Open Powermove` (default), with Details; Settings `Close`, `Try Again`.

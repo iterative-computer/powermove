@@ -10,10 +10,13 @@ pub(crate) struct PendingOpens(BTreeMap<String, Value>);
 impl PendingOpens {
     pub fn required(&mut self, project: &str, ticket: String, recovery: RecoveryResult) -> Value {
         self.0.retain(|_, v| v["projectId"] != project);
+        let mut lost = None;
         let (kind, truncated, reason, source_name) = match recovery {
             RecoveryResult::Recovered { truncated } => ("recoverable", truncated, None, None),
             RecoveryResult::OfferCopy { truncated, .. } => ("copy", truncated, None, None),
-            RecoveryResult::Unrecoverable { reason } => {
+            RecoveryResult::Unrecoverable { reason, lost: work } => {
+                lost = Some(json!({"changes": work.changes, "steps": work.steps,
+                    "from": work.from, "until": work.until}));
                 ("unrecoverable", false, Some(reason), None)
             }
             RecoveryResult::FromOtherFile { name, truncated } => (
@@ -36,6 +39,9 @@ impl PendingOpens {
             "recovery":{"kind":kind,"truncated":truncated,"reason":reason,"choices":choices}});
         if let Some(name) = source_name {
             value["recovery"]["sourceName"] = json!(name);
+        }
+        if let Some(lost) = lost {
+            value["recovery"]["lost"] = lost;
         }
         self.0.insert(ticket, value.clone());
         value

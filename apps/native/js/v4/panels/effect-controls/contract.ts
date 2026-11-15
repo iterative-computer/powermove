@@ -57,7 +57,21 @@ export interface ActionRow {
   label: string;
   readonly: boolean;
 }
-export type Row = EffectHeader | ParameterRow | ActionRow;
+/** A grade instrument's parameters as one row (a colour wheel's master and
+ * red, green and blue; a curve's points): the Color panel draws the
+ * instrument, Effect Controls sums it up and opens it there. */
+export interface SummaryRow {
+  kind: "summary";
+  id: string;
+  effect: string;
+  /** "lift", "gamma", "gain", "offset" or "curve". */
+  group: string;
+  label: string;
+  parameters: Parameter[];
+  effectLabel: string;
+  enabled: boolean;
+}
+export type Row = EffectHeader | ParameterRow | ActionRow | SummaryRow;
 /** Read-only worker projection of pm-panel-inspector, never an editable JS document. */
 export interface Projection {
   version: 1;
@@ -107,6 +121,8 @@ export interface Platform {
   contextMenu(items: MenuItem[]): Promise<string | null>;
   /** Maps semantic IDs to accepted numeric nodes, queues native focus/reveal. */
   focus(id: string): void;
+  /** Runs an app command (shows the Color panel). */
+  command(name: string): void;
   announce(message: string): void;
   report(error: unknown): void;
 }
@@ -214,6 +230,23 @@ export function projection(value: Json): Projection {
         row.index >= 16
       )
         throw new TypeError("Invalid action row");
+    } else if (row.kind === "summary") {
+      if (
+        typeof row.effect !== "string" ||
+        typeof row.group !== "string" ||
+        typeof row.label !== "string" ||
+        typeof row.effectLabel !== "string" ||
+        typeof row.enabled !== "boolean" ||
+        !Array.isArray(row.parameters) ||
+        row.parameters.some(
+          (r) =>
+            !r ||
+            ![r.id, r.effect, r.label, r.binding].every(
+              (v) => typeof v === "string",
+            ),
+        )
+      )
+        throw new TypeError("Invalid summary row");
     } else throw new TypeError("Invalid row kind");
   }
   return structuredClone(p);

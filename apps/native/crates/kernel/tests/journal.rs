@@ -901,11 +901,10 @@ mod save_points {
         text.push_str(&format!("{sum} {future}\n"));
         std::fs::write(&segment, text).unwrap();
         let (recovery, _) = reopen(&journals, &file);
-        assert_eq!(
-            recovery,
-            RecoveryResult::Unrecoverable {
-                reason: journal::NEWER_FORMAT.into()
-            }
+        assert!(
+            matches!(&recovery, RecoveryResult::Unrecoverable { reason, .. }
+                if reason == journal::NEWER_FORMAT),
+            "{recovery:?}"
         );
         assert!(segment.exists(), "the journal is kept");
 
@@ -927,11 +926,10 @@ mod save_points {
             m.insert("version", Value::Number(f64::from(journal::FORMAT + 1)));
         });
         let (recovery, _) = reopen(&journals, &file);
-        assert_eq!(
-            recovery,
-            RecoveryResult::Unrecoverable {
-                reason: journal::NEWER_FORMAT.into()
-            }
+        assert!(
+            matches!(&recovery, RecoveryResult::Unrecoverable { reason, .. }
+                if reason == journal::NEWER_FORMAT),
+            "{recovery:?}"
         );
     }
 

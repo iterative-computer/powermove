@@ -1001,6 +1001,9 @@ pub struct DragSample {
     pub value_delta: f64,
     pub time_scale: f64,
     pub value_scale: f64,
+    /// A transform drag's fixed point `(time, value)` when it is not the
+    /// one the drag began with (Cmd scales about the box's centre, v1).
+    pub anchor: Option<(f64, f64)>,
     pub handle_time: f64,
     pub handle_value: f64,
     pub modifiers: Modifiers,
@@ -1478,12 +1481,16 @@ impl Drag {
             } => {
                 finite(sample.time_scale)?;
                 finite(sample.value_scale)?;
+                let (anchor_time, anchor_value) =
+                    sample.anchor.unwrap_or((*anchor_time, *anchor_value));
+                finite(anchor_time)?;
+                finite(anchor_value)?;
                 out.push(
                     KeyframeCommand::Transform {
                         key_ids: ids.clone(),
-                        anchor_time: *anchor_time,
+                        anchor_time,
                         time_scale: sample.time_scale,
-                        anchor_value: *anchor_value,
+                        anchor_value,
                         value_scale: sample.value_scale,
                     }
                     .into(),
@@ -1786,8 +1793,9 @@ impl TimelineModel {
             Context::Graph { series } => {
                 add("graph.value", true, self.graph_mode == GraphMode::Value);
                 add("graph.speed", true, self.graph_mode == GraphMode::Speed);
-                add("graph.fit", *series > 0, false);
+                // v1's order: Merge, then Fit.
                 add("graph.merge", *series >= 2, self.graph_merge);
+                add("graph.fit", *series > 0, false);
                 add(
                     "graph.combined",
                     true,
@@ -1995,11 +2003,11 @@ pub fn menu_label(id: &str) -> &'static str {
         "ease.linear" => "Linear",
         "ease.easeIn" => "Ease In",
         "ease.easeOut" => "Ease Out",
-        "ease.easeInOut" => "Ease In and Out",
+        "ease.easeInOut" => "Easy Ease",
         "ease.swish" => "Swish",
         "ease.power" => "Power",
-        "ease.expoOut" => "Expo Out",
-        "ease.backOut" => "Back Out",
+        "ease.expoOut" => "Exponential Out",
+        "ease.backOut" => "Overshoot",
         "ease.snap" => "Snap",
         "ease.glide" => "Glide",
         "track.add" => "Add Keyframe",

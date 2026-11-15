@@ -15,6 +15,9 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       focus: (id) => {
         void platform("focus", id).catch(report);
       },
+      command: (name) => {
+        void platform("command", { name, args: [] }).catch(report);
+      },
       announce: (message) => {
         void platform("announce", message).catch(report);
       },

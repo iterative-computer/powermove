@@ -136,6 +136,7 @@ fn a_new_frame_replaces_the_old_one_and_details_stay_closed_until_asked() {
             symbol: "info.circle",
             severity: Severity::Note,
             text: "1 media file was already offline.".into(),
+            detail: None,
         }],
         buttons: vec![Button::new("try_again", "Try Again")],
         default: Some("try_again".into()),

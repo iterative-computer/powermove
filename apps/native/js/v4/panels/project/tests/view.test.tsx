@@ -535,9 +535,36 @@ test("the search field follows a query the host set, not late answers to typing"
   const field = find(root, "Search media");
   expect(field.props.value).toBe("");
   expect((field.props.metadata as { hostValue: number }).hostValue).toBe(1);
-  // A late publication from before the host's change doesn't undo it.
+  // At rest the field shows what filters the list, whoever set it.
   view = { ...view, query: "cl", host_filter: 1 };
   await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  await root.dispose();
+});
+test("the search field never shows its placeholder over a filtered list", async () => {
+  const { root } = recorder();
+  const draw = (view: Projection) =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
+  // The panel drawn again (a new view) while the model filters by "pex".
+  await draw({ ...projection([asset()]), query: "pex" });
+  await event(root, find(root, "Search Media").id, "click");
+  expect(find(root, "Search media").props.value).toBe("pex");
+  // Cleared by the person: the field and the filter are empty together.
+  await event(root, find(root, "Search media").id, "input", {
+    value: "",
+    composing: false,
+  });
+  expect(find(root, "Search media").props.value).toBe("");
+  await draw({ ...projection([asset()]), query: "" });
   expect(find(root, "Search media").props.value).toBe("");
   await root.dispose();
 });

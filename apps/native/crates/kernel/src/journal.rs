@@ -190,7 +190,19 @@ pub(crate) fn full_sync(file: &File) -> io::Result<()> {
 }
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    SYNCED.with(|s| {
+        if let Some(log) = s.borrow_mut().as_mut() {
+            log.push(dir.to_path_buf());
+        }
+    });
     full_sync(&File::open(dir)?)
+}
+
+// Test-only: the folders synced on this thread, in order, while recording.
+#[cfg(test)]
+thread_local! {
+    static SYNCED: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
 }
 
 enum Job {
@@ -558,6 +570,82 @@ pub fn sessions(project_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The prefix of a session folder still being created.
+const STAGING: &str = ".creating-";
+
+/// A session with a header that verifies, or a checkpoint: one a kill left
+/// half created (an older build, before the staging folder) is neither.
+fn published(session: &Path) -> bool {
+    !numbered(session, "checkpoint-", ".json").is_empty()
+        || numbered(session, "journal-", ".log")
+            .first()
+            .and_then(|&n| segment_head(&session.join(segment_name(n))))
+            .is_some()
+}
+
+/// `session` and every session it continues from (its checkpoint 0 never
+/// landed): what replaying it needs, newest first.
+pub(crate) fn chain(session: &Path) -> Vec<PathBuf> {
+    let mut out = vec![session.to_path_buf()];
+    while let Some(earlier) = out.last().and_then(|s| continued(s)) {
+        if out.contains(&earlier) || out.len() > 64 {
+            break;
+        }
+        out.push(earlier);
+    }
+    out
+}
+
+/// Sets `session` aside with every session it continues from, all in its
+/// project's `discarded/`, where they still resolve one another and no
+/// retirement deletes them.
+pub(crate) fn archive_chain(mut session: PathBuf) -> io::Result<()> {
+    archive_predecessors(&session)?;
+    archive_path(&mut session)
+}
+
+/// Moves the sessions `session` continues from into the `discarded/` it is
+/// (or is about to be) in, the oldest first.
+fn archive_predecessors(session: &Path) -> io::Result<()> {
+    let Some(parent) = session.parent() else {
+        return Ok(());
+    };
+    let archive = if parent.file_name() == Some(std::ffi::OsStr::new("discarded")) {
+        parent.to_path_buf()
+    } else {
+        parent.join("discarded")
+    };
+    for old in chain(session).into_iter().skip(1).rev() {
+        if old.parent() == Some(archive.as_path()) {
+            continue;
+        }
+        fs::create_dir_all(&archive)?;
+        sync_dir(archive.parent().expect("project directory"))?;
+        let destination = archive.join(old.file_name().expect("session name"));
+        if destination.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Journal archive exists",
+            ));
+        }
+        let from = old.parent().expect("session parent").to_path_buf();
+        fs::rename(&old, &destination)?;
+        // Its new entry durable before its removal: a power loss in between
+        // must leave it in one of the two places, never neither.
+        sync_dir(&archive)?;
+        sync_dir(&from)?;
+    }
+    Ok(())
+}
+
+/// Deletes `session` and every session it continues from: their work is
+/// durable elsewhere now (a recovery copy).
+pub(crate) fn retire_chain(session: &Path) {
+    for old in chain(session) {
+        let _ = fs::remove_dir_all(old);
+    }
+}
+
 impl Journal {
     /// Starts a session under `project_dir` for a document whose canonical
     /// hash is `base`, checkpointing `initial` in the background.
@@ -570,6 +658,7 @@ impl Journal {
     /// ([`recover_from`]), and a large project is not rewritten just to be
     /// opened or saved. The superseded sessions hold nothing the base lacks
     /// and are deleted at once.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         durability: &Durability,
         project_dir: &Path,
@@ -578,11 +667,31 @@ impl Journal {
         initial: CheckpointState,
         supersedes: Vec<PathBuf>,
         saved: bool,
+        ancestors: Vec<Ancestor>,
     ) -> io::Result<Journal> {
-        let dir = project_dir.join(session_name());
-        fs::create_dir_all(&dir)?;
-        sync_dir(project_dir)?;
-        let bases = vec![Ancestor::start(base)];
+        // Built under a name recovery never reads, and published under its
+        // session name only once its header is durable: a kill in between
+        // leaves no empty newest session to hide (and later delete) the
+        // sessions before it.
+        let name = session_name();
+        let dir = project_dir.join(&name);
+        let staging = project_dir.join(format!("{STAGING}{name}"));
+        // What a kill left half created holds nothing yet (no header).
+        for e in fs::read_dir(project_dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(STAGING) {
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
+        fs::create_dir_all(&staging)?;
+        // Recovered work also descends from what the session it replaces
+        // descended from (the file it was opened on, the saves it made): a
+        // later crash on that unchanged file recovers in place, not as a copy.
+        let mut bases = vec![Ancestor::start(base)];
+        for ancestor in ancestors {
+            if bases.len() < MAX_BASES && !bases.contains(&ancestor) {
+                bases.push(ancestor);
+            }
+        }
         // Adopted recovered work starts from checkpoint 0, not the base.
         // Until that lands, the session it supersedes here still holds the
         // state, and recovery continues from it.
@@ -596,7 +705,7 @@ impl Journal {
         });
         let (file, target) = open_segment(
             durability,
-            &dir,
+            &staging,
             Head {
                 project,
                 base,
@@ -606,6 +715,8 @@ impl Journal {
                 revision: initial.revision,
             },
         )?;
+        fs::rename(&staging, &dir)?;
+        sync_dir(project_dir)?;
         let checkpoint_bytes = Arc::new(AtomicU64::new(0));
         let mut deferred = None;
         if saved {
@@ -828,15 +939,13 @@ impl Journal {
     }
 
     /// Call only after the durability barrier, with no concurrent writer.
+    /// Sets this session aside with the sessions it continues from. No
+    /// checkpoint writer may still reference these paths: the actor must
+    /// pass its barrier first.
     pub(crate) fn archive(&mut self) -> io::Result<()> {
+        archive_predecessors(&self.dir)?;
         archive_path(&mut self.dir)
     }
-}
-
-/// Archive rather than delete rejected recovery work. No checkpoint writer
-/// may still reference this path: the actor must pass its barrier first.
-pub(crate) fn archive_session(mut path: PathBuf) -> io::Result<()> {
-    archive_path(&mut path)
 }
 
 fn archive_path(path: &mut PathBuf) -> io::Result<()> {
@@ -1291,6 +1400,71 @@ pub enum Recovery {
     Unrecoverable { session: PathBuf, reason: String },
 }
 
+/// What a session that cannot be replayed holds, read leniently so the
+/// person can be told what is lost: its files stay on disk.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LostWork {
+    /// Document changes recorded (published revisions).
+    pub changes: usize,
+    /// The undo steps recorded, by name, oldest first (the last few).
+    pub steps: Vec<String>,
+    /// When the session began, and when it last wrote (seconds since the
+    /// epoch).
+    pub from: Option<u64>,
+    pub until: Option<u64>,
+}
+
+/// [`LostWork`] of `session`: every record line that parses, whatever
+/// stopped the replay.
+pub fn lost_work(session: &Path) -> LostWork {
+    const STEPS: usize = 5;
+    let mut lost = LostWork::default();
+    for n in numbered(session, "journal-", ".log") {
+        let path = session.join(segment_name(n));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let Some((_, json)) = line.split_once(' ') else {
+                continue;
+            };
+            let Ok(value) = parse(json) else { continue };
+            match value.get("t").and_then(Value::as_str) {
+                Some("rev") => lost.changes += 1,
+                Some("push" | "squash") => {
+                    let label = value
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Edit")
+                        .to_owned();
+                    if lost.steps.last() != Some(&label) {
+                        lost.steps.push(label);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let modified = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        lost.until = lost.until.max(modified);
+    }
+    if lost.steps.len() > STEPS {
+        lost.steps.drain(..lost.steps.len() - STEPS);
+    }
+    // Session folders are named `s<nanoseconds since the epoch>-<pid>`.
+    lost.from = session
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix('s'))
+        .and_then(|n| n.split('-').next())
+        .and_then(|n| n.parse::<u128>().ok())
+        .map(|nanos| (nanos / 1_000_000_000) as u64);
+    lost
+}
+
 /// Recovers the newest session of a project. `current_base`: the canonical
 /// hash of what the library slot or file holds now (`None`: unknown, adopt).
 /// `base_document`: that document, used only when no checkpoint landed yet
@@ -1329,7 +1503,11 @@ pub fn recover_from(
     current_base: Option<&str>,
     base: Option<Base>,
 ) -> Recovery {
-    let Some(session) = sessions(project_dir).pop() else {
+    let Some(session) = sessions(project_dir)
+        .into_iter()
+        .rev()
+        .find(|s| published(s))
+    else {
         return Recovery::Nothing;
     };
     if let Some(head) = numbered(&session, "journal-", ".log")
@@ -1390,14 +1568,23 @@ fn continued(session: &Path) -> Option<PathBuf> {
         return None;
     }
     let name = head.get("continues")?.as_str()?;
+    // Beside it: in the same project, or both set aside in `discarded/`.
     let earlier = session.parent()?.join(name);
     (!name.is_empty() && !name.contains('/') && earlier.is_dir()).then_some(earlier)
 }
 
+/// The header line of a segment, verified. Only that line is read: a later
+/// record torn inside a character (a machine crash mid-append) is the
+/// torn-tail reader's to handle, never a reason to doubt the header.
 fn segment_head(path: &Path) -> Option<Map> {
-    let mut text = String::new();
-    File::open(path).ok()?.read_to_string(&mut text).ok()?;
-    let first = text.lines().next()?;
+    use std::io::BufRead;
+    let mut line = Vec::new();
+    std::io::BufReader::new(File::open(path).ok()?)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    let first = std::str::from_utf8(&line)
+        .ok()?
+        .trim_end_matches(['\n', '\r']);
     let (sum, json) = first.split_once(' ')?;
     (checksum(json) == sum).then_some(())?;
     parse(json).ok()?.as_object().cloned()
@@ -1529,22 +1716,22 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
             // still holds its start state.
             let earlier = recover_session(&earlier, base)?;
             let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(0.0) as u64;
-            if earlier.truncated || earlier.revision != revision {
+            // A torn tail the first recovery left behind is fine when what it
+            // replays to is exactly what this session adopted.
+            let verified =
+                || earlier.document.canonical_hash().as_deref() == Some(session_base.as_str());
+            if earlier.revision != revision || (earlier.truncated && !verified()) {
                 return Err("the session's first checkpoint never landed".into());
             }
             (
                 (first, 0),
+                // The state from the predecessor; what it may be matched
+                // against (its base and ancestors) from this session's own
+                // header, which lists only the bases its recovery verified.
                 Loaded {
                     revision,
-                    base: earlier.base,
-                    bases: {
-                        let mut bases = earlier.bases;
-                        let start = Ancestor::start(&session_base);
-                        if !bases.contains(&start) {
-                            bases.push(start);
-                        }
-                        bases
-                    },
+                    base: session_base.clone(),
+                    bases: bases_of(&head, &session_base),
                     document: earlier.document.root().cloned(),
                     history: LoadedHistory::Ready(earlier.history),
                     workspace: earlier.workspace,
@@ -1904,4 +2091,57 @@ mod meta_line_tests {
             to_canonical_string(&Value::Object(whole))
         );
     }
+}
+
+/// Review w32 re-check, finding 4: archiving a continued session moves its
+/// predecessor first, and that predecessor's new entry in `discarded/` is
+/// made durable before its removal from the project folder is, so a power
+/// loss between the two leaves it in one place or the other, never neither.
+#[cfg(test)]
+#[test]
+fn an_archived_predecessor_is_durable_where_it_went_before_it_leaves() {
+    let root = std::env::temp_dir().join(format!(
+        "pm-archive-order-{}-{}",
+        std::process::id(),
+        crate::new_id("t")
+    ));
+    let project = root.join("P");
+    let (s1, s2) = (project.join("s1"), project.join("s2"));
+    fs::create_dir_all(&s1).unwrap();
+    fs::create_dir_all(&s2).unwrap();
+    // S2's header continues S1 (its checkpoint 0 never landed).
+    let mut head = Map::new();
+    head.insert("t", Value::from("head"));
+    head.insert("format", Value::from(JOURNAL_FORMAT));
+    head.insert("version", Value::Number(f64::from(FORMAT)));
+    head.insert("project", Value::from("P"));
+    head.insert("base", Value::from("b"));
+    head.insert("start", Value::from("checkpoint"));
+    head.insert("continues", Value::from("s1"));
+    let mut text = String::new();
+    line(&mut text, &Value::Object(head));
+    fs::write(s2.join(segment_name(0)), text).unwrap();
+    assert_eq!(chain(&s2), [s2.clone(), s1.clone()]);
+    SYNCED.with(|s| *s.borrow_mut() = Some(Vec::new()));
+    archive_chain(s2.clone()).unwrap();
+    let synced = SYNCED.with(|s| s.borrow_mut().take().unwrap());
+    let archive = project.join("discarded");
+    assert!(archive.join("s1").is_dir() && archive.join("s2").is_dir());
+    // After S1's move: the archive, then the project folder it left.
+    let first_archive = synced
+        .iter()
+        .position(|d| *d == archive)
+        .expect("archive synced");
+    let project_after = synced
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, d)| **d == project)
+        .map(|(i, _)| i)
+        .expect("project synced after the move");
+    assert!(
+        first_archive < project_after,
+        "the source removal was made durable first: {synced:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
