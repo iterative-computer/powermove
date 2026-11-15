@@ -140,7 +140,7 @@ function JobRow({
           />
         )}
       </div>
-      <div style={{ ...stack, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
+      <div style={{ ...stack, flexGrow: 1, flexShrink: 1, overflow: "hidden" }}>
         <text
           style={{
             ...body,

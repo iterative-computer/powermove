@@ -53,10 +53,7 @@ const stack = { display: "flex", flexDirection: "column" } as const;
  * section headings, the row titles, the notes and the summary all start a
  * row inset inside the cards' leading edge.
  */
-const column = {
-  paddingLeft: 0,
-  paddingRight: 0,
-} as const;
+const column = {} as const;
 /** Between the title and the actions; the sheet's height follows it. */
 const body = { ...stack, gap: token("metrics.inset") } as const;
 /** Summary on the text column, actions at the trailing edge (a Mac sheet). */
