@@ -329,8 +329,8 @@ export function ViewerPanel({
   ) : null;
   // 2D | 3D, the bar's leading control: the composition as shot, or the 3D
   // scene's editor view (the same switch as View camera and looking around).
-  // A composition without 3D layers keeps 3D visible but dimmed.
-  const dimension = source ? null : (
+  // Only compositions with a 3D scene need this control.
+  const dimension = source || !m.studio ? null : (
     <SegmentedControl
       id="viewer.dimension"
       label="View"

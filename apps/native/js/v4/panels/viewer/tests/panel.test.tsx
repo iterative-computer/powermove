@@ -227,9 +227,9 @@ for (const [name, change] of cases) {
                 ? ["viewer.source.close"]
                 : [
                     // 2D | 3D leads the bar (its checked segment takes focus).
-                    nodes.find(
+                    ...(state.model?.studio ? [nodes.find(
                       (n) => n.props.role === "radio" && n.props.label === "2D",
-                    )?.props.id,
+                    )?.props.id] : []),
                     ...[
                     "gotoStart",
                     "prevFrame",
@@ -550,7 +550,7 @@ test("a 3D composition's bar has one preview pop-up: Fast by default, before RGB
   await flat.dispose();
 });
 
-test("2D | 3D leads the bar: it switches the shot and the scene, and dims 3D without a scene", async () => {
+test("2D | 3D leads the bar: it switches the shot and the scene, and hides without a scene", async () => {
   const seen: [string, unknown][] = [];
   const drive = (id: string, v?: unknown) => void seen.push([id, v]);
   const segment = (nodes: { props: Record<string, unknown> }[], label: string) =>
@@ -580,12 +580,16 @@ test("2D | 3D leads the bar: it switches the shot and the scene, and dims 3D wit
     ["viewer.studio.look", "camera"],
   ]);
   await scene.dispose();
-  // No 3D layers: 3D stays visible, dimmed, and says why.
+  // Adding and deleting the last 3D layer updates the same mounted bar.
   const { root: flat } = recorder();
-  await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
-  nodes = flat.inspect().nodes;
-  const three = segment(nodes, "3D");
-  expect(three.props.disabled).toBe(true);
-  expect(String(three.props.title)).toContain("Add a 3D layer to view the scene");
+  const state = fixture();
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
+  state.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(true);
+  delete state.model!.studio;
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
   await flat.dispose();
 });

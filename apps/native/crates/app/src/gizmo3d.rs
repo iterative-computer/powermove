@@ -443,6 +443,9 @@ impl GizmoSurface {
         const VIEWS: &[&str] = &["1", "2", "4"];
         const TIERS: &[&str] = &["fast", "live", "refine"];
         // A camera move still settling is stored before the look changes.
+        if group == "look" && !self.studio.active() {
+            return;
+        }
         if group == "look" {
             self.studio_cam_nav_end(true, cx);
         }

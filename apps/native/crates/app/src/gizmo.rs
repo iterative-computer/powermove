@@ -797,6 +797,13 @@ impl GizmoSurface {
                         }
                         s.studio.comp = Some(comp);
                     }
+                    if scene.is_none() {
+                        free_look = false;
+                        s.studio.look_pending = None;
+                        if published || kept.as_deref() == Some("free") {
+                            adopt = Some(false);
+                        }
+                    }
                     let changed_look = free_look != s.studio.free_look;
                     s.studio.scene = scene.map(Arc::new);
                     if let Some(want) = adopt {
