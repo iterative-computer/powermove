@@ -644,7 +644,8 @@ impl SurfaceView {
             let blurred = cx.on_blur(handle, window, move |v, window, cx| {
                 // Carry the next control's semantic name so a row retains its
                 // reveal while Tab moves between actions in that same row.
-                let next = v.focused_node(window).and_then(|next|v.publication.surface.node(next))
+                let next = v.publication.surface.node(id).filter(|node|node.input.is_none())
+                    .and_then(|_|v.focused_node(window)).and_then(|next|v.publication.surface.node(next))
                     .and_then(|node|node.props.get("id")).cloned();
                 v.pointer(id, "blur", EventDetail { value: next, ..Default::default() }, cx);
             });
