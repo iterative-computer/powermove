@@ -94,6 +94,7 @@ test("select, cite, comment, jump, remove and sent history", async () => {
   expect((node("Transcript text").props.metadata as any).revealQuote).toEqual([
     0, 40, 1,
   ]);
+  await capture("jump");
   await root.drive(node("Edit comment").id, "click");
   await root.drive(node("Add a comment about this quote").id, "input", {
     value: "Discard this",
