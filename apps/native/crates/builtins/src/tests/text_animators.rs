@@ -122,6 +122,9 @@ fn properties_adds_a_preset_animator_with_font_sized_channels_and_removes_it() {
     let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
     assert_eq!(animators(&kernel)[0]["p"]["y"]["v"], 42.);
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
     click(&mut panels, "Remove Rise");
     settle(&mut panels, || animators(&kernel).is_empty());
     assert!(panels.take_errors().is_empty());
