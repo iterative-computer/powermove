@@ -643,7 +643,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 51] = [
+pub const PLANNED: [&str; 52] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -660,6 +660,7 @@ pub const PLANNED: [&str; 51] = [
     "distributeLayers",
     "newSolid",
     "new3d",
+    "newCamera",
     "newShape",
     "newAdjustment",
     "newNull",
@@ -1023,6 +1024,7 @@ pub fn command_plan(
         })
     };
     match name {
+        "newCamera" => command_plan("new3d", &[serde_json::json!("camera")], published, time),
         "new3d" => {
             // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
             // new layer is selected so Properties shows it.

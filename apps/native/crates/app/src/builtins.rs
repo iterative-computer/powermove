@@ -2441,6 +2441,7 @@ impl crate::gizmo::Host for ControllerDelegate {
                         "New",
                         vec![
                             pm_shell::MenuEntry::item("Solid", "newSolid"),
+                            pm_shell::MenuEntry::item("Camera", "newCamera"),
                             pm_shell::MenuEntry::item("Shape Layer", "newShape"),
                             pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
                             pm_shell::MenuEntry::item("Null Object", "newNull"),

@@ -2726,10 +2726,14 @@ impl TimelineSurface {
         };
         let items = self.model.menu(&context);
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
-        let rows = items
+        let mut rows: Vec<serde_json::Value> = items
             .iter()
             .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
+        let camera_index = ids.len() + 1;
+        if matches!(context, MenuContext::Empty) {
+            rows.push(serde_json::json!({"label":"New","children":[{"label":"Camera"}]}));
+        }
         let weak = cx.entity().downgrade();
         self.delegate.clone().extension_menu(
             locations,
@@ -2737,6 +2741,10 @@ impl TimelineSurface {
             window,
             cx,
             Box::new(move |index, cx| {
+                if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
+                    let _ = weak.update(cx, |s, cx| s.delegate.run("newCamera", vec![], cx));
+                    return;
+                }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
                     return;
                 };
