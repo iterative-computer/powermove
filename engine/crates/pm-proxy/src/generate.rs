@@ -9,7 +9,10 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
-use crate::{ProxyError, ProxyRecipe, ProxyStore, Result, StoredProxy, disk_guard, free_bytes};
+use crate::{
+    ProxyError, ProxyRecipe, ProxyStore, Result, StoredProxy, disk_guard_for_job,
+    estimated_output_bytes, free_bytes,
+};
 use pm_protocol::priority::{ProxyFormat, ProxySize};
 
 pub struct GenerationControl<'a> {
@@ -132,7 +135,18 @@ pub fn generate_with_disk_probe(
         Err(e) => return Err(e),
     }
     let mut low_disk_reported = false;
-    while !disk_guard_pair(request.store.root(), disk_space)? {
+    while !disk_guard_pair(
+        request.store.root(),
+        disk_space,
+        estimated_output_bytes(
+            &recipe,
+            native_source
+                .probe
+                .video
+                .as_ref()
+                .map_or(1, |v| v.frames as u64),
+        ),
+    )? {
         if request.control.cancel.load(Ordering::Relaxed) {
             return Err(ProxyError::Cancelled);
         }
@@ -590,7 +604,19 @@ fn transcode(
         {
             (request.control.on_progress)((done / total).clamp(0.0, 1.0));
         }
-        let disk_low = !disk_guard_pair(request.store.root(), disk_space)?;
+        let disk_low = !disk_guard_pair(
+            request.store.root(),
+            disk_space,
+            estimated_output_bytes(
+                recipe,
+                native_source
+                    .probe
+                    .video
+                    .as_ref()
+                    .map_or(1, |v| v.frames as u64),
+            )
+            .saturating_sub(std::fs::metadata(destination).map_or(0, |m| m.len())),
+        )?;
         let reason = if disk_low {
             Some(PauseReason::LowDisk)
         } else if (request.control.pause)() {
@@ -614,9 +640,13 @@ fn transcode(
     }
 }
 
-fn disk_guard_pair(root: &Path, disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>) -> Result<bool> {
+fn disk_guard_pair(
+    root: &Path,
+    disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
+    output_bytes: u64,
+) -> Result<bool> {
     let (free, capacity) = disk_space(root)?;
-    Ok(disk_guard(free, capacity))
+    Ok(disk_guard_for_job(free, capacity, output_bytes))
 }
 
 fn signal(child: &mut Child, sig: i32) -> Result<()> {

@@ -393,9 +393,38 @@ pub fn free_bytes(path: &Path) -> Result<(u64, u64)> {
     ))
 }
 
-/// Generation pauses when free bytes are below max(20 GiB, 10% capacity).
+/// Keep max(5 GiB, 1% capacity) free, plus room for the pending output.
 pub fn disk_guard(available: u64, capacity: u64) -> bool {
     available >= disk_reserve(capacity)
+}
+
+/// Encoded-size planning estimate, in bytes per output pixel per frame.
+/// Keep this profile-specific: raw RGBA size would reject long compressed
+/// movies even on volumes large enough for their actual rendition. The
+/// encoder still checks available space throughout writing.
+pub fn estimated_output_bytes(recipe: &ProxyRecipe, frames: u64) -> u64 {
+    let (numerator, denominator) = match recipe.codec() {
+        "prores_proxy" => (1, 4),
+        "prores_lt" => (1, 2),
+        "prores_hq" => (1, 1),
+        "prores_4444" => (2, 1),
+        "hevc_10" => (1, 8),
+        _ => (2, 1),
+    };
+    u64::from(recipe.width)
+        .saturating_mul(u64::from(recipe.height))
+        .saturating_mul(frames.max(1))
+        .saturating_mul(numerator)
+        .div_ceil(denominator)
+        .saturating_add(1 << 20)
+}
+
+pub fn required_free_bytes(capacity: u64, output_bytes: u64) -> u64 {
+    disk_reserve(capacity).saturating_add(output_bytes)
+}
+
+pub fn disk_guard_for_job(available: u64, capacity: u64, output_bytes: u64) -> bool {
+    available >= required_free_bytes(capacity, output_bytes)
 }
 
 /// Test-only: replaces the guard's reserve (bytes) so proxy tests that are
@@ -432,7 +461,7 @@ fn disk_reserve(capacity: u64) -> u64 {
             return reserve;
         }
     }
-    (20u64 << 30).max(capacity / 10)
+    (5u64 << 30).max(capacity / 100)
 }
 
 #[cfg(test)]
