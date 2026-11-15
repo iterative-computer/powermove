@@ -38,6 +38,7 @@ export function PresetSheet({
       }}
     >
       <text role="heading">Save Animation Preset</text>
+      <text>Name</text>
       <TextField
         label="Name"
         binding={bindings.name!}
@@ -46,28 +47,51 @@ export function PresetSheet({
       />
       <text>Effects</text>
       {choices.effects.map((f: any) => (
-        <Checkbox
-          label={f.type}
-          binding={bindings[`fx.${f.id}`]!}
-          value={effects.includes(f.id)}
-          onChange={() => setEffects(toggle(effects, f.id))}
-        />
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <Checkbox
+            label={f.type}
+            binding={bindings[`fx.${f.id}`]!}
+            value={effects.includes(f.id)}
+            onChange={() => setEffects(toggle(effects, f.id))}
+          />
+          <text>{f.type}</text>
+        </div>
       ))}
       <text>Properties</text>
       {choices.properties.map((p: string) => (
-        <Checkbox
-          label={p}
-          binding={bindings[`property.${p}`]!}
-          value={properties.includes(p)}
-          onChange={() => setProperties(toggle(properties, p))}
-        />
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <Checkbox
+            label={p}
+            binding={bindings[`property.${p}`]!}
+            value={properties.includes(p)}
+            onChange={() => setProperties(toggle(properties, p))}
+          />
+          <text>{p}</text>
+        </div>
       ))}
-      <Checkbox
-        label="Keep keyframes"
-        binding={bindings.animated!}
-        value={animated}
-        onChange={() => setAnimated(!animated)}
-      />
+      <div
+        style={{ display: "flex", flexDirection: "row", alignItems: "center" }}
+      >
+        <Checkbox
+          label="Keep keyframes"
+          binding={bindings.animated!}
+          value={animated}
+          onChange={() => setAnimated(!animated)}
+        />
+        <text>Keep keyframes</text>
+      </div>
       <text>Keyframes are placed relative to the playhead when applied.</text>
       <PushButton label="Cancel" onClick={cancel}>
         Cancel
