@@ -192,7 +192,7 @@ mod tests {
 
 #[cfg(test)]
 mod ruler_snap_tests {
-    use super::*;
+    use super::{DISTANCE, snap_with_rulers};
     use crate::viewer_rulers::{Axis, RulerGuide};
     #[test]
     fn ruler_guides_snap_only_their_own_axis() {
