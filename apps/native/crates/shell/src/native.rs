@@ -2324,13 +2324,16 @@ impl Host {
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
                         // A press on the window's own content (a timeline, a
-                        // canvas, a list), not on a hosted control, ends the
-                        // editing of a hosted text field: the keyboard comes
-                        // back with it, so ⌘Z and the other shortcuts reach
-                        // the project, not the field a person left.
+                        // canvas, a list), not on a hosted control or inside
+                        // an extension panel, takes the keyboard back from a
+                        // hosted text field or from the extensions' shared
+                        // page: ⌘Z and the other shortcuts reach the project,
+                        // not the field or the panel a person left.
                         if e.windowNumber() == window.windowNumber() {
+                            let page = objc2::runtime::AnyClass::get(c"WKWebView");
                             let editing = window.firstResponder().is_some_and(|r| unsafe {
                                 msg_send![&*r, isKindOfClass: NSTextView::class()]
+                                    || page.is_some_and(|page| msg_send![&*r, isKindOfClass: page])
                             });
                             let content = window.contentView().and_then(|v| {
                                 v.hitTest(e.locationInWindow())
