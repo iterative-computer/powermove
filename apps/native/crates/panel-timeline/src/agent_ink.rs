@@ -171,6 +171,12 @@ impl AgentInk {
             let mut animated = 0;
             for op in &mut frame.ops {
                 if active.event.kind == Kind::Create
+                    && op.id == format!("clip-content:{}", active.event.layer)
+                    && op.text.is_some()
+                {
+                    op.opacity *= ((age - 80.) / 200.).clamp(0., 1.);
+                }
+                if active.event.kind == Kind::Create
                     && op.id == format!("clip:{}", active.event.layer)
                 {
                     if reduced {
@@ -236,9 +242,12 @@ impl AgentInk {
                     .find(|o| o.id == format!("clip:{}", active.event.layer))
                     .map(|o| o.bounds)
                 {
-                    let length = (age * 0.6).min(bar.width).min(240.);
-                    let mut x = bar.x;
-                    while x < bar.x + length {
+                    let duration = (bar.width / 0.6).clamp(1., 400.);
+                    let end = bar.x + bar.width * (age / duration).clamp(0., 1.);
+                    let mut x = bar.x.max(v.layer_column);
+                    let end = end.min(v.width);
+                    let mut dots = 0;
+                    while x < end && dots < 600 {
                         for y in [bar.y, bar.y + bar.height] {
                             let mut dot = Op::new(
                                 format!("agent-pencil:{}:{x}:{y}", active.event.layer),
@@ -248,6 +257,7 @@ impl AgentInk {
                             );
                             dot.opacity = 0.38;
                             frame.ops.push(dot);
+                            dots += 1;
                         }
                         x += palette.dot_pitch;
                     }

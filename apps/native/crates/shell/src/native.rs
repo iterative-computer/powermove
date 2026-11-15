@@ -1799,12 +1799,12 @@ impl ToolbarDelegate {
         }
         if name == "agentPresence" {
             let view: Retained<CoeditPresence> = unsafe {
-                msg_send![super(CoeditPresence::alloc(mtm)),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
+                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
             };
             let view: Retained<NSView> = Retained::into_super(view);
             view.setWantsLayer(true);
             if let Some(layer) = view.layer() {
-                layer.setCornerRadius(12.);
+                layer.setCornerRadius(t.metrics.capsule_radius as f64);
                 layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
             }
             for (tag, title, x, width) in [
@@ -2060,6 +2060,9 @@ fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSIm
     NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(14., 14.), false, &draw)
 }
 impl Host {
+    pub fn agent_effect_frames(&self) -> u64 {
+        self.agent_effect_frames.get()
+    }
     fn set_agent_presence(&mut self, status: &AgentStatus) {
         let was_working = self.agent_status.working;
         let existing = self
@@ -2210,8 +2213,10 @@ impl Host {
             let started = std::time::Instant::now();
             let shown = status.clone();
             let item = item.clone();
+            let frame_count = self.agent_effect_frames.clone();
             let step =
                 block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    frame_count.set(frame_count.get() + 1);
                     let elapsed = started.elapsed().as_secs_f64();
                     if elapsed >= 12. {
                         item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
@@ -2346,6 +2351,7 @@ pub struct Host {
     agent_status: AgentStatus,
     agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
     agent_presence_generation: Rc<Cell<u64>>,
+    agent_effect_frames: Rc<Cell<u64>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2544,6 +2550,7 @@ impl Host {
             agent_status: AgentStatus::default(),
             agent_timer: None,
             agent_presence_generation: Rc::new(Cell::new(0)),
+            agent_effect_frames: Rc::new(Cell::new(0)),
             _delegate: delegate,
             _target: target,
             observer: None,

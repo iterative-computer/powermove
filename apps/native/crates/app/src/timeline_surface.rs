@@ -369,6 +369,9 @@ pub struct TimelineSurface {
     agent_ink: pm_panel_timeline::agent_ink::AgentInk,
     agent_ink_clock: std::time::Instant,
     agent_ink_task: Option<Task<()>>,
+    agent_ink_frames: u64,
+    agent_ink_samples: [f64; 64],
+    agent_ink_sample_count: usize,
 
     kernel: KernelHandle,
     project: String,
@@ -478,6 +481,9 @@ impl TimelineSurface {
             agent_ink: Default::default(),
             agent_ink_clock: std::time::Instant::now(),
             agent_ink_task: None,
+            agent_ink_frames: 0,
+            agent_ink_samples: [0.; 64],
+            agent_ink_sample_count: 0,
             kernel: kernel.clone(),
             project: project.clone(),
             tokens: tokens.clone(),
@@ -638,6 +644,7 @@ impl TimelineSurface {
                             if !moving {
                                 s.agent_ink_task = None;
                             }
+                            s.agent_ink_frames += 1;
                             cx.notify();
                             moving
                         })
@@ -648,7 +655,14 @@ impl TimelineSurface {
                 }
             }));
         }
+        self.agent_ink_frames += 1;
         cx.notify();
+    }
+    pub fn agent_ink_metrics(&self) -> serde_json::Value {
+        let mut samples = self.agent_ink_samples;
+        let n = self.agent_ink_sample_count.min(64);
+        samples[..n].sort_by(f64::total_cmp);
+        serde_json::json!({"frames":self.agent_ink_frames,"paint_p95_ms":if n==0 {0.}else{samples[(n-1)*95/100]},"samples":self.agent_ink_sample_count})
     }
     /// A kernel publication landed: follow it on a worker.
     pub fn published(&mut self, cx: &mut Context<Self>) {
@@ -1203,6 +1217,7 @@ impl TimelineSurface {
         if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) {
             return Some(frame);
         }
+        let started = std::time::Instant::now();
         let mut frame = (*frame).clone();
         if let Some(scene) = &self.scene {
             self.agent_ink.paint(
@@ -1211,6 +1226,9 @@ impl TimelineSurface {
                 &self.tokens,
                 self.agent_ink_clock.elapsed().as_millis() as u64,
             );
+            self.agent_ink_samples[self.agent_ink_sample_count % 64] =
+                started.elapsed().as_secs_f64() * 1000.;
+            self.agent_ink_sample_count += 1;
         }
         Some(Arc::new(frame))
     }

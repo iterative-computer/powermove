@@ -1022,6 +1022,7 @@ impl Builtins {
         let (agent, _) = self.agent_state().ok()?;
         let state = agent.shared();
         let session = state.panel.session(state.panel.active_id()).ok()?;
+        session.run.as_ref()?;
         Some(if !session.activity.is_empty() {
             session.activity.clone()
         } else {
