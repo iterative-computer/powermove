@@ -94,8 +94,9 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   };
   (mounted as Mounted).publish = () => {
     const hint = native("presets.takeSheet");
-    if (hint && !sheetOpen) void showSheet(hint).catch(report);
     refresh();
+    if (hint && !sheetOpen) return showSheet(hint);
+    return Promise.resolve();
   };
   const pending = native("presets.takeSheet");
   if (pending) await showSheet(pending);

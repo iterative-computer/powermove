@@ -15,7 +15,8 @@ export function PresetSheet({
 }) {
   const [name, setName] = useState("Preset");
   const [effects, setEffects] = useState<string[]>(
-    hint.effects ?? choices.effects.map((f: any) => f.id),
+    hint.effects ??
+      (hint.properties?.length ? [] : choices.effects.map((f: any) => f.id)),
   );
   const [properties, setProperties] = useState<string[]>(hint.properties ?? []);
   const [animated, setAnimated] = useState(true);
