@@ -75,6 +75,9 @@ test("select, cite, comment, jump, remove and sent history", async () => {
   );
   await capture("chips");
   await root.drive(node("Edit comment").id, "click");
+  expect(
+    (node("Add a comment about this quote").props.metadata as any).focusOnMount,
+  ).toBe(true);
   await capture("comment");
   await root.drive(node("Add a comment about this quote").id, "input", {
     value: "Explain this choice",

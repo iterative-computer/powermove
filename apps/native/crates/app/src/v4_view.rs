@@ -1161,11 +1161,15 @@ impl SurfaceView {
         // A field the panel opens on demand (a layer's rename, a typed time)
         // takes the keyboard as it appears, its text selected: typing
         // replaces it, and no shortcut fires on the way.
-        if view.cancel_change {
+        let focus_on_mount = node
+            .props
+            .get("metadata")
+            .is_some_and(|m| m.get("focusOnMount") == Some(&Value::Bool(true)));
+        if view.cancel_change || focus_on_mount {
             field.update(cx, |f, cx| {
                 // Escape closes it unchanged (an AppKit field commits on
                 // Escape unless told otherwise).
-                f.set_escape_cancels(true);
+                f.set_escape_cancels(view.cancel_change);
                 f.begin_editing_selecting_all(cx);
             });
         }

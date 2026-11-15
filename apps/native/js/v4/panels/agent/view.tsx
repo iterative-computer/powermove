@@ -290,6 +290,7 @@ function CitationChips({ s, send }: { key?: string; s: Snapshot; send: Send }) {
               metadata={{
                 placeholder: "Add a comment about this quote",
                 submitOnReturn: true,
+                focusOnMount: true,
               }}
               onInput={(e) => setComment(String(e.value ?? ""))}
               onChange={save}
