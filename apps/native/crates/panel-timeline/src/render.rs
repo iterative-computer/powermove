@@ -338,6 +338,7 @@ pub struct Scene {
     pub work_area: (f64, f64),
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
+    stagger: HashMap<String, Vec<crate::stagger::Band>>,
 }
 /// Where dropped media joins the layer stack ([`Scene::drop_before`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,6 +366,9 @@ pub trait ModelPresenter {
     /// `None` for layers that draw a name.
     fn waveform(&self, _layer: &crate::Layer) -> Option<Option<Waveform>> {
         None
+    }
+    fn stagger_bands(&self, _layer: &crate::Layer, _time: f64) -> Vec<crate::stagger::Band> {
+        vec![]
     }
     /// A captions layer's cues; none for other layers.
     fn cues(&self, _layer: &crate::Layer) -> Vec<CueMark> {
@@ -553,6 +557,15 @@ impl Scene {
             rows
         };
         let mut scene = Self::new(rows, model.index.duration, model.index.fps, t)?;
+        scene.stagger = model
+            .index
+            .layers
+            .iter()
+            .filter_map(|l| {
+                let bands = p.stagger_bands(l, time);
+                (!bands.is_empty()).then_some((l.id.clone(), bands))
+            })
+            .collect();
         scene.work_area = (model.index.work[0], model.index.work[1]);
         scene.markers = model
             .index
@@ -655,6 +668,7 @@ impl Scene {
             work_area: (0., duration),
             markers: vec![],
             bars: vec![],
+            stagger: HashMap::new(),
         })
     }
     /// v1's `layerDrop` geometry: the layer row under `y` (panel space; a
@@ -990,6 +1004,27 @@ impl Scene {
         }
         covered
     }
+    /// v1 textStagger.draw: each animator's cascade in the clip's foot.
+    fn paint_stagger(&self, clip: &Clip, strip: Rect, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
+        let Some(bands) = self.stagger.get(&clip.id) else {
+            return;
+        };
+        for band in bands {
+            let y1 = strip.y + strip.height - 2.;
+            let y0 = y1 - (strip.height * 0.3).max(4.).min(8.);
+            let x = |seconds| v.x(clip.from + seconds);
+            let mut op = Op::new(
+                format!("stagger:{}:{}", clip.id, band.animator),
+                "stagger",
+                Rect::new(x(band.start), y0, x(band.end) - x(band.start), y1 - y0),
+                t.strip(clip.label.color(t), strip_state(clip)).foreground,
+            );
+            op.opacity = 0.8;
+            op.clip = Some(strip);
+            op.detail = json!({"band":band,"points":[[x(band.start),y0],[x(band.start+band.duration),y0],[x(band.end),y1],[x(band.start+band.cascade),y1]],"hitTop":strip.y+strip.height/2.,"hitBottom":strip.y+strip.height,"locked":clip.locked});
+            ops.push(op);
+        }
+    }
     /// Row `i`'s ops in panel space (unclipped), and its keyframe toggle
     /// with its key times when `controls` is given.
     fn row_ops(
@@ -1043,6 +1078,9 @@ impl Scene {
                 let strip = clip
                     .as_ref()
                     .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, t, ops));
+                if let (Some(clip), Some(strip)) = (clip, strip) {
+                    self.paint_stagger(clip, strip, v, t, ops);
+                }
                 // Summary marks only while the layer is collapsed (open, its
                 // property rows show the keys themselves), and only inside
                 // the strip they belong to: a layer with no strip on screen
@@ -1078,7 +1116,9 @@ impl Scene {
                 });
                 let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    paint_clip(clip, y, h, v, grid, t, ops);
+                    if let Some(strip) = paint_clip(clip, y, h, v, grid, t, ops) {
+                        self.paint_stagger(clip, strip, v, t, ops);
+                    }
                 }
             }
             RowContent::Property { state, keys } => {

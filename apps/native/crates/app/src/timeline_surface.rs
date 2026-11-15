@@ -167,6 +167,10 @@ enum Spec {
         grabbed: f64,
     },
     QuickOffsetKeys,
+    TextStagger {
+        band: pm_panel_timeline::stagger::Band,
+        end: bool,
+    },
 }
 enum Job {
     Sync,
@@ -1582,6 +1586,35 @@ impl TimelineSurface {
             self.pump(cx);
             return;
         }
+        // v1 textStagger.hit runs before a clip body's slide.
+        if let Some(op) = frame.ops.iter().rev().find(|op| {
+            frame.hit_clip(x, y).is_none_or(|(_, edge)| edge.is_none())
+                && (op.shape == "stagger"
+                    && op.detail["locked"] != true
+                    && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
+                    && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
+                    && (x - (op.bounds.x + op.bounds.width)).abs() < 5.
+                    || op.shape == "stagger"
+                        && op.detail["locked"] != true
+                        && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
+                        && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
+                        && x >= op.bounds.x - 2.
+                        && x <= op.bounds.x + op.bounds.width)
+        }) {
+            if let Ok(band) = serde_json::from_value(op.detail["band"].clone()) {
+                let end = (x - (op.bounds.x + op.bounds.width)).abs() < 5.;
+                let band: pm_panel_timeline::stagger::Band = band;
+                self.queue
+                    .push_back(Job::SelectLayer(band.layer.clone(), mods));
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::TextStagger { band, end }),
+                    release: None,
+                });
+                self.pump(cx);
+                return;
+            }
+        }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
             if self
@@ -2069,8 +2102,14 @@ impl TimelineSurface {
             Gesture::Idle => return false,
             Gesture::Pressed(press) => {
                 let delta = event.position - press.origin;
-                let travel = f32::from(delta.x).hypot(f32::from(delta.y));
-                if travel < self.tokens.metrics.drag_threshold {
+                let travel = if matches!(press.spec, Some(Spec::Property { .. })) {
+                    f32::from(delta.x).abs()
+                } else {
+                    f32::from(delta.x).hypot(f32::from(delta.y))
+                };
+                if travel < self.tokens.metrics.drag_threshold
+                    && !matches!(press.spec, Some(Spec::TextStagger { .. }))
+                {
                     return true;
                 }
                 let origin = press.origin;
@@ -3068,6 +3107,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
+        Spec::TextStagger { band, end } => DragKind::TextStagger { band, end, time },
         Spec::QuickOffsetKeys => {
             let groups: Vec<Vec<String>> = model
                 .index
@@ -3273,6 +3313,123 @@ impl ModelPresenter for Presenter {
                 text: c.text,
             })
             .collect()
+    }
+    fn stagger_bands(
+        &self,
+        layer: &pm_panel_timeline::Layer,
+        time: f64,
+    ) -> Vec<pm_panel_timeline::stagger::Band> {
+        if layer.kind != "text" {
+            return vec![];
+        }
+        let Some(root) = self.published.snapshot.root() else {
+            return vec![];
+        };
+        let Some(node) = pm_kernel::model::find_layer(root, &layer.id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+        else {
+            return vec![];
+        };
+        let Some(animators) = node.get("d").and_then(|d| d.get("animators")) else {
+            return vec![];
+        };
+        let raw: serde_json::Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&animators.to_value()))
+                .unwrap_or_default();
+        if !raw.as_array().into_iter().flatten().any(|animator| {
+            animator["enabled"] != false
+                && animator["mode"] == "stagger"
+                && animator["p"].get("duration").is_some()
+        }) {
+            return vec![];
+        }
+        crate::text_host::query(&self.published, |q| {
+            let layout = q.text_layout(None, &layer.id, time)?;
+            let lines: Vec<pm_model::JsString> = layout
+                .get("lines")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|l| {
+                    l.get("text")
+                        .and_then(pm_model::Value::as_str)
+                        .map(Into::into)
+                })
+                .collect();
+            let mut bands = Vec::new();
+            for animator in raw.as_array().into_iter().flatten() {
+                if animator["enabled"] == false
+                    || animator["mode"] != "stagger"
+                    || animator["p"].get("duration").is_none()
+                {
+                    continue;
+                }
+                let Some(id) = animator["id"].as_str() else {
+                    continue;
+                };
+                let unit = match animator["unit"].as_str() {
+                    Some("words") => pm_eval::text_anim::UnitKind::Words,
+                    Some("lines") => pm_eval::text_anim::UnitKind::Lines,
+                    _ => pm_eval::text_anim::UnitKind::Characters,
+                };
+                let count = (pm_eval::text_anim::count_text_units(&lines, unit).max(1) as f64
+                    + animator["unitOffset"].as_f64().unwrap_or(0.))
+                .max(animator["unitTotal"].as_f64().unwrap_or(0.))
+                .max(1.);
+                let mut value = |key: &str| -> Result<f64, pm_kernel::QueryError> {
+                    if animator["p"].get(key).is_none() {
+                        return Ok(0.);
+                    }
+                    Ok(
+                        q.evaluate(None, &layer.id, &format!("ta.{id}.{key}"), time)?
+                            .as_f64()
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(0.),
+                    )
+                };
+                let (delay, duration_value, stagger) =
+                    (value("delay")?, value("duration")?, value("stagger")?);
+                let duration = duration_value.max(0.);
+                let rank = (count - 1.).max(0.)
+                    / if matches!(animator["order"].as_str(), Some("center" | "edges")) {
+                        2.
+                    } else {
+                        1.
+                    };
+                let cascade = stagger.max(0.) * rank;
+                let out = match animator["anchor"].as_str() {
+                    Some("in") => false,
+                    Some("out") => true,
+                    _ => animator["direction"] == "out",
+                };
+                let legacy_duration = animator["legacyStartDuration"]
+                    .as_f64()
+                    .filter(|v| v.is_finite());
+                let start = if out {
+                    let offset = legacy_duration
+                        .map(|duration| duration - delay - duration_value.max(0.) - cascade)
+                        .unwrap_or(delay);
+                    layer.duration - offset - duration - cascade
+                } else {
+                    delay
+                };
+                bands.push(pm_panel_timeline::stagger::Band {
+                    layer: layer.id.clone(),
+                    animator: id.into(),
+                    delay,
+                    duration_value,
+                    stagger,
+                    start,
+                    duration,
+                    cascade,
+                    end: start + duration + cascade,
+                    out,
+                    legacy: legacy_duration.is_some(),
+                });
+            }
+            Ok(bands)
+        })
+        .unwrap_or_default()
     }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
         match key.stored_string("e") {
@@ -4176,6 +4333,26 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         .clip
         .map(|c| Bounds::new(at(c.x, c.y), size(px(c.width as f32), px(c.height as f32))));
     let draw = |window: &mut Window, cx: &mut App| match op.shape {
+        "stagger" => {
+            let mut path = PathBuilder::fill();
+            for (i, p) in op.detail["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let point = at(p[0].as_f64().unwrap_or(0.), p[1].as_f64().unwrap_or(0.));
+                if i == 0 {
+                    path.move_to(point);
+                } else {
+                    path.line_to(point);
+                }
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
         // 45° stripes clipped to the op's rounded box (offline clips, the
         // render bar while rendering).
         "stripes-45" => {

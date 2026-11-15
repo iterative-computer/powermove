@@ -740,3 +740,58 @@ fn a_very_short_layer_keeps_a_visible_strip_at_any_zoom() {
         assert!((strip.bounds.x - (start + t.strip_gap() as f64 / 2.)).abs() < 1e-9);
     }
 }
+
+#[test]
+fn text_stagger_bands_draw_the_first_and_last_unit_intervals() {
+    use pm_panel_timeline::{Key, Layer, RowId, TimelineIndex, TimelineModel};
+    struct Presenter;
+    impl ModelPresenter for Presenter {
+        fn accessibility_label(&self, _: &RowId) -> String {
+            "Text".into()
+        }
+        fn layer_label(&self, _: &Layer) -> Label {
+            Label::for_layer("text", None)
+        }
+        fn media(&self, _: &Layer) -> Media {
+            Media::Ready
+        }
+        fn interpolation(&self, _: &Key) -> Interpolation {
+            Interpolation::Linear
+        }
+        fn stagger_bands(&self, layer: &Layer, _: f64) -> Vec<pm_panel_timeline::stagger::Band> {
+            vec![pm_panel_timeline::stagger::Band {
+                layer: layer.id.clone(),
+                animator: "a".into(),
+                delay: 0.5,
+                duration_value: 1.,
+                stagger: 0.1,
+                start: 0.5,
+                duration: 1.,
+                cascade: 0.4,
+                end: 1.9,
+                out: false,
+                legacy: false,
+            }]
+        }
+    }
+    let document = pm_model::json::parse(r#"{"id":"p","compId":"c","w":640,"h":360,"fps":30,"dur":10,"layers":[{"id":"text","name":"Text","type":"text","from":1,"dur":4,"p":{},"d":{"text":"Hello"}}],"assets":{},"comps":{}}"#).unwrap();
+    let store = pm_kernel::DocumentStore::new_untitled(document);
+    let mut model = TimelineModel::default();
+    model.index = std::sync::Arc::new(TimelineIndex::from_snapshot(&store.snapshot()));
+    model.rebuild_rows();
+    let t = tokens();
+    let v = viewport(&t);
+    let frame = Scene::from_model(&model, &Presenter, &t, 0.)
+        .unwrap()
+        .prepare(v, &t)
+        .unwrap();
+    let band = frame.ops.iter().find(|op| op.shape == "stagger").unwrap();
+    let points = band.detail["points"].as_array().unwrap();
+    let x = |time: f64| v.layer_column + (time - v.scroll_time) * v.pps;
+    assert!((points[0][0].as_f64().unwrap() - x(1.5)).abs() < 1e-9);
+    assert!((points[1][0].as_f64().unwrap() - x(2.5)).abs() < 1e-9);
+    assert!((points[2][0].as_f64().unwrap() - x(2.9)).abs() < 1e-9);
+    assert!((points[3][0].as_f64().unwrap() - x(1.9)).abs() < 1e-9);
+    assert_eq!(band.opacity, 0.8);
+    assert!(band.clip.is_some());
+}

@@ -981,6 +981,11 @@ pub enum DragKind {
         groups: Vec<Vec<String>>,
         time: f64,
     },
+    TextStagger {
+        band: crate::stagger::Band,
+        end: bool,
+        time: f64,
+    },
     QuickOffsetLayers {
         ids: Vec<String>,
     },
@@ -1108,6 +1113,15 @@ impl Drag {
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
                     if l.effectively_locked {
                         return Err(ModelError::Locked(l.id.clone()));
+                    }
+                }
+            }
+            DragKind::TextStagger { band, time, .. } => {
+                finite(*time)?;
+                for key in ["delay", "duration", "stagger"] {
+                    let path = format!("ta.{}.{key}", band.animator);
+                    if key == "duration" || index.channel(&band.layer, &path).is_some() {
+                        model.require_channel(&band.layer, &path)?;
                     }
                 }
             }
@@ -1264,6 +1278,13 @@ impl Drag {
             DragKind::Layers { .. } => "Move clip",
             DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
+            DragKind::TextStagger { end, .. } => {
+                if end {
+                    "Stretch text animation"
+                } else {
+                    "Move text animation"
+                }
+            }
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
             DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
             DragKind::Keys { .. } => "Move keyframe",
@@ -1341,6 +1362,9 @@ impl Drag {
         };
         let mut out = Vec::new();
         match &self.kind {
+            DragKind::TextStagger { band, end, time } => {
+                out.extend(band.commands(*end, sample.time_delta, self.start.fps, *time))
+            }
             DragKind::QuickOffsetKeys { groups, time } => {
                 let mut model = TimelineModel::default();
                 model.index = self.start.clone();
