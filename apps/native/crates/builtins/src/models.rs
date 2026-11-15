@@ -1193,7 +1193,12 @@ impl Backend {
         self.native.export["options"] =
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
+        // The work area's span names what "Work area" exports: a composition's
+        // work area starts as its whole length.
+        let work_area = comp
+            .get("work")
+            .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         if let Some((_, label)) =

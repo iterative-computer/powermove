@@ -94,8 +94,11 @@ pub(crate) fn limits() -> Limits {
     Limits {
         heap_bytes: 1024 * 1024 * 1024,
         // The shipped bundle and a mirrored project start here; more comes
-        // from the cage account as extensions and projects need it.
-        initial_heap_bytes: 32 * 1024 * 1024,
+        // from the cage account as extensions and projects need it. V8 sizes
+        // its collections by this limit: a real project's 40 MiB mirror in a
+        // 32 MiB slice collected in full every few megabytes, ~100 times while
+        // loading and for the life of an export or playback.
+        initial_heap_bytes: 256 * 1024 * 1024,
         external_bytes: 512 * 1024 * 1024,
         max_source_bytes: 256 * 1024 * 1024,
         max_host_ops: usize::MAX / 2,
