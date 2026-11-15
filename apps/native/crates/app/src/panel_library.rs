@@ -381,7 +381,17 @@ impl PanelLibrary {
             .gap(px(12.))
             .corner(t, t.radius.lg)
             .bg(rgb(c.panel))
-            .active_style(|s| s.bg(rgb(pm_design::color::mix(c.panel, c.text, 0.04))))
+            .active_style(|s| {
+                if art {
+                    s.bg(linear_gradient(
+                        135.,
+                        linear_color_stop(rgb(pm_design::color::mix(from, c.text, 0.04)), 0.),
+                        linear_color_stop(rgb(pm_design::color::mix(to, c.text, 0.04)), 1.),
+                    ))
+                } else {
+                    s.bg(rgb(pm_design::color::mix(c.panel, c.text, 0.04)))
+                }
+            })
             .elevated(
                 t,
                 if hover > 0.1 {
@@ -426,14 +436,12 @@ impl PanelLibrary {
                     .flex()
                     .gap(px(4.))
                     .children(delete_command.map(|command| {
-                        kit.icon_button(
+                        kit.destructive_icon_button(
                             format!("library-delete-{}", card.id),
                             "trash",
                             format!("Delete {}", card.title),
-                            false,
                         )
                         .bg(rgb(c.floating))
-                        .text_color(rgb(c.danger))
                         .on_click(cx.listener(move |v, _, _, cx| {
                             cx.stop_propagation();
                             v.send(command.clone(), cx)
@@ -468,7 +476,8 @@ impl PanelLibrary {
         div()
             .w(px(width))
             .h(px(42.))
-            .px(px(14.))
+            .pl(px(14.))
+            .pr(px(10.))
             .flex()
             .flex_col()
             .justify_center()
@@ -637,11 +646,10 @@ impl PanelLibrary {
                             kit.hovered(key)
                         })
                         .child(
-                            kit.icon_button(
+                            kit.destructive_icon_button(
                                 format!("workspace-delete-{}", card.id),
                                 "trash",
                                 format!("Delete {}", card.name),
-                                false,
                             )
                             .bg(rgb(c.floating))
                             .on_click(cx.listener(
@@ -893,11 +901,15 @@ impl Render for PanelLibrary {
                 shown.is_empty()
             }
         };
-        let fade = kit.animate(
-            kit::key("library-page-fade"),
-            1.,
-            Some(pm_design::motion::Preset::Show),
-        );
+        let fade = if t.accessibility.reduce_motion {
+            1.
+        } else {
+            kit.animate(
+                kit::key("library-page-fade"),
+                1.,
+                Some(pm_design::motion::Preset::Show),
+            )
+        };
         let body = if empty {
             let (symbol, heading, detail) = if !self.query.trim().is_empty() {
                 (
@@ -965,7 +977,6 @@ impl Render for PanelLibrary {
                 .pb(px(m.inset))
                 .opacity(fade)
                 .child(shelf)
-                .child(kit.settle())
                 .into_any_element()
         };
         let content = div()
@@ -1024,6 +1035,7 @@ impl Render for PanelLibrary {
             .font_family(pm_design::TEXT_FONT)
             .child(sidebar)
             .child(content)
+            .child(kit.settle())
     }
 }
 
@@ -1325,6 +1337,7 @@ mod capture_tests {
                         scheme,
                         pm_design::Accessibility {
                             increase_contrast: contrast,
+                            reduce_transparency: true,
                             reduce_motion: true,
                             ..Default::default()
                         },
@@ -1364,7 +1377,10 @@ mod capture_tests {
                             })
                         })
                         .unwrap();
-                    cx.run_until_parked();
+                    for _ in 0..40 {
+                        cx.run_until_parked();
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
                     cx.capture_screenshot(window.into())
                         .unwrap()
                         .save(format!("{dir}/after-{name}-{}x{}.png", w as u32, h as u32))
@@ -1374,7 +1390,10 @@ mod capture_tests {
                             view.set_page(super::Page::Workspaces(None), cx)
                         })
                         .unwrap();
-                    cx.run_until_parked();
+                    for _ in 0..40 {
+                        cx.run_until_parked();
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
                     cx.capture_screenshot(window.into())
                         .unwrap()
                         .save(format!(

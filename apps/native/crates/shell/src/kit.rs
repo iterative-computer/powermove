@@ -265,6 +265,25 @@ impl Kit {
         label: impl Into<SharedString>,
         selected: bool,
     ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, selected, None)
+    }
+    /// Destructive actions share the icon-button recipe, with danger ink on hover.
+    pub fn destructive_icon_button(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+    ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, false, Some(self.t.colors.danger))
+    }
+    fn icon_button_tinted(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+        selected: bool,
+        hover_ink: Option<u32>,
+    ) -> Stateful<Div> {
         let (t, id, label) = (&self.t, id.into(), label.into());
         let (c, m) = (&t.colors, &t.metrics);
         let k = key(&id);
@@ -285,7 +304,13 @@ impl Kit {
                 symbol,
                 m.symbol_panel,
                 Weight::Regular,
-                if selected { c.text } else { c.secondary },
+                if selected {
+                    c.text
+                } else if self.hovered(k) > 0.01 {
+                    hover_ink.unwrap_or(c.secondary)
+                } else {
+                    c.secondary
+                },
             ))
             .when(selected, |d| {
                 d.bg(rgb(c.raised)).elevated(t, Elevation::Raised)
