@@ -104,6 +104,7 @@ fn main() {
             }
         });
     }
+    let mut peak_record: Option<pm_kernel::history::HistoryRecord> = None;
     for i in 0..40 {
         let new: Vec<String> = (0..37).map(|n| format!("memory-{i}-{n}")).collect();
         for cmd in [
@@ -130,6 +131,15 @@ fn main() {
             Command::Layer(LayerCommand::Delete { layer_ids: new }),
         ] {
             store.execute(cmd, Origin::Mcp).unwrap();
+            if let Some(record) = store.history().records().last() {
+                if peak_record.as_ref().is_none_or(|p| record.bytes > p.bytes) {
+                    println!(
+                        "peak_latest_record label={:?} accounted_bytes={} revision={}",
+                        record.label, record.bytes, record.revision
+                    );
+                    peak_record = Some(record.clone());
+                }
+            }
         }
         if i % 10 == 9 {
             println!(
@@ -146,12 +156,15 @@ fn main() {
     let without_store = live().0;
     drop(history);
     let without_history = live().0;
+    drop(peak_record);
+    let without_peak = live().0;
     drop(held);
     println!(
-        "owners store_document_queries_log={} history={} legacy_log={} remaining={}",
+        "owners store_document_queries_log={} history_except_peak={} peak_record_retained={} legacy_log={} remaining={}",
         all - without_store,
         without_store - without_history,
-        without_history - live().0,
+        without_history - without_peak,
+        without_peak - live().0,
         live().0 - baseline.0
     );
 }
