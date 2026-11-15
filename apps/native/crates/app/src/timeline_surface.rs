@@ -302,6 +302,22 @@ struct Press {
     /// A plain click on an already selected item narrows selection on release.
     release: Option<Job>,
 }
+/// Frozen ruler mapping for work-area gestures. Handles follow absolute
+/// pointer time (including the hit-zone offset); the body follows pointer delta.
+#[derive(Clone, Copy)]
+struct WorkDragMapping {
+    edge: Option<f64>,
+    pps: f64,
+    scroll_time: f64,
+    column: f64,
+}
+impl WorkDragMapping {
+    fn delta(self, x: f64, dx: f64) -> f64 {
+        self.edge.map_or(dx / self.pps, |edge| {
+            (self.scroll_time + (x - self.column) / self.pps).max(0.) - edge
+        })
+    }
+}
 enum Gesture {
     ParentPick {
         ids: Vec<String>,
@@ -316,6 +332,7 @@ enum Gesture {
         origin: Point<Pixels>,
         proedit: bool,
         keys: bool,
+        work: Option<WorkDragMapping>,
         readout: bool,
         quick: Option<(Point<Pixels>, f64, usize)>,
         quick_limits: Vec<(f64, f64)>,
@@ -570,7 +587,7 @@ impl TimelineSurface {
                 match created {
                     Ok((client, built)) => {
                         s.client = Some(client);
-                        s.install(built, cx);
+                        s.install(built, false, cx);
                         s.pump(cx);
                     }
                     Err(error) => s.delegate.report(error.to_string(), cx),
@@ -1005,6 +1022,7 @@ impl TimelineSurface {
         while matches!(job, Job::Sample(_)) && matches!(self.queue.front(), Some(Job::Sample(_))) {
             job = self.queue.pop_front().unwrap();
         }
+        let work_update = client.active_drag().is_some_and(|drag| drag.is_work_area());
         self.busy = true;
         let previous_scene = self.scene.clone();
         let preview_update = matches!(&job, Job::Sample(_));
@@ -1051,7 +1069,7 @@ impl TimelineSurface {
                     s.delegate.timing_preview(None, cx);
                     s.viewer_previewing = false;
                 }
-                s.install(built, cx);
+                s.install(built, work_update, cx);
                 match effects {
                     Ok(effects) => {
                         for effect in effects {
@@ -1069,7 +1087,7 @@ impl TimelineSurface {
         })
         .detach();
     }
-    fn install(&mut self, built: Option<Built>, cx: &mut Context<Self>) {
+    fn install(&mut self, built: Option<Built>, hold_time_mapping: bool, cx: &mut Context<Self>) {
         let Some(built) = built else {
             return;
         };
@@ -1111,6 +1129,14 @@ impl TimelineSurface {
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
+        // The writer may still be applying the last queued sample after the
+        // mouse was released. Test the kernel gesture, not just the UI gesture.
+        let work_editing = hold_time_mapping
+            || self
+                .client
+                .as_ref()
+                .and_then(|c| c.active_drag())
+                .is_some_and(|drag| drag.is_work_area());
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
@@ -1122,7 +1148,8 @@ impl TimelineSurface {
             if !self.fitted {
                 self.fitted = true;
                 self.view.pps = fit;
-            } else if self.fit_duration > 0.
+            } else if !work_editing
+                && self.fit_duration > 0.
                 && (self.fit_duration - duration).abs() > 1e-9
                 && whole(self.fit_duration)
             {
@@ -1131,6 +1158,8 @@ impl TimelineSurface {
                 // refit); a view the user zoomed into or scrolled stays.
                 self.view.pps = fit;
             }
+            // Consume live extension updates even while keeping the mapping:
+            // mouse-up must not apply a delayed fit either.
             self.fit_duration = duration;
         }
         self.changed(false, cx);
@@ -1210,7 +1239,9 @@ impl TimelineSurface {
                 };
                 let layer = match parse_row(&row.id) {
                     Ok(RowId::Layer(id)) => id,
-                    Ok(RowId::Property { layer_id, .. } | RowId::Effect { layer_id, .. }) => layer_id,
+                    Ok(RowId::Property { layer_id, .. } | RowId::Effect { layer_id, .. }) => {
+                        layer_id
+                    }
                     Err(_) => continue,
                 };
                 let at = |v: f64| ((y + ruler + v - self.view.scroll_y) * 100.).round() / 100.;
@@ -2355,11 +2386,25 @@ impl TimelineSurface {
                     self.cursor = CursorStyle::ClosedHand;
                 }
                 let keys = matches!(spec, Spec::Keys | Spec::GraphKeys);
+                let work =
+                    matches!(spec, Spec::WorkIn | Spec::WorkOut | Spec::WorkMove).then(|| {
+                        WorkDragMapping {
+                            edge: match spec {
+                                Spec::WorkIn => Some(self.model.index.work[0]),
+                                Spec::WorkOut => Some(self.model.index.work[1]),
+                                _ => None,
+                            },
+                            pps: self.view.pps,
+                            scroll_time: self.view.scroll_time,
+                            column: self.view.layer_column,
+                        }
+                    });
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
                     keys,
+                    work,
                     readout,
                     quick,
                     quick_limits,
@@ -2373,6 +2418,7 @@ impl TimelineSurface {
                 origin,
                 proedit,
                 keys,
+                work,
                 readout,
                 quick,
                 quick_limits,
@@ -2389,9 +2435,14 @@ impl TimelineSurface {
                     }
                     cx.notify();
                 }
-                let (origin, proedit, keys, readout, handle) =
-                    (*origin, *proedit, *keys, *readout, *handle);
+                let (origin, proedit, keys, work, readout, handle) =
+                    (*origin, *proedit, *keys, *work, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let Some(work) = work {
+                    let (x, _) = self.local(event.position);
+                    sample.time_delta =
+                        work.delta(x, f32::from(event.position.x - origin.x) as f64);
+                }
                 (sample.acquire_tolerance, sample.release_tolerance) =
                     pm_panel_timeline::snap::tolerances(keys, self.view.pps);
                 if let (Some(layer_from), Some(area), Some(graph)) =
@@ -2451,7 +2502,11 @@ impl TimelineSurface {
                     }
                     self.readout = Some((self.graph_readout(&sample), lx, ly));
                 }
-                self.autoscroll(event.position, cx);
+                // Work-area drags extrapolate beyond the ruler in Electron.
+                // Autoscroll would move its mapping under the held handle.
+                if work.is_none() {
+                    self.autoscroll(event.position, cx);
+                }
                 // Keep one sample for the next display refresh. A mouse-up
                 // remains behind that sample, so the last position commits.
                 if matches!(self.queue.back(), Some(Job::Sample(_))) {

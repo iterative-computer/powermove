@@ -3058,3 +3058,101 @@ fn electron_trim_guide_clears_when_legal_bounds_prevent_alignment() {
     assert_eq!(drag.snap_target_in(&client.model.index), None);
     block_on(client.finish_drag(false)).unwrap();
 }
+
+#[test]
+fn work_area_sample_streams_are_monotonic_frame_only_and_one_undo() {
+    for pps in [24., 96., 240.] {
+        for step in [1., 20.] {
+            for is_end in [false, true] {
+                let (_actor, mut c) = client();
+                let before = c.model.index.clone();
+                let kind = if is_end {
+                    DragKind::WorkOut
+                } else {
+                    DragKind::WorkIn
+                };
+                let edge = before.work[usize::from(is_end)];
+                block_on(c.begin_drag(kind)).unwrap();
+                let mut previous = edge;
+                let mut peak = before.duration;
+                // Deliberately alternate Shift, which must have no influence.
+                for i in 1..=48 {
+                    let delta = i as f64 * step / pps;
+                    block_on(c.drag(DragSample {
+                        modifiers: Modifiers {
+                            shift: i % 2 == 0,
+                            ..mods()
+                        },
+                        acquire_tolerance: 100.,
+                        release_tolerance: 100.,
+                        ..sample(delta)
+                    }))
+                    .unwrap();
+                    let at = c.model.index.work[usize::from(is_end)];
+                    assert!(at >= previous, "{pps} {step} {is_end}: {previous} -> {at}");
+                    let expected = if is_end {
+                        frame(edge + delta, before.fps)
+                    } else {
+                        frame(edge + delta, before.fps).min(before.work[1] - 1. / before.fps)
+                    };
+                    assert!((at - expected).abs() < 1e-9);
+                    peak = peak.max(at);
+                    assert_eq!(
+                        c.model.index.duration,
+                        if is_end { peak } else { before.duration }
+                    );
+                    assert!(c.active_drag().unwrap().snap_target().is_none());
+                    previous = at;
+                }
+                // Reversing from beyond the end preserves the peak duration;
+                // it does not inflate again from the previous sample's result.
+                for i in (0..48).rev() {
+                    block_on(c.drag(sample(i as f64 * step / pps))).unwrap();
+                    let at = c.model.index.work[usize::from(is_end)];
+                    assert!(at <= previous);
+                    previous = at;
+                    assert_eq!(
+                        c.model.index.duration,
+                        if is_end { peak } else { before.duration }
+                    );
+                }
+                // Finish away from the initial edge so history has one edit.
+                block_on(c.drag(sample(0.5))).unwrap();
+                block_on(c.finish_drag(true)).unwrap();
+                assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+                undo(&mut c);
+                assert_eq!(c.model.index.work, before.work);
+                assert_eq!(c.model.index.duration, before.duration);
+            }
+        }
+    }
+}
+
+#[test]
+fn work_handles_quantize_absolute_time_and_cancel_peak_extension() {
+    let (_actor, mut c) = client_with(
+        parse(r#"{"id":"P","compId":"C","fps":30,"dur":10,"work":[1.01,9.01],"layers":[]}"#)
+            .unwrap(),
+    );
+    for end in [false, true] {
+        let before = c.model.index.clone();
+        block_on(c.begin_drag(if end {
+            DragKind::WorkOut
+        } else {
+            DragKind::WorkIn
+        }))
+        .unwrap();
+        block_on(c.drag(sample(0.01))).unwrap();
+        assert_eq!(
+            c.model.index.work[usize::from(end)],
+            frame(before.work[usize::from(end)] + 0.01, 30.)
+        );
+        if end {
+            block_on(c.drag(sample(20.))).unwrap();
+        }
+        block_on(c.finish_drag(false)).unwrap();
+        assert_eq!(c.model.index.work, before.work);
+        assert_eq!(c.model.index.duration, before.duration);
+        assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
+    }
+}

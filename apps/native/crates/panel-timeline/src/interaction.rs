@@ -1396,6 +1396,12 @@ impl Drag {
             _ => "Work area",
         }
     }
+    pub fn is_work_area(&self) -> bool {
+        matches!(
+            self.kind,
+            DragKind::WorkIn | DragKind::WorkOut | DragKind::WorkMove
+        )
+    }
     /// Electron draws a guide for strip latches only. Key proximity locks have
     /// no guide, and work-area edits remain frame-only.
     pub fn snap_target(&self) -> Option<f64> {
@@ -1427,8 +1433,8 @@ impl Drag {
             self.kind,
             DragKind::Keys { .. } | DragKind::GraphKeys { .. }
         );
-        let snapping = !(matches!(self.kind, DragKind::GraphKeys { .. })
-            && sample.time_delta == 0.)
+        let snapping = !self.is_work_area()
+            && !(matches!(self.kind, DragKind::GraphKeys { .. }) && sample.time_delta == 0.)
             && self
                 .track_snap
                 .map_or(sample.modifiers.shift, |on| on != sample.modifiers.shift);
@@ -1841,9 +1847,14 @@ impl Drag {
                 let frame = 1. / self.start.fps;
                 let duration = self.start.duration;
                 let (a, b) = match self.kind {
-                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b),
+                    DragKind::WorkIn => (
+                        (self::frame(a + sample.time_delta, self.start.fps))
+                            .max(0.)
+                            .min(b - frame),
+                        b,
+                    ),
                     DragKind::WorkOut => {
-                        let end = (b + delta).max(a + frame);
+                        let end = self::frame(b + sample.time_delta, self.start.fps).max(a + frame);
                         self.work_duration = self.work_duration.max(end);
                         (a, end)
                     }
