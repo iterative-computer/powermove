@@ -2801,3 +2801,82 @@ fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
     assert_eq!(c.model.index.layer("a").unwrap().from, before.from);
     assert_eq!(c.model.index.layer("a").unwrap().duration, before.duration);
 }
+
+#[test]
+fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
+    let m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"a","type":"shape","collapsed":false,"p":{"opacity":{"v":100,"kf":[]},"position.y":{"v":0,"kf":[{"i":"k","t":0,"v":0}]},"rotation":{"v":0,"kf":[],"expr":"time*10"},"anchor.x":{"v":0,"kf":[],"expr":""}},"fx":[{"id":"blur","type":"Blur","p":{"radius":{"v":10,"kf":[{"i":"r","t":0,"v":10}]},"quality":{"v":1,"kf":[]}}},{"id":"empty","type":"Glow","p":{"amount":{"v":0,"kf":[]}}}]}]}"#).unwrap());
+    let paths: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paths, ["position.y", "rotation", "blur.radius"]);
+    assert_eq!(
+        m.rows()
+            .iter()
+            .filter(|r| matches!(r.id, RowId::Effect { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(m.rows().last().unwrap().depth, 2);
+    let frame = v4::project_window(&m, 0, 20).unwrap();
+    assert_eq!(frame["window"]["rows"][3]["kind"], "heading");
+    assert_eq!(frame["window"]["rows"][3]["label"], "Blur");
+}
+
+#[test]
+fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
+    let (_actor, mut c) = client();
+    assert!(!c.model.layer_disclosable("c"));
+    c.model.toggle_disclosure("c").unwrap();
+    let property = RowId::Property {
+        layer_id: "c".into(),
+        channel: "opacity".into(),
+    };
+    let targets = vec![("c".into(), "opacity".into())];
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    assert!(c.model.layer_disclosable("c"));
+    c.model.editing_property = Some(("c".into(), "opacity".into()));
+    let p = c.model.property_diamond(&targets, 0.).unwrap();
+    run(&mut c, p);
+    assert!(c.model.row_position(&property).is_some());
+    c.model.editing_property = None;
+    c.model.rebuild_rows();
+    assert!(c.model.row_position(&property).is_none());
+    assert!(!c.model.layer_disclosable("c"));
+}
+
+#[test]
+fn explicit_reveal_all_is_preserved_by_normal_and_cascade_twirls() {
+    let mut m = model(fixture());
+    m.reveal_property('*', false, 100, &PropertyFacts::default())
+        .unwrap();
+    assert!(m.layer_disclosable("c"));
+    m.toggle_disclosure("c").unwrap();
+    m.toggle_disclosure("c").unwrap();
+    assert_eq!(m.reveal.layers["c"].paths, Some(vec!["*".into()]));
+    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id=="c" && channel=="opacity")));
+}
+
+#[test]
+fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
+    let mut m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"g","name":"Synthetic wordmark","type":"group","threeD":true,"collapsed":true,"p":{"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"anchor.z":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null},"orientation.x":{"v":0,"kf":[],"expr":null},"orientation.y":{"v":0,"kf":[],"expr":null},"orientation.z":{"v":0,"kf":[],"expr":null},"perspective":{"v":50,"kf":[],"expr":null},"position.x":{"v":100,"kf":[],"expr":null},"position.y":{"v":200,"kf":[{"i":"y","t":0,"v":210},{"i":"y2","t":1,"v":200}],"expr":null},"position.z":{"v":0,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"rotation.x":{"v":0,"kf":[],"expr":null},"rotation.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[{"i":"sx","t":0,"v":100}],"expr":null},"scale.y":{"v":100,"kf":[{"i":"sy","t":0,"v":100}],"expr":null},"scale.z":{"v":100,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null}}},{"id":"child","type":"shape","group":"g","p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.toggle_disclosure("g").unwrap();
+    let properties: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(properties, ["position.y", "scale"]);
+    assert_eq!(m.rows().last().unwrap().id, RowId::Layer("child".into()));
+    assert_eq!(m.rows().last().unwrap().depth, 1);
+    assert!(m.reveal.layers["g"].paths.is_none());
+}

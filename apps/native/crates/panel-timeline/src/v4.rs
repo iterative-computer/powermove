@@ -61,6 +61,7 @@ pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {
     match row {
+        RowId::Effect { layer_id, effect } => json!(["effect", layer_id, effect]).to_string(),
         RowId::Layer(id) => json!(["layer", id]).to_string(),
         RowId::Property { layer_id, channel } => json!(["property", layer_id, channel]).to_string(),
     }
@@ -76,6 +77,14 @@ pub fn parse_row(id: &str) -> Result<RowId, Error> {
             Ok(RowId::Property {
                 layer_id: layer_id.clone(),
                 channel: channel.clone(),
+            })
+        }
+        [kind, layer_id, effect]
+            if kind == "effect" && !layer_id.is_empty() && !effect.is_empty() =>
+        {
+            Ok(RowId::Effect {
+                layer_id: layer_id.clone(),
+                effect: effect.clone(),
             })
         }
         _ => Err(Error::InvalidIntent("row id")),
@@ -204,6 +213,7 @@ pub async fn dispatch(
                     .ok_or(Error::InvalidIntent("modifiers"))?,
             )?;
             let calls = match row {
+                RowId::Effect { .. } => return Err(Error::InvalidIntent("section row")),
                 RowId::Layer(id) => {
                     if client.model.mode == TimelineMode::Tracks {
                         client.model.select_track_layer(&id, m)?.0
@@ -515,6 +525,24 @@ pub fn project_window(
         .map(|row| {
             let mut value = json!({ "id": row_id(&row.id), "depth": row.depth });
             match &row.id {
+                RowId::Effect { layer_id, effect } => {
+                    let layer = model
+                        .index
+                        .layer(layer_id)
+                        .ok_or_else(|| ModelError::UnknownId(layer_id.clone()))?;
+                    value["kind"] = json!("heading");
+                    value["locked"] = json!(layer.effectively_locked);
+                    value["layer"] = json!(layer_id);
+                    value["label"] = json!(
+                        layer
+                            .effects
+                            .iter()
+                            .find(|(id, _)| id == effect)
+                            .map(|(_, label)| label.as_str())
+                            .unwrap_or(effect)
+                    );
+                    value["selected"] = json!(false);
+                }
                 RowId::Layer(id) => {
                     let layer = model
                         .index
@@ -522,6 +550,7 @@ pub fn project_window(
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
                     let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
+                    value["canOpen"] = json!(model.layer_disclosable(id));
                     value["layer"] = json!(id);
                     let definition = layer.definition.as_deref();
                     value["layerKind"] =

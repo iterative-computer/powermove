@@ -479,6 +479,13 @@ impl Scene {
                             selected.contains(id.as_str()),
                         )
                     }
+                    RowId::Effect { .. } => (
+                        RowContent::Property {
+                            state: KeyState::Static,
+                            keys: vec![],
+                        },
+                        false,
+                    ),
                     RowId::Property { layer_id, channel } => {
                         let layer = model.index.layer(layer_id).ok_or(Error::DuplicateId)?;
                         let keys = keys(layer, model.track_channels(layer_id, channel));
@@ -1492,10 +1499,7 @@ fn paint_clip(
     // strip that goes on out of view is cut straight by the tracks, never
     // rounded at the edge as if it ended there (where it has no trim).
     let reach = radius + gap + 2. * m.border as f64;
-    let (x0, x1) = (
-        start.max(v.layer_column - reach),
-        end.min(v.width + reach),
-    );
+    let (x0, x1) = (start.max(v.layer_column - reach), end.min(v.width + reach));
     let body = Rect::new(x0, r.y, x1 - x0, r.height);
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
@@ -1859,6 +1863,9 @@ fn paint_keys(
 fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
     match crate::v4::parse_row(&row).ok()? {
         crate::RowId::Layer(layer)
+        | crate::RowId::Effect {
+            layer_id: layer, ..
+        }
         | crate::RowId::Property {
             layer_id: layer, ..
         } => Some((layer, key)),
@@ -2447,7 +2454,7 @@ mod drop_tests {
                 clip: None,
                 summary: std::sync::Arc::from([]),
             },
-            RowId::Property { .. } => RowContent::Property {
+            RowId::Property { .. } | RowId::Effect { .. } => RowContent::Property {
                 state: KeyState::Static,
                 keys: vec![],
             },
