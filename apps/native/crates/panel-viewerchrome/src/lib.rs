@@ -406,6 +406,14 @@ impl ViewModel {
                 no_arg()?;
                 Action::Host(HostAction::Source(SourceCommand::PlayPause))
             }
+            "viewer.composition.open" => {
+                let id = argument.as_str().ok_or(Error::Invalid("composition id"))?;
+                let root = self.snapshot.root().ok_or(Error::Closed)?;
+                if root.get("comps").and_then(|c| c.get(id)).is_none() {
+                    return Err(Error::Invalid("composition id"));
+                }
+                Action::Host(HostAction::OpenComposition(id.into()))
+            }
             "viewer.source.close" => {
                 no_arg()?;
                 Action::Host(HostAction::Source(SourceCommand::Close))
@@ -624,6 +632,7 @@ pub enum Action {
     ToggleGuides,
     ToggleSafeAreas,
     Transport(TransportAction),
+    OpenComposition(String),
     WorkIn,
     WorkOut,
     ResetWork,
@@ -636,6 +645,7 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostAction {
     Transport(TransportAction),
+    OpenComposition(String),
     /// The host gathers current extension contributions. No built-in menu copy
     /// or invented Fit/Settings rows are hardcoded here.
     ContextMenu {

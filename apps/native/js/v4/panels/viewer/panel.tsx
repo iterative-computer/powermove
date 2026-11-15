@@ -462,6 +462,65 @@ export function ViewerPanel({
             }}
           >
             {dimension}
+            {!source && m.trail && m.trail.ids.length > 0 && (
+              <div
+                id="viewer.path"
+                role="navigation"
+                label="Composition path"
+                style={{
+                  ...row,
+                  gap: token("metrics.gap"),
+                  minWidth: 0,
+                  overflow: "hidden",
+                }}
+              >
+                {m.trail.ids.map((id, index) => (
+                  <div key={id} style={row}>
+                    {index > 0 && <text label="">›</text>}
+                    {index === m.trail!.index ? (
+                      <text
+                        id={`viewer.crumb.${id}`}
+                        label={
+                          m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"
+                        }
+                        style={{
+                          color: token("colors.text"),
+                          fontSize: token("typography.body"),
+                          fontWeight: token("typography.medium_weight"),
+                          flexShrink: 0,
+                        }}
+                      >
+                        {m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"}
+                      </text>
+                    ) : (
+                      <ToolbarItem
+                        id={`viewer.crumb.${id}`}
+                        label={
+                          m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"
+                        }
+                        style={{
+                          color: token(
+                            index === m.trail!.index
+                              ? "colors.text"
+                              : "colors.muted",
+                          ),
+                          fontSize: token("typography.body"),
+                        }}
+                        onClick={() =>
+                          actions.drive("viewer.composition.open", id)
+                        }
+                      >
+                        {m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"}
+                      </ToolbarItem>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             {source ? (
               <>
                 <text

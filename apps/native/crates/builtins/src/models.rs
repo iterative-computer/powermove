@@ -1628,6 +1628,7 @@ impl Backend {
                                 }
                                 TransportAction::Pause => json!({"kind":"pause"}),
                             },
+                            HostAction::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
                             HostAction::Command { id, args } => {
                                 json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})
                             }
