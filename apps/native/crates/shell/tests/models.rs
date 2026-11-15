@@ -572,3 +572,85 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
         assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
     }
 }
+
+#[test]
+fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
+    let t = tokens();
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1248.,
+        h: 705. - t.metrics.toolbar - t.metrics.status - t.metrics.dock_gap,
+    };
+    let mut layout = Layout::preset("design");
+    let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+    layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+        .into_iter()
+        .map(|id| Group {
+            tabs: vec![id.into()],
+            active: 0,
+            size: None,
+            flex_basis: None,
+            collapsed: false,
+        })
+        .collect();
+    let geometry = layout.geometry(bounds, &t);
+    let viewport = geometry.side_docks[&di];
+    let panels: Vec<_> = geometry.panels.iter().filter(|p| p.dock == di).collect();
+    assert!(
+        panels.last().unwrap().rect.y + panels.last().unwrap().rect.h > viewport.y + viewport.h
+    );
+    for (p, usable_floor) in panels.iter().zip([360., 320., 400.]) {
+        assert!(p.rect.h >= usable_floor);
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR);
+    }
+    let natural = std::collections::BTreeMap::from([
+        ("inspector".into(), 2000.),
+        ("easing".into(), 360.),
+        ("fxbrowser".into(), 5000.),
+    ]);
+    let measured = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    for p in measured.panels.iter().filter(|p| p.dock == di) {
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR && p.rect.h <= 705. * 0.6 + 0.01);
+    }
+    // The splitter starts from the same measured geometry; a saved size wins
+    // over automatic natural-content sizing and remains a fluid basis.
+    let divider = measured
+        .dividers
+        .iter()
+        .find(|d| d.dock == di && d.group == Some(0))
+        .unwrap();
+    let before = measured
+        .panels
+        .iter()
+        .find(|p| p.dock == di && p.group == 0)
+        .unwrap()
+        .rect
+        .h;
+    layout.resize_with_panel_heights(divider, -40., bounds, &t, &natural);
+    let resized = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    assert_eq!(
+        resized
+            .panels
+            .iter()
+            .find(|p| p.dock == di && p.group == 0)
+            .unwrap()
+            .rect
+            .h,
+        before - 40.
+    );
+    assert!(layout.docks[di].groups[0].size.is_none());
+    layout.docks[di].groups[1].size = Some(240.);
+    layout.docks[di].groups[1].flex_basis = None;
+    assert_eq!(
+        side_group_floor(&layout.docks[di].groups[1], bounds.h, &t, Some(5000.)),
+        240.
+    );
+    let record =
+        pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+    let restored = pm_shell::workspace::layout(&record);
+    assert!(restored.docks[di].groups[0].size.is_none());
+    assert!((restored.docks[di].groups[0].flex_basis.unwrap() - layout.docks[di].groups[0].flex_basis.unwrap()).abs() <= 0.05);
+    assert_eq!(restored.docks[di].groups[1].size, Some(240.));
+    assert_eq!(pm_shell::workspace::write(&restored, &record), record);
+}

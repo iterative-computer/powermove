@@ -8,8 +8,15 @@ use crate::{
 use gpui::{prelude::*, *};
 #[cfg(test)]
 use ::core::prelude::v1::test;
+use gpui::{prelude::*, *};
 use pm_design::Tokens;
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 /// A tab drag in progress: the layout it started from, the pointer and the
 /// target it would drop on. Escape restores `original`.
@@ -56,6 +63,8 @@ pub struct Editor {
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
     dock_scroll: HashMap<String, f32>,
+    dock_reported_heights: BTreeMap<String, f32>,
+    dock_natural_heights: BTreeMap<String, f32>,
     dock_scroll_max: HashMap<String, f32>,
     last_scroll_focus: Option<FocusHandle>,
     area_hover: Option<(String, Option<crate::area::Corner>)>,
@@ -146,6 +155,8 @@ impl Editor {
             host,
             geometry: Geometry::default(),
             dock_scroll: HashMap::new(),
+            dock_reported_heights: BTreeMap::new(),
+            dock_natural_heights: BTreeMap::new(),
             dock_scroll_max: HashMap::new(),
             last_scroll_focus: None,
             area_hover: None,
@@ -880,6 +891,26 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = cmd.name.strip_prefix("dockContent:") {
+            if self.layout.find(id).is_some()
+                && let Some(height) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_f64())
+                    .filter(|h| h.is_finite() && *h > 0.)
+            {
+                let height = height as f32 + self.tokens.metrics.header;
+                if self
+                    .dock_reported_heights
+                    .get(id)
+                    .is_none_or(|old| (*old - height).abs() > 1.)
+                {
+                    self.dock_reported_heights.insert(id.into(), height);
+                    cx.notify();
+                }
+            }
+            return;
+        }
         if let Some(id) = cmd.name.strip_prefix("dockScroll:") {
             if let Some((di, _, _)) = self.layout.find(id) {
                 let dock = self.layout.docks[di].id.clone();
@@ -2032,11 +2063,36 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.dock_gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.dock_gap).max(0.),
         };
-        self.geometry = self.layout.geometry_with_maximized(
-            self.dock_bounds,
-            &t,
-            self.maximized_panel.as_deref(),
-        );
+        // Freeze content measurements during a splitter drag, so every delta
+        // uses the same starting geometry. Explicitly resized heights win below.
+        if !matches!(self.gesture, Some(Gesture::Resize(..))) {
+            self.dock_natural_heights = self.dock_reported_heights.clone();
+            for dock in &self.layout.docks {
+                for group in &dock.groups {
+                    let id = group.active();
+                    if let Some(height) = self
+                        .integration
+                        .as_ref()
+                        .and_then(|i| i.natural_panel_height(id, cx))
+                    {
+                        self.dock_natural_heights.insert(id.into(), height);
+                    }
+                }
+            }
+        }
+        self.geometry = if self.maximized_panel.is_some() {
+            self.layout.geometry_with_maximized(
+                self.dock_bounds,
+                &t,
+                self.maximized_panel.as_deref(),
+            )
+        } else {
+            self.layout.geometry_with_panel_heights(
+                self.dock_bounds,
+                &t,
+                &self.dock_natural_heights,
+            )
+        };
         // Keep input/drop geometry in window coordinates, including the column offset.
         for (&di, bounds) in &self.geometry.side_docks {
             let id = &self.layout.docks[di].id;
@@ -2049,6 +2105,9 @@ impl Render for Editor {
                 .fold(bounds.y, f32::max);
             let offset = self.dock_scroll.entry(id.clone()).or_default();
             let maximum = (bottom - bounds.y - bounds.h).max(0.);
+            // Electron ignores a <=1 px range; fractional flex rounding
+            // must not turn a fitting column into a scrollable one.
+            let maximum = if maximum <= 1. { 0. } else { maximum };
             self.dock_scroll_max.insert(id.clone(), maximum);
             *offset = offset.clamp(0., maximum);
             for p in self.geometry.panels.iter_mut().filter(|p| p.dock == di) {
@@ -2322,7 +2381,13 @@ impl Render for Editor {
                             }
                             this.resize_live = true;
                             this.layout = original.clone();
-                            this.layout.resize(d, delta, this.dock_bounds, &this.tokens);
+                            this.layout.resize_with_panel_heights(
+                                d,
+                                delta,
+                                this.dock_bounds,
+                                &this.tokens,
+                                &this.dock_natural_heights,
+                            );
                             cx.notify();
                         }
                         Some(Gesture::Panel(drag)) => {
@@ -2404,8 +2469,13 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout
-                        .resize(&d, delta, this.dock_bounds, &this.tokens);
+                    this.layout.resize_with_panel_heights(
+                        &d,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
                     this.save();
                     cx.notify();
                 }
@@ -3015,8 +3085,13 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout
-                        .resize(&key_divider, delta, this.dock_bounds, &this.tokens);
+                    this.layout.resize_with_panel_heights(
+                        &key_divider,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
                     this.save();
                     cx.stop_propagation();
                     cx.notify();
