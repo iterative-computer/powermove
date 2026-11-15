@@ -1107,3 +1107,32 @@ fn open_in_new_window_asks_for_a_window_of_its_own() {
         assert_eq!(opened, Some(("Trailer".into(), new_window)));
     }
 }
+
+#[test]
+fn delete_toast_follows_successful_home_trash_and_undo_uses_put_back() {
+    let mut c = ready();
+    c.menu("a", MenuAction::Trash).unwrap();
+    let (serial, _) = alert(&mut c);
+    c.answer(serial, Some(true)).unwrap();
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Ok(Outcome::Changed));
+    let toast = effects(&mut c).into_iter().find_map(|e| match e { HostEffect::Deleted { id, message } => Some((id, message)), _ => None }).unwrap();
+    assert_eq!(toast, ("a".into(), "Deleted Launch Film".into()));
+    c.restore_deleted(toast.0).unwrap();
+    assert_eq!(c.port.sent.last().unwrap().command, Command::PutBack("a".into()));
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Ok(Outcome::Changed));
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+}
+
+#[test]
+fn failed_home_trash_never_shows_delete_toast() {
+    let mut c = ready();
+    c.menu("a", MenuAction::Trash).unwrap();
+    let (serial, _) = alert(&mut c);
+    c.answer(serial, Some(true)).unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Err(Failure::Service(ServiceErrorCode::Unavailable)));
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+}

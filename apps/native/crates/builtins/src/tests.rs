@@ -5953,3 +5953,37 @@ fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs
     assert_eq!(pending["tabs"][1]["id"], "spinner");
     assert_eq!(pending["tabs"][0]["id"], "c");
 }
+
+#[test]
+fn delete_toast_is_emitted_only_after_project_delete_acknowledgement() {
+    use pm_surface::host_api::{HOST_API_VERSION, HostOperation, HostRequest, Identity};
+    use pm_surface::host_data::KernelData;
+    for input in [pm_panel_media::Input::DeleteAsset("file".into()), pm_panel_media::Input::Invoke(pm_panel_media::MenuCommand::DeleteComposition("C2".into()))] {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel.open("toast", OpenSource::Untitled(pm_model::json::parse(r#"{"id":"toast","compId":"C1","compName":"Main","w":640,"h":360,"fps":30,"dur":10,"layers":[],"assets":{"file":{"id":"file","name":"Clip.mov","kind":"video"}},"comps":{"C2":{"id":"C2","name":"Second","w":640,"h":360,"fps":30,"dur":10,"layers":[]}}}"#).unwrap())).wait().unwrap().unwrap();
+        let identity = Identity { realm: "assets".into(), generation: 1, project: "toast".into() };
+        let backend = Arc::new(Mutex::new(data::Backend::new(kernel.clone(), identity.clone(), "assets", false).unwrap()));
+        let before = kernel.published("toast").unwrap();
+        let catalog = pm_panel_media::Catalog::published(&before).unwrap();
+        let args = serde_json::to_value(pm_panel_media::v4::Request { owner: catalog.stamp, action: pm_panel_media::v4::Action::Input(input) }).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        data::Data(backend.clone()).enqueue(HostRequest { version: HOST_API_VERSION, realm: identity.realm, generation: 1, project: "toast".into(), request_id: 1, expected_revision: before.revision(), expected_state_revision: None, operation: HostOperation::Command { command: "panel.project".into(), args } }, tx).unwrap();
+        assert!(backend.lock().unwrap().native.platform.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            backend.lock().unwrap().tick().unwrap();
+            if rx.try_recv().is_ok() { break; }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let effects = std::mem::take(&mut backend.lock().unwrap().native.platform);
+        let deleted: Vec<_> = effects.into_iter().filter(|(op, _)| op == "project.effect").map(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v).unwrap()).filter(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. })).collect();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].owner.revision, kernel.published("toast").unwrap().revision());
+        kernel.call("toast", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo).with_document(deleted[0].owner.document).outside_revision(deleted[0].owner.revision)).wait().unwrap().unwrap();
+        let restored = pm_panel_media::Catalog::published(&kernel.published("toast").unwrap()).unwrap();
+        assert!(restored.assets.contains_key("file"));
+        assert!(restored.compositions.contains_key("C2"));
+    }
+}

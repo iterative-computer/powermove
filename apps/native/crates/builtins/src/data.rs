@@ -75,6 +75,7 @@ struct Inflight {
     reply: SyncSender<HostAck>,
     pending: Pending<Result<Ack, KernelFailure>>,
     plan: Option<pm_panel_inspector::v4_effects::Plan>,
+    delete_message: Option<String>,
 }
 struct StateInflight {
     request: HostRequest,
@@ -554,7 +555,7 @@ impl Backend {
                 }
                 if matches!(&item.request.operation, HostOperation::Command { command, .. } if command == "panel.project")
                     && matches!(ack.reply, Reply::Applied { .. })
-                    && let Some(message) = self.native.project_reply.as_mut().and_then(|v| v.as_object_mut()).and_then(|v| v.remove("delete_message")).and_then(|v| v.as_str().map(str::to_owned))
+                    && let Some(message) = item.delete_message
                     && let Some(p) = self.published()
                     && p.revision() == ack.revision
                 {
@@ -860,7 +861,11 @@ impl KernelData for Data {
                 *expected_revision = Some(request.expected_revision);
             }
             let pending = b.kernel.call(&b.identity.project, next);
+            let delete_message = if matches!(&request.operation, HostOperation::Command { command, .. } if command == "panel.project") {
+                b.native.project_reply.as_mut().and_then(|v| v.as_object_mut()).and_then(|v| v.remove("delete_message")).and_then(|v| v.as_str().map(str::to_owned))
+            } else { None };
             b.pending.push(Inflight {
+                delete_message,
                 request,
                 reply,
                 pending,
