@@ -590,11 +590,12 @@ export function ProgressRow(props: Common & { value?: number }) {
 export function EmptyState(
   props: Common & {
     explanation: string;
+    compact?: boolean;
     action?: ComponentChildren;
     symbol?: string;
   },
 ) {
-  const { explanation, action, symbol, ...rest } = props;
+  const { explanation, action, symbol, compact, ...rest } = props;
   return kit(
     "empty-state",
     "div",
@@ -614,22 +615,26 @@ export function EmptyState(
             role: "heading",
             style: {
               color: token("colors.text"),
-              fontSize: token("typography.heading"),
+              fontSize: token(
+                compact ? "typography.body" : "typography.heading",
+              ),
               fontWeight: token("typography.semibold_weight"),
             },
           },
           props.label,
         ),
-        h(
-          "text",
-          {
-            style: {
-              color: token("colors.secondary"),
-              fontSize: token("typography.reading"),
-            },
-          },
-          explanation,
-        ),
+        explanation
+          ? h(
+              "text",
+              {
+                style: {
+                  color: token("colors.secondary"),
+                  fontSize: token("typography.reading"),
+                },
+              },
+              explanation,
+            )
+          : null,
         action,
       ],
     },

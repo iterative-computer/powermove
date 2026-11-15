@@ -1652,7 +1652,8 @@ impl Backend {
         let time = self.time();
         if matches!(
             command,
-            "export.queue.add"
+            "export.destination.choose"
+                | "export.queue.add"
                 | "export.begin"
                 | "export.retry"
                 | "export.without"
@@ -1662,9 +1663,15 @@ impl Backend {
                 | "export.closeFailure"
         ) && matches!(
             self.native.export["run"]["phase"].as_str(),
-            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
+            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "finishing" | "cancelling")
         ) {
             return Err("Export is in progress".into());
+        }
+        if self.native.export["destinationChoosing"] == true && matches!(command,
+            "export.destination.choose" | "export.begin" | "export.retry" | "export.without"
+                | "export.queue.add" | "export.queue.render" | "export.plan"
+                | "export.preset.save" | "export.reset" | "export.closeFailure") {
+            return Err("Choosing an export destination".into());
         }
         let value = match command {
             "panel.inspector" => {
@@ -2041,6 +2048,12 @@ impl Backend {
                         value: Some(model(&presets)?),
                     }],
                 }));
+            }
+            "export.destination.choose" => {
+                crate::delivery::options(&args["options"])?.validate()?;
+                self.native.export["destinationChoosing"] = json!(true);
+                self.native.platform.push((command.into(), args["options"].clone()));
+                self.command_reply(command)?
             }
             "export.plan" => {
                 let options: pm_promedia::export_panel::Options =

@@ -986,6 +986,8 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     let run = json!({"phase":"rendering","frame":2,"total":300,"elapsed":1});
     backend.native.export["run"] = run.clone();
     for command in [
+        "export.destination.choose",
+        "export.queue.add",
         "export.begin",
         "export.retry",
         "export.without",
@@ -6224,4 +6226,26 @@ fn newly_added_effect_ack_publishes_controls_without_another_document_change() {
             );
         }
     }
+}
+
+#[test]
+fn export_destination_choice_does_not_start_or_change_the_draft_and_blocks_duplicate_pickers() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "export-destination".into(), generation: 1, project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "export", false).unwrap();
+    let before = backend.export_snapshot().unwrap();
+    assert!(backend.native_command("export.destination.choose", &json!({"options":{"format":"invalid"}})).is_err());
+    backend.native_command("export.destination.choose", &json!({"options":before["options"]})).unwrap();
+    assert_eq!(backend.native.export["run"], before["run"]);
+    assert_eq!(backend.native.export["options"], before["options"]);
+    assert_eq!(backend.native.export["destinationChoosing"], true);
+    assert_eq!(backend.native.platform.len(), 1);
+    assert_eq!(backend.native.platform[0].0, "export.destination.choose");
+    assert_eq!(backend.native.platform[0].1, before["options"]);
+    for command in ["export.destination.choose", "export.begin", "export.queue.add"] {
+        assert!(backend.native_command(command, &json!({"options":before["options"]})).is_err());
+    }
+    assert_eq!(backend.native.platform.len(), 1);
 }

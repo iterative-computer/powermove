@@ -1203,9 +1203,8 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     assert_eq!(decorated, Some((true, false)));
 }
 
-/// The export sheet's footer laid out with `offline` unreadable originals in
-/// a project export: the sheet, its notice and its two buttons.
-fn export_footer(cx: &mut TestAppContext, offline: usize) -> [Bounds<Pixels>; 4] {
+/// Output settings with an offline-media notice above the pinned actions.
+fn export_footer(cx: &mut TestAppContext, offline: usize) -> [Bounds<Pixels>; 5] {
     let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
         let deadline = Instant::now() + Duration::from_secs(20);
         while ticket.try_take().is_none() {
@@ -1251,29 +1250,26 @@ fn export_footer(cx: &mut TestAppContext, offline: usize) -> [Bounds<Pixels>; 4]
     [
         "export.sheet",
         "export.summary",
-        "export.cancel",
+        "export.queue.add",
         "export.start",
+        "export.footer",
     ]
     .map(|n| bounds(&mut vcx, n))
 }
 
-/// The footer keeps its buttons whole and inside the sheet however long its
-/// notice runs: the notice wraps beside them (Cancel was squeezed, and the
-/// AppKit button it hosts then pushed Export Video past the sheet's edge).
+/// A long notice wraps above the footer and never squeezes or scrolls its actions.
 #[gpui::test]
 fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppContext) {
-    let [_, _, cancel_alone, start_alone] = export_footer(cx, 0);
-    let [sheet, summary, cancel, start] = export_footer(cx, 12);
+    let [_, _, add_alone, start_alone, _] = export_footer(cx, 0);
+    let [sheet, summary, add, start, footer] = export_footer(cx, 12);
     assert_eq!(
-        (cancel.size.width, start.size.width),
-        (cancel_alone.size.width, start_alone.size.width),
+        (add.size.width, start.size.width),
+        (add_alone.size.width, start_alone.size.width),
         "buttons squeezed by the notice"
     );
-    assert!(
-        start.right() <= sheet.right() && summary.right() <= cancel.left(),
-        "notice {summary:?}, buttons {cancel:?} {start:?}, sheet {sheet:?}"
-    );
-    assert!(summary.size.height > cancel.size.height, "the notice wraps");
+    assert!(summary.bottom() <= footer.top(), "the notice sits above the actions");
+    assert!(add.left() >= footer.left() && start.right() <= footer.right(), "actions stay inside the footer");
+    assert!(footer.bottom() <= sheet.bottom() && start.bottom() <= footer.bottom(), "footer stays inside the sheet");
 }
 
 /// Full Keyboard Access: Tab reaches kit controls in order; `tabIndex` -1
@@ -1601,7 +1597,7 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
         {"id":4,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Failed","progress":0.,"error":"Missing media","finishedAt":1794686460}
     ])).unwrap());
     wait(rig.runtime.observe_export(json!({"phase":"rendering","frame":42,"total":100,"elapsed":2.})).unwrap());
-    wait(rig.runtime.show("export").unwrap());
+    wait(rig.runtime.show_section("export", "queue").unwrap());
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
     vcx.run_until_parked();
     vcx.update(|window, _| window.activate());

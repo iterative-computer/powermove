@@ -56,3 +56,26 @@ test("whole panel bundles and executes without Node/Chromium/DOM globals", async
     buffer: "undefined",
   });
 });
+
+test("the host can reveal Queue and reopening Export returns to settings", async () => {
+  const f = fixture();
+  const mounted = await mountExportPanel({
+    host: f.host,
+    anchor: 0,
+    subscription: "export.queue.fixture",
+    transport: async (c) => ({ accepted: true, revision: c.baseRevision + 1 }),
+  });
+  await mounted.show("queue");
+  expect(mounted.model.queueOpen).toBe(true);
+  expect(
+    mounted.root
+      .inspect()
+      .nodes.some((n) => n.props.id === "export.queue.empty"),
+  ).toBe(true);
+  await mounted.show();
+  expect(mounted.model.queueOpen).toBe(false);
+  expect(
+    mounted.root.inspect().nodes.some((n) => n.props.id === "export.format"),
+  ).toBe(true);
+  await mounted.dispose();
+});

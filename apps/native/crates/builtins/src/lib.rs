@@ -1715,6 +1715,11 @@ impl Builtins {
     pub fn observe_render_queue(&self, queue: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("export")?.eval(format!("runtime.engine('export.queueObserve',{});__pmBuiltin.publish()", queue))
     }
+    pub fn observe_export_destination(&self, destination: Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of("export")?.eval(format!(
+            "runtime.engine('export.destinationObserve',{});__pmBuiltin.publish()", destination
+        ))
+    }
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("export")?.eval(format!(
             "runtime.engine('export.observe',{});__pmBuiltin.publish()",
@@ -2359,6 +2364,15 @@ impl EngineProxy for Broker {
                 entry.overlay = Surface::default();
                 self.forget_overlay(panel);
                 (self.wake)();
+                Ok(Value::Null)
+            }
+            "export.destinationObserve" => {
+                let mut backend = entry.backend.shared();
+                if input["path"].is_string() {
+                    backend.native.export["destination"] = input.clone();
+                }
+                backend.native.export["destinationChoosing"] = json!(false);
+                backend.native.export["sequence"] = json!(backend.native.export["sequence"].as_u64().unwrap_or(0) + 1);
                 Ok(Value::Null)
             }
             "export.queueObserve" => {

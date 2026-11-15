@@ -105,6 +105,8 @@ export type QueueJob = {
 };
 export interface ExportSnapshot {
   queue?: QueueJob[];
+  destination?: { path: string; format: Format };
+  destinationChoosing?: boolean;
   version: 1;
   /** Monotonic export-observation sequence, independent of document revision. */
   sequence: number;
@@ -227,6 +229,20 @@ export function snapshot(value: unknown): ExportSnapshot {
     !object(value.run)
   )
     throw new TypeError("Invalid export projection");
+  if (
+    value.destination !== undefined &&
+    (!object(value.destination) ||
+      typeof value.destination.path !== "string" ||
+      !formats.some(
+        (f) => f.v === (value.destination as Record<string, unknown>).format,
+      ))
+  )
+    throw new TypeError("Invalid export destination");
+  if (
+    value.destinationChoosing !== undefined &&
+    typeof value.destinationChoosing !== "boolean"
+  )
+    throw new TypeError("Invalid destination picker state");
   const p = value.project;
   if (
     p !== null &&
@@ -351,6 +367,7 @@ export class ExportModel {
   presetName = "";
   chosenPreset = "";
   open = false;
+  queueOpen = false;
   error?: string;
   planningError?: string;
   presetError = false;
@@ -372,11 +389,51 @@ export class ExportModel {
   get kind() {
     return kindOf(this.options.format);
   }
+  get destination() {
+    return this.current.destination?.format === this.options.format
+      ? this.current.destination
+      : undefined;
+  }
+  showQueue() {
+    this.queueOpen = true;
+    this.changed();
+  }
+  backToSettings() {
+    this.queueOpen = false;
+    this.changed();
+  }
+  async dismiss() {
+    this.open = false;
+    this.queueOpen = false;
+    this.changed();
+    await this.command("export.dismiss");
+  }
+  async chooseDestination() {
+    if (this.locked || this.error || this.disposed) return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept(
+        (
+          await this.command("export.destination.choose", {
+            options: json(this.options),
+          })
+        ).value,
+      );
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
   get pending() {
     return this.busy;
   }
   get locked() {
-    return this.busy || this.current.run.phase !== "idle";
+    return (
+      this.busy ||
+      !!this.current.destinationChoosing ||
+      !["idle", "done", "cancelled"].includes(this.current.run.phase)
+    );
   }
   get canExport() {
     return (
@@ -430,6 +487,7 @@ export class ExportModel {
     if (next.sequence < this.current.sequence) return;
     if (this.current.project?.id !== next.project?.id) {
       this.open = false;
+      this.queueOpen = false;
       this.draftVersion++;
       replaceDraft = true;
     }
@@ -752,6 +810,13 @@ export class ExportModel {
       return true;
     }
     if (!this.open) return false;
+    if (this.queueOpen) {
+      if (key === "Escape") {
+        this.backToSettings();
+        return true;
+      }
+      if (!(meta && key === ".")) return false;
+    }
     if (presetField && key === "Enter") {
       await this.savePreset();
       return true;

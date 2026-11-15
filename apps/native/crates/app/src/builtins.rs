@@ -114,6 +114,7 @@ pub struct Host {
     pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
+    pub export_destination: Option<crate::export_coordinator::Destination>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,
@@ -1690,6 +1691,10 @@ impl Controller {
                         request.operation == "export.without",
                         cx,
                     );
+                    Ok(Value::Null)
+                }
+                "export.destination.choose" => {
+                    self.choose_builtin_export_destination(request.input.clone(), cx);
                     Ok(Value::Null)
                 }
                 "export.queue.add" => {
