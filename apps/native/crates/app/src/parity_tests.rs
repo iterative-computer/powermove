@@ -84,8 +84,13 @@ impl Desk {
         if let Some(call) = transaction(&plan, Some(published.revision())) {
             self.call(call);
         }
-        if let Some(ids) = plan.select {
-            self.call(SelectionCall::Layers { ids, add: false });
+        if plan.commands.is_empty()
+            && let Some(ids) = plan.select
+        {
+            self.call(SelectionCall::User(Box::new(SelectionCall::Layers {
+                ids,
+                add: false,
+            })));
         }
     }
     /// A chord through the shipped keymap.
@@ -1413,6 +1418,8 @@ fn linked_folder_save_reopen_resolves_in_place_without_retained_copy() {
 fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
     let desk = Desk::new(project(vec![]));
     let before = desk.document();
+    let before_selection = desk.published().selection.clone();
+    let entries = desk.published().history.entries;
     desk.run(command, args, 0.);
     assert_eq!(desk.layers().len(), 1);
     let ids = desk.selected();
@@ -1436,10 +1443,21 @@ fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
             .unwrap()
             .is_some()
     );
+    assert_eq!(desk.published().history.entries, entries + 1);
+    assert_ne!(
+        desk.published().history.undo_label.as_deref(),
+        Some("Selection")
+    );
+    let after_selection = desk.published().selection.clone();
     desk.undo();
     assert!(desk.layers().is_empty());
     assert_eq!(desk.document(), before);
+    assert_eq!(desk.published().selection, before_selection);
+    desk.redo();
+    assert_eq!(desk.published().selection, after_selection);
+    assert_eq!(desk.layers().len(), 1);
 }
+
 #[test]
 fn camera_entry_layer_new() {
     assert!(

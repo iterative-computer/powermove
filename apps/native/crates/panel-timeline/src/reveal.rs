@@ -300,7 +300,11 @@ impl TimelineModel {
         }
         self.graph_focus = Some((layer.into(), track));
         Ok(crate::Plan {
-            calls: vec![pm_kernel::SelectionCall::Channel(Some(channel.into())).into()],
+            calls: vec![
+                pm_kernel::SelectionCall::Channel(Some(channel.into()))
+                    .user()
+                    .into(),
+            ],
             ..Default::default()
         })
     }

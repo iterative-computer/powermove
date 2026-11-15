@@ -1620,11 +1620,13 @@ impl Controller {
     ) {
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {
-                self.call(SelectionCall::Layers { ids, add: false }.into(), cx);
+                self.call(
+                    SelectionCall::User(Box::new(SelectionCall::Layers { ids, add: false })).into(),
+                    cx,
+                );
             }
             return;
         };
-        let select = plan.select;
         let Some(session) = &self.session else { return };
         let counted = plan
             .count_keys
@@ -1648,9 +1650,6 @@ impl Controller {
                     {
                         let after = crate::layer_commands::key_count(&after, &ids);
                         v.note(format!("{before} → {after} keyframes"), cx);
-                    }
-                    if let Some(ids) = select {
-                        v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
                     }
                 }
                 other => v.edit_failed(other.and_then(Result::err)),
