@@ -4,6 +4,8 @@ use pm_kernel::SelectionCall;
 /// Keys are `(layer, key)`: key ids may repeat across layers.
 #[derive(Clone, Debug)]
 pub struct MarqueeSession {
+    before: pm_kernel::Selection,
+    document: u64,
     keys: Vec<(String, String)>,
     layers: Vec<String>,
     additive: bool,
@@ -13,6 +15,8 @@ pub struct MarqueeSession {
 impl MarqueeSession {
     pub fn begin(model: &TimelineModel, additive: bool, graph: bool) -> Self {
         Self {
+            before: model.selection.clone(),
+            document: model.index.doc_id,
             keys: model.selected_key_pairs(),
             layers: model.selection.layers().to_vec(),
             additive,
@@ -65,6 +69,17 @@ impl MarqueeSession {
         selection(selected_layers, keys)
     }
     pub fn finish(&self) -> Plan {
+        let mut plan = self.finish_selection();
+        plan.calls.push(
+            SelectionCall::FinishGesture {
+                document: self.document,
+                before: self.before.clone(),
+            }
+            .into(),
+        );
+        plan
+    }
+    fn finish_selection(&self) -> Plan {
         if !self.graph || self.additive {
             return Plan::default();
         }
@@ -87,12 +102,14 @@ impl MarqueeSession {
 fn selection(layers: Vec<String>, keys: Vec<(String, String)>) -> Plan {
     Plan {
         calls: vec![
-            SelectionCall::Layers {
-                ids: layers,
-                add: false,
-            }
+            SelectionCall::Preview(vec![
+                SelectionCall::Layers {
+                    ids: layers,
+                    add: false,
+                },
+                SelectionCall::LayerKeys(keys),
+            ])
             .into(),
-            SelectionCall::LayerKeys(keys).into(),
         ],
         ..Default::default()
     }

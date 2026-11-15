@@ -1797,6 +1797,7 @@ impl TimelineSurface {
                                     ids: vec![layer],
                                     add: false,
                                 }
+                                .user()
                                 .into(),
                             ],
                             ..Default::default()
@@ -2260,6 +2261,7 @@ impl TimelineSurface {
                             ids: vec![layer.clone()],
                             add: false,
                         }
+                        .user()
                         .into(),
                     ],
                     ..Default::default()
@@ -2684,7 +2686,7 @@ impl TimelineSurface {
                     self.queue.push_back(Job::Apply(session.finish()));
                 } else {
                     self.queue.push_back(Job::Apply(Plan {
-                        calls: vec![SelectionCall::Clear.into()],
+                        calls: vec![SelectionCall::Clear.user().into()],
                         ..Default::default()
                     }));
                 }
@@ -3253,7 +3255,6 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         Job::Finish(commit) => {
             if let Some(drag) = client.active_drag() {
                 let copies = drag.copies().map(<[String]>::to_vec);
-                client.finish_drag(commit).await.map_err(text)?;
                 // An Option-drag leaves its copies selected.
                 if let (true, Some(ids)) = (commit, copies) {
                     client
@@ -3264,6 +3265,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                         .await
                         .map_err(text)?;
                 }
+                client.finish_drag(commit).await.map_err(text)?;
             }
             Ok(vec![])
         }

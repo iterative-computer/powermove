@@ -117,6 +117,8 @@ pub struct TimelineModel {
     /// The published timeline UI last restored. The native tracks and the
     /// outline each hold a model; a disclosure one publishes reaches the other.
     ui_seen: Option<pm_model::json::Value>,
+    history_applied: usize,
+    history_entries: usize,
 }
 
 impl TimelineModel {
@@ -129,6 +131,12 @@ impl TimelineModel {
             *self = Self::default();
         }
         let selection_changed = self.selection.layers() != published.selection.layers();
+        let keys_changed = self.selection.keys() != published.selection.keys();
+        let selection_step = !changed
+            && self.history_applied != published.history.applied
+            && self.history_entries == published.history.entries;
+        self.history_applied = published.history.applied;
+        self.history_entries = published.history.entries;
         self.selection = published.selection.clone();
         if changed {
             self.index = TimelineIndex::shared(&published.snapshot, &self.index);
@@ -137,6 +145,9 @@ impl TimelineModel {
         if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
             self.ui_seen = Some(published.ui_state.timeline.clone());
             self.restore_ui(&published.ui_state);
+        }
+        if keys_changed || selection_step {
+            self.key_selection_active = !self.selection.keys().is_empty();
         }
         if selection_changed {
             let mut seen = HashSet::new();
@@ -559,6 +570,7 @@ impl TimelineModel {
                 ids: next,
                 add: false,
             }
+            .user()
             .into(),
         ])
     }
@@ -605,17 +617,14 @@ impl TimelineModel {
         self.key_selection_active = true;
         let mut calls = Vec::new();
         if additive || !self.selection.contains(layer) {
-            calls.push(
-                SelectionCall::Layers {
-                    ids: vec![layer.into()],
-                    add: additive,
-                }
-                .into(),
-            );
+            calls.push(SelectionCall::Layers {
+                ids: vec![layer.into()],
+                add: additive,
+            });
         }
-        calls.push(SelectionCall::Channel(Some(channel.into())).into());
-        calls.push(SelectionCall::LayerKeys(next).into());
-        Ok(calls)
+        calls.push(SelectionCall::Channel(Some(channel.into())));
+        calls.push(SelectionCall::LayerKeys(next));
+        Ok(vec![SelectionCall::Batch(calls).user().into()])
     }
 
     /// The selected keys as `(layer, key)`.
@@ -643,12 +652,15 @@ impl TimelineModel {
             }
         }
         vec![
-            SelectionCall::Layers {
-                ids: layers,
-                add: additive,
-            }
+            SelectionCall::Batch(vec![
+                SelectionCall::Layers {
+                    ids: layers,
+                    add: additive,
+                },
+                SelectionCall::Keys(selected_keys),
+            ])
+            .user()
             .into(),
-            SelectionCall::Keys(selected_keys).into(),
         ]
     }
 
