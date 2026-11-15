@@ -292,7 +292,7 @@ fn animated_legacy_upgrade_uses_original_expression_context() {
     assert_eq!(model["p"]["rotation.y"]["kf"][30]["v"], 50.);
 }
 #[test]
-fn legacy_history_and_redo_are_upgraded_and_original_archived() {
+fn legacy_history_and_redo_are_upgraded_without_duplicate_archive() {
     let mut dir = common::TempDir::new("scene3d-history");
     dir.0 = std::fs::canonicalize(&dir.0).unwrap();
     let p = json!({"id":"P","name":"History","compId":"C","w":640,"h":360,"fps":30,"dur":10,"layers":[{"id":"old","name":"Edited","type":"extension","from":0,"dur":5,"p":{},"d":{"definition":"powermove.3d.scene","data":{"scene":{"objects":[{"id":"box","source":{"primitive":"box"}}]}}}}],"assets":{}});
@@ -305,7 +305,7 @@ fn legacy_history_and_redo_are_upgraded_and_original_archived() {
     );
     assert_eq!(layer(&s, "old")["type"], "group");
     assert_eq!(layer(&s, "old")["name"], "Edited");
-    assert_eq!(project(&s)["native3dHistoryArchive"], history);
+    assert!(project(&s).get("native3dHistoryArchive").is_none());
     s.undo().unwrap();
     assert_eq!(layer(&s, "old")["name"], "Original");
     assert_eq!(layer(&s, "old")["type"], "group");

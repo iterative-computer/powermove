@@ -766,7 +766,7 @@ fn is_old_3d(definition: &str) -> bool {
 
 /// Upgrade each imported history state as well as the current document. Stable
 /// deterministic migration IDs make before/after diffs preserve Undo and Redo.
-/// A complete original logical history remains archived for recovery.
+/// Migrated undo is kept in the bounded history store, never in scene metadata.
 pub(crate) fn upgrade_document_history(
     document: pm_model::Document,
     history: crate::History,
@@ -792,7 +792,6 @@ pub(crate) fn upgrade_document_history(
             history,
         );
     }
-    let saved = history.snapshot().to_saved();
     let mut original = document.clone();
     let cursor = history.applied();
     let mut revision = original.revision();
@@ -839,7 +838,7 @@ pub(crate) fn upgrade_document_history(
         while next.applied() > cursor {
             next.mark_undone();
         }
-        next.set_max_bytes(history.stats().max_bytes.max(next.stats().bytes));
+        next.set_max_bytes(history.stats().max_bytes);
         Ok(next)
     })();
     if run.is_ok() && !needed {
@@ -847,9 +846,6 @@ pub(crate) fn upgrade_document_history(
     }
     let mut value = upgraded;
     if let Some(m) = value.as_object_mut() {
-        if m.get("native3dHistoryArchive").is_none() {
-            m.insert("native3dHistoryArchive", saved);
-        }
         m.insert("native3dHistoryVersion", Value::Number(1.));
     }
     match run {

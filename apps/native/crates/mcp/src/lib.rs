@@ -17,9 +17,9 @@ pub mod media_tools;
 pub mod memory;
 pub mod memory_admission;
 pub mod pro_edit;
+mod recovery;
 pub mod registration;
 pub mod registration_cli;
-mod recovery;
 pub mod scene3d;
 pub mod services;
 pub mod session;
@@ -125,8 +125,16 @@ pub(crate) fn model(value: &Value) -> pm_model::Value {
 /// A lone UTF-16 surrogate (valid in a saved project, as in JavaScript) has no
 /// serde form; such a string reads as U+FFFD instead of stopping the worker.
 pub(crate) fn json_value(value: &pm_model::Value) -> Value {
-    serde_json::from_str(&pm_model::json::to_canonical_string(value))
-        .unwrap_or_else(|_| lossy_json(value))
+    match value {
+        pm_model::Value::Array(items) => Value::Array(items.iter().map(json_value).collect()),
+        pm_model::Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.to_string_lossy(), json_value(value)))
+                .collect(),
+        ),
+        _ => serde_json::from_str(&pm_model::json::to_canonical_string(value))
+            .unwrap_or_else(|_| lossy_json(value)),
+    }
 }
 fn lossy_json(value: &pm_model::Value) -> Value {
     use pm_model::Value as V;

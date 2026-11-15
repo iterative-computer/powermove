@@ -881,3 +881,41 @@ fn authored_media_order_survives_open_edit_undo_save_and_reopen() {
     .unwrap();
     assert!(open_store(&sorted).root().unwrap().get(member).is_none());
 }
+
+#[test]
+fn obsolete_3d_archive_is_not_materialized_and_save_keeps_scene() {
+    let dir = TempDir::new("retired-3d-history");
+    let input = dir.path("legacy.json");
+    let project = r#"{"id":"P","name":"Scene","w":640,"h":360,"fps":30,"dur":10,"layers":[],"assets":{},"custom":{"native3dHistoryArchive":"authored"}}"#;
+    // 128 MiB of obsolete recovery data. Deliberately opaque syntax inside
+    // the balanced archive proves ingress does not parse its entries.
+    let archive = "x".repeat(128 * 1024 * 1024);
+    std::fs::write(
+        &input,
+        format!("{{\"proj\":{project},\"native\":true,\"history\":null}}"),
+    )
+    .unwrap();
+    let ordinary = DocumentStore::open(open_project(&input, Default::default()).unwrap());
+    let expected = ordinary.snapshot().document.to_value();
+    std::fs::write(
+        &input,
+        format!(
+            "{{\"proj\":{{\"native3dHistoryArchive\":[{archive}],{} }}}}",
+            &project[1..project.len() - 1]
+        ),
+    )
+    .unwrap();
+    drop(archive);
+    let start = std::time::Instant::now();
+    let mut store = DocumentStore::open(open_project(&input, Default::default()).unwrap());
+    assert!(
+        start.elapsed().as_secs_f64() < 10.,
+        "large archive open exceeded 10 seconds"
+    );
+    assert_eq!(store.snapshot().document.to_value(), expected);
+    let output = dir.path("compact.pmv");
+    save_as(&mut store, &output).unwrap();
+    assert!(std::fs::metadata(&output).unwrap().len() < 64 * 1024);
+    let reopened = DocumentStore::open(open_project(&output, Default::default()).unwrap());
+    assert_eq!(reopened.snapshot().document.to_value(), expected);
+}
