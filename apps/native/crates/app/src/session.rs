@@ -2998,6 +2998,21 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name == crate::v4_quote::CITE_COMMAND {
+            return self
+                .builtins
+                .views
+                .get("agent")
+                .cloned()
+                .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
+        }
+        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") {
+            if self.builtins.views.get("agent").cloned().is_some_and(|view| {
+                view.update(cx, |v, cx| v.copy_selection(window, cx))
+            }) {
+                return true;
+            }
+        }
         // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
         // flight where it began, the rest wait (no play, scrub or edits).
         if let Some(g) = self.builtins.gizmos.clone()
