@@ -3533,6 +3533,16 @@ impl Controller {
             // v1: Return (and the row menu's Rename…) opens the selected
             // layer's name field in the timeline; a text layer's Return edits
             // its text first (text.editSelected steps aside otherwise).
+            "saveAnimationPreset" => {
+                if let Some(runtime) = self.builtins.runtime.clone() {
+                    let _ = runtime
+                        .preset_sheet(cmd.args.first().cloned().unwrap_or(serde_json::json!({})));
+                    self.host
+                        .borrow()
+                        .send_command("panel:show:fxbrowser", vec![]);
+                    self.drain_builtins(cx);
+                }
+            }
             "renameLayer" => {
                 let Some(runtime) = self.builtins.runtime.clone() else {
                     return false;

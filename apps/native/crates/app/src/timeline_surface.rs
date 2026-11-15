@@ -2730,6 +2730,12 @@ impl TimelineSurface {
             .iter()
             .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
+        let preset_index = ids.len();
+        if matches!(context, MenuContext::Track { .. }) {
+            rows.push(
+                serde_json::json!({"id":"saveAnimationPreset","label":"Save Animation Preset…"}),
+            );
+        }
         let camera_index = ids.len() + 1;
         if matches!(context, MenuContext::Empty) {
             rows.push(empty_new_menu());
@@ -2741,6 +2747,21 @@ impl TimelineSurface {
             window,
             cx,
             Box::new(move |index, cx| {
+                if index == Some(preset_index) && matches!(context, MenuContext::Track { .. }) {
+                    let _ = weak.update(cx, |s, cx| {
+                        s.delegate.run(
+                            "saveAnimationPreset",
+                            match &context {
+                                MenuContext::Track { layer, channel } => {
+                                    vec![serde_json::json!({"layer":layer,"properties":[channel]})]
+                                }
+                                _ => vec![],
+                            },
+                            cx,
+                        )
+                    });
+                    return;
+                }
                 if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
                     let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
                     return;
