@@ -1091,11 +1091,18 @@ impl Viewer {
         })
     }
     /// Retarget a settled raster without exposing its drawable until complete.
-    pub fn retarget(&self, layer: metal::MetalLayer) -> Result<()> {
+    pub fn retarget(&self, layer: metal::MetalLayer, crop: Option<Crop>) -> Result<()> {
         self.edit(|v| {
             if let Some(old) = &v.config.layer {
                 v.retired_presenters.push(foreign_types::ForeignType::as_ptr(old) as usize);
             }
+            let size = layer.drawable_size();
+            v.config.output = Output {
+                width: size.width.round().max(1.) as u32,
+                height: size.height.round().max(1.) as u32,
+                crop,
+                ..v.config.output
+            };
             v.config.layer = Some(layer);
             v.stamp.generation += 1;
             v.stamp.sequence += 1;

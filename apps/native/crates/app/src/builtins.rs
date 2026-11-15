@@ -2126,7 +2126,8 @@ impl Controller {
                         && v.host.borrow_mut().stage_viewer_raster(layer.clone())
                         && let Some(viewer) = &v.viewer
                     {
-                        let _ = viewer.retarget(layer);
+                        let crop = v.host.borrow().viewer_crop.get().map(|[x, y, canvas_width, canvas_height]| pm_engine_service::Crop { x, y, canvas_width, canvas_height });
+                        let _ = viewer.retarget(layer, crop);
                         v.builtins.frame_outline = Default::default();
                     }
                 }

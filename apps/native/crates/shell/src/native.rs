@@ -3563,6 +3563,17 @@ impl Host {
             self.last_geometry = None;
             return false;
         }
+        // Configure the target before the worker can acquire its first drawable.
+        // A default-size first frame must never qualify for the atomic reveal.
+        if let Some(target) = self.viewer_geometry() {
+            unsafe { let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer]; }
+            layer.set_contents_scale(target.scale);
+            layer.set_drawable_size(core_graphics::geometry::CGSize::new(
+                target.layer.size.width * target.scale,
+                target.layer.size.height * target.scale,
+            ));
+            self.viewer_crop.set(target.crop);
+        }
         unsafe {
             let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
             let old = self.layer.as_ptr() as *mut AnyObject;
