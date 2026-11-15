@@ -1099,6 +1099,19 @@ impl TextLayout {
         document.byte_index_for_pixel_point(pixel_point - bounds.origin, line_height)
     }
 
+    /// The closest caret boundary, rather than the start of the glyph under the point.
+    pub fn closest_index_for_position(&self, pixel_point: Point<Pixels>) -> Result<usize, usize> {
+        let state = self.measured();
+        let bounds = state.bounds.expect("prepaint has not been performed");
+        if pixel_point.y < bounds.top() {
+            return Err(0);
+        }
+        let Some(document) = &state.document else {
+            return Err(0);
+        };
+        document.closest_byte_index_for_pixel_point(pixel_point - bounds.origin, state.line_height)
+    }
+
     /// Get the pixel position for the given byte index.
     pub fn position_for_index(&self, byte_index: usize) -> Option<Point<Pixels>> {
         let element_state = self.measured();

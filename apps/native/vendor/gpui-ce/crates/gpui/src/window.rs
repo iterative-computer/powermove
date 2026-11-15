@@ -5448,6 +5448,11 @@ impl Window {
         bounds
     }
 
+    /// Keep a custom text element's independent layout instead of collecting it as inline text.
+    pub fn mark_layout_atomic(&mut self, node_id: LayoutId) {
+        self.publish_inline_content(node_id, crate::InlineContent::Atomic);
+    }
+
     pub(crate) fn publish_inline_content(
         &mut self,
         node_id: LayoutId,
