@@ -1092,9 +1092,13 @@ impl DocumentStore {
             }
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
             let ops = match (command, property) {
-                (_, Some(c)) => {
-                    crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
-                }
+                (_, Some(c)) => crate::commands::properties::plan_set(
+                    tree,
+                    origin,
+                    c,
+                    &mut presets,
+                    &self.selection,
+                )?,
                 (Some(c), None) => c.plan_with_state(
                     tree,
                     origin,

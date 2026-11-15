@@ -1970,7 +1970,7 @@ fn preplanned_operations_are_bound_to_document_identity() {
     ));
 }
 #[test]
-fn selected_value_keys_edit_between_keys_without_inserting_a_new_one() {
+fn selected_value_keys_away_from_playhead_insert_normally() {
     let (_a, mut c) = client();
     select_keys(&mut c, &["a0", "a2"]);
     block_on(c.begin_drag(DragKind::Property {
@@ -1984,9 +1984,9 @@ fn selected_value_keys_edit_between_keys_without_inserting_a_new_one() {
     }))
     .unwrap();
     let ch = c.model.index.channel("a", "opacity").unwrap();
-    assert_eq!(ch.keys.len(), 2);
-    assert_eq!(ch.keys[0].value, Value::Number(15.));
-    assert_eq!(ch.keys[1].value, Value::Number(55.));
+    assert_eq!(ch.keys.len(), 3);
+    assert_eq!(ch.keys[0].value, Value::Number(10.));
+    assert_eq!(ch.keys[1].value, Value::Number(35.));
     block_on(c.finish_drag(false)).unwrap();
 }
 #[test]
@@ -2472,7 +2472,7 @@ fn text_stagger_gesture_updates_animator_channels_and_undo_restores_both() {
 }
 
 #[test]
-fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
+fn linked_scale_scrub_away_from_selected_keys_keys_the_playhead() {
     let mut v = fixture();
     layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
     let (_actor, mut c) = client_with(v);
@@ -2489,8 +2489,9 @@ fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
     .unwrap();
     for axis in ["scale.x", "scale.y"] {
         let ch = c.model.index.channel("a", axis).unwrap();
-        assert_eq!(ch.keys.len(), 1);
-        assert_eq!(ch.keys[0].value, Value::Number(105.));
+        assert_eq!(ch.keys.len(), 2);
+        assert_eq!(ch.keys[0].value, Value::Number(100.));
+        assert_eq!(ch.keys[1].value, Value::Number(105.));
         assert_eq!(ch.keys[0].time, 0.125);
     }
     block_on(c.finish_drag(false)).unwrap();
@@ -2547,4 +2548,33 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         }
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
+}
+
+#[test]
+fn selected_property_drag_sets_all_selected_keys_absolutely_and_undoes_once() {
+    let (_a, mut c) = client();
+    select_keys(&mut c, &["a0", "a2", "px"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "opacity".into())],
+        time: 1.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let ch = c.model.index.channel("a", "opacity").unwrap();
+    assert_eq!(ch.keys[0].value, Value::Number(15.));
+    assert_eq!(ch.keys[1].value, Value::Number(15.));
+    assert_eq!(
+        c.model.index.channel("a", "position.x").unwrap().keys[0].value,
+        Value::Number(5.)
+    );
+    undo(&mut c);
+    assert_eq!(
+        c.model.index.channel("a", "opacity").unwrap().keys[1].value,
+        Value::Number(50.)
+    );
 }
