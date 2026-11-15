@@ -1055,6 +1055,11 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
+        if let Some(tree) = start {
+            if let Some(ops) = crate::commands::layers::plan_starts(tree, commands) {
+                return self.stage_ops_from(start.cloned(), &ops?, true);
+            }
+        }
         let revision = self.revision() + 1;
         let mut root = start.cloned();
         let mut forward = Vec::new();
