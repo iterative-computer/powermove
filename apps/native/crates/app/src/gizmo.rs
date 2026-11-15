@@ -773,6 +773,11 @@ impl GizmoSurface {
                         s.poses = Arc::new(poses);
                     }
                     let had = s.studio.scene.is_some();
+                    // Flight belongs to the composition it began in. Stop its
+                    // timer and shortcut capture before adopting another scene.
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) || scene.is_none() {
+                        s.studio_fly_end(false, cx);
+                    }
                     let published = look.as_deref() == Some("free");
                     // A look this viewer wrote holds until it is published.
                     let mut free_look = match s.studio.look_pending {

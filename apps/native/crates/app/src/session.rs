@@ -2383,6 +2383,9 @@ impl Controller {
         history_rejected: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+        }
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
         }

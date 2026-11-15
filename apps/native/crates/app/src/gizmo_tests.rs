@@ -2823,3 +2823,22 @@ fn two_d_three_d_returns_to_camera_after_the_last_layer_is_removed(cx: &mut Test
         assert!(!g.studio_free());
     });
 }
+
+#[gpui::test]
+fn switching_to_2d_ends_fly_and_releases_its_shortcut_capture(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "camera", cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}
+
+#[gpui::test]
+fn toggling_to_2d_during_fly_uses_the_view_on_screen(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}

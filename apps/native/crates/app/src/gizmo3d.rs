@@ -469,6 +469,11 @@ impl GizmoSurface {
             _ => return,
         };
         if let Some(v) = allowed.iter().find(|a| **a == value) {
+            if key == "studioLook" {
+                // Resolve Toggle before cancelling: Fly restores its starting
+                // view, but the choice refers to the view currently on screen.
+                self.studio_fly_end(false, cx);
+            }
             if key == "studioLook" && *v == "free" {
                 self.studio_go_free(cx);
                 self.studio_push_view(cx);

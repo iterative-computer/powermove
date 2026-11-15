@@ -4308,6 +4308,31 @@ mod worker_tests {
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
     }
     #[test]
+    fn fly_camera_updates_do_not_select_auto_scrub_quality() {
+        let service = EngineService::start(pm_gpu::Gpu::new("fly-auto-quality").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
+        let shown = |v: &Viewer| {
+            let stamp = v.stamp();
+            wait_for(v, "camera frame", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok && Some(f.stamp) == stamp))
+        };
+        shown(&v);
+        let mut camera = studio::FreeView { ortho: false, roll: 0., eye: [0., 0., 5.], target: [0.; 3], zoom: 1. };
+        for step in 0..4 {
+            camera.eye[0] = f64::from(step);
+            v.studio_view_at(Some(camera), trace::now()).unwrap();
+            let status = shown(&v);
+            let frame = status.frame.unwrap();
+            assert_eq!(frame.moment, Moment::Paused);
+            assert!(frame.scale >= 1., "camera motion reduced Auto: {frame:?}");
+        }
+        v.studio_view(None).unwrap();
+        assert!(shown(&v).frame.unwrap().scale >= 1.);
+        v.retire();
+    }
+
+    #[test]
     fn camera_input_keeps_the_oldest_origin_across_superseded_frames() {
         let service=EngineService::start(pm_gpu::Gpu::new("camera-input-origin").unwrap()).unwrap();
         let v=shapes_viewer(&service,None);v.capture_next().unwrap();drawn(&v);
