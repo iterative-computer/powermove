@@ -3164,6 +3164,32 @@ impl SurfaceView {
                         .into_any_element()
                 });
             }
+            Kit::QueueProgress { value, ring } => {
+                if *ring {
+                    let value = *value;
+                    let accent = t.colors.accent;
+                    let track = t.colors.field;
+                    let stroke = t.metrics.export_job_progress_height;
+                    let side = t.metrics.symbol_panel;
+                    element = element.child(canvas(|_,_,_|(), move |bounds,_,window,_| {
+                        let center = bounds.center();
+                        let radius = side / 2. - stroke;
+                        for (fraction, color) in [(1., track), (value, accent)] {
+                            let mut path = PathBuilder::stroke(px(stroke));
+                            for step in 0..=48 {
+                                let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * fraction * step as f32 / 48.;
+                                let p = center + point(px(radius * angle.cos()), px(radius * angle.sin()));
+                                if step == 0 { path.move_to(p); } else { path.line_to(p); }
+                            }
+                            if let Ok(path) = path.build() { window.paint_path(path, rgb(color)); }
+                        }
+                    }).size(px(side)).flex_none());
+                } else {
+                    element = element.child(div().h(px(t.metrics.export_job_progress_height)).w_full()
+                        .rounded(px(t.metrics.border)).overflow_hidden().bg(rgb(t.colors.field))
+                        .child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent))));
+                }
+            }
             Kit::Progress(Some(value)) => {
                 let track = div()
                     .h(px(t.metrics.inner_radius))

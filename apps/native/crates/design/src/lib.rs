@@ -366,6 +366,10 @@ pub struct Metrics {
     /// Tallest a sheet's option body grows before it scrolls, so the sheet
     /// and its footer stay on screen.
     pub sheet_body_max: f32,
+    /// Compact two-line export queue rows and their inline progress indicator.
+    pub export_job_row: f32,
+    pub export_job_progress_width: f32,
+    pub export_job_progress_height: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
@@ -876,6 +880,9 @@ impl Tokens {
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
+                export_job_row: 44.,
+                export_job_progress_width: 80.,
+                export_job_progress_height: 2.,
                 composer_max_lines: 10.,
                 group_radius: radius.lg,
                 form_row: 40.,

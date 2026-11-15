@@ -545,6 +545,9 @@ const ROLES: &[(&str, &str)] = &[
         "Selected tab or segment over a raised track, never the accent (derived)",
     ),
     ("metrics.tab", "Text tab and full-height segmented control"),
+    ("metrics.export_job_row", "Two-line export job row height"),
+    ("metrics.export_job_progress_width", "Inline export job progress width"),
+    ("metrics.export_job_progress_height", "Inline export job progress stroke"),
     (
         "metrics.sheet_body_max",
         "Tallest sheet option body before it scrolls",

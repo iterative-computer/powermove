@@ -615,3 +615,60 @@ test("queue shows progress, pending controls, failed retry and completed Finder 
   check(replay(f.commits));
   await f.root.dispose();
 });
+
+test("each queue status has exactly its inline actions, revealed on hover and keyboard focus", async () => {
+  const seed = initial();
+  seed.run = { phase: "rendering", frame: 42, total: 100, elapsed: 2 };
+  seed.queue = (
+    ["Pending", "Rendering", "Done", "Failed", "Cancelled"] as const
+  ).map((status, index) => ({
+    id: index + 1,
+    name: `Job ${index + 1}`,
+    format: "mp4",
+    path: `/Exports/Job-${index + 1}.mp4`,
+    status,
+    progress: 0.42,
+    error: "",
+    finishedAt:
+      status === "Done" || status === "Failed" ? 1700000000 + index : 0,
+  }));
+  const f = await mounted(seed);
+  const expected = [
+    ["cancel"],
+    ["cancel"],
+    ["finder", "remove"],
+    ["retry", "remove"],
+    ["remove"],
+  ];
+  for (const [index, actions] of expected.entries()) {
+    const id = index + 1;
+    const jobRow = named(f.root, `queue.job.${id}`);
+    expect(jobRow.props.style).toMatchObject({
+      height: { token: "metrics.export_job_row" },
+    });
+    for (const action of ["cancel", "retry", "finder", "remove"]) {
+      const node = [...f.root.host.nodes.values()].find(
+        (n) => n.props.id === `queue.${action}.${id}`,
+      );
+      expect(!!node).toBe(actions.includes(action));
+      if (node) {
+        expect(node.props.title).toBeTruthy();
+        expect(node.props.label).toContain(`Job ${id}`);
+        expect(node.parent?.props.style).toMatchObject({ opacity: 0 });
+      }
+    }
+    await event(f.root, jobRow.id, "pointerenter");
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "pointerleave");
+    await event(f.root, jobRow.id, "focus");
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+  }
+  check(replay(f.commits));
+  await f.root.dispose();
+});

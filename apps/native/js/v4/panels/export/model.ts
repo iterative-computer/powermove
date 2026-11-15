@@ -96,6 +96,8 @@ export type QueueJob = {
   id: number;
   name: string;
   format: string;
+  profile?: string;
+  finishedAt?: number;
   path: string;
   status: "Pending" | "Rendering" | "Done" | "Failed" | "Cancelled";
   progress: number;

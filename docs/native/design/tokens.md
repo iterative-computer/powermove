@@ -94,6 +94,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
 | `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
+| `metrics.export_job_progress_height` | Inline export job progress stroke | 2 | 2 | 2 | 2 |
+| `metrics.export_job_progress_width` | Inline export job progress width | 80 | 80 | 80 | 80 |
+| `metrics.export_job_row` | Two-line export job row height | 44 | 44 | 44 | 44 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
 | `metrics.field_menu_width` | Field menu width | 300 | 300 | 300 | 300 |

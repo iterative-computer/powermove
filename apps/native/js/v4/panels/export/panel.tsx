@@ -2,6 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useLayoutEffect, useReducer } from "preact/hooks";
 import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
+import { RenderQueue } from "./queue";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
   audioCodings,
@@ -53,8 +54,8 @@ const stack = { display: "flex", flexDirection: "column" } as const;
  * row inset inside the cards' leading edge.
  */
 const column = {
-  paddingLeft: token("metrics.inset"),
-  paddingRight: token("metrics.inset"),
+  paddingLeft: 0,
+  paddingRight: 0,
 } as const;
 /** Between the title and the actions; the sheet's height follows it. */
 const body = { ...stack, gap: token("metrics.inset") } as const;
@@ -240,80 +241,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     : (blocked ?? p.summary);
   const timed = timedSummary(summary);
   const queue = (
-    <div
-      role="group"
-      label="Queue"
-      style={{ ...stack, ...column, gap: token("metrics.gap") }}
+    <scroll
+      id="export.queue.rows"
+      style={{ ...stack, maxHeight: token("metrics.sheet_body_max") }}
     >
-      <div style={line}>
-        <text style={text}>Queue</text>
-        <Action
-          id="export.queue.render"
-          label="Render Pending"
-          disabled={
-            !(s.queue ?? []).some((j) => j.status === "Pending") ||
-            (s.queue ?? []).some((j) => j.status === "Rendering")
-          }
-          onClick={() => watch(model.command("export.queue.render"))}
-        />
-      </div>
-      <scroll
-        id="export.queue.rows"
-        style={{ ...stack, maxHeight: token("metrics.sheet_body_max") }}
-      >
-        {(s.queue ?? []).length === 0 ? (
-          <text style={detail}>The render queue is empty.</text>
-        ) : null}
-        {(s.queue ?? []).map((job) => (
-          <div
-            key={job.id}
-            style={{ ...stack, ...column, gap: token("metrics.gap") }}
-          >
-            <text
-              style={text}
-            >{`${job.name} · ${job.format.toUpperCase()} · ${job.status}${job.status === "Rendering" ? ` ${Math.round(job.progress * 100)}%` : ""}`}</text>
-            <text style={detail}>{job.path}</text>
-            {job.error ? (
-              <text style={{ ...detail, color: token("colors.danger") }}>
-                {job.error}
-              </text>
-            ) : null}
-            <div style={line}>
-              {job.status === "Failed" || job.status === "Cancelled" ? (
-                <Action
-                  id={`queue.retry.${job.id}`}
-                  label="Retry"
-                  onClick={() => watch(model.queueAction(job.id, "retry"))}
-                />
-              ) : null}
-              {job.status === "Pending" || job.status === "Rendering" ? (
-                <Action
-                  id={`queue.cancel.${job.id}`}
-                  label="Cancel"
-                  onClick={() => watch(model.queueAction(job.id, "cancel"))}
-                />
-              ) : null}
-              {job.status !== "Rendering" ? (
-                <Action
-                  id={`queue.remove.${job.id}`}
-                  label="Remove"
-                  onClick={() => watch(model.queueAction(job.id, "remove"))}
-                />
-              ) : null}
-              {job.status === "Done" ? (
-                <Action
-                  id={`queue.finder.${job.id}`}
-                  label="Show in Finder"
-                  onClick={() =>
-                    watch(model.command("export.queue.finder", { id: job.id }))
-                  }
-                />
-              ) : null}
-            </div>
-          </div>
-        ))}
-      </scroll>
-    </div>
+      <RenderQueue model={model} watch={watch} />
+    </scroll>
   );
   return (
     <UI.SheetAnchor
@@ -322,16 +255,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       anchor={anchor}
       open
       style={{
-        padding: token("metrics.sheet_inset"),
+        padding: token("space.xl"),
         width: token("metrics.sheet_width_wide"),
-        gap: token("metrics.inset"),
+        gap: token("space.lg"),
       }}
-      // No substitute for missing wide-sheet/inset tokens. Metadata is a request,
-      // not a claim the current kit interprets these properties.
+      // Shared tokens keep the sheet and its compact rows on the same grid.
       metadata={{
         export: {
           width: "metrics.sheet_width_wide",
-          inset: "metrics.sheet_inset",
+          inset: "space.xl",
           dismissOutside: false,
           dismissEscape: !progressSheet,
           initialFocus: progressSheet ? null : "export.kind",
@@ -346,15 +278,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         style={{
           ...column,
           color: token("colors.text"),
-          fontSize: token("typography.heading"),
+          fontSize: token(
+            progressSheet ? "typography.body" : "typography.heading",
+          ),
           fontWeight: token("typography.display_weight"),
         }}
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
-      {progressSheet || s.run.phase === "done" || model.kind === "project"
-        ? queue
-        : null}
+      {s.run.phase === "done" || model.kind === "project" ? queue : null}
       {s.run.phase === "done" ? (
         <div role="status" id="export.completed" style={body}>
           <text style={text}>Export complete</text>
@@ -429,11 +361,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               </>
             )}
           </div>
+          <div style={column}>{queue}</div>
           <div
             role="group"
             label="Export"
             metadata={{ export: { recipe: "sheet-footer" } }}
-            style={{ ...footer, justifyContent: "end" }}
+            style={{ ...footer, ...column, justifyContent: "end" }}
           >
             {s.run.phase === "failed" ? (
               <>
@@ -541,7 +474,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   maxHeight: token("metrics.sheet_body_max"),
                 }}
               >
-                {queue}
+                <div style={column}>{queue}</div>
                 <Group label="Output">
                   {select(
                     "format",

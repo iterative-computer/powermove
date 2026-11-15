@@ -129,6 +129,7 @@ pub enum Kit {
         keyline: u32,
     },
     Progress(Option<f32>),
+    QueueProgress { value: f32, ring: bool },
     Anchored {
         anchor: Option<Id>,
         point: Option<(f32, f32)>,
@@ -985,6 +986,10 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
         Some(Component::ColourWell) => Kit::Swatch {
             color: value.and_then(Value::as_str).and_then(parse_hex),
             keyline: t.colors.separator,
+        },
+        Some(Component::ProgressRow) if node.props.get("metadata").and_then(|m|m.get("pmKit")).and_then(|m|m.get("queueProgress")).is_some() => Kit::QueueProgress {
+            value: node.props.get("aria-valuenow").and_then(Value::as_f64).unwrap_or(0.).clamp(0.,1.) as f32,
+            ring: node.props["metadata"]["pmKit"]["queueProgress"] == "ring",
         },
         Some(Component::ProgressRow) => Kit::Progress(
             node.props

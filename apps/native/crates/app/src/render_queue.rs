@@ -7,6 +7,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 pub type Store = Arc<Mutex<Queue>>;
 pub fn store(profile: &Path) -> Store {
     static STORES: OnceLock<Mutex<HashMap<PathBuf, Store>>> = OnceLock::new();
@@ -27,6 +33,8 @@ struct Row {
     input: Value,
     #[serde(default)]
     cancel: bool,
+    #[serde(default)]
+    finished_at: u64,
 }
 pub struct Queue {
     path: PathBuf,
@@ -92,6 +100,7 @@ impl Queue {
                 progress: 0.,
                 input,
                 cancel: false,
+                finished_at: 0,
             });
             Ok(id)
         })
@@ -115,6 +124,9 @@ impl Queue {
                 .ok_or("Queue job missing")?;
             row.status = status.into();
             row.error = error;
+            if status != "Rendering" {
+                row.finished_at = now();
+            }
             if status == "Done" {
                 row.progress = 1.;
             }
@@ -123,6 +135,10 @@ impl Queue {
     }
     pub fn action(&mut self, id: u64, action: &str) -> Result<(), String> {
         self.change(|rows| {
+            if action == "clear" {
+                rows.retain(|r| r.status == "Pending" || r.status == "Rendering");
+                return Ok(());
+            }
             let row = rows
                 .iter_mut()
                 .find(|r| r.id == id)
@@ -133,9 +149,13 @@ impl Queue {
                     row.error.clear();
                     row.progress = 0.;
                     row.cancel = false;
+                    row.finished_at = 0;
                 }
                 "cancel" if row.status == "Rendering" => row.cancel = true,
-                "cancel" if row.status == "Pending" => row.status = "Cancelled".into(),
+                "cancel" if row.status == "Pending" => {
+                    row.status = "Cancelled".into();
+                    row.finished_at = now();
+                }
                 "remove" if row.status != "Rendering" => rows.retain(|r| r.id != id),
                 _ => return Err("This queue action is unavailable".into()),
             }
@@ -152,7 +172,7 @@ impl Queue {
     }
     pub fn projection(&self) -> Value {
         json!(self.rows.iter().map(|r|json!({"id":r.id,"name":r.input["name"],"format":r.input["options"]["format"],
-            "path":r.input["destination"],"status":r.status,"progress":r.progress,"error":r.error})).collect::<Vec<_>>())
+            "profile":r.input["options"]["profile"],"finishedAt":r.finished_at,"path":r.input["destination"],"status":r.status,"progress":r.progress,"error":r.error})).collect::<Vec<_>>())
     }
 }
 #[cfg(test)]
@@ -212,6 +232,23 @@ mod tests {
         assert!(q.take_pending().unwrap().is_none());
         q.finish(first, "Cancelled", String::new()).unwrap();
         assert_eq!(q.take_pending().unwrap().unwrap().0, second);
+    }
+    #[test]
+    fn clear_history_keeps_pending_and_running_jobs_and_completion_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut q = Queue::load(dir.path().join("queue.json"));
+        let done = q.add(json!({"name":"Done"})).unwrap();
+        q.take_pending().unwrap();
+        q.finish(done, "Done", String::new()).unwrap();
+        assert!(q.rows[0].finished_at > 0);
+        let running = q.add(json!({"name":"Running"})).unwrap();
+        q.take_pending().unwrap();
+        let pending = q.add(json!({"name":"Pending"})).unwrap();
+        q.action(0, "clear").unwrap();
+        assert_eq!(
+            q.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![running, pending]
+        );
     }
     #[test]
     fn broken_store_is_preserved_and_write_failure_rolls_back() {
