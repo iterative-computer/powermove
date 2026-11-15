@@ -692,6 +692,8 @@ impl Controller {
             }
         })
         .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -735,6 +737,11 @@ impl Controller {
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {
                                     v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { .. } => {
+                                    crate::appearance::follow(&v.kernel.state())
                                 }
                                 _ => {}
                             }
@@ -2677,7 +2684,7 @@ impl Controller {
         })
         .detach();
     }
-    fn project_name(&self) -> String {
+    pub(crate) fn project_name(&self) -> String {
         self.published
             .as_ref()
             .and_then(|p| p.snapshot.document.root())
@@ -3157,9 +3164,8 @@ impl Controller {
             // The gear and ⌘, toggle: Settings showing closes, back to the
             // tab it came forward over; open behind another tab, it comes
             // forward. Its rows have saved as they changed (as its × closes).
-            "settings" if self.pages.toggle_closes("settings") => {
-                self.close_tab_page("settings", cx)
-            }
+            // ⌘, with Settings in front closes it.
+            "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
@@ -3543,12 +3549,8 @@ impl Controller {
                 if self.published.is_none() {
                     return false;
                 }
+                self.builtins.settings_page = Some("project".into());
                 self.show_builtin("settings", window, cx);
-                if let Some(view) = self.builtins.views.get("settings") {
-                    view.update(cx, |v, cx| {
-                        v.scroll_semantic("settings.section.project", cx)
-                    });
-                }
             }
             "actualSize" => self.step_zoom(1., Some(1.), window, cx),
             "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),

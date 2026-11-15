@@ -1650,6 +1650,12 @@ impl Builtins {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.show({section})"))
     }
+    /// Something done in a panel's native chrome (Settings' sidebar and
+    /// search field), for the panel's model.
+    pub fn panel_act(&self, panel: &str, intent: &Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.act({intent})"))
+    }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
     }
