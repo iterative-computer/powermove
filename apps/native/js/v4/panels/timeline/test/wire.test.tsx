@@ -173,7 +173,10 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     overflow: "hidden",
   });
   expect(switches.props.style).toMatchObject({ flexShrink: 0 });
-  // v1: the name is the reorder handle (the native surface lifts it).
+  // The whole header is a source; interactive children keep their own pointer handlers.
+  expect(row.props.metadata).toMatchObject({
+    timelineLayerDrag: { layer: "headline" },
+  });
   expect(
     byId(root, "timeline:name:layer:headline").props.metadata,
   ).toMatchObject({
@@ -540,5 +543,43 @@ test("group children retain the number column and shift right at depths 0/1/2", 
     expect(spacers.length * 12).toBe([0, 12, 24][depth]);
     expect(JSON.stringify(tree(root))).toContain("01");
   }
+  await root.dispose();
+});
+
+test("reorder sources belong to layer headers and pause during inline rename", async () => {
+  const { root } = recorder();
+  const header = layer();
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [header] } })}
+      send={() => {}}
+    />,
+  );
+  for (const id of ["disclosure", "parent", "visibility"])
+    expect(
+      byId(root, `timeline:${id}:${header.id}`).props.metadata
+        ?.timelineLayerDrag,
+    ).toBeUndefined();
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        window: {
+          total: 1,
+          first: 0,
+          rows: [
+            {
+              ...header,
+              nameEditor: { value: header.label, binding: "rename" },
+            },
+          ],
+        },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(
+    byId(root, `timeline:row:${header.id}`).props.metadata.timelineLayerDrag,
+  ).toBeUndefined();
+  expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
   await root.dispose();
 });

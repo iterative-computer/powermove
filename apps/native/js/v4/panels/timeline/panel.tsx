@@ -758,7 +758,14 @@ const TimelineRow = memo(
           nativeRow: row.id,
           depth: row.depth,
           designTodo: "T4",
-          ...(row.kind === "layer" ? { media: row.media } : {}),
+          ...(row.kind === "layer"
+            ? {
+                media: row.media,
+                ...(!row.nameEditor
+                  ? { timelineLayerDrag: { layer: row.layer } }
+                  : {}),
+              }
+            : {}),
         }}
         onClickCapture={(event) => {
           clickModifiers = modifiers(event);
