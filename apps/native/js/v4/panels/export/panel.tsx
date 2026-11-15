@@ -594,7 +594,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                         label={`Render time ${p.studio.estimate}`}
                         style={{
                           ...text,
-                          fontWeight: "600",
+                          fontWeight: token("typography.display_weight"),
                           fontVariantNumeric: "tabular-nums",
                           color: token(
                             p.studio.state === "measuring"
@@ -722,7 +722,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                           : "colors.text",
                       ),
                       fontSize: token("typography.body"),
-                      fontWeight: "600",
+                      fontWeight: token("typography.display_weight"),
                       fontVariantNumeric: "tabular-nums",
                     }}
                   >

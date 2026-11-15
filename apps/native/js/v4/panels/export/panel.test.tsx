@@ -481,9 +481,9 @@ test("a 3D export states its preset's promise, its render time and the 75% optio
   );
   expect(named(f.root, "export.summary").props.label).toBe(project.summary);
   expect(
-    (named(f.root, "export.summaryTime").props.style as { fontWeight: string })
+    (named(f.root, "export.summaryTime").props.style as { fontWeight: unknown })
       .fontWeight,
-  ).toBe("600");
+  ).toEqual({ token: "typography.display_weight" });
   // Render at 75% Size is offered, and off unless chosen.
   expect(named(f.root, "export.studioReducedSize").props.value).toBe(false);
   await f.root.dispose();
