@@ -769,3 +769,50 @@ fn raw_queries_address_a_root_level_composition() {
     let value = q.query(&request).unwrap();
     assert_eq!(value.as_f64(), Some(0.4));
 }
+
+#[test]
+fn decoded_change_log_is_bounded_by_bytes_and_falls_back_to_snapshot() {
+    let mut s = store();
+    let old = s.revision();
+    for i in 0..12 {
+        s.execute(
+            Command::SetLayerName {
+                layer_id: "s1".into(),
+                name: format!("{i}{}", "x".repeat(2 * 1024 * 1024)),
+            },
+            Origin::Mcp,
+        )
+        .unwrap();
+    }
+    assert!(s.changes_since(old).is_none());
+    assert_eq!(s.changes_since(s.revision() - 1).unwrap().len(), 1);
+    let snapshot = s.snapshot();
+    assert!(snapshot.root().is_some());
+    assert!(s.undo().is_ok());
+    assert!(s.redo().is_ok());
+}
+
+#[test]
+fn oversized_change_is_delivered_but_not_retained_in_incremental_log() {
+    let mut s = store();
+    let old = s.revision();
+    let count = Arc::new(Mutex::new(0));
+    let c = count.clone();
+    s.subscribe(move |e| {
+        if matches!(e, StoreEvent::Changed(_)) {
+            *c.lock().unwrap() += 1;
+        }
+    });
+    s.execute(
+        Command::SetLayerName {
+            layer_id: "s1".into(),
+            name: "x".repeat(17 * 1024 * 1024),
+        },
+        Origin::Mcp,
+    )
+    .unwrap();
+    assert_eq!(*count.lock().unwrap(), 1);
+    assert!(s.changes_since(old).is_none());
+    assert!(s.changes_since(s.revision()).unwrap().is_empty());
+    assert_eq!(name(&s, "s1").len(), 17 * 1024 * 1024);
+}
