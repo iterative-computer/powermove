@@ -34,7 +34,8 @@ pub const SEQUENCE_PIPELINE: u32 = 2;
 impl ProxyRecipe {
     /// 4: every colour field is tagged with the original's reading
     /// (untagged originals' proxies were read by their own size).
-    pub const VERSION: u32 = 4;
+    /// 5: retain VP8/VP9 alpha and fit portrait HD previews in 1080×1920.
+    pub const VERSION: u32 = 5;
 
     pub fn new(
         requested_format: ProxyFormat,
@@ -57,7 +58,13 @@ impl ProxyRecipe {
             // Fit the whole HD box, including ultrawide and portrait media.
             // VideoToolbox memory follows coded pixels, not the viewer crop.
             ProxySize::P1080 => {
-                ((u64::from(source_height) * 1920) / u64::from(source_width)).clamp(1, 1080) as u32
+                let (box_width, box_height) = if source_height > source_width {
+                    (1080, 1920)
+                } else {
+                    (1920, 1080)
+                };
+                ((u64::from(source_height) * box_width) / u64::from(source_width))
+                    .clamp(1, box_height) as u32
             }
             ProxySize::P720 => 720,
         };

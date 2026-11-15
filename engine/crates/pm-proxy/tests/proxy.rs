@@ -681,3 +681,102 @@ fn machine_profile_uses_injected_power_and_propagates_probe_failures() {
     assert!(pm_proxy::probe_machine_profile_with(dir.path(), f64::NAN, &Probe(false)).is_err());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn webm_preview_preserves_alpha_samples() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("alpha.webm");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red@0.5:s=128x72:r=24:d=0.5,format=yuva420p",
+            "-c:v",
+            "libvpx-vp9",
+            "-lossless",
+            "1",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::Hevc10,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert_eq!(output.stored.recipe.codec(), "prores_4444");
+    assert!(output.stored.recipe.source_has_alpha);
+    let decoded = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&output.stored.path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "alphaextract,format=gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    assert!(!decoded.stdout.is_empty());
+    assert!(
+        decoded.stdout.iter().all(|&a| (120..=136).contains(&a)),
+        "the half-transparent WebM must not become opaque"
+    );
+}
+
+#[test]
+fn portrait_hd_preview_fits_the_portrait_composition() {
+    let recipe = |w, h| {
+        ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false).unwrap()
+    };
+    let portrait = recipe(2160, 3840);
+    assert_eq!((portrait.width, portrait.height), (1080, 1920));
+    let landscape = recipe(3840, 2160);
+    assert_eq!((landscape.width, landscape.height), (1920, 1080));
+    let small = recipe(540, 960);
+    assert_eq!((small.width, small.height), (540, 960));
+}
