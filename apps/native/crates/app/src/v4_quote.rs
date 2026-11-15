@@ -256,6 +256,11 @@ mod shaped_tests {
                     [
                         (1, 0, "First 😀 paragraph wraps here"),
                         (2, 32, "Second paragraph"),
+                        (
+                            3,
+                            49,
+                            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                        ),
                     ]
                     .into_iter()
                     .map(|(id, offset, content)| {
@@ -313,6 +318,9 @@ mod shaped_tests {
             let point = second.layout.position_for_index(3).unwrap();
             assert_eq!(selected.hit(10, point), Some(35));
             assert!(first.layout.bounds().size.height > first.layout.line_height());
+            let unbroken = &selected.blocks[&3];
+            assert!(unbroken.layout.bounds().size.height > unbroken.layout.line_height());
+            assert!(unbroken.layout.bounds().size.width <= px(110.));
         });
     }
 }
