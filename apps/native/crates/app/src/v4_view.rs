@@ -2145,6 +2145,9 @@ impl SurfaceView {
         true
     }
     fn quote_owner(&self, mut id: Id) -> Option<Id> {
+        if self.publication.panel != "agent" {
+            return None;
+        }
         loop {
             if self
                 .publication
