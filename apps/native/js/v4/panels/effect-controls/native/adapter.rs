@@ -409,3 +409,53 @@ fn option_diamond_on_static_parameter_is_a_noop_and_does_not_add_animation() {
     f.step(r#"{"type":"parameter","id":"{\"layer\":\"a\",\"path\":\"f1.radius\"}","action":"stopwatch"}"#);
     assert_eq!(f.model.revision(), f.initial_revision);
 }
+
+#[test]
+fn add_repopulates_a_zero_length_viewport_in_its_acknowledged_projection() {
+    let mut f = Fixture::new(project(), 0..0);
+    f.select("a");
+    f.model
+        .register_effect(definition(vec![param("radius".into())]));
+    f.step(r#"{"type":"range","range":[0,0]}"#);
+    f.step(r#"{"type":"add","definition":"glow"}"#);
+    let p = f.project();
+    let focus = p.get("focus").unwrap().as_str().unwrap();
+    assert!(rows(&p).iter().any(|r| {
+        r.get("kind").and_then(Value::as_str) == Some("parameter")
+            && r.get("parameter")
+                .and_then(|p| p.get("effect"))
+                .and_then(Value::as_str)
+                == Some(focus)
+    }));
+}
+
+#[test]
+fn a_drop_moves_only_the_primary_stack_with_one_undo_and_preserves_effect_data() {
+    let mut f = Fixture::new(project(), 0..32);
+    f.select("a");
+    let before = f.model.layer("a").unwrap().get("fx").unwrap().clone();
+    let history = f.handle.published("P").unwrap().history.entries;
+    f.step(r#"{"type":"drop","id":"f1","slot":3}"#);
+    assert_eq!(
+        f.handle.published("P").unwrap().history.entries,
+        history + 1
+    );
+    let after = f.model.layer("a").unwrap().get("fx").unwrap().clone();
+    let previous = before.as_array().unwrap();
+    let moved = after.as_array().unwrap();
+    assert_eq!(
+        moved,
+        &vec![
+            previous[1].clone(),
+            previous[2].clone(),
+            previous[0].clone()
+        ]
+    );
+    f.handle
+        .call("P", Request::new(Caller::native(), HistoryCall::Undo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    f.sync();
+    assert_eq!(f.model.layer("a").unwrap().get("fx").unwrap(), &before);
+}

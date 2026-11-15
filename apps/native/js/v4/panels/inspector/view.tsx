@@ -1,3 +1,5 @@
+import { EffectControls } from "../effect-controls/panel";
+import type { EffectsController } from "../effect-controls/controller";
 import { useLayoutEffect, useState } from "preact/hooks";
 import type { ComponentChildren } from "preact";
 import {
@@ -730,8 +732,10 @@ function FinishShelf({
 }
 export function InspectorPanel({
   session,
+  effects,
 }: {
   session: InspectorSession;
+  effects?: { controller: EffectsController; rowHeight: number };
   key?: string;
 }) {
   const [, refresh] = useState(0);
@@ -913,7 +917,17 @@ export function InspectorPanel({
               })
             }
             accessory={
-              section.actions ? (
+              section.id === "effects" && effects ? (
+                <Action
+                  id="inspector:add-effect"
+                  label="Add effect"
+                  symbol="plus"
+                  disabled={target.kind !== "layers" || target.first.locked}
+                  onActivate={() => {
+                    void effects.controller.add().catch(session.onError);
+                  }}
+                />
+              ) : section.actions ? (
                 // Several actions (Time) stand in a row at the trailing edge.
                 <div style={{ ...horizontal, gap: token("metrics.border") }}>
                   {section.actions.map((action) =>
@@ -925,6 +939,9 @@ export function InspectorPanel({
               ) : undefined
             }
           >
+            {section.id === "effects" && effects ? (
+              <EffectControls {...effects} embedded />
+            ) : null}
             {section.finishes ? (
               <FinishShelf
                 finishes={section.finishes}
@@ -1040,7 +1057,9 @@ export function InspectorPanel({
           Properties
         </text>
         <div style={horizontal}>
-          {target.kind === "layers" && target.first.acceptsEffects ? (
+          {!effects &&
+          target.kind === "layers" &&
+          target.first.acceptsEffects ? (
             <Action
               id="inspector:add-effect"
               label="Add Effect"

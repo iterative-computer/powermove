@@ -2037,6 +2037,18 @@ impl SurfaceView {
                         }
                     });
                 });
+                let cancelled = weak.clone();
+                window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture && event.keystroke.key == "escape" {
+                        let _ = cancelled.update(cx, |v, cx| {
+                            if v.dragging.is_some() {
+                                cx.stop_active_drag(window);
+                                v.end_drag(cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
@@ -2777,6 +2789,10 @@ impl SurfaceView {
             let panel = self.publication.panel.clone();
             let own = move |drag: &PanelDrag| drag.panel == panel;
             let own_over = own.clone();
+            let effect_target = node
+                .semantic
+                .as_ref()
+                .is_some_and(|s| s.starts_with("layer-effects:effect:"));
             element = element
                 .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))
                 .on_drop(cx.listener(move |v, paths: &ExternalPaths, window, cx| {
@@ -2784,6 +2800,52 @@ impl SurfaceView {
                     let detail = file_drop(paths.paths(), window.modifiers().alt);
                     v.send(id, "drop", detail, cx);
                 }))
+                .on_drag_move(
+                    cx.listener(move |v, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                        if effect_target
+                            && event.drag(cx).panel == v.publication.panel
+                            && event.bounds.contains(&event.event.position)
+                        {
+                            v.anchors.borrow_mut().insert(id, event.bounds);
+                            let y = f64::from(
+                                f32::from(event.event.position.y - event.bounds.origin.y)
+                                    / f32::from(event.bounds.size.height).max(1.),
+                            );
+                            v.send(
+                                id,
+                                "dragover",
+                                EventDetail {
+                                    y: Some(y),
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                            // The browser's usual edge scrolling, for the native stack.
+                            for scroll in v.scrolls.values() {
+                                let bounds = scroll.bounds();
+                                if bounds.contains(&event.event.position) {
+                                    let edge = v.table.tokens.metrics.row;
+                                    let direction = if event.event.position.y
+                                        < bounds.top() + px(edge)
+                                    {
+                                        1.
+                                    } else if event.event.position.y > bounds.bottom() - px(edge) {
+                                        -1.
+                                    } else {
+                                        0.
+                                    };
+                                    if direction != 0. {
+                                        let offset = scroll.offset();
+                                        let y = (offset.y + px(direction * edge / 2.))
+                                            .clamp(-scroll.max_offset().y, px(0.));
+                                        scroll.set_offset(point(offset.x, y));
+                                        cx.notify();
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
                 .on_drag_over::<PanelDrag>(move |style, drag, _, _| {
                     if own_over(drag) {
                         style.bg(target)
@@ -2796,7 +2858,18 @@ impl SurfaceView {
                         return;
                     }
                     cx.stop_propagation();
+                    let y = if effect_target {
+                        v.anchor_bounds(id).map(|bounds| {
+                            f64::from(
+                                f32::from(window.mouse_position().y - bounds.origin.y)
+                                    / f32::from(bounds.size.height).max(1.),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     let detail = EventDetail {
+                        y,
                         alt_key: Some(window.modifiers().alt),
                         ..Default::default()
                     };

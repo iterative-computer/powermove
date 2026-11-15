@@ -182,3 +182,60 @@ test("§4 both Add controls and native row menu preserve the real model clipboar
     await h.close();
   }
 });
+
+test.each([false, true])(
+  "header midpoint drag, rendered order, undo and Escape (embedded=%s)",
+  async (embedded) => {
+    const h = new ModelHost();
+    await h.start();
+    const root = createRoot(async (commit) => ({
+      accepted: true,
+      revision: commit.baseRevision + 1,
+    }));
+    try {
+      await root.render(
+        <EffectControls
+          controller={h.controller}
+          rowHeight={24}
+          embedded={embedded}
+        />,
+      );
+      const header = (id: string) =>
+        find(root, (p) => p.id === `layer-effects:effect:${id}`);
+      const list = () => find(root, (p) => p.id === "layer-effects:list");
+      const settle = async () => {
+        await h.controller.settled();
+        await root.flush();
+      };
+      const order = () =>
+        h.controller
+          .snapshot()
+          .rows.filter((r) => r.kind === "effect")
+          .map((r) => r.id);
+      await event(root, header("f1").id, "dragstart");
+      await event(root, header("f3").id, "dragover", { y: 0.75 });
+      expect((header("f3").props.metadata as any).insertAfter).toBe(true);
+      await event(root, header("f3").id, "drop", {}, [list().id]);
+      await settle();
+      expect(order()).toEqual(["f2", "f3", "f1"]);
+      const rendered = [...root.host.nodes.values()].filter((n) =>
+        String(n.props.id ?? "").startsWith("layer-effects:effect:"),
+      );
+      expect(rendered).toHaveLength(3);
+      await h.line({ history: "undo" });
+      await h.publish();
+      await settle();
+      expect(order()).toEqual(["f1", "f2", "f3"]);
+      await event(root, header("f1").id, "dragstart");
+      await event(root, header("f3").id, "dragover", { y: 0.75 });
+      await event(root, list().id, "keydown", { key: "Escape" });
+      await settle();
+      await event(root, list().id, "drop");
+      await settle();
+      expect(order()).toEqual(["f1", "f2", "f3"]);
+    } finally {
+      await root.dispose();
+      await h.close();
+    }
+  },
+);

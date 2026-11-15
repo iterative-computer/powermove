@@ -1,3 +1,4 @@
+import type { EffectsController } from "../effect-controls/controller";
 import { createRoot } from "../../src";
 import type { Transport } from "../../src/protocol";
 import { InspectorPanel } from "./view";
@@ -11,7 +12,10 @@ export { InspectorPanel, InspectorSession };
 export async function mountInspector(
   session: InspectorSession,
   transport: Transport,
-  options: { retire: (generation: number) => Promise<void> },
+  options: {
+    retire: (generation: number) => Promise<void>;
+    effects?: { controller: EffectsController; rowHeight: number };
+  },
 ) {
   const root = createRoot(transport, session.onError, {
     generation: session.host.identity.generation,
@@ -25,7 +29,9 @@ export async function mountInspector(
   });
   try {
     await session.start();
-    await root.render(<InspectorPanel session={session} />);
+    await root.render(
+      <InspectorPanel session={session} effects={options.effects} />,
+    );
   } catch (error) {
     try {
       await root.dispose();
