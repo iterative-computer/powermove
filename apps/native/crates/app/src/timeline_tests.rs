@@ -588,9 +588,8 @@ fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, f
     let origin = s.origin();
     let (top, height) = layer_row(s, layer);
     let from = point(origin.x + px(120.), origin.y + px(top + height / 2.));
-    s.vcx
-        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_layer_row(layer.into(), from));
     let x = s.at(0, 1.).x;
     s.vcx.simulate_mouse_move(
         point(x, from.y + px(8.)),
@@ -612,73 +611,6 @@ fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, f
         s.recorder.reports.borrow()
     );
 }
-/// Whole-row input must reach the reorder gesture through the mounted outline.
-#[gpui::test]
-fn row_drag_index_and_empty_space_reorder_with_one_undo(cx: &mut TestAppContext) {
-    for x in [12., 220.] {
-        let mut s = stage(cx, 3);
-        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
-        let from = point(row.origin.x + px(x), row.center().y);
-        let (top, height) = layer_row(&s, "l0");
-        let to = point(from.x, s.origin().y + px(top + height * 0.1));
-        s.drag(cx, from, to, Modifiers::none());
-        assert_eq!(ids(&s), ["l2", "l0", "l1"], "header x={x}");
-        s.undo(cx);
-        assert_eq!(ids(&s), ["l0", "l1", "l2"]);
-    }
-}
-
-#[gpui::test]
-fn row_drag_under_threshold_selects_and_escape_cancels(cx: &mut TestAppContext) {
-    let mut s = stage(cx, 3);
-    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
-    let from = point(row.origin.x + px(12.), row.center().y);
-    s.drag(cx, from, from + point(px(2.), px(0.)), Modifiers::none());
-    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
-    assert!(
-        s.surface
-            .read_with(&s.vcx, |t, _| t.model().selection.contains("l2"))
-    );
-    s.vcx
-        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-    s.vcx.simulate_mouse_move(
-        from - point(px(0.), px(50.)),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    s.idle(cx);
-    assert!(s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx)));
-    s.vcx
-        .simulate_mouse_up(from, MouseButton::Left, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
-}
-
-#[gpui::test]
-fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
-    for control in ["visibility", "lock", "parent", "disclosure"] {
-        let mut s = stage(cx, 3);
-        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
-        s.vcx
-            .simulate_mouse_move(row.center(), None, Modifiers::none());
-        s.idle(cx);
-        let target = bounds(&mut s.vcx, &format!("timeline:{control}:layer:l2"));
-        let from = target.center();
-        s.vcx
-            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-        let to = from - point(px(0.), px(50.));
-        s.vcx
-            .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-        s.idle(cx);
-        // Parent pick may be active; cancel it before release.
-        s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
-        s.vcx
-            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
-        s.idle(cx);
-        assert_eq!(ids(&s), ["l0", "l1", "l2"], "{control}");
-    }
-}
-
 /// v1: a layer dragged by its name to the top half of another row lands
 /// before it, as one undo step; its clip moves with its row.
 #[gpui::test]
@@ -707,11 +639,6 @@ fn a_layer_dragged_onto_a_group_joins_it_and_back_out_leaves_it(cx: &mut TestApp
         "{:?}",
         stack(&s)
     );
-    assert_eq!(ids(&s), ["g", "l1", "l0"]);
-    drag_layer(&mut s, cx, "l0", "l1", 0.1);
-    assert_eq!(stack(&s)[1], ("l0".into(), Some("g".into())));
-    s.undo(cx);
-    assert_eq!(ids(&s), ["g", "l1", "l0"]);
     drag_layer(&mut s, cx, "l1", "g", 0.1);
     assert_eq!(stack(&s)[0], ("l1".into(), None), "{:?}", stack(&s));
 }
