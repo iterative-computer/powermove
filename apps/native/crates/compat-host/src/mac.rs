@@ -609,6 +609,12 @@ pub struct MacDomHost {
     /// The panels' colour under the page (sRGB, 0–1), shown where the
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
+    /// Where the fill shows, when narrower than the regions
+    /// (`set_fill_regions`); `None`: wherever they show.
+    fill_regions: Option<Vec<Rect>>,
+    /// Draws the fill within `fill_regions`: the slot layer's first sublayer,
+    /// under the page's.
+    ground: Retained<objc2_quartz_core::CAShapeLayer>,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -720,6 +726,8 @@ impl MacDomHost {
         refuse_drags(&web);
         let slot = SlotView::new(mtm, frame);
         slot.addSubview(&web);
+        // The fill where only some regions take it (`set_fill_regions`).
+        let ground = objc2_quartz_core::CAShapeLayer::new();
         slot.setAccessibilityElement(true);
         slot.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
         slot.setAccessibilityLabel(Some(&NSString::from_str("Compatibility panels")));
@@ -733,6 +741,8 @@ impl MacDomHost {
             job_count: 0,
             content: None,
             fill: None,
+            fill_regions: None,
+            ground,
         };
         host.load();
         Ok(host)
@@ -984,6 +994,21 @@ impl MacDomHost {
             self.shared.geometry_dirty.set(true);
         }
     }
+    /// Where the fill shows within the regions: the panels' bodies, never
+    /// the viewer's stage, where the page shows the viewer through it. `None`
+    /// fills wherever the regions show.
+    pub fn set_fill_regions(&mut self, regions: Option<Vec<Rect>>) -> Result<()> {
+        if let Some(r) = &regions
+            && (r.len() > 256 || r.iter().any(|r| !r.valid()))
+        {
+            return Err(Error::InvalidGeometry);
+        }
+        if self.fill_regions != regions {
+            self.fill_regions = regions;
+            self.shared.geometry_dirty.set(true);
+        }
+        Ok(())
+    }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
     pub fn present(&mut self, viewport: Rect) -> Result<()> {
@@ -1003,11 +1028,32 @@ impl MacDomHost {
         // The fill shows within the regions; the page's content only where
         // its own mask lets it.
         self.slot.setWantsLayer(true);
+        let color = self
+            .fill
+            .map(|[r, g, b, a]| NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor());
         if let Some(layer) = self.slot.layer() {
-            let color = self.fill.map(|[r, g, b, a]| {
-                NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor()
-            });
-            layer.setBackgroundColor(color.as_deref());
+            // Everywhere the regions show, or (`set_fill_regions`) only in
+            // some of them: a shape layer under the page's.
+            let everywhere = self.fill_regions.is_none();
+            layer.setBackgroundColor(color.as_deref().filter(|_| everywhere));
+            if self.ground.superlayer().is_none() {
+                layer.insertSublayer_atIndex(&self.ground, 0);
+            }
+            let shape = &self.ground;
+            let path = CGMutablePath::new();
+            let h = self.slot.bounds().size.height;
+            for r in self.fill_regions.iter().flatten() {
+                unsafe {
+                    CGMutablePath::add_rect(
+                        Some(&path),
+                        std::ptr::null(),
+                        NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
+                    );
+                }
+            }
+            shape.setFrame(self.slot.bounds());
+            shape.setPath(Some(&path));
+            shape.setFillColor(color.as_deref().filter(|_| self.fill_regions.is_some()));
         }
         self.web.setWantsLayer(true);
         if let Some(layer) = self.web.layer() {
