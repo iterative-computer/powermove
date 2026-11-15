@@ -653,6 +653,31 @@ fn separate_dimensions_is_undoable_and_groups_only_exact_legacy_key_times() {
     );
 }
 
+/// v1's gutterDown: the diamond on a property row works on that property as
+/// the row does, so keying a static Position plots Position, not the layer's
+/// other animated property above it in the list.
+#[test]
+fn the_diamond_puts_its_property_in_the_graph() {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[{"id":"t","type":"shape","name":"Made","collapsed":false,"from":0,"dur":10,"p":{"opacity":{"v":1,"kf":[{"i":"o1","t":0,"v":0},{"i":"o2","t":1,"v":1}]},"position.x":{"v":5,"kf":[]},"position.y":{"v":6,"kf":[]}}}]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    dispatch(&mut c, json!({"type":"selectRow","id":id("t"),"modifiers":{}})).unwrap();
+    assert_eq!(c.model.graph_series().0, [("t".to_owned(), "opacity".to_owned())]);
+    let position = "position";
+    dispatch(&mut c, json!({"type":"keyToggle","layer":"t","path":position})).unwrap();
+    assert_eq!(
+        c.model.graph_series().0,
+        [
+            ("t".to_owned(), "position.x".to_owned()),
+            ("t".to_owned(), "position.y".to_owned())
+        ]
+    );
+    assert_eq!(c.model.selection.channel(), Some(position));
+}
+
 #[test]
 fn axis_diamond_changes_only_its_axis_and_group_diamond_completes_the_other_axis() {
     let (_actor, mut c) = position_client();
@@ -1018,4 +1043,15 @@ fn tracks_stack_like_premiere_captions_then_highest_video_down_then_audio() {
     assert!(
         matches!(&top.content, paint::RowContent::Track { clips } if clips.len() == 1 && clips[0].id == "top")
     );
+}
+
+#[test]
+fn the_graph_menu_fits_the_curves_shown() {
+    // The menu's rows are checked against the curves the graph shows: Fit
+    // with one curve shown (it was refused, as if none were).
+    let (_actor, mut c) = client();
+    c.model.graph_focus = Some(("a:[]".into(), "opacity".into()));
+    assert_eq!(c.model.graph_series().0.len(), 1);
+    let effects = dispatch(&mut c, json!({"type":"graphMenu","action":"graph.fit"})).unwrap();
+    assert!(effects.iter().any(|e| matches!(e, HostEffect::FitCurves(..))), "{effects:?}");
 }

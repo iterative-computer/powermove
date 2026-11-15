@@ -1939,6 +1939,36 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// The keyboard is on a node of this view that hears keys, itself or
+    /// through what holds it (a Project card a click focused, in a grid that
+    /// listens): its Space is its own (Quick Look), not Play.
+    pub fn focused_takes_keys(&self, window: &Window) -> bool {
+        let Some(mut at) = self
+            .focus
+            .iter()
+            .find_map(|(id, focus)| focus.is_focused(window).then_some(*id))
+        else {
+            return false;
+        };
+        while let Some(node) = self.prepared.node(at) {
+            if node.events.key_down {
+                return true;
+            }
+            let Some(parent) = node.parent else { break };
+            at = parent;
+        }
+        false
+    }
+    /// The button came up in the window while a scrub or a captured press of
+    /// this view still waits for it: its own listener never heard the
+    /// release (the panel was drawn again while held). It ends now.
+    pub fn release_unheard(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let held = self.scrub.is_some() || self.capture.is_some();
+        if held {
+            self.release_pointer(window.mouse_position(), 1, Modifiers::none(), cx);
+        }
+        held
+    }
     /// The pressed pointer comes up: a scrub or a grading drag ends (one
     /// Undo step), a captured node hears `pointerup`.
     fn release_pointer(
@@ -2856,9 +2886,10 @@ impl SurfaceView {
         // covers its neighbours.
         if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
+            let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
-                let (title, tokens) = (title.clone(), tokens.clone());
-                cx.new(|_| Tooltip { title, tokens }).into()
+                let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
+                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
             });
         }
         element
@@ -3369,12 +3400,42 @@ impl Render for SurfaceView {
             .child(Self::tracking(cx, self.origin.clone()))
     }
 }
-struct Tooltip {
+pub(crate) struct Tooltip {
     title: SharedString,
     tokens: pm_design::Tokens,
+    /// The node it describes: its title is read again at each draw, so a
+    /// press that changes it (a disclosure's Expand to Collapse, applied when
+    /// the panel republishes) never leaves the old words up while hovered.
+    source: Option<(WeakEntity<SurfaceView>, Id)>,
+}
+impl Tooltip {
+    /// A tooltip for node `id` of `view`, showing `title` until it changes.
+    pub(crate) fn following(
+        view: WeakEntity<SurfaceView>,
+        id: Id,
+        title: SharedString,
+        tokens: pm_design::Tokens,
+    ) -> Self {
+        Self {
+            title,
+            tokens,
+            source: Some((view, id)),
+        }
+    }
+    /// Its node's title now (the last one, when the node has none left).
+    pub(crate) fn current_title(&mut self, cx: &App) -> SharedString {
+        if let Some(title) = self.source.as_ref().and_then(|(view, id)| {
+            view.upgrade()
+                .and_then(|view| view.read(cx).tooltip_title(*id))
+        }) {
+            self.title = title;
+        }
+        self.title.clone()
+    }
 }
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.current_title(cx);
         let t = &self.tokens;
         // Line 1 names the thing (with its shortcut); an optional line 2,
         // after a newline, says what it does (HIG help tags), in secondary.

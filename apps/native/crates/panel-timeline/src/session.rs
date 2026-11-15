@@ -19,6 +19,7 @@ impl TimelineModel {
         } else {
             GraphMode::Value
         };
+        self.graph_merge = value.get("graphMerge").and_then(Value::as_bool) == Some(true);
         self.key_selection_active = value
             .get("keySelectionActive")
             .and_then(Value::as_bool)
@@ -71,6 +72,7 @@ impl TimelineModel {
             "graphCombined",
             Value::Bool(self.graph_display == GraphDisplay::Combined),
         );
+        timeline.insert("graphMerge", Value::Bool(self.graph_merge));
         timeline.insert(
             "graphMode",
             Value::from(if self.graph_mode == GraphMode::Speed {

@@ -1786,6 +1786,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": true,
             "top": 6018265,
             "bottom": 8841195,
@@ -1985,6 +1989,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 13553358,
@@ -2191,6 +2199,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 8577252,
             "bottom": 10875894,
@@ -2345,6 +2357,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 8577252,
             "bottom": 10875894,
@@ -2498,6 +2514,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 10150073,
@@ -5390,6 +5410,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": true,
             "top": 6018265,
             "bottom": 8841195,
@@ -5589,6 +5613,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 13553358,
@@ -5795,6 +5823,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 8577252,
             "bottom": 10875894,
@@ -5949,6 +5981,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 8577252,
             "bottom": 10875894,
@@ -6102,6 +6138,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 10150073,
@@ -8891,6 +8931,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": true,
             "top": 10217450,
             "bottom": 10217450,
@@ -9113,6 +9157,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 14145495,
@@ -9342,6 +9390,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 10217450,
             "bottom": 10217450,
@@ -9519,6 +9571,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 10217450,
             "bottom": 10217450,
@@ -9695,6 +9751,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 11397062,
@@ -12479,6 +12539,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": true,
             "top": 10217450,
             "bottom": 10217450,
@@ -12701,6 +12765,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 14145495,
@@ -12930,6 +12998,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 10217450,
             "bottom": 10217450,
@@ -13107,6 +13179,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 10217450,
             "bottom": 10217450,
@@ -13283,6 +13359,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 11397062,
@@ -16170,6 +16250,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": true,
             "top": 25212,
             "bottom": 34204,
@@ -16369,6 +16453,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 4737096,
@@ -16575,6 +16663,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 22899,
             "bottom": 34975,
@@ -16729,6 +16821,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 22899,
             "bottom": 34975,
@@ -16882,6 +16978,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 24104,
@@ -19774,6 +19874,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": true,
             "top": 25212,
             "bottom": 34204,
@@ -19973,6 +20077,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 4737096,
@@ -20179,6 +20287,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 22899,
             "bottom": 34975,
@@ -20333,6 +20445,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              233.5,
+              769.0
+            ],
             "selected": false,
             "top": 22899,
             "bottom": 34975,
@@ -20486,6 +20602,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              233.5,
+              769.0
             ],
             "selected": false,
             "top": 24104,
@@ -23274,6 +23394,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": true,
             "top": 23404,
@@ -23497,6 +23621,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 5066061,
@@ -23726,6 +23854,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 23404,
             "bottom": 23404,
@@ -23903,6 +24035,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 23404,
             "bottom": 23404,
@@ -24079,6 +24215,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 24120,
@@ -26863,6 +27003,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": true,
             "top": 23404,
             "bottom": 23404,
@@ -27085,6 +27229,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 5066061,
@@ -27314,6 +27462,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 23404,
             "bottom": 23404,
@@ -27491,6 +27643,10 @@
               232.5,
               770.0
             ],
+            "stripEdges": [
+              234.5,
+              768.0
+            ],
             "selected": false,
             "top": 23404,
             "bottom": 23404,
@@ -27667,6 +27823,10 @@
             "sourceEdges": [
               232.5,
               770.0
+            ],
+            "stripEdges": [
+              234.5,
+              768.0
             ],
             "selected": false,
             "top": 24120,

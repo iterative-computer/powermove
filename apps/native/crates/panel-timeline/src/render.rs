@@ -1418,8 +1418,12 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-/// How far either side of a layer's in or out point a press trims it.
+/// How far past a layer's in or out point a press trims it.
 const TRIM_REACH: f64 = 5.;
+/// How far in from a strip's drawn end a press trims it: v1's five points,
+/// with room for an end drawn on a half point, so five points in trims at
+/// both ends (the out end was drawn on a half point and lost its fifth).
+const TRIM_INSIDE: f64 = 6.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1481,6 +1485,8 @@ fn paint_clip(
         "from":c.from,"duration":c.duration,
         "cursor":if c.locked {"notAllowed"}else{"openHand"},
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
+        // The strip's own ends as drawn (inside the layer's times).
+        "stripEdges":[start,end],
         "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
         // The ruler's grid reads through the body: its first line inside
@@ -2076,12 +2082,20 @@ impl Frame {
                 return None;
             }
             let edges = o.detail["sourceEdges"].as_array()?;
-            let edge = if (x - edges[0].as_f64()?).abs() <= TRIM_REACH {
-                Some(Edge::In)
-            } else if (x - edges[1].as_f64()?).abs() <= TRIM_REACH {
-                Some(Edge::Out)
-            } else {
-                None
+            let drawn = o.detail["stripEdges"].as_array()?;
+            let (a, b) = (edges[0].as_f64()?, edges[1].as_f64()?);
+            let (da, db) = (drawn[0].as_f64()?, drawn[1].as_f64()?);
+            // v1's reach at both ends: `TRIM_INSIDE` inside the strip as
+            // drawn and `TRIM_REACH` past the layer's edge; a strip too short
+            // for both trims the end nearer the point.
+            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_INSIDE;
+            let near_out = x >= db - TRIM_INSIDE && x <= b + TRIM_REACH;
+            let edge = match (near_in, near_out) {
+                (true, true) if (x - da).abs() <= (x - db).abs() => Some(Edge::In),
+                (true, true) => Some(Edge::Out),
+                (true, false) => Some(Edge::In),
+                (false, true) => Some(Edge::Out),
+                _ => None,
             };
             let b = o.bounds;
             let level = y >= b.y && y < b.y + b.height;

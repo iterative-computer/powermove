@@ -198,6 +198,10 @@ enum Job {
         channel: String,
         keys: Vec<String>,
     },
+    FocusGraph {
+        layer: String,
+        channel: String,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewed {
@@ -1189,6 +1193,13 @@ impl TimelineSurface {
         });
         self.pump(cx);
     }
+    /// A property keyed from Properties (its diamond): the graph plots its
+    /// track, as a press on its row there did in v1 (`focusGraph`), without
+    /// opening the graph.
+    pub fn focus_graph(&mut self, layer: String, channel: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::FocusGraph { layer, channel });
+        self.pump(cx);
+    }
     /// Playing, the view turns a page to keep the head in sight, as v1: once
     /// the head is within 50 points (or a tenth of the tracks) of the right
     /// edge it comes back a fifth of the way in; behind the left edge (a
@@ -1451,11 +1462,17 @@ impl TimelineSurface {
             return;
         }
         // Final Cut: a click moves the playhead to the skimmer; the gesture
-        // (selection, a drag) goes on from there, without a skimmer.
-        if let Some(at) = self.skimmer {
+        // (selection, a drag) goes on from there, without a skimmer. A key, a
+        // direction handle or a transform grip under the pointer takes the
+        // press as it stands: the playhead stays where it is.
+        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
+            || self.graph_point_at(x, y);
+        if let Some(at) = self.skimmer
+            && !grabs
+        {
             self.delegate.seek(at, cx);
-            self.set_skimmer(None, cx);
         }
+        self.set_skimmer(None, cx);
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -1808,6 +1825,32 @@ impl TimelineSurface {
             };
         }
     }
+    /// Whether `(x, y)` lands on a graph key, a direction handle or a grip of
+    /// the transform box (what a press there takes hold of).
+    fn graph_point_at(&self, x: f64, y: f64) -> bool {
+        let (Some(area), Some(region)) = (self.graph_area(), self.graph_region()) else {
+            return false;
+        };
+        if y < region.y {
+            return false;
+        }
+        if self
+            .viewport()
+            .and_then(|v| self.graph.as_ref()?.transform_box(v, area))
+            .is_some_and(|b| b.grip_at(x, y).is_some())
+        {
+            return true;
+        }
+        self.graph_ops(area).is_some_and(|ops| {
+            ops.iter().any(|o| {
+                (o.id.starts_with("graph-handle:") || o.id.starts_with("graph-key:"))
+                    && x >= o.bounds.x - 3.
+                    && x <= o.bounds.x + o.bounds.width + 3.
+                    && y >= o.bounds.y - 3.
+                    && y <= o.bounds.y + o.bounds.height + 3.
+            })
+        })
+    }
     /// The graph key nearest `(x, y)` within v1's 8 point reach.
     fn graph_key_at(&self, x: f64, y: f64) -> Option<String> {
         let ops = self.graph_area().and_then(|area| self.graph_ops(area))?;
@@ -2068,15 +2111,15 @@ impl TimelineSurface {
         self.changed(false, cx);
     }
     fn marquee(&mut self, cx: &mut Context<Self>) {
-        let Gesture::Marquee {
-            session,
-            origin,
-            at,
-        } = &mut self.gesture
-        else {
-            return;
+        let (origin, at, in_graph) = match &self.gesture {
+            Gesture::Marquee {
+                session,
+                origin,
+                at,
+            } => (*origin, *at, session.in_graph()),
+            _ => return,
         };
-        let (a, b) = (*origin - self.bounds.origin, *at - self.bounds.origin);
+        let (a, b) = (origin - self.bounds.origin, at - self.bounds.origin);
         let (ax, ay, bx, by) = (
             f32::from(a.x.min(b.x)) as f64,
             f32::from(a.y.min(b.y)) as f64,
@@ -2093,9 +2136,34 @@ impl TimelineSurface {
             return;
         };
         let covered = scene.marquee(frame.viewport, &self.tokens, area);
+        // In the graph a box picks the curves' keys it covers, as they are
+        // drawn there (the rows under the graph are not shown).
+        let keys = if in_graph {
+            let graph = self.graph.clone();
+            self.graph_area()
+                .and_then(|a| self.graph_ops(a))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|o| {
+                    let id = o.id.strip_prefix("graph-key:")?;
+                    let (x, y) = (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+                    let inside = x >= area.x
+                        && x <= area.x + area.width
+                        && y >= area.y
+                        && y <= area.y + area.height;
+                    let layer = graph.as_ref()?.key_layer(id)?.to_owned();
+                    inside.then(|| (layer, id.to_owned()))
+                })
+                .collect()
+        } else {
+            covered.keys
+        };
+        let Gesture::Marquee { session, .. } = &mut self.gesture else {
+            return;
+        };
         // The layers whose bars (Layers) or clips (Tracks) the box touches;
         // the session takes them only when it covers no keys (v1's rule).
-        let plan = session.update(covered.keys, covered.clips);
+        let plan = session.update(keys, if in_graph { vec![] } else { covered.clips });
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
@@ -2674,6 +2742,10 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             let effects = client.dispatch(plan).await.map_err(text)?;
             client.publish_view().await.map_err(text)?;
             Ok(effects)
+        }
+        Job::FocusGraph { layer, channel } => {
+            client.model.graph_focus = Some((layer, channel));
+            Ok(vec![])
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};

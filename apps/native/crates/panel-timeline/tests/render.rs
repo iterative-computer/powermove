@@ -148,6 +148,14 @@ fn trim_hit_tests_use_authored_edges_and_ignore_gutter_ruler_and_offscreen_edges
     assert_eq!(f.hit_clip(end, y), Some(("selected", Some(Edge::Out))));
     assert_eq!(f.hit_clip(end + 4., y), Some(("selected", Some(Edge::Out))));
     assert_eq!(f.hit_clip(end + 6., y), None);
+    // v1's reach inside the strip: five points in from its drawn end trims,
+    // with room for an end drawn on a half point (the strip stops
+    // `strip_gap / 2` short of the layer's out point).
+    let drawn = end - t.strip_gap() as f64 / 2.;
+    for inside in [3., 5., 5.5] {
+        assert_eq!(f.hit_clip(drawn - inside, y), Some(("selected", Some(Edge::Out))));
+    }
+    assert_eq!(f.hit_clip(drawn - 6.5, y), Some(("selected", None)));
     assert_eq!(f.hit_clip(t.metrics.layer_column as f64 - 1., y), None);
     assert_eq!(f.hit_clip(end, 3.), None);
     assert_eq!(
@@ -738,5 +746,31 @@ fn a_very_short_layer_keeps_a_visible_strip_at_any_zoom() {
         assert!(strip.bounds.width >= 4., "{pps}: {}", strip.bounds.width);
         let start = v.layer_column + (3. - v.scroll_time) * pps;
         assert!((strip.bounds.x - (start + t.strip_gap() as f64 / 2.)).abs() < 1e-9);
+    }
+}
+
+/// Five points in from either end of a strip trims that end, wherever the
+/// zoom puts its ends between points (acceptance found the out end giving
+/// only about two of v1's five).
+#[test]
+fn both_ends_of_a_strip_trim_five_points_in() {
+    let t = tokens();
+    let mut c = clip("mid");
+    c.from = 3.;
+    c.duration = 1.;
+    for pps in [34.5, 35., 35.25, 100.] {
+        let v = Viewport { pps, ..viewport(&t) };
+        let f = scene_with(&t, c.clone()).prepare(v, &t).unwrap();
+        let o = f.ops.iter().find(|o| o.id == "clip:mid").expect("a strip");
+        let (left, right) = (o.bounds.x, o.bounds.x + o.bounds.width);
+        let y = o.bounds.y + o.bounds.height / 2.;
+        for inside in [1., 3., 5., 5.5] {
+            assert_eq!(f.hit_clip(left + inside, y), Some(("mid", Some(Edge::In))), "{pps} in {inside}");
+            assert_eq!(f.hit_clip(right - inside, y), Some(("mid", Some(Edge::Out))), "{pps} out {inside}");
+        }
+        if right - left > 14. {
+            assert_eq!(f.hit_clip(left + 6.5, y), Some(("mid", None)), "{pps}");
+            assert_eq!(f.hit_clip(right - 6.5, y), Some(("mid", None)), "{pps}");
+        }
     }
 }
