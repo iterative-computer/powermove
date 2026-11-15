@@ -28,6 +28,8 @@ pub mod menu;
 #[cfg(target_os = "macos")]
 pub mod motion;
 #[cfg(target_os = "macos")]
+pub mod layer_stage;
+#[cfg(target_os = "macos")]
 mod native;
 #[cfg(target_os = "macos")]
 pub mod native_control;

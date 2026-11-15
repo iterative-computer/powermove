@@ -46,12 +46,20 @@ pub(crate) struct Resolved {
 /// [`Resolved::source_edge`] of a draw by its matrix, UV window and whether
 /// it is placed on a plane (also asked of a plan before it is resolved, to
 /// decode a still ahead at the size its draw reads).
-pub(crate) fn source_edge(matrix: &[f64; 6], uv: [f64; 4], plane: bool) -> Option<u32> {
-    if plane {
-        return None;
-    }
-    let width = matrix[0].hypot(matrix[1]) / (uv[2] - uv[0]).abs().max(0.0001);
-    let height = matrix[2].hypot(matrix[3]) / (uv[3] - uv[1]).abs().max(0.0001);
+pub(crate) fn source_edge(
+    matrix: &[f64; 6],
+    uv: [f64; 4],
+    plane: Option<&crate::space25d::Plane>,
+) -> Option<u32> {
+    // Output pixels per unit of u and of v: the affine matrix's columns, or
+    // a 2.5D plane's densest corner (it was read whole, so a 3D group's
+    // stills were decoded whole in the frame that met them).
+    let (du, dv) = match plane {
+        Some(plane) => crate::space25d::corner_density(plane)?,
+        None => (matrix[0].hypot(matrix[1]), matrix[2].hypot(matrix[3])),
+    };
+    let width = du / (uv[2] - uv[0]).abs().max(0.0001);
+    let height = dv / (uv[3] - uv[1]).abs().max(0.0001);
     Some((width.max(height).ceil().clamp(64., 16384.) as u32).next_power_of_two())
 }
 
@@ -59,7 +67,7 @@ impl Resolved {
     /// Pixel density the viewer actually reads. Round to powers of two to
     /// avoid decoding another still for every pixel of an animated scale.
     fn source_edge(&self) -> Option<u32> {
-        source_edge(&self.matrix, self.uv, self.plane.is_some())
+        source_edge(&self.matrix, self.uv, self.plane.as_ref())
     }
     /// Whether this draw can read beyond mip zero. Projective draws retain
     /// the full pyramid because their Jacobian changes across the quad.
@@ -1755,5 +1763,32 @@ mod sequence_read_tests {
         crate::media::FAIL_DECODE.with(|f| f.set(false));
         assert!(failures.is_empty(), "{failures:?}");
         assert!(card[3] > 0.99, "its card: {card:?}");
+    }
+}
+
+#[cfg(test)]
+mod source_edge_tests {
+    use super::source_edge;
+
+    /// A still on a 2.5D plane is read at the size its densest corner draws
+    /// it, as an affine draw is: a flat plane reads the affine edge, a
+    /// tilted one its near side's, and a corner behind the camera the whole.
+    #[test]
+    fn a_plane_reads_its_still_at_its_densest_corner() {
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        // 600 x 400 pixels at (100, 50), column-major (u, v, 1) -> (x, y, w).
+        let flat = [600.0, 0.0, 0.0, 0.0, 400.0, 0.0, 100.0, 50.0, 1.0];
+        let affine = [600.0, 0.0, 0.0, 400.0, 100.0, 50.0];
+        assert_eq!(source_edge(&affine, uv, None), Some(1024));
+        assert_eq!(source_edge(&affine, uv, Some(&flat)), Some(1024));
+        // Tilted away along v: the near side (v = 0, w = 1) keeps 600 px,
+        // the far side shrinks; the near side is what is read.
+        let tilted = [600.0, 0.0, 0.0, 0.0, 400.0, 1.0, 100.0, 50.0, 1.0];
+        assert_eq!(source_edge(&affine, uv, Some(&tilted)), Some(1024));
+        // Closer, the near side is drawn larger: so is the still read.
+        let near = [1500.0, 0.0, 0.0, 0.0, 400.0, 1.0, 100.0, 50.0, 1.0];
+        assert_eq!(source_edge(&affine, uv, Some(&near)), Some(2048));
+        let behind = [600.0, 0.0, 0.0, 0.0, 400.0, -2.0, 100.0, 50.0, 1.0];
+        assert_eq!(source_edge(&affine, uv, Some(&behind)), None);
     }
 }
