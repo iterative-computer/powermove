@@ -1578,6 +1578,30 @@ fn tab_windows(window: &NSWindow) -> Vec<Retained<NSWindow>> {
             vec![unsafe { Retained::retain(window as *const _ as *mut NSWindow).unwrap() }]
         })
 }
+/// Shows the tab `by` places after `window`'s in its group (wrapping). The
+/// group's own selection, not AppKit's Show Next Tab, which does nothing for
+/// windows that never tab on their own (`editor_window_tabbing`).
+fn select_tab(window: &NSWindow, by: isize) {
+    let group = tab_windows(window);
+    let Some(at) = group
+        .iter()
+        .position(|w| w.windowNumber() == window.windowNumber())
+    else {
+        return;
+    };
+    let count = group.len() as isize;
+    if count < 2 {
+        return;
+    }
+    let next = &group[((at as isize + by).rem_euclid(count)) as usize];
+    unsafe {
+        let tab_group: *mut AnyObject = msg_send![window, tabGroup];
+        if !tab_group.is_null() {
+            let _: () = msg_send![tab_group, setSelectedWindow: &**next];
+        }
+    }
+    next.makeKeyAndOrderFront(None);
+}
 /// Asks `window` to close on the next turn of the run loop, as its close
 /// button does. Never `performClose` directly: inside a GPUI update the
 /// should-close handler cannot run, so the window would close without its
@@ -4559,13 +4583,8 @@ impl Host {
         match name {
             "quit" => app.terminate(None),
             "closeWindow" | "closeTab" => request_close(&self.window),
-            "nextTab" => unsafe {
-                let _: () = msg_send![&*self.window,selectNextTab:std::ptr::null::<AnyObject>()];
-            },
-            "previousTab" => unsafe {
-                let _: () =
-                    msg_send![&*self.window,selectPreviousTab:std::ptr::null::<AnyObject>()];
-            },
+            "nextTab" => select_tab(&self.window, 1),
+            "previousTab" => select_tab(&self.window, -1),
             "moveTabToNewWindow" => unsafe {
                 let _: () =
                     msg_send![&*self.window,moveTabToNewWindow:std::ptr::null::<AnyObject>()];
