@@ -1592,6 +1592,16 @@ impl Controller {
                             }) =>
                         {
                             match effect.effect {
+                                pm_panel_media::Effect::Deleted { message } => {
+                                    let owner = effect.owner;
+                                    crate::v4_native::announce(&self.host.borrow().window, &message);
+                                    let kernel = self.kernel.clone();
+                                    self.delete_toast = Some(cx.new(|cx| crate::action_toast::ToastView::new(message, move |cx| {
+                                        let pending = kernel.call(&owner.project, pm_kernel::Request::new(pm_kernel::Caller::native(), pm_kernel::HistoryCall::Undo).with_document(owner.document).outside_revision(owner.revision));
+                                        cx.spawn(async move |_| { let _ = pending.await; }).detach();
+                                    }, cx)));
+                                    cx.notify();
+                                }
                                 pm_panel_media::Effect::OpenComposition(id) => {
                                     self.open_builtin_composition(&id, cx)
                                 }

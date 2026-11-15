@@ -552,6 +552,17 @@ impl Backend {
                 {
                     return Err(format!("Notes remain applied but could not be saved: {message}. Read the latest notes before retrying."));
                 }
+                if matches!(&item.request.operation, HostOperation::Command { command, .. } if command == "panel.project")
+                    && matches!(ack.reply, Reply::Applied { .. })
+                    && let Some(message) = self.native.project_reply.as_mut().and_then(|v| v.as_object_mut()).and_then(|v| v.remove("delete_message")).and_then(|v| v.as_str().map(str::to_owned))
+                    && let Some(p) = self.published()
+                    && p.revision() == ack.revision
+                {
+                    self.native.platform.push(("project.effect".into(), serde_json::to_value(pm_panel_media::HostRequest {
+                        owner: pm_panel_media::Stamp { project: p.project.clone(), document: p.snapshot.doc_id, revision: ack.revision },
+                        effect: pm_panel_media::Effect::Deleted { message },
+                    }).map_err(|e| e.to_string())?));
+                }
                 if let Some(plan) = item.plan {
                     self.panel
                         .acknowledge(self.model.as_mut().ok_or("No open project")?, plan, &ack)

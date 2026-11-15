@@ -35,6 +35,7 @@ pub trait Integration {
     fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
         None
     }
+    fn action_toast(&self, _cx: &mut App) -> Option<AnyElement> { None }
     /// Commands that cannot run now, so menus never offer a silent no-op.
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()

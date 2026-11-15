@@ -2889,6 +2889,9 @@ impl Render for Editor {
             left
         };
         root = root.child(Self::titlebar_band(top));
+        if let Some(toast) = self.integration.as_ref().and_then(|i| i.action_toast(cx)) {
+            root = root.child(toast);
+        }
         root.child(
             positioned(Rect {
                 x: 0.,
