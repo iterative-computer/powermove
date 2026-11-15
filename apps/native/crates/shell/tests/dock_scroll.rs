@@ -285,7 +285,8 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
         cx.update_window(window.into(), |_, window, _| window.activate()).unwrap();
         cx.run_until_parked();
         // Move through the actual native panel focus handles, one rendered frame each.
-        for _ in 0..8 {
+        let mut reached_last = false;
+        for _ in 0..20 {
             window
                 .update(&mut cx, |editor, w, cx| {
                     editor.command(
@@ -300,7 +301,13 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
                 })
                 .unwrap();
             cx.run_until_parked();
+            reached_last = window.update(&mut cx, |editor, _, _| {
+                let last = editor.panel_rect("fxbrowser").unwrap();
+                last.y + last.h <= 600.
+            }).unwrap();
+            if reached_last { break; }
         }
+        assert!(reached_last, "keyboard traversal reveals the final panel");
         window
             .update(&mut cx, |editor, _, _| {
                 // The traversal reached the lower right groups, so the column moved.

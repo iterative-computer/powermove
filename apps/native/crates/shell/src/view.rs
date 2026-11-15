@@ -2106,9 +2106,8 @@ impl Render for Editor {
         }
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
-            a.rect
-                .y
-                .total_cmp(&b.rect.y)
+            (a.rect.y + self.dock_scroll.get(&self.layout.docks[a.dock].id).copied().unwrap_or(0.))
+                .total_cmp(&(b.rect.y + self.dock_scroll.get(&self.layout.docks[b.dock].id).copied().unwrap_or(0.)))
                 .then(a.rect.x.total_cmp(&b.rect.x))
         });
         self.panel_order = ordered
