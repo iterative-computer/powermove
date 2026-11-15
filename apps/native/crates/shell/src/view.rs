@@ -3103,6 +3103,9 @@ impl Render for Editor {
                     .to_string();
                 let panel_hover = self.area_hover.as_ref().is_some_and(|(h, _)| h == &id);
                 for (i, corner) in crate::area::Corner::ALL.into_iter().enumerate() {
+                    let corner_rect = self.geometry.side_docks.get(&p.dock)
+                        .map_or(corner.rect(p.rect), |clip| corner.rect(p.rect).intersection(*clip));
+                    if corner_rect.w <= 0. || corner_rect.h <= 0. { continue; }
                     let active = self
                         .area_hover
                         .as_ref()
@@ -3131,7 +3134,7 @@ impl Render for Editor {
                     };
                     let id_down = id.clone();
                     root = root.child(
-                        positioned(corner.rect(p.rect))
+                        positioned(corner_rect)
                             .id(format!("area-{id}-{i}"))
                             .tooltip(tooltip(&t, "Drag to split, join or dock"))
                             .cursor(CursorStyle::Crosshair)
@@ -4334,6 +4337,11 @@ mod tests {
                             } else {
                                 (r.x + across, r.y + at)
                             };
+                            // Scrolling docks keep offscreen dividers in geometry.
+                            if d.group.is_some() && view.read_with(cx, |v, _|
+                                v.geometry.side_docks.get(&d.dock).is_some_and(|clip| !clip.contains(x, y))) {
+                                continue;
+                            }
                             // Where two dividers' grabs cross, either answers.
                             let crossing = dividers
                                 .iter()

@@ -225,8 +225,7 @@ fn nested_wheel_hands_off_at_both_edges() {
             }
             .to_platform_input()
         };
-        window
-            .update(&mut cx, |_, w, cx| {
+        cx.update_window(window.into(), |_, w, cx| {
                 w.dispatch_event(wheel(-50.), cx);
             })
             .unwrap();
@@ -241,8 +240,7 @@ fn nested_wheel_hands_off_at_both_edges() {
             })
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
-        window
-            .update(&mut cx, |_, w, cx| {
+        cx.update_window(window.into(), |_, w, cx| {
                 w.dispatch_event(wheel(-50.), cx);
             })
             .unwrap();
@@ -255,8 +253,7 @@ fn nested_wheel_hands_off_at_both_edges() {
             })
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
-        window
-            .update(&mut cx, |_, w, cx| {
+        cx.update_window(window.into(), |_, w, cx| {
                 w.dispatch_event(wheel(25.), cx);
             })
             .unwrap();
