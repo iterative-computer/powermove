@@ -177,6 +177,7 @@ fn build_frame(
                     if !ready && state.stage != panel_build::Stage::Wake {
                         let mut rows = vec![state.row];
                         rows.extend(state.pending.iter().copied().filter(|row| *row > state.row).take(2));
+                        rows.retain(|row| !state.committed.contains_key(row) || (state.stage == panel_build::Stage::Ink && *row == state.row));
                         for row in rows {
                             let row_y = BUILD_HEADER + (row as f32+0.5)*BUILD_ROW;
                             let erasure = if row == state.row && state.stage == panel_build::Stage::Ink { 1.-panel_build::fade(elapsed-0.06,0.22) } else { 1. };
@@ -250,7 +251,7 @@ fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bo
     if build.stage == panel_build::Stage::Ready { return 1.; }
     build.committed.get(&index).map_or(0., |at| {
         let age = at.elapsed().as_secs_f32();
-        if reduced { panel_build::reveal(age, true) } else { panel_build::fade(age, 0.28) }
+        panel_build::control_alpha(age, reduced)
     })
 }
 

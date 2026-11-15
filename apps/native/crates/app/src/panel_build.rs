@@ -321,3 +321,20 @@ mod track_tests {
         assert_eq!(ink_track(300., 0.5, 0., true), ink_track(300., 0.5, 0.28, true));
     }
 }
+
+/// The entire real control fades through the ink; no substitute geometry.
+pub fn control_alpha(age: f32, reduced: bool) -> f32 {
+    if reduced { reveal(age, true) } else { fade(age, 0.28) }
+}
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    #[test]
+    fn real_controls_fade_over_the_full_commit_window() {
+        assert_eq!(control_alpha(0., false), 0.);
+        assert!((control_alpha(0.14, false)-0.5).abs() < 0.00001);
+        assert_eq!(control_alpha(0.28, false), 1.);
+        assert_eq!(control_alpha(0.12, true), 0.);
+        assert_eq!(control_alpha(0.28, true), 1.);
+    }
+}
