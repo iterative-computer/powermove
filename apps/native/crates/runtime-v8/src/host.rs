@@ -260,6 +260,8 @@ pub struct IsolateMemory {
     /// What the isolate holds of its admission account: its current heap
     /// limit, which grows on demand and shrinks back when it idles.
     pub reserved_heap_bytes: usize,
+    /// Full (mark-compact) collections since the isolate started.
+    pub major_collections: u64,
 }
 #[derive(Debug, Clone)]
 pub struct GenerationMemory {
