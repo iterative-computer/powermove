@@ -3645,7 +3645,10 @@ impl Window {
                 .map(|(n, t)| format!("{n}:{:.2}/{:.2}/{:.2}", t[0], t[1], t[2]))
                 .collect();
             eprintln!(
-                "PM_DRAW {{\"times\":\"{}\",\"views\":\"{}\",\"dirty\":{dirty},\"layout\":{:.2},\"prepaint\":{:.2},\"paint\":{:.2},\"a11y\":{:.2},\"a11y_on\":{a11y_active_start_of_frame}}}",
+                "PM_DRAW {{\"w\":{},\"times\":\"{}\",\"views\":\"{}\",\"dirty\":{dirty},\"layout\":{:.2},\"prepaint\":{:.2},\"paint\":{:.2},\"a11y\":{:.2},\"a11y_on\":{a11y_active_start_of_frame}}}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
                 times.join(" "),
                 rendered.join(" "),
                 ms(start, layout),
