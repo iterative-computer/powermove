@@ -2199,9 +2199,14 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            // A wheel step only moves the content (a native view inside
-            // draws on its own and keeps the full redraw).
-            if !self.holds_native(id) {
+            // A wheel step only moves the content, in the Project panel: the
+            // one long list the layer made faster (PM-311). Elsewhere it gained
+            // nothing measurable and held hover and AppKit controls a frame
+            // behind the content (PM-389, PM-390). A native view inside draws
+            // on its own and keeps the full redraw.
+            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+                && !self.holds_native(id)
+            {
                 element = element.scroll_layer();
             }
             if follows {

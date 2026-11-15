@@ -443,6 +443,15 @@ fn cached_panel_does_not_rerender_for_a_parent_frame(cx: &mut TestAppContext) {
 /// past what was recorded renders, and the panel renders once the steps stop.
 #[gpui::test]
 fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppContext) {
+    wheel_steps(cx, pm_builtins::PROJECT_PANEL, true);
+}
+/// Elsewhere a step draws the panel again (its hover and controls follow
+/// the content at once: PM-389, PM-390).
+#[gpui::test]
+fn outside_the_project_panel_a_wheel_step_draws_the_panel_again(cx: &mut TestAppContext) {
+    wheel_steps(cx, "fxbrowser", false);
+}
+fn wheel_steps(cx: &mut TestAppContext, panel: &str, layer: bool) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
     let mut ops = node_ops(
@@ -461,7 +470,8 @@ fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppConte
             &["pointerdown"],
         ));
     }
-    let surface = synthetic(&rig, ops);
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = panel.into();
     let runtime = rig.runtime.clone();
     cx.executor().allow_parking();
     let (root, vcx) = cx.add_window_view(|window, cx| {
@@ -487,6 +497,11 @@ fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppConte
         vcx.run_until_parked();
     };
     wheel(&mut vcx, -30.);
+    if !layer {
+        assert!(view.read_with(&vcx, |v, _| v.renders) > rendered);
+        assert_eq!(row(&mut vcx, 4), top + px(50.));
+        return;
+    }
     assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
     // 55 + 30 lands in row 4 (80..100) now.
     events(&view, &mut vcx);
