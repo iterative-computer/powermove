@@ -3,7 +3,7 @@
 //! releases with a test key, driven by clicks as a person would.
 use crate::store_window::{Page, Services, StoreWindow};
 use ed25519_dalek::{Signer, SigningKey};
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext};
 use pm_compat_runner::store_install;
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_kernel::{Kernel, KernelConfig};
@@ -961,4 +961,88 @@ fn a_build_without_a_store_key_refuses_installs_and_says_why() {
     assert!(view.read_with(cx, |v, _| v.busy.is_none()));
     assert!(!f.profile.path().join("extensions/shot-notes").exists());
     assert!(cx.debug_bounds("store-signing").is_some());
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_store() {
+    let f = fixture();
+    for failed in [false, true] {
+        let mut svc = services(&f, false);
+        if failed {
+            svc.client = Arc::new(|| {
+                Err(pm_services::ServiceError::message(
+                    pm_services::ServiceErrorCode::Offline,
+                    "Synthetic offline failure",
+                ))
+            });
+        }
+        crate::utility_capture_tests::capture(
+            if failed { "store-failure" } else { "store" },
+            |_, cx| {
+                cx.new(|cx| {
+                    let mut view = StoreWindow::new(svc, pm_shell::tokens(), cx);
+                    if failed {
+                        view.shelves =
+                            crate::store_window::Load::Failed("Synthetic offline failure".into());
+                    }
+                    view
+                })
+            },
+        );
+    }
+}
+
+#[::core::prelude::v1::test]
+fn offline_store_and_catalog_retry_without_exposing_transport_details() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = fixture();
+    let mut svc = services(&f, false);
+    let blocked = Arc::new(AtomicBool::new(true));
+    let factory = svc.client.clone();
+    svc.client = {
+        let blocked = blocked.clone();
+        Arc::new(move || {
+            if blocked.load(Ordering::SeqCst) {
+                Err(pm_services::ServiceError::message(
+                    pm_services::ServiceErrorCode::Offline,
+                    "synthetic transport detail",
+                ))
+            } else {
+                factory()
+            }
+        })
+    };
+    let mut test = TestAppContext::single();
+    let (view, cx) = open(&mut test, svc);
+    settle(&view, cx, "offline storefront", |v| {
+        matches!(v.shelves, crate::store_window::Load::Failed(_))
+    });
+    assert!(cx.debug_bounds("store-retry").is_some());
+    let logged = view.update(cx, |_, cx| {
+        crate::error_log::shared(cx)
+            .borrow()
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.source == "Store" && entry.message.contains("synthetic transport detail")
+            })
+    });
+    assert!(logged);
+    blocked.store(false, Ordering::SeqCst);
+    click(cx, "store-retry");
+    settle(&view, cx, "retried storefront", |v| ready(&v.shelves));
+    blocked.store(true, Ordering::SeqCst);
+    view.update(cx, |v, cx| v.set_page(Page::Kind(2), cx));
+    settle(&view, cx, "offline catalog", |v| {
+        matches!(
+            v.catalog_state_for_tests(),
+            pm_services::surfaces::store::CatalogState::Failed(_)
+        )
+    });
+    blocked.store(false, Ordering::SeqCst);
+    click(cx, "store-retry");
+    settle(&view, cx, "retried catalog", |v| {
+        cx_rows(v) == ["shot-notes"]
+    });
 }

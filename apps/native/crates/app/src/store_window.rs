@@ -18,6 +18,10 @@ use pm_services::{
         requires_text,
     },
 };
+use pm_shell::{
+    kit::{Button, Kit},
+    motion::Motion,
+};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
@@ -174,6 +178,8 @@ enum Reply {
 }
 
 pub struct StoreWindow {
+    motion: Motion<u64>,
+    frame_kit: Option<Kit>,
     services: Services,
     tokens: Tokens,
     pub page: Page,
@@ -200,6 +206,14 @@ pub struct StoreWindow {
 }
 
 impl StoreWindow {
+    fn motion(&mut self) -> &mut Motion<u64> {
+        &mut self.motion
+    }
+    fn kit(&self) -> &Kit {
+        self.frame_kit
+            .as_ref()
+            .expect("Store controls are built during render")
+    }
     pub fn new(services: Services, tokens: Tokens, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::unbounded();
         cx.spawn(async move |this, cx| {
@@ -211,6 +225,8 @@ impl StoreWindow {
         })
         .detach();
         let mut window = Self {
+            motion: Motion::default(),
+            frame_kit: None,
             services,
             tokens,
             page: Page::Discover,
@@ -277,7 +293,7 @@ impl StoreWindow {
         self.run(move |client| {
             let result = client
                 .and_then(|mut c| c.browse())
-                .map_err(load_error)
+                .map_err(|error| error.to_string())
                 .map(|shelves| {
                     shelves
                         .into_iter()
@@ -303,7 +319,7 @@ impl StoreWindow {
         match self.catalog.search(CatalogQuery { text, category }) {
             Ok(work) => self.run(move |client| match client {
                 Ok(mut client) => Reply::Catalog(work.run(&mut client)),
-                Err(error) => Reply::Done(load_error(error)),
+                Err(error) => Reply::Catalog(work.fail(error)),
             }),
             Err(_) => self.message = Some("Search is limited to 120 characters.".into()),
         }
@@ -312,7 +328,7 @@ impl StoreWindow {
         if let Some(work) = self.catalog.more() {
             self.run(move |client| match client {
                 Ok(mut client) => Reply::Catalog(work.run(&mut client)),
-                Err(error) => Reply::Done(load_error(error)),
+                Err(error) => Reply::Catalog(work.fail(error)),
             });
             cx.notify();
         }
@@ -393,7 +409,7 @@ impl StoreWindow {
         self.run(move |client| {
             let detail = client
                 .and_then(|mut c| c.detail(&handle, &slug))
-                .map_err(load_error)
+                .map_err(|error| error.to_string())
                 .and_then(|value| Detail::from_value(&value).ok_or_else(|| GENERIC.to_owned()));
             Reply::Detail(generation, Box::new(detail))
         });
@@ -537,6 +553,16 @@ impl StoreWindow {
         cx.notify();
     }
     fn receive(&mut self, reply: Reply, cx: &mut Context<Self>) {
+        let failure = match &reply {
+            Reply::Shelves(_, Err(error)) => Some(error.as_str()),
+            Reply::Detail(_, result) => result.as_ref().as_ref().err().map(String::as_str),
+            _ => None,
+        };
+        if let Some(error) = failure {
+            crate::error_log::shared(cx)
+                .borrow_mut()
+                .push("Store", error);
+        }
         match reply {
             Reply::Shelves(generation, result) if generation == self.generation => {
                 self.shelves = match result {
@@ -545,6 +571,11 @@ impl StoreWindow {
                 };
             }
             Reply::Catalog(reply) => {
+                if let Some(error) = reply.error() {
+                    crate::error_log::shared(cx)
+                        .borrow_mut()
+                        .push("Store", &error.to_string());
+                }
                 self.catalog.receive(reply);
             }
             Reply::Detail(generation, result) if generation == self.generation => {
@@ -922,34 +953,59 @@ impl StoreWindow {
         enabled: bool,
         primary: bool,
     ) -> Stateful<Div> {
-        let (c, m) = (&self.tokens.colors, &self.tokens.metrics);
         let id: SharedString = id.into();
-        div()
-            .id(id.clone())
+        self.kit()
+            .button(
+                id.clone(),
+                label.to_owned(),
+                if primary {
+                    Button::Primary
+                } else {
+                    Button::Neutral
+                },
+                None,
+                None,
+            )
             .debug_selector(move || id.to_string())
-            .flex_none()
-            .px(px(m.inset))
-            .h(px(m.row))
-            .flex()
-            .items_center()
-            .rounded(px(m.control_radius))
-            .when(primary && enabled, |d| {
-                d.bg(rgb(c.accent)).text_color(rgb(c.selected_text))
-            })
-            .when(!primary || !enabled, |d| d.bg(rgb(c.panel_secondary)))
-            .when(!enabled, |d| d.text_color(rgb(c.muted)))
-            .child(label.to_string())
+            .when(!enabled, |d| self.kit().disabled(d))
+    }
+    fn loading(&self) -> Div {
+        self.kit().progress(None)
+    }
+    fn load_failed(&self, cx: &mut Context<Self>) -> Div {
+        self.kit()
+            .empty_state(
+                "wifi.exclamationmark",
+                "Can’t Reach the Store",
+                "Check your internet connection and try again.",
+            )
+            .child(
+                self.kit()
+                    .button("store-retry", "Try Again", Button::Neutral, None, None)
+                    .debug_selector(|| "store-retry".into())
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        if let Some((listing, _)) = v.detail.clone() {
+                            v.open_detail(listing, cx);
+                        } else if v.page == Page::Library {
+                            v.load_library();
+                        } else if v.page == Page::Discover && v.query.trim().is_empty() {
+                            v.load_shelves();
+                        } else {
+                            v.load_catalog();
+                        }
+                        cx.notify();
+                    })),
+            )
     }
     /// A listing (the kit's `ListingRow`): its artwork, its name with the
     /// verified seal, `by {handle}` and its tagline, and its action at the
     /// end: a check when it's here, else a plus that opens its page (where
     /// its access is shown before it's installed).
     fn row(&self, listing: &Listing, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let (c, m, ty, tr) = (
+        let (c, m, ty) = (
             &self.tokens.colors,
             &self.tokens.metrics,
             self.tokens.typography,
-            &self.tokens.translucency,
         );
         let slug = listing.slug.clone();
         let item = listing.clone();
@@ -973,33 +1029,31 @@ impl StoreWindow {
         let installed = self.installed(listing).is_some();
         let action = if installed {
             div()
-                .id(SharedString::from(format!("store-row-{}-action", listing.repo_id)))
+                .id(SharedString::from(format!(
+                    "store-row-{}-action",
+                    listing.repo_id
+                )))
                 .role(Role::Image)
                 .aria_label("Installed")
                 .flex_none()
                 .child(symbol("checkmark", m.symbol_inline, c.muted))
         } else {
-            div()
-                .id(SharedString::from(format!("store-row-{}-action", listing.repo_id)))
-                .role(Role::Button)
-                .aria_label(format!("Get: {}", listing.name))
-                .flex_none()
-                .size(px(m.hit))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(pm_shell::kit::ink(c.text, tr.hover))
-                .hover_style(|s| s.bg(pm_shell::kit::ink(c.text, tr.selected)))
-                .child(symbol("plus", m.symbol_inline, c.text))
+            self.kit()
+                .icon_button(
+                    format!("store-row-{}-action", listing.repo_id),
+                    "plus",
+                    format!("Get: {}", listing.name),
+                    false,
+                )
                 .on_click(cx.listener(move |v, _, _, cx| {
                     cx.stop_propagation();
                     v.open_detail(open.clone(), cx)
                 }))
         };
         // Keyed by repository: two makers' listings may share a slug.
-        div()
-            .id(SharedString::from(format!("store-row-{}", listing.repo_id)))
+        let id = format!("store-row-{}", listing.repo_id);
+        let row = div()
+            .id(SharedString::from(id.clone()))
             .debug_selector(move || format!("store-row-{slug}"))
             .flex()
             .items_center()
@@ -1009,8 +1063,9 @@ impl StoreWindow {
             .min_w(px(0.))
             .h(px(m.row * 2.))
             .px(px(m.gap))
-            .rounded(px(m.control_radius))
-            .hover_style(|s| s.bg(rgb(c.hover)))
+            .rounded(px(m.control_radius));
+        self.kit()
+            .wash(row, pm_shell::kit::key(&id), m.control_radius)
             .child(
                 div()
                     .flex_none()
@@ -1114,13 +1169,13 @@ impl StoreWindow {
         let searching = !self.query.trim().is_empty();
         match self.page {
             Page::Discover if !searching => match &self.shelves {
-                Load::Loading => out.push(self.status("Loading…").into_any_element()),
-                Load::Failed(error) => out.push(self.status(error).into_any_element()),
+                Load::Loading => out.push(self.loading().into_any_element()),
+                Load::Failed(_) => out.push(self.load_failed(cx).into_any_element()),
                 Load::Ready(shelves) if shelves.is_empty() => out.push(
                     pm_shell::view::empty_state(
                         &self.tokens,
-                        "Nothing Here Yet",
-                        "Extensions people publish to the Store appear here.",
+                        "No Extensions Yet",
+                        "Check back for extensions published to the Store.",
                     )
                     .into_any_element(),
                 ),
@@ -1147,19 +1202,20 @@ impl StoreWindow {
                 let rows = items.iter().map(|l| self.row(l, window, cx)).collect();
                 out.push(self.grid(rows));
                 match self.catalog.state {
-                    CatalogState::Loading => out.push(self.status("Loading…").into_any_element()),
-                    CatalogState::Failed(code) => out.push(
-                        self.status(&load_error(pm_services::ServiceError::message(code, "")))
-                            .into_any_element(),
-                    ),
+                    CatalogState::Loading => out.push(self.loading().into_any_element()),
+                    CatalogState::Failed(_) => out.push(self.load_failed(cx).into_any_element()),
                     CatalogState::Ready if items.is_empty() => out.push(
                         pm_shell::view::empty_state(
                             &self.tokens,
-                            "No Results",
+                            &if searching {
+                                "No Results".to_owned()
+                            } else {
+                                format!("No {} Yet", self.page.title())
+                            },
                             if searching {
                                 "Try a different search."
                             } else {
-                                "Nothing of this kind is on the Store yet."
+                                "Choose another category or check back later."
                             },
                         )
                         .into_any_element(),
@@ -1192,15 +1248,15 @@ impl StoreWindow {
         let mut out = Vec::new();
         let items = match &self.library {
             Load::Ready(items) => items.clone(),
-            Load::Loading => return vec![self.status("Loading…").into_any_element()],
-            Load::Failed(error) => return vec![self.status(error).into_any_element()],
+            Load::Loading => return vec![self.loading().into_any_element()],
+            Load::Failed(_) => return vec![self.load_failed(cx).into_any_element()],
         };
         if items.is_empty() && self.yours.is_empty() {
             return vec![
                 pm_shell::view::empty_state(
                     &self.tokens,
-                    "No Store Extensions",
-                    "Extensions you install from the Store appear here.",
+                    "No Extensions Yet",
+                    "Find an extension in Discover to install it.",
                 )
                 .into_any_element(),
             ];
@@ -1366,14 +1422,16 @@ impl StoreWindow {
         );
         let mut out = vec![
             div()
-                .id("store-back")
-                .debug_selector(|| "store-back".into())
-                .flex_none()
-                .px(px(m.gap))
-                .pt(px(m.gap))
-                .text_color(rgb(c.accent_text))
-                .child(format!("‹ {}", self.title_for_back()))
-                .on_click(cx.listener(|v, _, _, cx| v.back(cx)))
+                .flex()
+                .items_center()
+                .gap(px(m.gap))
+                .child(
+                    self.kit()
+                        .icon_button("store-back", "chevron.left", "Back", false)
+                        .debug_selector(|| "store-back".into())
+                        .on_click(cx.listener(|v, _, _, cx| v.back(cx))),
+                )
+                .child(self.title_for_back())
                 .into_any_element(),
             div()
                 .px(px(m.gap))
@@ -1399,11 +1457,11 @@ impl StoreWindow {
         ];
         let detail = match load {
             Load::Loading => {
-                out.push(self.status("Loading…").into_any_element());
+                out.push(self.loading().into_any_element());
                 return out;
             }
-            Load::Failed(error) => {
-                out.push(self.status(error).into_any_element());
+            Load::Failed(_) => {
+                out.push(self.load_failed(cx).into_any_element());
                 return out;
             }
             Load::Ready(detail) => detail,
@@ -1576,23 +1634,20 @@ impl StoreWindow {
 
 impl Render for StoreWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
+        self.frame_kit = Some(Kit::new(
+            &self.tokens,
+            &self.motion,
+            Self::motion,
+            window,
+            cx,
+        ));
         let t = self.tokens.clone();
-        let (c, m) = (&t.colors, &t.metrics);
-        let (ground, ground_alpha) = t.ground();
-        let (line, line_alpha) = t.line();
-        // Source list, as the Project Library's: Discover, the kinds, Library.
-        let mut sidebar = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .gap(px(m.border))
-            .w(px(m.settings_sidebar))
-            .h_full()
-            .pt(px(if self.embedded { m.gap } else { m.toolbar }))
-            .px(px(m.gap))
-            .bg(pm_shell::view::tint(ground, ground_alpha))
-            .border_r(px(m.border))
-            .border_color(pm_shell::view::tint(line, line_alpha));
+        let m = &t.metrics;
+        let kit = self.kit();
+        let mut sidebar =
+            kit.utility_sidebar()
+                .pt(px(if self.embedded { t.space.md } else { m.toolbar }));
         let pages = std::iter::once(Page::Discover)
             .chain((0..KINDS.len()).map(Page::Kind))
             .chain([Page::Library]);
@@ -1603,17 +1658,27 @@ impl Render for StoreWindow {
                 sidebar = sidebar.child(div().h(px(m.gap)));
             }
             sidebar = sidebar.child(
-                div()
-                    .id(label)
-                    .debug_selector(move || format!("store-section-{label}"))
-                    .flex()
-                    .items_center()
-                    .h(px(m.row))
-                    .px(px(m.gap))
-                    .rounded(px(m.control_radius))
-                    .when(selected, |d| d.bg(rgb(c.selected_fill)))
-                    .child(label)
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
+                kit.nav_row(
+                    label,
+                    match page {
+                        Page::Discover => "sparkles",
+                        Page::Library => "square.stack",
+                        Page::Kind(i) => [
+                            "wand.and.stars",
+                            "square.on.square",
+                            "rectangle.split.3x1",
+                            "paintpalette",
+                            "command",
+                            "square.3.layers.3d",
+                            "wrench.and.screwdriver",
+                        ][i],
+                    },
+                    label.into(),
+                    None,
+                    selected,
+                )
+                .debug_selector(move || format!("store-section-{label}"))
+                .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
             );
         }
         let heading = match &self.detail {
@@ -1626,9 +1691,7 @@ impl Render for StoreWindow {
             .flex_1()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .px(px(m.gap))
-            .pb(px(m.inset));
+            .overflow_y_scroll();
         let content = match self.detail.clone() {
             Some((listing, load)) => self.detail_view(&listing, &load, cx),
             None => self.list(window, cx),
@@ -1636,12 +1699,10 @@ impl Render for StoreWindow {
         // The original app's Store column: its shelves and pages centre in
         // the sheet at a readable width however wide the window grows.
         let centred = |inner: Div| {
-            div().flex().justify_center().child(
-                inner
-                    .flex_1()
-                    .min_w(px(0.))
-                    .max_w(px(m.store_column)),
-            )
+            div()
+                .flex()
+                .justify_center()
+                .child(inner.flex_1().min_w(px(0.)).max_w(px(m.store_column)))
         };
         let mut column = div().flex().flex_col();
         // A list page says what happened above its rows; a detail page
@@ -1652,50 +1713,26 @@ impl Render for StoreWindow {
             column = column.child(message);
         }
         body = body.child(centred(column.children(content)));
-        let content = div()
-            .flex_1()
-            .min_w(px(0.))
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(c.panel))
-            // The heading and search stand over the same centred column.
-            .child(
-                centred(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(m.inset))
-                        .h(px(m.toolbar))
-                        .px(px(m.inset))
-                        .child(
-                            div()
-                                .text_size(px(t.typography.heading))
-                                .font_weight(FontWeight(t.typography.semibold_weight))
-                                .child(heading),
-                        )
-                        // The field draws its own well.
-                        .children(
-                            self.search
-                                .clone()
-                                .map(|field| div().w(px(m.settings_sidebar)).child(field)),
-                        ),
-                )
-                .flex_none()
-                .px(px(m.gap)),
-            )
-            .child(body);
-        div()
-            .size_full()
-            .flex()
-            .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
-            .font_family(pm_design::TEXT_FONT)
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::on_key))
-            .child(sidebar)
-            .child(content)
+        let actions = self
+            .search
+            .clone()
+            .map(|field| {
+                div()
+                    .w(px(m.settings_sidebar))
+                    .child(field)
+                    .into_any_element()
+            })
+            .into_iter()
+            .collect();
+        kit.utility_window(
+            heading,
+            Some(sidebar.into_any_element()),
+            actions,
+            body.into_any_element(),
+            vec![],
+        )
+        .track_focus(&self.focus)
+        .on_key_down(cx.listener(Self::on_key))
     }
 }
 
@@ -1714,4 +1751,11 @@ fn art(seed: &str) -> (u32, u32) {
         pm_design::color::oklch(lightness as f32 / 100., 0.11, first as f32),
         pm_design::color::oklch((lightness + 22) as f32 / 100., 0.08, second as f32),
     )
+}
+
+#[cfg(test)]
+impl StoreWindow {
+    pub(crate) fn catalog_state_for_tests(&self) -> &CatalogState {
+        &self.catalog.state
+    }
 }
