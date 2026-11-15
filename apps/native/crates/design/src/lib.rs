@@ -53,6 +53,9 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Accent-tinted timeline layer selection, with a stronger hovered state.
+    pub timeline_selected: u32,
+    pub timeline_selected_hover: u32,
     /// Soft neutral fill: segmented tracks, search fields, quiet wells
     /// (`text` ink at `translucency.hover` over `panel`).
     pub fill: u32,
@@ -640,6 +643,8 @@ impl Colors {
             },
             selected_text: 0xffffff,
             selected_fill,
+            timeline_selected: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.18),
+            timeline_selected_hover: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.24),
             fill: 0,
             fill_strong: 0,
             hairline: 0,
@@ -1040,6 +1045,7 @@ impl Tokens {
         colors.viewer: color, colors.field: color, colors.floating: color,
         colors.hover: color, colors.separator: color, colors.text: color,
         colors.secondary: color, colors.muted: color, colors.accent: color,
+        colors.timeline_selected: color, colors.timeline_selected_hover: color,
         colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
         colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
         colors.warning: color, colors.success: color,

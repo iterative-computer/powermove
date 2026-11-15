@@ -407,7 +407,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t("colors.muted"),
+              color: t(row.selected ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -422,6 +422,7 @@ function Layer({
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
             symbol={row.expanded ? "chevron.down" : "chevron.right"}
             quiet
+            tint={row.selected ? "colors.accent_text" : undefined}
             tabIndex={-1}
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -459,7 +460,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t("colors.text"),
+            color: t(row.selected ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -491,6 +492,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
+              ...(row.selected ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -511,6 +513,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
+              tint={row.selected ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -738,9 +741,18 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.hovered && !row.selected
-            ? { background: t("colors.hover") }
-            : {}),
+          ...(row.selected
+            ? {
+                background: t(
+                  row.hovered
+                    ? "colors.timeline_selected_hover"
+                    : "colors.timeline_selected",
+                ),
+                color: t("colors.accent_text"),
+              }
+            : row.hovered
+              ? { background: t("colors.hover") }
+              : {}),
         }}
       >
         {row.kind === "layer" ? (

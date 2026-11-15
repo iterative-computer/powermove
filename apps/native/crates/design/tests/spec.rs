@@ -11,6 +11,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
+    ("colors.timeline_selected", "Accent tint for selected timeline layer rows"),
+    ("colors.timeline_selected_hover", "Stronger accent tint for hovered selected timeline layer rows"),
     (
         "colors.window",
         "Window ground behind panels, toolbar band and status bar",

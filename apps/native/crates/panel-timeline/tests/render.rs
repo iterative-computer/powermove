@@ -743,3 +743,31 @@ fn text_stagger_bands_draw_the_first_and_last_unit_intervals() {
     assert_eq!(band.opacity, 0.8);
     assert!(band.clip.is_some());
 }
+
+#[test]
+fn selected_rows_use_accent_tints_in_light_and_dark() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        for (selected, hovered, expected) in [
+            (false, true, t.colors.hover),
+            (true, false, t.colors.timeline_selected),
+            (true, true, t.colors.timeline_selected_hover),
+        ] {
+            let mut r = row("states", RowContent::Layer { clip: Some(clip("states")), summary: vec![].into() });
+            r.selected = selected;
+            r.hovered = hovered;
+            let s = Scene::new(vec![r], 10., 30., &t).unwrap();
+            let f = s.prepare(viewport(&t), &t).unwrap();
+            let wire = f.wire();
+            let row = wire["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["id"] == "row:states")
+                .unwrap();
+            assert_eq!(row["color"], expected);
+        }
+        assert_ne!(t.colors.timeline_selected, t.colors.hover);
+        assert_ne!(t.colors.timeline_selected_hover, t.colors.timeline_selected);
+    }
+}
