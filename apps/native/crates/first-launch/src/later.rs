@@ -230,7 +230,11 @@ mod tests {
         fs::write(temp.path().join("first-launch.lock"), b"").unwrap();
         assert_eq!(tidy(temp.path()).unwrap(), 2);
         assert!(!deltas.join(STAGE).exists());
-        assert!(deltas.join("pending.capture.archive-0000000000000001").exists());
+        assert!(
+            deltas
+                .join("pending.capture.archive-0000000000000001")
+                .exists()
+        );
         assert!(deltas.join("base").exists());
     }
 }

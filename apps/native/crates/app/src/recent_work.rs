@@ -147,15 +147,20 @@ mod tests {
         assert_eq!(alert.buttons[0].label, "Restart and Bring In");
         assert!(alert.buttons[0].default);
         assert!(alert.informative.contains("stays unchanged"));
-        assert!(confirm_alert(true).informative.contains("Quit the original app first"));
+        assert!(
+            confirm_alert(true)
+                .informative
+                .contains("Quit the original app first")
+        );
     }
     #[test]
     fn a_cancelled_quit_withdraws_the_request() {
         let temp = tempfile::tempdir().unwrap();
-        later::request(temp.path()).unwrap();
-        *RELAUNCH.lock().unwrap() = Some(temp.path().to_owned());
+        let root = temp.path().canonicalize().unwrap();
+        later::request(&root).unwrap();
+        *RELAUNCH.lock().unwrap() = Some(root.clone());
         quit_cancelled();
-        assert!(!later::requested(temp.path()));
+        assert!(!later::requested(&root));
         assert!(RELAUNCH.lock().unwrap().is_none());
     }
 }

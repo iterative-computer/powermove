@@ -213,7 +213,10 @@ fn a_click_selects_and_return_opens_through_the_kernel() {
     // Ghost loading: the window hears of the open at once, before the
     // project has been read.
     view.update(cx, |v, cx| v.pump(cx));
-    assert_eq!(log.borrow().first().map(String::as_str), Some("ghost First Film"));
+    assert_eq!(
+        log.borrow().first().map(String::as_str),
+        Some("ghost First Film")
+    );
     assert!(!log.borrow().iter().any(|l| l.starts_with("opened")));
     let start = Instant::now();
     while !log.borrow().iter().any(|l| l.starts_with("opened")) {
@@ -222,7 +225,10 @@ fn a_click_selects_and_return_opens_through_the_kernel() {
         assert!(start.elapsed() < Duration::from_secs(10), "never opened");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(*log.borrow(), ["ghost First Film", "ghost ended", "opened First Film"]);
+    assert_eq!(
+        *log.borrow(),
+        ["ghost First Film", "ghost ended", "opened First Film"]
+    );
     log.borrow_mut().clear();
     assert!(fixture.actor.handle().published("first").is_some());
     // Opening it again, from this or another window's list, brings forward the
@@ -358,7 +364,10 @@ fn capture_home_recent_work() {
     use gpui::{HeadlessAppContext, px, size};
     let dir = std::env::var("PM_WELCOME_CAPTURE").unwrap();
     std::fs::create_dir_all(&dir).unwrap();
-    for (name, newer) in [("home-without-line", false), ("after-home-newer-work-line", true)] {
+    for (name, newer) in [
+        ("home-without-line", false),
+        ("after-home-newer-work-line", true),
+    ] {
         objc2::rc::autoreleasepool(|_| {
             let fixture = fixture();
             crate::recent_work::set_newer(newer);
@@ -382,7 +391,8 @@ fn capture_home_recent_work() {
             let fill = tokens.colors.window;
             let window = cx
                 .open_window(size(px(1100.), px(640.)), move |_, cx| {
-                    let view = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx));
+                    let view =
+                        cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx));
                     cx.new(|_| Backed { view, fill })
                 })
                 .unwrap();
@@ -410,7 +420,11 @@ struct Backed {
     fill: u32,
 }
 impl gpui::Render for Backed {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
         gpui::div()
             .size_full()
             .bg(gpui::rgb(self.fill))

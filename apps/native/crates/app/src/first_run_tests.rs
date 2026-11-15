@@ -542,14 +542,23 @@ fn a_failed_bring_in_is_recorded_and_no_launch_tries_it_again() {
     }));
     let frame = flow.frame();
     titled(&frame, "Recent Work Couldn’t Come In");
-    assert!(frame.line.starts_with("Some of the original app’s files couldn’t be read."));
+    assert!(
+        frame
+            .line
+            .starts_with("Some of the original app’s files couldn’t be read.")
+    );
     assert_eq!(frame.default_action(), Some("open_native"));
     assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
     // The next launch: no screen, no new capture, the record stays.
     let mut next = Flow::new(plan(&home));
     assert_ne!(next.start(), vec![Effect::BringIn]);
     assert!(!next.visible());
-    assert!(!later_store(&later, |_| panic!("a failed capture is not retried at launch")).unwrap());
+    assert!(
+        !later_store(&later, |_| panic!(
+            "a failed capture is not retried at launch"
+        ))
+        .unwrap()
+    );
     assert_eq!(later::last_failure(&config.native_profile), Some(failure));
 }
 #[test]
@@ -564,10 +573,13 @@ fn a_taken_capture_finishes_at_launch_unless_its_last_attempt_failed() {
     ));
     assert!(later_store(&later, |_| Ok(())).unwrap());
     // Had it failed, the launch leaves it for the person to ask again.
-    later::record_failure(&config.native_profile, &anyhow::Error::new(LowDisk {
-        needed: 8,
-        available: 6,
-    }))
+    later::record_failure(
+        &config.native_profile,
+        &anyhow::Error::new(LowDisk {
+            needed: 8,
+            available: 6,
+        }),
+    )
     .unwrap();
     assert!(!later_store(&later, |_| panic!("failed capture")).unwrap());
     pm_first_launch::delta_media(&config, |_| Ok(())).unwrap();
@@ -1113,7 +1125,10 @@ fn capture_recent_work_frames() {
                 progress: Some((3, 12)),
             }),
         ),
-        ("after-asked-waiting-for-original", recent_frame(&Recent::Waiting)),
+        (
+            "after-asked-waiting-for-original",
+            recent_frame(&Recent::Waiting),
+        ),
         (
             "after-asked-low-disk",
             recent_frame(&Recent::Failed {
