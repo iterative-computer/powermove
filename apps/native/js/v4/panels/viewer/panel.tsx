@@ -1,3 +1,4 @@
+import { showsFlyHint } from "./contract";
 import { useEffect, useState } from "preact/hooks";
 import {
   EmptyState,
@@ -359,7 +360,7 @@ export function ViewerPanel({
     />
   );
   // Fly navigation (Shift+`, Blender's Fly): its keys while it lasts.
-  const flyHint = m.studio?.fly ? (
+  const flyHint = showsFlyHint(m, !!source) ? (
     <div
       id="viewer.studio.flyHint"
       role="status"

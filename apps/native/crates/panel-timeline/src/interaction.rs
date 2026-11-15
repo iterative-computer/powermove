@@ -1822,21 +1822,21 @@ impl Drag {
                 let [a, b] = self.start.work;
                 let frame = 1. / self.start.fps;
                 let duration = self.start.duration;
-                let (a, b, duration) = match self.kind {
-                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b, duration),
+                let (a, b) = match self.kind {
+                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b),
                     DragKind::WorkOut => {
-                        let end = (b + delta).max(a + frame);
-                        (a, end, duration.max(end))
+                        let end = (b + delta).max(a + frame).min(duration);
+                        (a, end)
                     }
                     _ => {
                         let d = delta.max(-a).min(duration - b);
-                        (a + d, b + d, duration)
+                        (a + d, b + d)
                     }
                 };
                 out.push(
                     CompCommand::Set {
                         patch: Box::new(CompPatch {
-                            duration: Some(duration),
+                            duration: None,
                             work_area: Some((a, b)),
                             ..Default::default()
                         }),
