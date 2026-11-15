@@ -36,6 +36,15 @@ const GROUP_GAP: f64 = 14.;
 /// The tile's side in a sidebar row.
 const TILE: f64 = 20.;
 const FRAME_NAME: &str = "PMSettingsWindow";
+/// The Settings window's identifier (its title is the section's name).
+const IDENTIFIER: &str = "pm.settings";
+
+/// Whether `window` is the Settings window.
+pub fn is_settings(window: &NSWindow) -> bool {
+    window
+        .identifier()
+        .is_some_and(|id| id.to_string() == IDENTIFIER)
+}
 const NAV: &str = "pm.settings.navigation";
 
 /// What a section's glyph is drawn from: the drawn glyph on the glass tile,
@@ -254,6 +263,7 @@ impl SettingsChrome {
                 | NSWindowStyleMask::Resizable
                 | NSWindowStyleMask::FullSizeContentView,
         );
+        window.setIdentifier(Some(&NSString::from_str(IDENTIFIER)));
         window.setTitlebarAppearsTransparent(false);
         window.setTitleVisibility(NSWindowTitleVisibility::Visible);
         let frame = window.frame();
