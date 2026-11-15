@@ -145,6 +145,14 @@ for (const [state, view, extra] of cases)
       expect(report.wireDiagnostics).toEqual([]);
     }
     const report = reports.at(-1)!;
+    if (state.startsWith("linked-Syncing")) {
+      expect(
+        Object.values(report.nodes).some(
+          (node: any) =>
+            node.props.attr?.symbol === "arrow.triangle.2.circlepath",
+        ),
+      ).toBe(true);
+    }
     expect({
       tree: treeSnapshot(report.nodes),
       ax: report.accessibility,
@@ -698,5 +706,31 @@ test("scrolling within the same rows asks for no new page", async () => {
     [200, 12],
     [202, 12],
   ]);
+  await root.dispose();
+});
+
+test("list video uses its resolved poster resource", async () => {
+  const row = asset();
+  if ("Asset" in row.data) row.data.Asset[1].poster = "poster-video";
+  const { root, commits } = recorder();
+  await root.render(
+    <ProjectView
+      view={projection([row])}
+      input={() => {}}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={layout}
+      viewMode="list"
+      posters={new Map([["poster-video", "thumb/video"]])}
+    />,
+  );
+  const report = replay(commits, projection([row])).at(-1)!;
+  expect(report.accepted).toBe(true);
+  expect(
+    Object.values(report.nodes).some(
+      (node: any) => node.props.resource === "thumb/video",
+    ),
+  ).toBe(true);
   await root.dispose();
 });

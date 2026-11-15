@@ -1945,7 +1945,7 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                                 "text",
                                 {
                                   "attr": {
-                                    "symbol": "link",
+                                    "symbol": "arrow.triangle.2.circlepath",
                                   },
                                   "style": {
                                     "bottom": {
@@ -2632,7 +2632,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                 "text",
                                 {
                                   "attr": {
-                                    "symbol": "link",
+                                    "symbol": "arrow.triangle.2.circlepath",
                                   },
                                   "style": {
                                     "bottom": {

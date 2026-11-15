@@ -579,7 +579,11 @@ export function ProjectView(props: ProjectViewProps) {
               <text
                 attr={{
                   symbol:
-                    f.folder.sync === "NotFound" ? "link.badge.plus" : "link",
+                    f.folder.sync === "NotFound"
+                      ? "link.badge.plus"
+                      : f.folder.sync === "Syncing"
+                        ? "arrow.triangle.2.circlepath"
+                        : "link",
                 }}
                 style={{
                   position: "absolute",
@@ -759,7 +763,11 @@ export function ProjectView(props: ProjectViewProps) {
             <text
               attr={{
                 symbol:
-                  f.folder.sync === "NotFound" ? "link.badge.plus" : "link",
+                  f.folder.sync === "NotFound"
+                    ? "link.badge.plus"
+                    : f.folder.sync === "Syncing"
+                      ? "arrow.triangle.2.circlepath"
+                      : "link",
               }}
               style={{
                 symbolSize: token("metrics.symbol_inline"),

@@ -187,6 +187,10 @@ fn capture_project_panel() {
         }
         thumbs.done(thumbs.generation(), id.into(), made);
     }
+    if media.join("moving-color.mp4").is_file() {
+        let key = posters.get("a2").expect("the real video fixture must generate a poster");
+        assert!(crate::media_thumbs::resolve(key).is_some(), "the native renderer can resolve the video poster");
+    }
     for (view, w, h) in [("grid", 300., 640.), ("list", 300., 640.)] {
         for (name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
@@ -275,6 +279,10 @@ fn capture_project_panel() {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
+                // The headless harness has no display-link invalidation loop.
+                // Redraw after asynchronous image decoding has settled.
+                window.update(&mut cx, |_, window, _| window.refresh()).unwrap();
+                cx.run_until_parked();
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
                     .save(format!("{dir}/{tag}-{view}-{name}.png"))
