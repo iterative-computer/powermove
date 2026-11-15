@@ -366,6 +366,10 @@ struct LayerDrop {
     name: String,
 }
 pub struct TimelineSurface {
+    agent_ink: pm_panel_timeline::agent_ink::AgentInk,
+    agent_ink_clock: std::time::Instant,
+    agent_ink_task: Option<Task<()>>,
+
     kernel: KernelHandle,
     project: String,
     tokens: Tokens,
@@ -471,6 +475,9 @@ impl TimelineSurface {
         outline.column.set(layer_column as f32);
         outline.bind_surface(cx.entity().downgrade());
         let mut this = Self {
+            agent_ink: Default::default(),
+            agent_ink_clock: std::time::Instant::now(),
+            agent_ink_task: None,
             kernel: kernel.clone(),
             project: project.clone(),
             tokens: tokens.clone(),
@@ -589,6 +596,59 @@ impl TimelineSurface {
             self.view.column_chosen = true;
             self.outline.column.set(column as f32);
         }
+    }
+    pub fn agent_presence(
+        &mut self,
+        events: Vec<pm_mcp::presence::Presence>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::agent_ink::{Event, Kind};
+        let now = self.agent_ink_clock.elapsed().as_millis() as u64;
+        for event in events {
+            let kind = match event.kind {
+                pm_mcp::presence::Kind::Focus => Kind::Focus,
+                pm_mcp::presence::Kind::Create => Kind::Create,
+                pm_mcp::presence::Kind::Key => Kind::Key,
+                pm_mcp::presence::Kind::Remove => Kind::Remove,
+                pm_mcp::presence::Kind::Held => Kind::Held,
+                pm_mcp::presence::Kind::Dropped => Kind::Dropped,
+                pm_mcp::presence::Kind::RunEnd => Kind::End,
+                _ => Kind::Set,
+            };
+            self.agent_ink.receive(
+                Event {
+                    layer: event.layer.unwrap_or_default(),
+                    property: event.property,
+                    kind,
+                    times: event.times,
+                },
+                now,
+            );
+        }
+        if self.agent_ink_task.is_none() && self.agent_ink.moving(now) {
+            self.agent_ink_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    let moving = this
+                        .update(cx, |s, cx| {
+                            let now = s.agent_ink_clock.elapsed().as_millis() as u64;
+                            let moving = s.agent_ink.moving(now);
+                            if !moving {
+                                s.agent_ink_task = None;
+                            }
+                            cx.notify();
+                            moving
+                        })
+                        .unwrap_or(false);
+                    if !moving {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.notify();
     }
     /// A kernel publication landed: follow it on a worker.
     pub fn published(&mut self, cx: &mut Context<Self>) {
@@ -1139,7 +1199,20 @@ impl TimelineSurface {
             let delegate = self.delegate.clone();
             cx.defer(move |cx| delegate.view_moved(cx));
         }
-        self.frame.clone()
+        let frame = self.frame.clone()?;
+        if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) {
+            return Some(frame);
+        }
+        let mut frame = (*frame).clone();
+        if let Some(scene) = &self.scene {
+            self.agent_ink.paint(
+                &mut frame,
+                scene,
+                &self.tokens,
+                self.agent_ink_clock.elapsed().as_millis() as u64,
+            );
+        }
+        Some(Arc::new(frame))
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
     /// `keySelectionActive`, and each visible row's layer with its top and
@@ -1241,7 +1314,8 @@ impl TimelineSurface {
     /// The graph's values at the playhead `time` (v1's dots and readouts on
     /// the head), in window points; none while the graph is not shown.
     pub fn graph_marks(&self, time: f64) -> Vec<graph_render::Mark> {
-        let (Some(area), Some(v), Some(graph)) = (self.graph_area(), self.viewport(), self.graph.as_ref())
+        let (Some(area), Some(v), Some(graph)) =
+            (self.graph_area(), self.viewport(), self.graph.as_ref())
         else {
             return vec![];
         };
@@ -1528,7 +1602,10 @@ impl TimelineSurface {
         // (selection, a drag) goes on from there, without a skimmer. A key, a
         // direction handle or a transform grip under the pointer takes the
         // press as it stands: the playhead stays where it is.
-        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
+        let grabs = self
+            .frame
+            .as_ref()
+            .is_some_and(|f| f.hit_key(x, y, 3.).is_some())
             || self.graph_point_at(x, y);
         if let Some(at) = self.skimmer
             && !grabs
@@ -2079,13 +2156,29 @@ impl TimelineSurface {
     /// The graph drawn into its region; `playhead` marks each curve's value
     /// there.
     fn graph_point_at(&self, x: f64, y: f64) -> bool {
-        let Some(region) = self.graph_region() else { return false; };
-        if y < region.y + graph_render::LEGEND { return false; }
-        if self.graph.as_ref().zip(self.viewport()).and_then(|(g,v)| g.selection_box(v,region))
-            .is_some_and(|b| graph_render::grip_at(b,x,y).is_some()) { return true; }
-        self.graph_ops(None).is_some_and(|ops| ops.iter().any(|o|
-            (o.id.starts_with("graph-key:") || o.id.starts_with("graph-handle:")) &&
-            (x-o.bounds.x-o.bounds.width/2.).hypot(y-o.bounds.y-o.bounds.height/2.) < graph_render::POINT_HIT))
+        let Some(region) = self.graph_region() else {
+            return false;
+        };
+        if y < region.y + graph_render::LEGEND {
+            return false;
+        }
+        if self
+            .graph
+            .as_ref()
+            .zip(self.viewport())
+            .and_then(|(g, v)| g.selection_box(v, region))
+            .is_some_and(|b| graph_render::grip_at(b, x, y).is_some())
+        {
+            return true;
+        }
+        self.graph_ops(None).is_some_and(|ops| {
+            ops.iter().any(|o| {
+                (o.id.starts_with("graph-key:") || o.id.starts_with("graph-handle:"))
+                    && (x - o.bounds.x - o.bounds.width / 2.)
+                        .hypot(y - o.bounds.y - o.bounds.height / 2.)
+                        < graph_render::POINT_HIT
+            })
+        })
     }
     fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
         self.graph
@@ -2467,7 +2560,10 @@ impl TimelineSurface {
                 .iter()
                 .filter_map(|o| {
                     let id = o.id.strip_prefix("graph-key:")?;
-                    let (x, y) = (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+                    let (x, y) = (
+                        o.bounds.x + o.bounds.width / 2.,
+                        o.bounds.y + o.bounds.height / 2.,
+                    );
                     let inside = x >= area.x
                         && x <= area.x + area.width
                         && y >= area.y
@@ -2742,7 +2838,8 @@ impl TimelineSurface {
             cx,
             Box::new(move |index, cx| {
                 if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
-                    let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
+                    let _ =
+                        weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
                     return;
                 }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
@@ -2935,7 +3032,10 @@ impl TimelineSurface {
             CursorStyle::ResizeLeftRight
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
-        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key(x,y,((m.hit-m.keyframe) as f64/2.).max(0.)).is_some()) {
+        } else if self.frame.as_ref().is_some_and(|f| {
+            f.hit_layer_key(x, y, ((m.hit - m.keyframe) as f64 / 2.).max(0.))
+                .is_some()
+        }) {
             CursorStyle::PointingHand
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
@@ -2946,7 +3046,13 @@ impl TimelineSurface {
                 })
         {
             CursorStyle::ResizeLeftRight
-        } else if self.clip_at(x,y).is_some_and(|(id,_)| !self.model.index.layer(&id).is_some_and(|l| l.effectively_locked)) {
+        } else if self.clip_at(x, y).is_some_and(|(id, _)| {
+            !self
+                .model
+                .index
+                .layer(&id)
+                .is_some_and(|l| l.effectively_locked)
+        }) {
             CursorStyle::OpenHand
         } else {
             CursorStyle::Arrow
@@ -4324,10 +4430,19 @@ impl TimelineSurface {
             );
         }
         let (text, x, y) = self.readout.as_ref()?;
-        Some(div().absolute().left(px(*x as f32 + 14.)).top(px(*y as f32 - 26.))
-            .px(px(self.tokens.metrics.gap)).py(px(2.)).rounded(px(3.))
-            .bg(rgb(self.tokens.colors.accent)).text_color(rgb(0xffffff))
-            .child(text.clone()).into_any_element())
+        Some(
+            div()
+                .absolute()
+                .left(px(*x as f32 + 14.))
+                .top(px(*y as f32 - 26.))
+                .px(px(self.tokens.metrics.gap))
+                .py(px(2.))
+                .rounded(px(3.))
+                .bg(rgb(self.tokens.colors.accent))
+                .text_color(rgb(0xffffff))
+                .child(text.clone())
+                .into_any_element(),
+        )
     }
     /// The skimmer: a hairline of text ink across the ruler and tracks
     /// (the playhead is the accent), with its timecode on the ruler.

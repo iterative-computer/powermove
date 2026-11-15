@@ -1935,13 +1935,23 @@ impl Host {
             let shown = status.clone();
             let item = item.clone();
             let step =
-                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    let turn = started.elapsed().as_secs_f64() % 1.;
+                block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    if elapsed >= 12. {
+                        item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
+                        // Keep the invalidated timer in agent_timer until the
+                        // run ends: elapsed text updates must not restart it.
+                        unsafe {
+                            timer.as_ref().invalidate();
+                        }
+                        return;
+                    }
+                    let turn = elapsed % 1.;
                     item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
                 });
             let timer = unsafe {
                 objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
-                    1. / 30.,
+                    1. / 20.,
                     true,
                     &step,
                 )
@@ -5655,7 +5665,9 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
-            if self.anchor.is_none() { save_palette_recent(&mut self.model.recents, &name); }
+            if self.anchor.is_none() {
+                save_palette_recent(&mut self.model.recents, &name);
+            }
             let (command, args) = menu::split_palette_command(&name);
             let _ = self.sender.try_send(Command {
                 name: command.to_owned(),
@@ -6492,7 +6504,11 @@ mod sidebar_rect_tests {
 }
 
 fn toolbar_click_command(command: &str, double_click: bool) -> &str {
-    if command == "toolAnchor" && double_click { "centerAnchor" } else { command }
+    if command == "toolAnchor" && double_click {
+        "centerAnchor"
+    } else {
+        command
+    }
 }
 
 #[cfg(test)]
@@ -6511,24 +6527,36 @@ mod anchor_toolbar_tests {
 
 fn load_palette_recents() -> Vec<String> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-    defaults.stringForKey(&NSString::from_str("PowermovePaletteRecents"))
+    defaults
+        .stringForKey(&NSString::from_str("PowermovePaletteRecents"))
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value.to_string()).ok())
-        .map(|mut ids| { ids.truncate(8); ids }).unwrap_or_default()
+        .map(|mut ids| {
+            ids.truncate(8);
+            ids
+        })
+        .unwrap_or_default()
 }
 fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     crate::transient::remember_command(recents, command);
     let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
     // NSString is a property-list value accepted by NSUserDefaults.
-    unsafe { objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents")); }
+    unsafe {
+        objc2_foundation::NSUserDefaults::standardUserDefaults()
+            .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
+    }
 }
 
 /// Viewer preferences share the shell's native application settings store.
 pub fn viewer_preference(key: &str, default: bool) -> bool {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = NSString::from_str(key);
-    if defaults.objectForKey(&key).is_none() { default } else { defaults.boolForKey(&key) }
+    if defaults.objectForKey(&key).is_none() {
+        default
+    } else {
+        defaults.boolForKey(&key)
+    }
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
-    objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(value, &NSString::from_str(key));
 }
