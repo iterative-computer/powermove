@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { JSDOM } from "jsdom";
+import { createRequire } from "node:module";
+const require = createRequire(new URL("../../../js/remote-dom/package.json", import.meta.url));
+const { JSDOM } = require("jsdom");
 import { readFileSync } from "node:fs";
 
 test("extension cssText padding cannot increase the panel body's border box width", () => {

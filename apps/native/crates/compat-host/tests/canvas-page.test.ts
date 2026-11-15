@@ -105,7 +105,7 @@ test("native canvas resource is decoded before release or the next poll", async 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(p.draws).toEqual([[2, 3, 0, 0]]);
     const release = p.calls.find((c) => c.kind === "canvas_applied");
-    expect(release.payload).toEqual({ resource: 17 });
+    expect(release.payload).toEqual({ resource: 17, failed: false });
     expect(p.calls.findIndex((c) => c.kind === "bitmap-closed")).toBeLessThan(
       p.calls.indexOf(release),
     );
@@ -114,7 +114,7 @@ test("native canvas resource is decoded before release or the next poll", async 
     p.dom.window.close();
   }
 });
-test("a canvas preceding its DOM sequence fails visibly without a false acknowledgement", async () => {
+test("a canvas preceding its DOM sequence waits without a false acknowledgement", async () => {
   const p = await page([
     { kind: "create", panel: 1 },
     { kind: "batch", panel: 1, batch },
@@ -130,7 +130,7 @@ test("a canvas preceding its DOM sequence fails visibly without a false acknowle
   ]);
   try {
     expect(p.resources).toEqual([]);
-    expect(p.calls.some((c) => c.kind === "failure")).toBe(true);
+    expect(p.calls.some((c) => c.kind === "failure")).toBe(false);
     expect(p.calls.some((c) => c.kind === "canvas_applied")).toBe(false);
     expect(p.draws).toEqual([]);
   } finally {
