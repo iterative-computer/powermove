@@ -1,5 +1,7 @@
 //! Selection on the existing shaped prose; Markdown styling stays in StyledText.
 use gpui::*;
+#[cfg(test)]
+use ::core::prelude::v1::test;
 use pm_surface::Id;
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 #[derive(Clone)]
