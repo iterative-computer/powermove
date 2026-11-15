@@ -115,6 +115,9 @@ pub struct Host {
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
     pub(crate) settings_history: crate::settings_window::History,
+    /// This editor's entity while it hosts Settings (its picker lists the
+    /// other editors' projects without reading this one, being updated).
+    pub(crate) settings_me: Option<gpui::EntityId>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
@@ -497,7 +500,7 @@ impl Controller {
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
             "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":self.settings_header(cx),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -1440,8 +1443,20 @@ impl Controller {
                         if settings {
                             let owner = cx.entity();
                             cx.defer(move |cx| {
+                                let Ok(view) = handle.update(cx, |_, window, _| {
+                                    pm_shell::settings_window::gpui_view(window)
+                                }) else {
+                                    return;
+                                };
+                                let chrome = view.and_then(|view| {
+                                    crate::settings_window::install(view, owner, cx)
+                                });
+                                // AppKit's layout told GPUI of the view's new
+                                // size while the app was busy (here), which
+                                // GPUI drops: it reads it now.
                                 let _ = handle.update(cx, |w, window, cx| {
-                                    w.chrome = crate::settings_window::install(window, owner, cx);
+                                    w.chrome = chrome;
+                                    window.bounds_changed(cx);
                                 });
                             });
                         }
@@ -1946,6 +1961,19 @@ impl Controller {
                 "settings.title" => Ok(Value::Null),
                 "settings.sidebar" => {
                     self.settings_sidebar(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                // The header's project picker and Show in Finder.
+                "settings.project" => {
+                    if let Some(id) = request.input.as_str() {
+                        self.settings_for_project(id, cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "settings.reveal" => {
+                    if let Some(path) = self.path.clone() {
+                        crate::platform::reveal(&path);
+                    }
                     Ok(Value::Null)
                 }
                 "settings.scroll" => {
@@ -2569,8 +2597,14 @@ impl Render for SurfaceWindow {
         let popover = self.panel == "agent";
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
-        // Settings' page is under AppKit's toolbar, on the page's ground.
+        // Settings' page is under AppKit's toolbar, on the page's ground;
+        // its chrome follows the appearance as it changes.
         let settings = self.panel == "settings";
+        if let Some(chrome) = &self.chrome {
+            let (dark, ground) =
+                crate::settings_window::scheme(&self.owner.read(cx).host.borrow().tokens);
+            chrome.set_scheme(dark, ground);
+        }
         if popover || sheet {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
@@ -2989,7 +3023,11 @@ mod follow_selection_tests {
 /// first snapshot; the Project panel asks for its list/grid choice before
 /// its first render (refused, its grid drew no thumbnails).
 fn answers_before_ready(operation: &str) -> bool {
-    matches!(operation, "export.estimate" | "project.view")
+    // Settings telling its window's sidebar what it lists edits nothing.
+    matches!(
+        operation,
+        "export.estimate" | "project.view" | "settings.sidebar"
+    )
 }
 
 /// The Project panel's view for `project` in the per-project choices at

@@ -88,6 +88,9 @@ pub struct State {
     search: RefCell<Option<Retained<NSSearchField>>>,
     nav: RefCell<Option<Retained<NSToolbarItemGroup>>>,
     can: Cell<(bool, bool)>,
+    /// The window's appearance: which icon set the rows show.
+    dark: Cell<bool>,
+    ground: Cell<Option<u32>>,
     /// Set while the host changes the selection, so it is not sent back.
     quiet: Cell<bool>,
 }
@@ -127,7 +130,7 @@ define_class!(
         }
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
         fn cell(&self, _: &NSOutlineView, _: *mut AnyObject, item: *mut AnyObject) -> Option<Retained<NSView>> {
-            self.row_of(item).flatten().map(|section| cell(MainThreadMarker::from(self), &section))
+            self.row_of(item).flatten().map(|section| cell(MainThreadMarker::from(self), &section, self.ivars().dark.get()))
         }
         #[unsafe(method(outlineViewSelectionDidChange:))]
         fn selection_changed(&self, _: &NSNotification) {
@@ -196,17 +199,15 @@ pub struct SettingsChrome {
 impl SettingsChrome {
     /// Frames the GPUI window `w` as Settings: its content view (GPUI's view
     /// and the accessibility host that holds it) becomes the detail item.
+    ///
+    /// Call it outside any update of that GPUI window (take the view with
+    /// [`gpui_view`] inside one): the frame ends with a layout, and GPUI must
+    /// be free to hear its view's new size.
     pub fn install(
-        w: &gpui::Window,
+        gpui: Retained<NSView>,
         sender: async_channel::Sender<Event>,
     ) -> Option<SettingsChrome> {
         let mtm = MainThreadMarker::new()?;
-        let RawWindowHandle::AppKit(handle) =
-            HasWindowHandle::window_handle(w).ok()?.as_raw()
-        else {
-            return None;
-        };
-        let gpui: Retained<NSView> = unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
         let window = gpui.window()?;
         let content = unsafe { gpui.superview() }?;
         let chrome: Retained<Chrome> = {
@@ -217,6 +218,8 @@ impl SettingsChrome {
                 search: RefCell::new(None),
                 nav: RefCell::new(None),
                 can: Cell::new((false, false)),
+                dark: Cell::new(true),
+                ground: Cell::new(None),
                 quiet: Cell::new(false),
             });
             unsafe { msg_send![super(this), init] }
@@ -349,6 +352,11 @@ impl SettingsChrome {
 
         *chrome.ivars().outline.borrow_mut() = Some(outline);
         *chrome.ivars().search.borrow_mut() = Some(search);
+        // GPUI's view takes its place in the detail now, so GPUI lays the
+        // page out at the detail's size from the first frame.
+        if let Some(content) = window.contentView() {
+            content.layoutSubtreeIfNeeded();
+        }
         Some(SettingsChrome { chrome, window })
     }
 
@@ -406,11 +414,25 @@ impl SettingsChrome {
         }
     }
 
-    /// The ground the detail shows under the toolbar, as the page's own.
-    pub fn set_ground(&self, rgb: u32) {
-        let c = |shift: u32| f64::from((rgb >> shift) & 0xff) / 255.;
-        let colour = NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.);
-        self.window.setBackgroundColor(Some(&colour));
+    /// The window's appearance (live): the rows' icon set, and the ground
+    /// the detail shows under the toolbar, as the page's own.
+    pub fn set_scheme(&self, dark: bool, ground: u32) {
+        let state = self.chrome.ivars();
+        if state.ground.replace(Some(ground)) != Some(ground) {
+            let c = |shift: u32| f64::from((ground >> shift) & 0xff) / 255.;
+            let colour = NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.);
+            self.window.setBackgroundColor(Some(&colour));
+        }
+        if state.dark.replace(dark) == dark {
+            return;
+        }
+        if let Some(outline) = state.outline.borrow().clone() {
+            let selected = outline.selectedRowIndexes();
+            state.quiet.set(true);
+            outline.reloadData();
+            outline.selectRowIndexes_byExtendingSelection(&selected, false);
+            state.quiet.set(false);
+        }
     }
 
     /// ⌘F: the keyboard goes to the search field.
@@ -430,6 +452,14 @@ impl SettingsChrome {
     }
 }
 
+/// GPUI's view of window `w`.
+pub fn gpui_view(w: &gpui::Window) -> Option<Retained<NSView>> {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).ok()?.as_raw() else {
+        return None;
+    };
+    unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }
+}
+
 fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(constraints));
 }
@@ -442,10 +472,10 @@ fn symbol(name: &str, label: &str) -> Option<Retained<NSImage>> {
 }
 
 /// A sidebar row: the section's icon and its name.
-fn cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
+fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView> {
     let view = NSTableCellView::new(mtm);
     let icon = NSImageView::new(mtm);
-    if let Some(image) = icon_image(&section.id) {
+    if let Some(image) = icon_image(&section.id, dark) {
         icon.setImage(Some(&image));
     }
     icon.setImageScaling(NSImageScaling::ScaleNone);
@@ -485,53 +515,76 @@ fn cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
 const MARGIN: (f64, f64, f64, f64) = (8. * TILE / 100., 6. * TILE / 100., 8. * TILE / 100., 14. * TILE / 100.);
 const ICON_SIZE: (f64, f64) = (116. * TILE / 100., 120. * TILE / 100.);
 
-/// The glass face's perceived centre, down the tile (the designer's
-/// round 3: midway between the face's middle and its luminance centroid).
-const FACE_CENTRE: f64 = 0.5407;
+/// Where the fallback's SF Symbol is centred down the tile
+/// (`sf-symbols.json`: x 50 %, y 49 %). The drawn glyphs sit where their
+/// SVGs place them.
+const SYMBOL_CENTRE: f64 = 0.49;
 
+/// One section's art in one appearance: dark is the glass slab, light its
+/// pastel variant (the owner's choices). Glyphs are placed alike in both.
 struct Art {
     drawn: &'static str,
     tile: &'static str,
     symbol: &'static str,
-    /// The glyph, its lit edge and its deep copy (`#rrggbbaa`).
+    /// The fallback symbol's glyph, lit edge and deep copy (`#rrggbbaa`).
     colours: [&'static str; 3],
 }
 
-fn art(id: &str) -> Option<Art> {
+fn art(id: &str, dark: bool) -> Option<Art> {
     macro_rules! art {
-        ($name:literal, $symbol:literal, $glyph:literal, $light:literal, $deep:literal) => {
-            Art {
-                drawn: include_str!(concat!("../assets/settings/", $name, ".svg")),
-                tile: include_str!(concat!("../assets/settings/tiles/", $name, ".svg")),
-                symbol: $symbol,
-                colours: [$glyph, $light, $deep],
+        ($name:literal, $symbol:literal, [$($d:literal),*], [$($l:literal),*]) => {
+            if dark {
+                Art {
+                    drawn: include_str!(concat!("../assets/settings/dark/", $name, ".svg")),
+                    tile: include_str!(concat!("../assets/settings/dark/tiles/", $name, ".svg")),
+                    symbol: $symbol,
+                    colours: [$($d),*],
+                }
+            } else {
+                Art {
+                    drawn: include_str!(concat!("../assets/settings/light/", $name, ".svg")),
+                    tile: include_str!(concat!("../assets/settings/light/tiles/", $name, ".svg")),
+                    symbol: $symbol,
+                    colours: [$($l),*],
+                }
             }
         };
     }
     Some(match id {
-        "project" => art!("project", "movieclapper.fill", "#ffeee2", "#ffe8d7", "#2606008c"),
-        "memory" => art!("memory", "brain.head.profile.fill", "#f9f0ff", "#f8ebff", "#1709278c"),
-        "general" => art!("general", "gearshape.fill", "#f7f5f3", "#f4f1ee", "#14110f8c"),
-        "shortcuts" => art!("shortcuts", "command", "#f1f5fc", "#edf2fc", "#0e12198c"),
-        "media" => art!("media", "photo.on.rectangle.angled.fill", "#e6f7ff", "#dbf5ff", "#00122a8c"),
-        "storage" => art!("storage", "externaldrive.fill", "#e5fcee", "#dbfbe7", "#0018088c"),
-        "accounts" => art!("accounts", "person.crop.circle.fill", "#e1faff", "#d4f9ff", "#0016218c"),
-        "transcription" => art!("transcription", "captions.bubble.fill", "#ffecf1", "#ffe5ec", "#25040d8c"),
-        "extensions" => art!("extensions", "puzzlepiece.extension.fill", "#fff4de", "#fff0d0", "#1d0e008c"),
+        "project" => art!("project", "movieclapper.fill",
+            ["#ffeee2", "#ffe8d7", "#2606008c"], ["#c05621", "#ffffff", "#7232138c"]),
+        "memory" => art!("memory", "brain.head.profile.fill",
+            ["#f9f0ff", "#f8ebff", "#1709278c"], ["#8c61c3", "#ffffff", "#5238748c"]),
+        "general" => art!("general", "gearshape.fill",
+            ["#f7f5f3", "#f4f1ee", "#14110f8c"], ["#817971", "#ffffff", "#4c47428c"]),
+        "shortcuts" => art!("shortcuts", "command",
+            ["#f1f5fc", "#edf2fc", "#0e12198c"], ["#6d7b94", "#ffffff", "#3f48578c"]),
+        "media" => art!("media", "photo.on.rectangle.angled.fill",
+            ["#e6f7ff", "#dbf5ff", "#00122a8c"], ["#2f7dcb", "#ffffff", "#1b49798c"]),
+        "storage" => art!("storage", "externaldrive.fill",
+            ["#e5fcee", "#dbfbe7", "#0018088c"], ["#1b905c", "#ffffff", "#1155368c"]),
+        "accounts" => art!("accounts", "person.crop.circle.fill",
+            ["#e1faff", "#d4f9ff", "#0016218c"], ["#0089b0", "#ffffff", "#0051688c"]),
+        "transcription" => art!("transcription", "captions.bubble.fill",
+            ["#ffecf1", "#ffe5ec", "#25040d8c"], ["#be506a", "#ffffff", "#712e3e8c"]),
+        "extensions" => art!("extensions", "puzzlepiece.extension.fill",
+            ["#fff4de", "#fff0d0", "#1d0e008c"], ["#a17000", "#ffffff", "#6042008c"]),
         _ => return None,
     })
 }
 
 thread_local! {
-    static ICONS: RefCell<std::collections::HashMap<String, Retained<NSImage>>> = RefCell::default();
+    static ICONS: RefCell<std::collections::HashMap<(String, bool), Retained<NSImage>>> = RefCell::default();
 }
 
-/// A section's icon, rendered once at 1× and 2×.
-pub fn icon_image(id: &str) -> Option<Retained<NSImage>> {
-    if let Some(image) = ICONS.with(|icons| icons.borrow().get(id).cloned()) {
+/// A section's icon for the dark or light appearance, rendered once at 1×
+/// and 2×.
+pub fn icon_image(id: &str, dark: bool) -> Option<Retained<NSImage>> {
+    let key = (id.to_owned(), dark);
+    if let Some(image) = ICONS.with(|icons| icons.borrow().get(&key).cloned()) {
         return Some(image);
     }
-    let art = art(id)?;
+    let art = art(id, dark)?;
     let size = NSSize::new(ICON_SIZE.0, ICON_SIZE.1);
     let image = match glyphs() {
         Glyphs::Drawn => bitmaps(art.drawn, size)?,
@@ -540,7 +593,7 @@ pub fn icon_image(id: &str) -> Option<Retained<NSImage>> {
             symbol_tile(tile, &art, size)?
         }
     };
-    ICONS.with(|icons| icons.borrow_mut().insert(id.to_owned(), image.clone()));
+    ICONS.with(|icons| icons.borrow_mut().insert(key, image.clone()));
     Some(image)
 }
 
@@ -589,9 +642,8 @@ fn bitmaps(svg: &str, size: NSSize) -> Option<Retained<NSImage>> {
 }
 
 /// The glyph-free tile with a real SF Symbol on it: the symbol at 0.46 of
-/// the tile, its box centred on the glass face's perceived centre (50 %,
-/// 54.07 %, where the drawn glyphs sit), with a lit copy 1.2 % above and a
-/// deep copy 2.6 % below, both unblurred.
+/// the tile, its box centred at `SYMBOL_CENTRE`, with a lit copy 1.2 %
+/// above and a deep copy 2.6 % below, both unblurred.
 fn symbol_tile(tile: Retained<NSImage>, art: &Art, size: NSSize) -> Option<Retained<NSImage>> {
     let name = NSString::from_str(art.symbol);
     let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
@@ -617,7 +669,7 @@ fn symbol_tile(tile: Retained<NSImage>, art: &Art, size: NSSize) -> Option<Retai
         tile.drawInRect(rect);
         let s = glyph.size();
         // Unflipped: the tile's bottom edge is `MARGIN.3` up.
-        let centre = NSPoint::new(MARGIN.0 + TILE * 0.5, MARGIN.3 + TILE * (1. - FACE_CENTRE));
+        let centre = NSPoint::new(MARGIN.0 + TILE * 0.5, MARGIN.3 + TILE * (1. - SYMBOL_CENTRE));
         let at = |dy: f64| {
             NSRect::new(NSPoint::new(centre.x - s.width / 2., centre.y - s.height / 2. + dy), s)
         };

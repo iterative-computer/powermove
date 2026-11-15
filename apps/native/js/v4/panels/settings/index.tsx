@@ -24,7 +24,14 @@ export interface SettingsPanelProps {
   key?: string;
   model: SettingsModel;
   /** Host-owned local native text/select leases; not kernel channel names. */
-  bindings: { search: string; extensionSearch: string; extensionType: string };
+  bindings: {
+    search: string;
+    extensionSearch: string;
+    extensionType: string;
+    project?: string;
+  };
+  /** The header's picker chose project `id`; Show in Finder. */
+  window?: { project(id: string): void; reveal(): void };
 }
 const t = UI.token;
 const text = { color: t("colors.text"), fontSize: t("typography.body") };
@@ -143,10 +150,12 @@ function RowControl({
     );
   return null;
 }
-/** A row of a card: its title over its description, the control trailing. */
+/** A row of a card (the Settings build note): its title over its
+ * description, the control trailing on the title's line. A single line is
+ * `form_row` tall; a description adds its lines and the inset under them. */
 const rowStyle = {
   display: "flex",
-  alignItems: "center",
+  alignItems: "start",
   justifyContent: "space-between",
   gap: t("metrics.inset"),
   minHeight: t("metrics.form_row"),
@@ -155,10 +164,17 @@ const rowStyle = {
   paddingTop: t("metrics.gap"),
   paddingBottom: t("metrics.gap"),
 };
-const trailing = {
+const describedRow = { ...rowStyle, paddingBottom: t("metrics.inset") };
+/** The title's line: as tall as a control, so the control beside it is
+ * centred on the title, not on the row. */
+const titleLine = {
   display: "flex",
-  flexShrink: 0,
   alignItems: "center",
+  minHeight: t("metrics.control"),
+};
+const trailing = {
+  ...titleLine,
+  flexShrink: 0,
   gap: t("metrics.gap"),
 };
 /** A row's words: they take what the control leaves and wrap in it. */
@@ -166,19 +182,88 @@ const copyColumn = {
   ...column,
   flexGrow: 1,
   flexShrink: 1,
-  // Hidden overflow lets it be narrower than its longest line.
-  overflow: "hidden",
-  gap: t("metrics.border"),
+  // It may be narrower than its longest line, which then wraps.
+  minWidth: 0,
 };
-function RowCopy({ title, detail }: { title: string; detail?: string }) {
+function RowCopy({
+  title,
+  detail,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  children?: ComponentChildren;
+}) {
   return (
     <div style={copyColumn}>
-      <text style={{ ...text, fontSize: t("typography.title") }}>{title}</text>
+      <div style={titleLine}>
+        <text style={{ ...text, fontSize: t("typography.title") }}>
+          {title}
+        </text>
+      </div>
       {detail && (
-        <text style={{ ...help, fontSize: t("typography.label") }}>
+        <text style={{ ...help, fontSize: t("typography.minimum") }}>
           {detail}
         </text>
       )}
+      {children}
+    </div>
+  );
+}
+/** The rows of one card, a hairline between each two (inset on both sides). */
+function Rows({ children }: { children: ComponentChildren }) {
+  const rows = (Array.isArray(children) ? children.flat() : [children]).filter(
+    (row) => row !== null && row !== undefined && row !== false,
+  );
+  return (
+    <>
+      {rows.flatMap((row, i) =>
+        i === 0
+          ? [row]
+          : [
+              <div
+                key={`separator.${i}`}
+                style={{
+                  height: t("metrics.border"),
+                  marginLeft: t("metrics.inset"),
+                  marginRight: t("metrics.inset"),
+                  background: t("colors.separator"),
+                }}
+              />,
+              row,
+            ],
+      )}
+    </>
+  );
+}
+/** A group of rows: its name over its card (13 pt medium, outside it). */
+function Group({
+  title,
+  muted,
+  children,
+}: {
+  title: string;
+  muted?: boolean;
+  children: ComponentChildren;
+  key?: string;
+}) {
+  return (
+    <div role="group" label={title} style={column}>
+      <text
+        role="heading"
+        style={{
+          color: t(muted ? "colors.muted" : "colors.text"),
+          fontSize: t("typography.title"),
+          fontWeight: t("typography.medium_weight"),
+          paddingLeft: t("metrics.inset"),
+          marginBottom: t("metrics.dock_gap"),
+        }}
+      >
+        {title}
+      </text>
+      <UI.FormGroup label={title}>
+        <Rows>{children}</Rows>
+      </UI.FormGroup>
     </div>
   );
 }
@@ -195,28 +280,9 @@ function SettingRow({
       id={`settings.row.${row.id}`}
       role="group"
       label={row.label}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: t("metrics.inset"),
-        minHeight: t("metrics.form_row"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
-        paddingTop: t("metrics.gap"),
-        paddingBottom: t("metrics.gap"),
-      }}
+      style={row.detail || row.error ? describedRow : rowStyle}
     >
-      {/* Title over its description; the control trails, centred on them. */}
-      <div style={copyColumn}>
-        <text style={{ ...text, fontSize: t("typography.title") }}>
-          {row.label}
-        </text>
-        {row.detail && (
-          <text style={{ ...help, fontSize: t("typography.label") }}>
-            {row.detail}
-          </text>
-        )}
+      <RowCopy title={row.label} detail={row.detail}>
         {row.error && (
           <div
             role="status"
@@ -224,14 +290,14 @@ function SettingRow({
             metadata={{ symbol: "exclamationmark.triangle.fill" }}
             style={{
               color: t("colors.danger"),
-              fontSize: t("typography.label"),
+              fontSize: t("typography.minimum"),
             }}
           >
             {row.error}
           </div>
         )}
-      </div>
-      <div style={{ display: "flex", flexShrink: 0, alignItems: "center" }}>
+      </RowCopy>
+      <div style={trailing}>
         <RowControl row={row} model={model} />
       </div>
     </div>
@@ -250,7 +316,7 @@ function SpeechRow({
   };
   const disabled = !model.services || model.pending.has(item.id);
   return (
-    <div role="group" label={item.name} style={rowStyle}>
+    <div role="group" label={item.name} style={describedRow}>
       <RowCopy
         title={
           item.recommended && item.state !== "installed"
@@ -423,7 +489,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           }}
         />
       </div>
-      <UI.FormGroup title="Installed">
+      <Group title="Installed">
         <div
           style={{
             ...column,
@@ -507,9 +573,9 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
             </virtual-list>
           )}
         </div>
-      </UI.FormGroup>
-      <UI.FormGroup title="Store">
-        <div role="group" label="Powermove Store" style={rowStyle}>
+      </Group>
+      <Group title="Store">
+        <div role="group" label="Powermove Store" style={describedRow}>
           <RowCopy
             title="Powermove Store"
             detail="Publish and manage your extensions on the Store."
@@ -524,7 +590,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
             />
           </div>
         </div>
-      </UI.FormGroup>
+      </Group>
     </>
   );
 }
@@ -549,14 +615,14 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
   );
   if (!memory.entries.length)
     return (
-      <UI.FormGroup title="Notes">
-        <div role="group" label="No Notes Yet" style={rowStyle}>
+      <Group title="Notes">
+        <div role="group" label="No Notes Yet" style={describedRow}>
           <RowCopy
             title="No Notes Yet"
             detail="When an agent records a goal, rule or decision for this project, it will show up here."
           />
         </div>
-      </UI.FormGroup>
+      </Group>
     );
   return (
     <>
@@ -566,7 +632,7 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
           .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
         if (!notes.length) return null;
         return (
-          <UI.FormGroup key={kind} title={title} muted={!memory.enabled}>
+          <Group key={kind} title={title} muted={!memory.enabled}>
             {notes.map((note, index) => {
               const date =
                 typeof note.updatedAt === "number" &&
@@ -620,7 +686,7 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
                 </div>
               );
             })}
-          </UI.FormGroup>
+          </Group>
         );
       })}
     </>
@@ -647,7 +713,7 @@ function Shortcuts({ model }: { model: SettingsModel }) {
   return (
     <>
       {menus.map((menu) => (
-        <UI.FormGroup key={menu} title={menu}>
+        <Group key={menu} title={menu}>
           {rows
             .filter((row) => row.menu === menu)
             .map((row) => {
@@ -668,7 +734,7 @@ function Shortcuts({ model }: { model: SettingsModel }) {
                   id={`settings.shortcut.${row.id}`}
                   role="group"
                   label={row.label}
-                  style={rowStyle}
+                  style={describedRow}
                 >
                   <RowCopy title={row.label} detail={detail} />
                   {!row.fixed && (
@@ -700,17 +766,17 @@ function Shortcuts({ model }: { model: SettingsModel }) {
                 </div>
               );
             })}
-        </UI.FormGroup>
+        </Group>
       ))}
       {!query && page.conflicts.length > 0 && (
-        <UI.FormGroup title="Shared Keys">
+        <Group title="Shared Keys">
           {page.conflicts.map((clash) => (
             <div
               key={clash.chord}
               id={`settings.shared.${clash.chord}`}
               role="group"
               label={clash.keys}
-              style={rowStyle}
+              style={describedRow}
             >
               <RowCopy
                 title={clash.keys}
@@ -718,15 +784,99 @@ function Shortcuts({ model }: { model: SettingsModel }) {
               />
             </div>
           ))}
-        </UI.FormGroup>
+        </Group>
       )}
     </>
+  );
+}
+/** Settings › Project's first card: the poster, the project's name (a
+ * picker of the projects open when there are several), its file and Show
+ * in Finder. */
+function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
+  const project = model.publication.project;
+  const header = model.publication.header;
+  if (!project || !header) return null;
+  const projects = header.projects ?? [];
+  const name = {
+    ...text,
+    fontSize: t("typography.heading"),
+    fontWeight: t("typography.semibold_weight"),
+  };
+  return (
+    <UI.FormGroup label="Project">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: t("metrics.inset"),
+          padding: t("metrics.inset"),
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            flexShrink: 0,
+            width: t("metrics.settings_poster_width"),
+            height: t("metrics.settings_poster_height"),
+            borderRadius: t("metrics.inner_radius"),
+            overflow: "hidden",
+            background: t("colors.field"),
+          }}
+        >
+          {header.poster ? (
+            <img
+              resource={header.poster}
+              alt={project.name}
+              style={{ position: "absolute", inset: "fill" }}
+            />
+          ) : null}
+        </div>
+        <div style={copyColumn}>
+          {projects.length > 1 && bindings.project ? (
+            <div style={{ display: "flex" }}>
+              <UI.PopUpButton
+                label="Project"
+                data-pm-variant="inline"
+                binding={bindings.project}
+                value={project.id}
+                options={projects.map((p) => ({ v: p.id, label: p.name }))}
+                onChange={(event) => {
+                  if (typeof event.value === "string")
+                    window?.project(event.value);
+                }}
+              />
+            </div>
+          ) : (
+            <text style={name}>{project.name}</text>
+          )}
+          {header.path ? (
+            <text
+              style={{
+                ...help,
+                fontSize: t("typography.minimum"),
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "middle",
+              }}
+            >
+              {header.path}
+            </text>
+          ) : null}
+        </div>
+        {header.path ? (
+          <div style={trailing}>
+            <Button label="Show in Finder" onClick={() => window?.reveal()} />
+          </div>
+        ) : null}
+      </div>
+    </UI.FormGroup>
   );
 }
 function SectionContent({
   section,
   model,
   bindings,
+  window,
 }: SettingsPanelProps & { section: Section }) {
   const copy = sectionCopy[section];
   const rows = model.rows.filter(
@@ -746,11 +896,11 @@ function SectionContent({
       label={copy.title}
       style={{
         ...column,
-        paddingTop: t("metrics.gap"),
+        paddingTop: t("metrics.dock_gap"),
         paddingLeft: t("metrics.sheet_inset"),
         paddingRight: t("metrics.sheet_inset"),
         paddingBottom: t("metrics.sheet_inset"),
-        gap: t("metrics.section_gap"),
+        gap: t("metrics.sheet_inset"),
       }}
     >
       {/* The toolbar names the section; a search lists several, each
@@ -768,22 +918,25 @@ function SectionContent({
           {copy.title}
         </text>
       ) : null}
+      {section === "project" && !model.query.trim() ? (
+        <ProjectHeader model={model} bindings={bindings} window={window} />
+      ) : null}
       {groups.map((group) => (
-        <UI.FormGroup key={group} title={group}>
+        <Group key={group} title={group}>
           {rows
             .filter((row) => row.group === group)
             .map((row) => (
               <SettingRow key={row.id} row={row} model={model} />
             ))}
-        </UI.FormGroup>
+        </Group>
       ))}
       {section === "memory" && <MemoryNotes model={model} />}
       {section === "transcription" && speech.length > 0 && (
-        <UI.FormGroup title="Models">
+        <Group title="Models">
           {speech.map((item) => (
             <SpeechRow key={item.id} item={item} model={model} />
           ))}
-        </UI.FormGroup>
+        </Group>
       )}
       {section === "extensions" && (
         <Extensions model={model} bindings={bindings} />
@@ -792,7 +945,7 @@ function SectionContent({
     </div>
   );
 }
-export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
+export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
   const [, update] = useState(0);
   useLayoutEffect(() => model.subscribe(() => update((n) => n + 1)), [model]);
   if (!model.open) return null;
@@ -825,7 +978,7 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
           role="group"
           label={sectionCopy[model.active].title}
           // A column: the page is as wide as the window leaves it.
-          style={{ ...column, flexGrow: 1, flexShrink: 1 }}
+          style={{ ...column, flexGrow: 1, flexShrink: 1, minWidth: 0 }}
         >
           {model.query.trim() && model.matches.count === 0 ? (
             // settings.md §5: centred reading text, not an empty-state title.
@@ -857,7 +1010,7 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
                   ...column,
                   flexGrow: 1,
                   flexShrink: 1,
-                  overflow: "hidden",
+                  minWidth: 0,
                   maxWidth: t("metrics.settings_column"),
                 }}
               >
@@ -874,6 +1027,7 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
                     section={section}
                     model={model}
                     bindings={bindings}
+                    window={window}
                   />
                 ))}
               </div>

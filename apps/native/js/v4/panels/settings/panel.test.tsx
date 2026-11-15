@@ -532,7 +532,14 @@ test("view visual values are pm-design tokens, never lane-authored numbers or co
   const visit = (node: ts.Node) => {
     if (ts.isPropertyAssignment(node) && visual.test(node.name.getText(ast))) {
       const v = node.initializer;
-      if (!ts.isCallExpression(v) || v.expression.getText(ast) !== "t")
+      // A zero least size is structural (the kit validator's rule too).
+      const zeroLeast =
+        /^min(Width|Height)$/.test(node.name.getText(ast)) &&
+        v.getText(ast) === "0";
+      if (
+        !zeroLeast &&
+        (!ts.isCallExpression(v) || v.expression.getText(ast) !== "t")
+      )
         problems.push(node.getText(ast));
     }
     ts.forEachChild(node, visit);

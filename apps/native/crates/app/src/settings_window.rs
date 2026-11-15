@@ -14,6 +14,12 @@ thread_local! {
     static HOST: RefCell<Option<WeakEntity<Controller>>> = const { RefCell::new(None) };
 }
 
+/// The window's appearance for its chrome: dark or light, and the page's
+/// ground.
+pub(crate) fn scheme(t: &pm_design::Tokens) -> (bool, u32) {
+    (t.scheme == pm_design::Scheme::Dark, t.colors.panel_secondary)
+}
+
 /// Where the toolbar's back and forward go: the sections visited, in order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct History {
@@ -57,17 +63,17 @@ impl History {
     }
 }
 
-/// Frames the Settings window `window` and sends what is done in its chrome
-/// to `owner`.
+/// Frames the Settings window whose GPUI view is `view` (outside any update
+/// of that window) and sends what is done in its chrome to `owner`.
 pub(crate) fn install(
-    window: &mut Window,
+    view: objc2::rc::Retained<objc2_app_kit::NSView>,
     owner: Entity<Controller>,
     cx: &mut App,
 ) -> Option<Rc<SettingsChrome>> {
     let (tx, rx) = async_channel::unbounded();
-    let chrome = Rc::new(SettingsChrome::install(window, tx)?);
-    let ground = owner.read(cx).host.borrow().tokens.colors.panel_secondary;
-    chrome.set_ground(ground);
+    let chrome = Rc::new(SettingsChrome::install(view, tx)?);
+    let (dark, ground) = scheme(&owner.read(cx).host.borrow().tokens);
+    chrome.set_scheme(dark, ground);
     let weak = owner.downgrade();
     cx.spawn(async move |cx| {
         while let Ok(event) = rx.recv().await {
@@ -106,12 +112,74 @@ impl Controller {
     }
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.builtins.settings_chrome = None;
+        self.builtins.settings_me = None;
         if let Some(handle) = self.builtins.windows.remove("settings") {
             let _ = handle.update(cx, |_, w, _| w.remove_window());
         }
     }
+    /// Settings › Project's header: this project's poster and path, and the
+    /// projects open in every editor for the picker (listed only by the
+    /// editor hosting Settings).
+    pub(crate) fn settings_header(&self, cx: &App) -> Value {
+        let Some(session) = &self.session else {
+            return Value::Null;
+        };
+        let id = &session.project;
+        let (file, _) = crate::poster::files(&self.profile.join("caches").join("thumbnails"), id);
+        let poster = file.exists().then(|| {
+            let key = format!("settings/poster/{id}");
+            crate::media_thumbs::register(&key, file);
+            key
+        });
+        let this = json!({ "id": id, "name": self.project_name() });
+        let projects: Vec<Value> = match self.builtins.settings_me {
+            Some(me) => crate::entry::editor_windows(cx)
+                .into_iter()
+                .filter_map(|(editor, _)| {
+                    if editor.entity_id() == me {
+                        return Some(this.clone());
+                    }
+                    let other = editor.read(cx);
+                    let session = other.session.as_ref()?;
+                    Some(json!({ "id": session.project, "name": other.project_name() }))
+                })
+                .collect(),
+            None => vec![this],
+        };
+        let path = self.path.as_ref().map(|path| {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+                Some(rest) => format!("~/{}", rest.display()),
+                None => path.display().to_string(),
+            }
+        });
+        json!({ "path": path, "poster": poster, "projects": projects })
+    }
+    /// The header's picker: Settings shows project `id`, so the editor that
+    /// has it open takes the window over.
+    pub(crate) fn settings_for_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.session.as_ref().is_some_and(|s| s.project == id) {
+            return;
+        }
+        let Some((editor, window)) = crate::entry::editor_windows(cx)
+            .into_iter()
+            .filter(|(e, _)| e.entity_id() != cx.entity_id())
+            .find(|(e, _)| e.read(cx).session.as_ref().is_some_and(|s| s.project == id))
+        else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                editor.update(cx, |v, cx| {
+                    v.builtins.settings_page = Some("project".into());
+                    v.show_builtin("settings", window, cx);
+                })
+            });
+        });
+    }
     /// This editor is to host Settings: one another editor hosts closes.
     pub(crate) fn take_settings_from_others(&mut self, cx: &mut Context<Self>) {
+        self.builtins.settings_me = Some(cx.entity_id());
         let me = cx.entity().downgrade();
         let other = HOST.with(|h| h.borrow_mut().replace(me.clone()));
         if let Some(other) = other

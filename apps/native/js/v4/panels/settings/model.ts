@@ -70,6 +70,13 @@ export interface Publication {
   revision: number;
   shortcuts?: Shortcuts;
   project?: { id: string; name: string };
+  /** Settings › Project's header: the project's poster (a host picture
+   * key), its file and the projects open, for the picker. */
+  header?: {
+    poster?: string | null;
+    path?: string | null;
+    projects: readonly { id: string; name: string }[];
+  } | null;
   multiWindow: boolean;
   memory?: { enabled: boolean; entries: readonly MemoryNote[] };
   rows?: Row[];

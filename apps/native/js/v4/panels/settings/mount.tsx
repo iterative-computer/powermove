@@ -84,7 +84,20 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   await r.render(
     <SettingsPanel
       model={model}
-      bindings={fields(["search", "extensionSearch", "extensionType"])}
+      bindings={fields([
+        "search",
+        "extensionSearch",
+        "extensionType",
+        "project",
+      ])}
+      window={{
+        project: (id) => {
+          void platform("settings.project", id).catch(report);
+        },
+        reveal: () => {
+          void platform("settings.reveal").catch(report);
+        },
+      }}
     />,
   );
   const mounted: Mounted = {

@@ -2653,7 +2653,7 @@ impl Controller {
         })
         .detach();
     }
-    fn project_name(&self) -> String {
+    pub(crate) fn project_name(&self) -> String {
         self.published
             .as_ref()
             .and_then(|p| p.snapshot.document.root())
