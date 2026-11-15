@@ -753,7 +753,7 @@ fn raw_typed_command_remains_atomic_and_caller_keeps_origin() {
 }
 
 #[test]
-fn multiple_selected_keys_offset_from_captured_value() {
+fn multiple_selected_keys_use_absolute_value_at_selected_playhead() {
     let mut f = Fixture::new();
     let keys = vec![
         pm_kernel::commands::keyframes::KeyframeSpec::new(0.0, 10.0),
@@ -799,7 +799,7 @@ fn multiple_selected_keys_offset_from_captured_value() {
     let base = f.value("a", "position.x").as_f64().unwrap();
     let (mut session, r) = f
         .model
-        .begin_edit(Caller::native(), &[prop("a", "position.x")], 2.0)
+        .begin_edit(Caller::native(), &[prop("a", "position.x")], 1.0)
         .unwrap();
     f.run(r);
     for delta in [5.0, 10.0] {
@@ -820,19 +820,19 @@ fn multiple_selected_keys_offset_from_captured_value() {
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(keys[0].get("v"), Some(&20.0.into()));
-    assert_eq!(keys[1].get("v"), Some(&40.0.into()));
+    assert_eq!(keys[0].get("v"), Some(&(base + 10.0).into()));
+    assert_eq!(keys[1].get("v"), Some(&(base + 10.0).into()));
     f.undo();
     assert_eq!(f.value("a", "position.x"), base.into());
 }
 #[test]
-fn unlinked_scale_animation_still_keys_both_axes() {
+fn unlinked_scale_animation_edits_only_one_axis() {
     let mut f = Fixture::new();
     act(&mut f, "a", "scale.x", PropertyAction::Stopwatch);
     f.set(prop("a", "scale.x"), 150.0);
     assert_eq!(f.value("a", "scale.y"), 50.0.into());
     assert!(
-        f.model
+        !f.model
             .binding_state(&prop("a", "scale.y"), 2.0)
             .unwrap()
             .key_at_playhead

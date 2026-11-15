@@ -971,7 +971,7 @@ impl TimelineModel {
             set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
         }
         let mut commands = vec![PropertyCommand::Set(set.clone()).into()];
-        if l.scale_linked || animated {
+        if l.scale_linked {
             set.channel = paired.into();
             set.value = Value::Number(if l.scale_linked {
                 value

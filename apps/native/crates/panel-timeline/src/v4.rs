@@ -340,73 +340,7 @@ pub async fn dispatch(
                             .ok_or(Error::InvalidIntent("numeric property"))
                     };
                 let baseline = evaluated(&mut mirror, &path)?;
-                let l = client
-                    .model
-                    .index
-                    .layer(&layer)
-                    .ok_or(Error::InvalidIntent("layer"))?;
-                let channel = client
-                    .model
-                    .index
-                    .channel(&layer, &path)
-                    .ok_or(Error::InvalidIntent("path"))?;
-                let paired = match path.as_str() {
-                    "scale.x" => client.model.index.channel(&layer, "scale.y"),
-                    "scale.y" => client.model.index.channel(&layer, "scale.x"),
-                    _ => None,
-                };
-                let current = |c: &crate::Channel| {
-                    c.keys.iter().any(|k| {
-                        (l.from + k.time - context.time).abs() < 0.5 / client.model.index.fps
-                    })
-                };
-                let at_key = current(channel) || paired.is_some_and(current);
-                let selected: Vec<_> = channel
-                    .keys
-                    .iter()
-                    .filter(|k| client.model.selection.keys().contains(&k.id))
-                    .collect();
-                let paired_selected = paired.is_some_and(|c| {
-                    c.keys.iter().any(|k| {
-                        client.model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
-                    })
-                });
-                if !at_key && (!selected.is_empty() || paired_selected) {
-                    for key in selected {
-                        if let Some(start) = key.value.as_f64() {
-                            commands.push(
-                                pm_kernel::KeyframeCommand::Edit {
-                                    key_id: key.id.clone(),
-                                    time: None,
-                                    value: Some(pm_model::Value::Number(start + value - baseline)),
-                                }
-                                .into(),
-                            );
-                        }
-                    }
-                    if l.scale_linked {
-                        if let Some(paired) = paired {
-                            for key in paired
-                                .keys
-                                .iter()
-                                .filter(|k| client.model.selection.keys().contains(&k.id))
-                            {
-                                if let Some(start) = key.value.as_f64() {
-                                    commands.push(
-                                        pm_kernel::KeyframeCommand::Edit {
-                                            key_id: key.id.clone(),
-                                            time: None,
-                                            value: Some(pm_model::Value::Number(
-                                                start + value - baseline,
-                                            )),
-                                        }
-                                        .into(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } else if matches!(path.as_str(), "scale.x" | "scale.y") {
+                if matches!(path.as_str(), "scale.x" | "scale.y") {
                     let paired = if path == "scale.x" {
                         "scale.y"
                     } else {

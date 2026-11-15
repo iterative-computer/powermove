@@ -1028,7 +1028,12 @@ fn the_graph_menu_fits_the_curves_shown() {
     c.model.graph_focus = Some(("a:[]".into(), "opacity".into()));
     assert_eq!(c.model.graph_series().0.len(), 1);
     let effects = dispatch(&mut c, json!({"type":"graphMenu","action":"graph.fit"})).unwrap();
-    assert!(effects.iter().any(|e| matches!(e, HostEffect::FitCurves(..))), "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, HostEffect::FitCurves(..))),
+        "{effects:?}"
+    );
 }
 
 #[test]
@@ -1057,4 +1062,44 @@ fn revealed_properties_can_be_hidden_by_the_twirl() {
         .unwrap();
         assert_eq!(c.model.reveal.layers["a:[]"].collapsed, !open);
     }
+}
+
+#[test]
+fn property_value_typing_updates_selected_keys_with_one_undo() {
+    let (_actor, mut c) = client();
+    let command = pm_kernel::PropertyCommand::Set(
+        pm_kernel::commands::properties::SetProperty::new("a:[]", "opacity", 90., 1.),
+    );
+    block_on(c.dispatch(Plan::edit(vec![command.into()], c.model.index.revision))).unwrap();
+    let ids = c
+        .model
+        .index
+        .channel("a:[]", "opacity")
+        .unwrap()
+        .keys
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    block_on(c.call(SelectionCall::Keys(ids).into())).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"propertyValue","layer":"a:[]","path":"opacity","value":42}),
+    )
+    .unwrap();
+    assert!(
+        c.model
+            .index
+            .channel("a:[]", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .all(|k| k.value.as_f64() == Some(42.))
+    );
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(
+        c.model.index.channel("a:[]", "opacity").unwrap().keys[1]
+            .value
+            .as_f64(),
+        Some(90.)
+    );
 }
