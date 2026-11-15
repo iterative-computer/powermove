@@ -240,13 +240,63 @@ impl Scene {
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
+        self.replay_layers(range, prev_scene, |_| None);
+    }
+
+    /// Copies a cached view's operations from the last frame. A scroll layer
+    /// among them is drawn from its recording at its offset now (`layer`
+    /// returns those operations; `None` keeps what the last frame drew).
+    pub(crate) fn replay_layers(
+        &mut self,
+        range: Range<usize>,
+        prev_scene: &Scene,
+        mut layer: impl FnMut(crate::scroll_layer::ScrollLayerKey) -> Option<Vec<PaintOperation>>,
+    ) {
+        let mut skipping = 0usize;
         for operation in &prev_scene.paint_operations[range] {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
-                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
-                PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::ScrollLayerStart(key) => {
+                    if skipping > 0 {
+                        skipping += 1;
+                        continue;
+                    }
+                    self.paint_operations.push(PaintOperation::ScrollLayerStart(*key));
+                    if let Some(ops) = layer(*key) {
+                        for op in ops {
+                            self.insert_operation(op);
+                        }
+                        skipping = 1;
+                    }
+                }
+                PaintOperation::ScrollLayerEnd => {
+                    if skipping > 0 {
+                        skipping -= 1;
+                        if skipping > 0 {
+                            continue;
+                        }
+                    }
+                    self.paint_operations.push(PaintOperation::ScrollLayerEnd);
+                }
+                _ if skipping > 0 => {}
+                op => self.insert_operation(op.clone()),
             }
         }
+    }
+
+    /// Inserts one recorded operation (a primitive or a layer bound).
+    pub(crate) fn insert_operation(&mut self, operation: PaintOperation) {
+        match operation {
+            PaintOperation::Primitive(primitive) => self.insert_primitive(primitive),
+            PaintOperation::StartLayer(bounds) => self.push_layer(bounds),
+            PaintOperation::EndLayer => self.pop_layer(),
+            marker => self.paint_operations.push(marker),
+        }
+    }
+
+    /// The operations painted since `start`, taken out of this scene (a
+    /// scroll layer paints into a scene of its own, then keeps them).
+    pub(crate) fn take_operations(&mut self) -> Vec<PaintOperation> {
+        std::mem::take(&mut self.paint_operations)
     }
 
     pub fn finish(&mut self) {
@@ -381,10 +431,16 @@ pub(crate) enum PrimitiveKind {
     FilterBoundaryEnd,
 }
 
+#[derive(Clone)]
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    /// Powermove P-SCROLL-LAYER: a scroll layer's content follows, up to the
+    /// matching end; a replay draws it again from the layer's recording at
+    /// the offset it has now (`crate::scroll_layer`).
+    ScrollLayerStart(crate::scroll_layer::ScrollLayerKey),
+    ScrollLayerEnd,
 }
 
 #[derive(Clone)]

@@ -284,8 +284,9 @@ test("native row windows request only their item window", async () => {
   );
   const virtual = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
   expect(virtual.props.count).toBe(30_000);
+  // Rows 100..106 with as many again each side: rows 94..112, two columns.
   await event(root, virtual.id, "rangechange", { range: [100, 106] });
-  expect(pages).toEqual([[200, 12]]);
+  expect(pages).toEqual([[188, 36]]);
   await event(root, virtual.id, "rangechange", { range: [0, 3000] });
   expect(pages.length).toBe(1);
   await root.dispose();
@@ -663,27 +664,46 @@ test("keys on a clicked card reach the grid: Space previews, arrows move", async
   ).toEqual(["Space", "Right"]);
   await root.dispose();
 });
-test("scrolling within the same rows asks for no new page", async () => {
+test("scrolling inside the rows loaded asks for no new page", async () => {
   const { root } = recorder();
   const pages: unknown[] = [];
-  await root.render(
-    <ProjectView
-      view={huge}
-      input={() => {}}
-      menu={() => {}}
-      page={(...p) => pages.push(p)}
-      native={native}
-      layout={layout}
-    />,
-  );
-  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  const draw = (view: Projection) =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={() => {}}
+        menu={() => {}}
+        page={(...p) => pages.push(p)}
+        native={native}
+        layout={layout}
+      />,
+    );
+  await draw(huge);
+  const list = () =>
+    root.inspect().nodes.find((n) => n.type === "virtual-list")!;
   // Every wheel event reports the range; most leave it where it was.
   for (let i = 0; i < 5; i++)
-    await event(root, list.id, "rangechange", { range: [100, 106] });
-  await event(root, list.id, "rangechange", { range: [101, 107] });
+    await event(root, list().id, "rangechange", { range: [100, 106] });
+  expect(pages).toEqual([[188, 36]]);
+  // The page arrives: rows 94..112. Scrolling inside them asks for nothing
+  // (the host scrolls the rows it has); past them, the next page.
+  const loaded = projection(
+    Array.from({ length: 36 }, (_, i) => asset(`b${i}`)),
+  );
+  loaded.page.total = 60_000;
+  loaded.page.offset = 188;
+  await draw(loaded);
+  for (const range of [
+    [101, 107],
+    [94, 100],
+    [106, 112],
+  ])
+    await event(root, list().id, "rangechange", { range });
+  expect(pages).toEqual([[188, 36]]);
+  await event(root, list().id, "rangechange", { range: [110, 116] });
   expect(pages).toEqual([
-    [200, 12],
-    [202, 12],
+    [188, 36],
+    [208, 36],
   ]);
   await root.dispose();
 });

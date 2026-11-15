@@ -96,6 +96,9 @@ pub struct Host {
     /// scroll when their content is taller than their slot), kept across
     /// splitter drags, and when each last scrolled (its thumb shows a moment).
     scrolls: BTreeMap<String, ScrollHandle>,
+    /// Each side panel's body, a cached view: a wheel step on it only
+    /// replays its drawing at the new offset (PM-311).
+    bodies: BTreeMap<String, Entity<PanelBody>>,
     scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -1074,7 +1077,7 @@ impl Controller {
             let view = view.clone();
             canvas(
                 |_, _, _| (),
-                move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
+                move |_, _, window, cx| view.read(cx).keep_native_slots(window, cx),
             )
             .absolute()
             .size_0()
@@ -1103,34 +1106,46 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
+        // As tall as its content, at least its slot.
+        let height = view.read(cx).body_height(body);
+        let panel_body = self
+            .builtins
+            .bodies
+            .entry(id.into())
+            .or_insert_with(|| {
+                cx.new(|_| PanelBody {
+                    id: SharedString::from(format!("panel-body-{id}")),
+                    view: view.clone(),
+                    handle: handle.clone(),
+                    height,
+                })
+            })
+            .clone();
+        panel_body.update(cx, |b, cx| {
+            // Half a point: the content's height is measured again every frame.
+            if (b.height - height).abs() > 0.5 || b.view != view {
+                b.height = height;
+                b.view = view.clone();
+                cx.notify();
+            }
+        });
         Some(
             div()
                 .relative()
                 .w_full()
                 .h(px(body))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("panel-body-{id}")))
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&handle)
-                        .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
-                            v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
-                            // The thumb goes once the scrolling has stopped.
-                            cx.spawn_in(window, async move |this, cx| {
-                                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            })
-                            .detach();
-                            cx.notify();
-                        }))
-                        // As tall as its content, at least its slot.
-                        .child({
-                            let content = view.read(cx).in_body(body);
-                            view.clone().cached(content)
-                        })
-                        .child(keep),
-                )
+                .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
+                    v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                    // The thumb goes once the scrolling has stopped.
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                    cx.notify();
+                }))
+                .child(panel_body.cached(StyleRefinement::default().size_full()))
+                .child(keep)
                 .children(thumb)
                 .into_any_element(),
         )
@@ -3200,5 +3215,37 @@ mod quick_look_tests {
             super::quick_look_files(&["b".to_owned()], "a", &originals),
             [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
         );
+    }
+}
+
+/// A side panel's body: the scroller, a scroll layer, around the panel. A
+/// view of its own, cached, so a wheel step that only moves the offset
+/// replays its drawing instead of the window laying the panel out again.
+pub(crate) struct PanelBody {
+    id: SharedString,
+    view: Entity<crate::v4_view::SurfaceView>,
+    handle: ScrollHandle,
+    /// The panel's height: its content, at least the slot.
+    height: f32,
+}
+impl Render for PanelBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Only the Project panel's body: measured on the release build, a
+        // panel that redraws while it scrolls (Properties follows the
+        // playhead and its springs) pays the recording on each redraw and
+        // lost frames with the layer (PM-311). A native view inside draws on
+        // its own: the body draws in full.
+        let native = !self.id.ends_with("-assets") || self.view.read(cx).has_native();
+        div()
+            .id(self.id.clone())
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .when(!native, |d| d.scroll_layer())
+            .child(
+                self.view
+                    .clone()
+                    .cached(StyleRefinement::default().w_full().h(px(self.height))),
+            )
     }
 }
