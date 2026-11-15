@@ -21,6 +21,8 @@ mod cloud_media;
 mod cloud_tests;
 mod colour;
 mod colour_panel;
+mod colour_model;
+mod colour_picker;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 mod dialogs;

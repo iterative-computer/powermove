@@ -94,6 +94,7 @@ struct State {
     /// Otherwise Tab and Shift-Tab commit and move focus on, as in an
     /// inspector (Option-Tab still types a tab).
     tab_inserts: Cell<bool>,
+    host_navigation: Cell<bool>,
     focus_pending: Cell<bool>,
     /// A composer takes the keyboard only when the person asked for it: a
     /// press on it, Tab to it, or the host beginning to edit it (an explicit
@@ -318,6 +319,7 @@ define_class!(
         #[unsafe(method(controlTextDidBeginEditing:))]
         fn field_begin(&self, _: &NSNotification) {
             self.ivars().editing.set(true);
+            if self.ivars().host_navigation.get() {self.ivars().emit(TextEvent::Key("focus"));}
             if let Editor::Field(v)=&self.ivars().editor {if let Some(ed)=v.currentEditor() {configure_editor(&ed,self.ivars().kind!=TextKind::DenseNumber);}}
         }
         #[unsafe(method(textDidBeginEditing:))]
@@ -373,6 +375,12 @@ impl TextDelegate {
         // The input method consumes Escape/Return first when it owns marked text.
         if unsafe { msg_send![view, hasMarkedText] } {
             return false;
+        }
+        // Opt-in dialog fields keep Tab, Return and Escape inside their host.
+        if self.ivars().host_navigation.get() {
+            let key=if command==objc2::sel!(insertTab:) {Some("tab")}else if command==objc2::sel!(insertBacktab:) {Some("backtab")}else if command==objc2::sel!(cancelOperation:) {Some("escape")}else{None};
+            if let Some(key)=key {self.ivars().emit(TextEvent::Key(key));return true;}
+            if command==objc2::sel!(insertNewline:) {self.ivars().emit(TextEvent::Submitted(self.ivars().editor.value()));return true;}
         }
         // A number field steps with Up and Down (Shift: ten steps), as a
         // spin field does; the host owns the value and its step.
@@ -465,6 +473,9 @@ pub struct NativeTextSlot {
     _delegate: Retained<TextDelegate>,
 }
 impl NativeTextSlot {
+    pub fn set_label(&self, label: &str) {unsafe {let _: ()=msg_send![&*self.state.wrapper, setAccessibilityLabel: &*NSString::from_str(label)];}}
+    pub fn set_host_navigation(&self, enabled: bool) {self.state.host_navigation.set(enabled);}
+
     /// Keep Tab as a typed character (a code editor) instead of moving focus.
     pub fn set_tab_inserts(&self, inserts: bool) {
         self.state.tab_inserts.set(inserts);
@@ -591,6 +602,7 @@ impl NativeTextSlot {
             gpui: unsafe { Retained::retain(gpui as *const NSView as *mut NSView).unwrap() },
             editing: Cell::new(false),
             tab_inserts: Cell::new(false),
+            host_navigation: Cell::new(false),
             focus_pending: Cell::new(false),
             armed: Cell::new(false),
             original: RefCell::new(initial.into()),

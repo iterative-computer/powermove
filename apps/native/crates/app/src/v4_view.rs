@@ -26,6 +26,7 @@ pub mod agent;
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
     pub outline: Rc<Outline>,
+    pub sample_color: Rc<RefCell<Option<crate::colour_picker::SampleSource>>>,
     /// The window's latest publication: what host-listed pop-up rows
     /// (`HostRows`) are read from when a menu opens.
     pub published: Rc<RefCell<Option<Arc<pm_kernel::Published>>>>,
@@ -178,6 +179,7 @@ pub struct SurfaceView {
     appkit: bool,
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
+    colour: Option<(Id, Entity<crate::colour_picker::Picker>, Subscription)>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
     /// Pop-ups whose rows the host lists, by the source they were given.
     row_sources: HashMap<Id, (EntityId, Value)>,
@@ -300,6 +302,7 @@ impl SurfaceView {
             appkit: HasWindowHandle::window_handle(window).is_ok(),
             natives,
             fields: BTreeMap::new(),
+            colour: None,
             controls: BTreeMap::new(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
@@ -537,6 +540,11 @@ impl SurfaceView {
         self.announce_statuses(window);
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
+        if self.colour.as_ref().is_some_and(|(id,_,_)| !live(id) || self.leases.get(id) != prepared.node(*id).map(|n| &n.binding)) {
+            self.colour=None;
+            if self.scrub_busy || self.scrub_gesture.is_some() || !self.scrub_ops.is_empty() {self.scrub_ops.push_back(ScrubOp::Finish(false));self.scrub_pump(cx);}
+        }
+
         self.controls.retain(|id, _| live(id));
         if self.pressed.is_some_and(|id| !live(&id)) {
             self.pressed = None;
@@ -1743,6 +1751,65 @@ impl SurfaceView {
             self.run(ticket, cx);
         }
     }
+    fn open_colour(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        if self.colour.is_some() || self.scrub.is_some() || self.scrub_busy {
+            return;
+        }
+        use crate::{
+            colour_model::Color,
+            colour_picker::{Edit, Picker},
+        };
+        let Some(node) = self.publication.surface.node(id) else {
+            return;
+        };
+        let binding = node
+            .props
+            .get("binding")
+            .and_then(Value::as_str)
+            .map(SharedString::from);
+        let color = node
+            .props
+            .get("value")
+            .and_then(Value::as_str)
+            .and_then(Color::parse)
+            .unwrap_or(Color([0.5, 0.5, 0.5, 1.]));
+        let tokens = self.table.tokens.clone();
+        let source = self.natives.sample_color.borrow().clone();
+        let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
+        let subscription = cx.subscribe(&picker, move |v, _, edit, cx| match edit {
+            Edit::Begin if binding.is_some() => {
+                v.scrub_ops.push_back(ScrubOp::Begin);
+                v.scrub_pump(cx);
+            }
+            Edit::Value(color) => {
+                if let Some(binding) = &binding {
+                    v.scrub_ops
+                        .push_back(ScrubOp::Value(binding.clone(), json!(color)));
+                    v.scrub_pump(cx);
+                } else {
+                    v.change(id, json!(color), cx);
+                }
+            }
+            Edit::Finish(commit) => {
+                if v.scrub_busy || v.scrub_gesture.is_some() || !v.scrub_ops.is_empty() {
+                    v.scrub_ops.push_back(ScrubOp::Finish(*commit));
+                    v.scrub_pump(cx);
+                }
+                v.colour = None;
+                let focus = v.focus.get(&id).cloned();
+                if let Some(focus) = focus {
+                    let handle = v.window;
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, w, cx| focus.focus(w, cx));
+                    });
+                }
+                cx.notify();
+            }
+            Edit::Begin | Edit::Sample => {}
+        });
+        self.colour = Some((id, picker, subscription));
+        cx.notify();
+    }
     fn activate(
         &mut self,
         id: Id,
@@ -1791,22 +1858,7 @@ impl SurfaceView {
                 });
             }
             Some(Component::ColourWell) => {
-                let initial = node
-                    .props
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .and_then(crate::sheets::hex_colour);
-                let owner = cx.entity().downgrade();
-                let binding = node.props.get("binding").cloned();
-                crate::colour_panel::menu(window, initial, cx, move |colour, cx| {
-                    let _ = owner.update(cx, |v, cx| {
-                        // The panel can outlive the row: its lease must still be this one.
-                        let current = v.publication.surface.node(id);
-                        if current.and_then(|n| n.props.get("binding")) == binding.as_ref() {
-                            v.change(id, json!(colour), cx);
-                        }
-                    });
-                });
+                self.open_colour(id, window, cx);
             }
             _ => self.send(id, "click", detail, cx),
         }
@@ -2005,7 +2057,7 @@ impl SurfaceView {
                     },
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() {
+                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.colour.is_none() {
                     v.scrub_gesture = None;
                     v.scrub_shown = None;
                 }
@@ -3705,6 +3757,19 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.colour.as_ref().map(|(id, picker, _)| {
+                let bounds = self.anchors.borrow().get(id).copied().unwrap_or_default();
+                deferred(
+                    anchored()
+                        .position(point(
+                            bounds.origin.x,
+                            bounds.origin.y + bounds.size.height + px(t.space.sm),
+                        ))
+                        .snap_to_window()
+                        .child(picker.clone()),
+                )
+                .priority(3)
+            }))
     }
 }
 struct Tooltip {

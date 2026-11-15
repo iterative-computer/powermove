@@ -347,6 +347,11 @@ pub struct Metrics {
     /// Minimum pointer target. Smaller glyphs get padded hit areas.
     pub hit: f32,
     pub popover_width: f32,
+    /// Electron colour editor geometry; shared by every native colour field.
+    pub color_picker_width: f32,
+    pub color_picker_plane_width: f32,
+    pub color_picker_plane_height: f32,
+    pub color_picker_track: f32,
     /// Corner of floating popovers drawn by Powermove (the agent popover).
     pub popover_radius: f32,
     pub sheet_width: f32,
@@ -878,6 +883,10 @@ impl Tokens {
                 symbol_action: 20.,
                 hit: 24.,
                 popover_width: 260.,
+                color_picker_width: 535.,
+                color_picker_plane_width: 230.,
+                color_picker_plane_height: 256.,
+                color_picker_track: 14.,
                 popover_radius: radius.xl,
                 sheet_width: 480.,
                 // The original app's popover: room for a reply beside a
