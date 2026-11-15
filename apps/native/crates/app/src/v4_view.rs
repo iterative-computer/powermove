@@ -31,12 +31,11 @@ pub struct Natives {
     pub published: Rc<RefCell<Option<Arc<pm_kernel::Published>>>>,
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
-/// Retained outlines mount a viewport directly; larger outlines request windows.
+/// The outline row window stays JS; its position follows native scroll at once.
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
     pub column: Cell<f32>,
-    rows: Cell<(usize, usize)>,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
     surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
@@ -74,8 +73,6 @@ impl Outline {
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
     }
-    #[cfg(test)]
-    pub fn scroll_for_test(&self) -> f32 { self.scroll_y.get() }
     fn offset(&self, first: &str) -> f32 {
         let top = self
             .scene
@@ -86,7 +83,6 @@ impl Outline {
         top - self.scroll_y.get()
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
-        self.rows.set(rows.unwrap_or((0, 0)));
         let moved = self.scroll_y.get() != scroll_y || self.column.get() != column;
         self.scroll_y.set(scroll_y);
         self.column.set(column);
@@ -1283,8 +1279,6 @@ impl SurfaceView {
         }
         self.fields.insert(id, field);
     }
-    #[cfg(test)]
-    pub fn outline_scroll_for_test(&self) -> f32 { self.natives.outline.scroll_for_test() }
     /// Ask JS for the row window that covers native scroll, when it left the
     /// published one. Rows already overscan a viewport on each side.
     pub fn outline_rows(&mut self, rows: (usize, usize), cx: &mut Context<Self>) {
@@ -1296,9 +1290,6 @@ impl SurfaceView {
         else {
             return;
         };
-        if node.outline_retained {
-            return;
-        }
         let (id, (first, count)) = (node.id, node.outline_window.unwrap());
         if rows.1 > rows.0
             && (rows.0 < first || rows.1 > first + count)
@@ -2751,13 +2742,7 @@ impl SurfaceView {
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }
-        if node.outline_retained {
-            let start = self.natives.outline.rows.get().0;
-            let top = self.natives.outline.scene.borrow().as_ref()
-                .and_then(|s| s.span(start).map(|(_, top, _)| top)).unwrap_or(0.);
-            element = element.absolute().left(px(0.)).right(px(0.))
-                .top(px(top as f32 - self.natives.outline.scroll_y.get()));
-        } else if let Some(first) = &node.outline_first {
+        if let Some(first) = &node.outline_first {
             element = element
                 .absolute()
                 .left(px(0.))
@@ -3168,10 +3153,7 @@ impl SurfaceView {
         } else {
             usize::MAX
         };
-        let (start, end) = if node.outline_retained {
-            self.natives.outline.rows.get()
-        } else { (0, usize::MAX) };
-        for child in node.children.iter().take(shown.min(end)).skip(start) {
+        for child in node.children.iter().take(shown) {
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {

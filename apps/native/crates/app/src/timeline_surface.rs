@@ -1075,7 +1075,7 @@ impl TimelineSurface {
         let range = self
             .scene
             .as_ref()?
-            .mount_range(self.view.scroll_y, height.max(0.));
+            .visible_range(self.view.scroll_y, height.max(0.));
         Some((range.start, range.end))
     }
     fn pump(&mut self, cx: &mut Context<Self>) {
@@ -1243,7 +1243,8 @@ impl TimelineSurface {
             return;
         };
         let height = f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64;
-        self.view.scroll_y = scene.clamp_scroll(self.view.scroll_y, height);
+        let limit = (scene.content_height() - height).max(0.);
+        self.view.scroll_y = self.view.scroll_y.clamp(0., limit);
     }
     fn viewport(&self) -> Option<Viewport> {
         let (w, h) = (
@@ -1271,11 +1272,6 @@ impl TimelineSurface {
             // A view restored or resized past the timeline's end comes back
             // onto its time.
             self.clamp_time();
-            // The viewport can clamp vertical scroll without a wheel event.
-            // Publish its native geometry after this render releases the view.
-            let (outline, y, column, rows) = (self.outline.clone(), self.view.scroll_y as f32,
-                self.view.layer_column as f32, self.visible_rows());
-            cx.defer(move |cx| outline.scrolled(y, column, rows, cx));
         }
         if self.frame.is_none() {
             let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
