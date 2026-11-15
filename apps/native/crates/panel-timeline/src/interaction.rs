@@ -472,7 +472,7 @@ impl TimelineModel {
             "deselect" => {
                 self.key_selection_active = false;
                 Plan {
-                    calls: vec![SelectionCall::Clear.user().into()],
+                    calls: vec![SelectionCall::Clear.into()],
                     ..Plan::default()
                 }
             }

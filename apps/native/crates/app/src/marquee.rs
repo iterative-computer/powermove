@@ -123,7 +123,7 @@ impl GizmoSurface {
                     };
                     let select = SelectionCall::Layers { ids, add: false };
                     kernel
-                        .call(&project, Request::new(Caller::native(), select.user()))
+                        .call(&project, Request::new(Caller::native(), select))
                         .await?
                         .ok()?;
                     super::read_at(kernel.published(&project)?.as_ref(), time)

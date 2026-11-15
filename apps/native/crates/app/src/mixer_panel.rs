@@ -914,7 +914,6 @@ fn strip_view(
                         ids: vec![id.clone()],
                         add: false,
                     }
-                    .user()
                     .into(),
                     cx,
                 );

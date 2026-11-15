@@ -1319,7 +1319,7 @@ async fn run_job(
                 ids: vec![id],
                 add: false,
             };
-            call(kernel, project, select.user().into()).await?;
+            call(kernel, project, select.into()).await?;
             Ok(None)
         }
         Job::Finish {
