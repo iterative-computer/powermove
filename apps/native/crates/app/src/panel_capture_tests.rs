@@ -36,7 +36,19 @@ fn capture_builtin_panels() {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let r = if let Ok(path) = std::env::var("PM_PANEL_CAPTURE_PROJECT") {
-                    rig_project(panel, &std::fs::read_to_string(path).unwrap())
+                    if std::path::Path::new(&path)
+                        .extension()
+                        .is_some_and(|e| e == "pmv")
+                    {
+                        let opened = pm_kernel::open_project(
+                            std::path::Path::new(&path),
+                            Default::default(),
+                        )
+                        .unwrap();
+                        crate::v4_view_tests::rig_source(panel, pm_kernel::OpenSource::File(opened))
+                    } else {
+                        rig_project(panel, &std::fs::read_to_string(path).unwrap())
+                    }
                 } else {
                     rig(panel, 8)
                 };
@@ -61,6 +73,39 @@ fn capture_builtin_panels() {
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
                     }
+                }
+                if let Ok(layer) = std::env::var("PM_PANEL_CAPTURE_EXPAND") {
+                    let ticket = r.runtime.timeline_action(serde_json::json!({"type":"disclosure", "id":pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer)), "open":true})).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    loop {
+                        if let Some(result) = ticket.try_take() {
+                            result.unwrap();
+                            break;
+                        }
+                        assert!(std::time::Instant::now() < deadline);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    let client = pm_panel_timeline::TimelineClient::new(
+                        r.kernel.clone(),
+                        PROJECT,
+                        pm_kernel::Caller::native(),
+                    )
+                    .unwrap();
+                    let rows =
+                        pm_panel_timeline::v4::project_window(&client.model, 0, 512).unwrap();
+                    std::fs::write(
+                        format!("{dir}/timeline-{name}-rows.json"),
+                        serde_json::to_vec_pretty(&rows).unwrap(),
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        format!("{dir}/timeline-{name}-ui.txt"),
+                        format!(
+                            "{:?}",
+                            r.kernel.published(PROJECT).unwrap().ui_state.timeline
+                        ),
+                    )
+                    .unwrap();
                 }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
                     .ok()

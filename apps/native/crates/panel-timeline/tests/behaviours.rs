@@ -2609,3 +2609,21 @@ fn explicit_reveal_all_is_preserved_by_normal_and_cascade_twirls() {
     assert_eq!(m.reveal.layers["c"].paths, Some(vec!["*".into()]));
     assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id=="c" && channel=="opacity")));
 }
+
+#[test]
+fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
+    let mut m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"g","name":"Synthetic wordmark","type":"group","threeD":true,"collapsed":true,"p":{"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"anchor.z":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null},"orientation.x":{"v":0,"kf":[],"expr":null},"orientation.y":{"v":0,"kf":[],"expr":null},"orientation.z":{"v":0,"kf":[],"expr":null},"perspective":{"v":50,"kf":[],"expr":null},"position.x":{"v":100,"kf":[],"expr":null},"position.y":{"v":200,"kf":[{"i":"y","t":0,"v":210},{"i":"y2","t":1,"v":200}],"expr":null},"position.z":{"v":0,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"rotation.x":{"v":0,"kf":[],"expr":null},"rotation.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[{"i":"sx","t":0,"v":100}],"expr":null},"scale.y":{"v":100,"kf":[{"i":"sy","t":0,"v":100}],"expr":null},"scale.z":{"v":100,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null}}},{"id":"child","type":"shape","group":"g","p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.toggle_disclosure("g").unwrap();
+    let properties: Vec<_> = m
+        .rows()
+        .iter()
+        .filter_map(|r| match &r.id {
+            RowId::Property { channel, .. } => Some(channel.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(properties, ["position.y", "scale"]);
+    assert_eq!(m.rows().last().unwrap().id, RowId::Layer("child".into()));
+    assert_eq!(m.rows().last().unwrap().depth, 1);
+    assert!(m.reveal.layers["g"].paths.is_none());
+}

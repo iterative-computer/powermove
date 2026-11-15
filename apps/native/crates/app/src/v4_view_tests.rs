@@ -52,14 +52,29 @@ pub(crate) fn rig(panel: &str, layers: usize) -> Rig {
     rig_project(panel, &project_json(layers))
 }
 pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
+    rig_source(
+        panel,
+        OpenSource::Untitled(pm_model::json::parse(project).unwrap()),
+    )
+}
+pub(crate) fn rig_source(panel: &str, source: OpenSource) -> Rig {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
-    let project = pm_model::json::parse(project).unwrap();
-    kernel
-        .open(PROJECT, OpenSource::Untitled(project))
-        .wait()
-        .unwrap()
-        .unwrap();
+    kernel.open(PROJECT, source).wait().unwrap().unwrap();
+    if let Ok(comp_id) = std::env::var("PM_PANEL_CAPTURE_COMP") {
+        let document = kernel.published(PROJECT).unwrap().snapshot.doc_id;
+        kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::Call::OpenComposition { comp_id, document },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
