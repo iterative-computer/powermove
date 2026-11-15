@@ -79,6 +79,7 @@ mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;
+mod popover_drag;
 mod play_range;
 mod playback;
 mod playhead;

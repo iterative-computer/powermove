@@ -1139,6 +1139,80 @@ impl Editor {
             preview,
         }));
     }
+    /// A panel that is not in the workspace (the Agent popover, a window of
+    /// its own) dragged over it to `at` (this window's points): the same drop
+    /// preview a tab drag shows, for the panel as Pin would first place it.
+    /// True when a drop there would dock it.
+    pub fn drag_from_outside(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
+        let preview = self.outside_target(id, at, cx);
+        let original = match self.gesture.take() {
+            Some(Gesture::Panel(d)) => d.original,
+            _ => self.layout.clone(),
+        };
+        let pointer = point(px(at.0), px(at.1));
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            stack: false,
+            start: pointer,
+            original,
+            at: pointer,
+            moved: true,
+            preview,
+        }));
+        cx.notify();
+        preview.is_some()
+    }
+    /// Ends an outside drag as a drop: the panel docks where its preview
+    /// showed (the workspace changes as a Pin there would). False, with the
+    /// workspace untouched, when no target was lit.
+    pub fn drop_from_outside(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(Gesture::Panel(drag)) = self.gesture.take() else {
+            return false;
+        };
+        let Some(preview) = drag.preview.filter(|_| drag.id == id) else {
+            cx.notify();
+            return false;
+        };
+        let panels = self.panels(cx);
+        let mut next = self.layout.clone();
+        let docked = next
+            .show_panel(id, &panels)
+            .and_then(|_| next.move_panel_to(id, preview.target).or(Ok(())));
+        if let Err(error) = docked {
+            self.status = error.to_string();
+            cx.notify();
+            return false;
+        }
+        self.layout = next;
+        self.slides.armed = true;
+        self.save();
+        cx.notify();
+        true
+    }
+    /// An outside drag let go off any target, or cancelled: no preview, the
+    /// workspace as it was.
+    pub fn cancel_from_outside(&mut self, cx: &mut Context<Self>) {
+        if let Some(Gesture::Panel(drag)) = self.gesture.take() {
+            self.layout = drag.original;
+            cx.notify();
+        }
+    }
+    /// Where a panel from outside would dock at `at`: the layout with it
+    /// shown (as Pin shows it) asked as for a tab drag; over the group Pin
+    /// puts it in, that group itself.
+    fn outside_target(&self, id: &str, at: (f32, f32), cx: &App) -> Option<DropPreview> {
+        let panels = self.panels(cx);
+        let mut with = self.layout.clone();
+        with.show_panel(id, &panels).ok()?;
+        // A floating panel's own drag docks as the original app's did: near
+        // a side column's edge or between its panels; over the middle of
+        // the workspace it stays floating (`Layout::floating_drop_target`).
+        let preview =
+            with.floating_drop_target(&self.geometry, self.dock_bounds, at.0, at.1, &self.tokens)?;
+        let mut next = with.clone();
+        next.move_panel_to(id, preview.target).ok()?;
+        Some(preview)
+    }
     /// Completes a simulated drag like a mouse-up; returns the applied target.
     #[doc(hidden)]
     pub fn simulate_drop(&mut self) -> Option<DropTarget> {
@@ -3280,6 +3354,77 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The Agent popover dragged over the workspace by its own header: as
+    /// the original app's floating panel, it docks only near a side column
+    /// (its edge, between its panels) with the same drop preview a tab drag
+    /// shows; over the middle it stays floating; a cancel changes nothing.
+    #[gpui::test]
+    fn a_panel_dragged_in_from_outside_docks_where_its_preview_shows(cx: &mut TestAppContext) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            if v.layout.find("agent").is_some() {
+                v.layout.close_panel("agent").unwrap();
+            }
+        });
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        // 1. Over the middle of the viewer: nothing lit, it stays floating.
+        let viewer = view.read_with(cx, |v, _| {
+            let (d, g, _) = v.layout.find("viewer").unwrap();
+            v.geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect
+        });
+        let middle = (viewer.x + viewer.w / 2., viewer.y + viewer.h / 2.);
+        assert!(!view.update(cx, |v, cx| v.drag_from_outside("agent", middle, cx)));
+        assert!(!view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+        // 2. Somewhere along a side column: lit, and it docks in that column.
+        let bounds = view.read_with(cx, |v, _| v.dock_bounds);
+        let mut lit = None;
+        'find: for i in 0..=96 {
+            for j in 0..=48 {
+                let at = (
+                    bounds.x + bounds.w * i as f32 / 96.,
+                    bounds.y + bounds.h * j as f32 / 48.,
+                );
+                if view.update(cx, |v, cx| v.drag_from_outside("agent", at, cx)) {
+                    lit = Some(at);
+                    break 'find;
+                }
+            }
+        }
+        assert!(lit.is_some(), "a side column takes the floating panel");
+        assert!(view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            let (dock, _, _) = v.layout.find("agent").expect("docked");
+            assert!(
+                matches!(v.layout.docks[dock].id.as_str(), "left" | "right"),
+                "in a side column, as the original app docks a floating panel"
+            );
+        });
+        // 3. A cancelled drag leaves the workspace as it was.
+        view.update(cx, |v, cx| {
+            v.layout = before.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            v.drag_from_outside("agent", lit.unwrap(), cx);
+            v.cancel_from_outside(cx);
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before, "a cancelled drag leaves the workspace");
+        });
     }
 
     /// A drag whose release never reaches the window (AppKit delivered it

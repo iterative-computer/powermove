@@ -185,6 +185,12 @@ pub struct SurfaceView {
     /// opened or closed: the chevron and the group's content follow the
     /// press in the next frame, the panel's own work after it.
     pub(crate) disclosures: HashMap<Id, bool>,
+    /// A text field to focus once it is mounted (the Agent composer when its
+    /// popover opens) and what was typed before it was.
+    ready_text: Option<(String, String, std::time::Instant)>,
+    /// The control the left button is down on: it shows pressed (a deeper
+    /// wash than hover) until the button comes up, as a Mac button does.
+    pressed: Option<Id>,
     scrolls: BTreeMap<Id, ScrollHandle>,
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
@@ -288,6 +294,8 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            pressed: None,
+            ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
@@ -470,6 +478,7 @@ impl SurfaceView {
             self.reconcile(window, cx);
         }
         self.try_focus_text(cx);
+        self.take_ready(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
             let _ = installed.try_send(());
@@ -507,6 +516,9 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
+        if self.pressed.is_some_and(|id| !live(&id)) {
+            self.pressed = None;
+        }
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
@@ -1380,6 +1392,77 @@ impl SurfaceView {
     pub fn focus_text(&mut self, layer: String, cx: &mut Context<Self>) {
         self.focus_text = Some((layer, std::time::Instant::now()));
         self.try_focus_text(cx);
+        self.take_ready(cx);
+    }
+    /// Focuses the text field `semantic` as soon as it is mounted; keys typed
+    /// before then (`type_early`) land in it, in order, as typing does.
+    pub(crate) fn focus_when_ready(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        self.ready_text = Some((semantic.into(), String::new(), std::time::Instant::now()));
+        self.take_ready(cx);
+    }
+    /// Text typed while the field asked for is not mounted yet; false when
+    /// nothing is waiting for it (a field that never came, after 2 s, waits
+    /// no more: keys go where they would).
+    pub(crate) fn type_early(&mut self, text: &str) -> bool {
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
+        match &mut self.ready_text {
+            Some((_, typed, _)) => {
+                typed.push_str(text);
+                true
+            }
+            None => false,
+        }
+    }
+    fn take_ready(&mut self, cx: &mut Context<Self>) {
+        // Asked for by an open that is over (the popover closed before its
+        // composer came): never focus a field later, docked or elsewhere.
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
+        let Some(id) = self
+            .ready_text
+            .as_ref()
+            .and_then(|(semantic, _, _)| self.prepared.semantics.get(semantic).copied())
+        else {
+            return;
+        };
+        let Some(field) = self.fields.get(&id).cloned() else {
+            return;
+        };
+        let Some((_, typed, _)) = self.ready_text.take() else {
+            return;
+        };
+        let value = field.update(cx, |f, cx| {
+            f.begin_editing(cx);
+            if typed.is_empty() {
+                return None;
+            }
+            let value = format!("{}{typed}", f.editing_text());
+            f.replace_text(&value, cx);
+            Some(value)
+        });
+        // The panel's model hears it as it hears typing.
+        if let Some(value) = value {
+            self.send(
+                id,
+                "input",
+                EventDetail {
+                    value: Some(json!(value)),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
     }
     fn try_focus_text(&mut self, cx: &mut Context<Self>) {
         if self
@@ -1407,6 +1490,23 @@ impl SurfaceView {
             .runtime
             .bound_layers(&self.publication.panel, &binding)?;
         (*bound == [layer.clone()]).then_some(id)
+    }
+    /// The text field `semantic` lets go of the keyboard (the editor has it).
+    pub(crate) fn blur_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        if let Some((s, _, _)) = &self.ready_text
+            && s == semantic
+        {
+            self.ready_text = None;
+        }
+        if let Some(field) = self
+            .prepared
+            .semantics
+            .get(semantic)
+            .and_then(|id| self.fields.get(id))
+            .cloned()
+        {
+            field.update(cx, |f, cx| f.blur(cx));
+        }
     }
     pub fn focus_semantic(&self, semantic: &str, window: &mut Window, cx: &mut App) {
         if let Some(id) = self.prepared.semantics.get(semantic) {
@@ -2315,9 +2415,14 @@ impl SurfaceView {
             );
         }
         let wash = self.motion.hovers.amount(id);
-        if wash > 0. && !node.disabled {
+        let pressed = self.pressed == Some(id);
+        if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
-            let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+            let alpha = if pressed {
+                (t.translucency.selected * 255.).round() as u32
+            } else {
+                (t.translucency.hover * wash * 255.).round() as u32
+            };
             let mut layer = div().absolute().inset_0();
             layer.style().corner_radii = node.style.corner_radii.clone();
             children.push(
@@ -2823,6 +2928,33 @@ impl SurfaceView {
                 })
         });
         let wash = clickable && (node.component.is_some() || control_role);
+        if wash {
+            // Pressed while the button is down on it; any release ends it.
+            element = element
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                        v.pressed = Some(id);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                );
+        }
         if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 if wash {

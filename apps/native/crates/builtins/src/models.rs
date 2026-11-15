@@ -1734,7 +1734,9 @@ impl Backend {
                             request: &request,
                             new_thread: &new_thread,
                             now: crate::agent_host::now_ms(),
-                            popover_open: true,
+                            // Escape closes a popover; docked, it hands the
+                            // keyboard back to the editor.
+                            popover_open: self.native.facts["agentPopover"] == true,
                             catalogs: &catalogs,
                         },
                     )
@@ -1769,6 +1771,8 @@ impl Backend {
                         EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
                         EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
                         EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
+                        // Escape in the docked composer: the editor takes the keyboard back.
+                        EffectKind::Shell(ShellAction::Blur) => Some(("agent.blur", Value::Null)),
                         // Pinned, the panel docks into the workspace (unpinning is
                         // its dock's Close, which returns it to the popover).
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),

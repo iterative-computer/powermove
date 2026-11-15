@@ -457,8 +457,10 @@ pub fn popover_frame(w: &gpui::Window, t: &Tokens) {
     }
     content.addSubview_positioned_relativeTo(&mat, NSWindowOrderingMode::Below, Some(&gpui));
     window.invalidateShadow();
-    // The half-bounce entrance (plan §3.10), as the palette and field menu.
-    animate(&window, true, t, &mut None);
+    // Opens as the palette and field menus do: `motion.menu_fade`, eased,
+    // no spring, so it is there at once and never delays typing (a 320 ms
+    // linear fade with a scale spring settling at ~470 ms read as sluggish).
+    animate_as(&window, true, true, t, &mut None);
 }
 pub fn contents(v: &NSView) -> Retained<NSView> {
     unsafe {
@@ -2351,6 +2353,16 @@ impl Host {
                                 p.hide();
                             }
                         }
+                        // A press anywhere but on the text being edited (the
+                        // timeline, the viewer, a control, another panel)
+                        // gives the editor the keyboard back, as a click away
+                        // from a field does in Electron: Space then plays.
+                        if e.windowNumber() == window.windowNumber() {
+                            let gpui = host.borrow().gpui.clone();
+                            if click_leaves_text(&window, &gpui, e) {
+                                window.makeFirstResponder(Some(&gpui));
+                            }
+                        }
                         return event.as_ptr();
                     }
                     if e.r#type() == NSEventType::KeyUp {
@@ -3072,7 +3084,10 @@ impl Host {
     /// Which page shows (`None`: the project or Home).
     pub fn shown_page(&self) -> Option<String> {
         let pages = self.pages.borrow();
-        pages.1.and_then(|i| pages.0.get(i)).map(|(id, _)| id.clone())
+        pages
+            .1
+            .and_then(|i| pages.0.get(i))
+            .map(|(id, _)| id.clone())
     }
     /// Home over the window: the Home item reads selected, and the
     /// document's own controls (tools, sidebars, Export, the title) step
@@ -4047,6 +4062,20 @@ impl Host {
             .setPlaceholderString(Some(&NSString::from_str(placeholder)));
         p.toggle();
     }
+    /// Replaces the open field menu's rows in place (after a row that
+    /// stays was chosen): no closing and reopening, the query kept. `false`
+    /// when no menu is open any more.
+    pub fn update_menu(&mut self, choices: Vec<Choice>) -> bool {
+        let mut p = self.fields.borrow_mut();
+        if !p.model.open {
+            return false;
+        }
+        p.model.choices = choices;
+        let query = p.search.stringValue().to_string();
+        p.model.search(query);
+        p.refresh();
+        true
+    }
     pub fn system(&self, name: &str) -> bool {
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         match name {
@@ -4103,13 +4132,12 @@ impl Host {
                     .keyWindow()
                     .and_then(|w| w.firstResponder())
                     .or_else(|| self.window.firstResponder());
-                if !responder
-                    .as_ref()
-                    .is_some_and(|r| menu::owns_text_edit(
+                if !responder.as_ref().is_some_and(|r| {
+                    menu::owns_text_edit(
                         unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] },
                         &r.class().name().to_string_lossy(),
-                    ))
-                {
+                    )
+                }) {
                     return false;
                 }
                 let selector = match name {
@@ -4279,12 +4307,17 @@ define_class!(
             if let Some(p) = self.ivars().upgrade() {
                 let mut p = p.borrow_mut();
                 let index = sender.tag() as usize;
-                if let Some(command) = p.model.choices.get(index).map(|c| c.command.clone()) {
-                    p.picked = true;
-                    let (name, args) = menu::split_palette_command(&command);
+                let chosen = p.model.choices.get(index).map(|c| (c.command.clone(), c.stays));
+                if let Some((command, _)) = &chosen {
+                    let (name, args) = menu::split_palette_command(command);
                     let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
-                p.hide();
+                // A row that stays (a provider) keeps the menu up for the
+                // rows its owner sends next; any other choice closes it.
+                if !chosen.as_ref().is_some_and(|(_, stays)| *stays) {
+                    p.picked = chosen.is_some();
+                    p.hide();
+                }
             }
         }
     }
@@ -5560,7 +5593,8 @@ impl Popup {
         };
         let before = self.model.lit();
         if let Some(name) = self.model.navigate(key) {
-            self.picked = true;
+            // A row that stays leaves the menu open (`navigate` kept it so).
+            self.picked = !self.model.open;
             let _ = self.sender.try_send(Command {
                 name,
                 args: vec![],
@@ -5818,7 +5852,8 @@ pub fn install_menus() {
                                     .unwrap_or("")
                                     .to_owned()
                             };
-                            VIEW3D_ITEMS.with(|v| v.borrow_mut().push((arg(0), arg(1), item.clone())));
+                            VIEW3D_ITEMS
+                                .with(|v| v.borrow_mut().push((arg(0), arg(1), item.clone())));
                             sub.addItem(&item);
                         }
                     }
@@ -6284,6 +6319,55 @@ mod key_owner_tests {
 }
 /// A first responder that is no longer on screen: a view out of its window
 /// or hidden (with a hidden ancestor), or the field editor of one.
+/// A press in `window` that lands off the text view (or field) holding its
+/// keyboard: anywhere in the editor's GPUI view, a native control, another
+/// field (which then takes the keyboard itself, as AppKit gives it).
+fn click_leaves_text(window: &NSWindow, gpui: &NSView, event: &NSEvent) -> bool {
+    let Some(responder) = window.firstResponder() else {
+        return false;
+    };
+    unsafe {
+        let mut text: *mut AnyObject = Retained::as_ptr(&responder) as *mut AnyObject;
+        let is_text: bool = msg_send![&*text, isKindOfClass: NSText::class()];
+        if !is_text {
+            return false;
+        }
+        // A field's editor stands for its field.
+        let editor: bool = msg_send![&*text, isFieldEditor];
+        if editor {
+            let delegate: *mut AnyObject = msg_send![&*text, delegate];
+            if !delegate.is_null() {
+                text = delegate;
+            }
+        }
+        let Some(content) = window.contentView() else {
+            return false;
+        };
+        let Some(hit) = content.hitTest(event.locationInWindow()) else {
+            return true;
+        };
+        // On the text itself, its scroll view or its field: it keeps it.
+        let mut view: Option<Retained<NSView>> = Some(hit);
+        while let Some(v) = view {
+            let p = Retained::as_ptr(&v) as *mut AnyObject;
+            if p == text {
+                return false;
+            }
+            if std::ptr::eq(Retained::as_ptr(&v), gpui) {
+                return true;
+            }
+            if let Ok(scroll) = v.clone().downcast::<NSScrollView>()
+                && scroll
+                    .documentView()
+                    .is_some_and(|d| Retained::as_ptr(&d) as *mut AnyObject == text)
+            {
+                return false;
+            }
+            view = v.superview();
+        }
+        true
+    }
+}
 fn stray_responder(responder: &NSResponder) -> bool {
     unsafe {
         let mut view: *mut AnyObject = responder as *const NSResponder as *mut AnyObject;

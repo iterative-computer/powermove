@@ -521,6 +521,8 @@ impl Tasks {
             effort: request["reasoningEffort"].as_str().map(str::to_owned),
             access: base.access,
             approval: base.approval,
+            // A subagent of a Full access run the person consented to.
+            computer_consent: base.computer_consent,
             workspace,
             // Main's children keep the parent's images and attachments.
             images: request["images"]
