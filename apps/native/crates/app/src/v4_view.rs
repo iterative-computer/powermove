@@ -2094,6 +2094,52 @@ impl SurfaceView {
             self.pointer(capture.target, "pointerup", detail, cx);
         }
     }
+    pub(crate) fn copy_selection(&self, window: &Window, cx: &mut App) -> bool {
+        let selected = self.quote_selection.borrow();
+        let Some(owner) = selected.owner else {
+            return false;
+        };
+        if !crate::v4_quote::cite_context(
+            self.publication.panel == "agent",
+            self.focus.get(&owner).is_some_and(|f| f.is_focused(window)),
+            selected.range(),
+        ) {
+            return false;
+        }
+        let text = selected.text(owner);
+        let Some(quote) = text.get(selected.range()) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(quote.to_owned()));
+        true
+    }
+    pub(crate) fn cite_selection(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let selected = self.quote_selection.borrow();
+        let Some(owner) = selected.owner else {
+            return false;
+        };
+        if !crate::v4_quote::cite_context(
+            self.publication.panel == "agent",
+            self.focus.get(&owner).is_some_and(|f| f.is_focused(window)),
+            selected.range(),
+        ) {
+            return false;
+        }
+        drop(selected);
+        self.publish_quote(owner, cx);
+        self.send(
+            owner,
+            "keydown",
+            EventDetail {
+                key: Some(".".into()),
+                meta_key: Some(true),
+                shift_key: Some(true),
+                ..Default::default()
+            },
+            cx,
+        );
+        true
+    }
     fn quote_owner(&self, mut id: Id) -> Option<Id> {
         loop {
             if self
@@ -2560,37 +2606,54 @@ impl SurfaceView {
                 .and_then(Value::as_array);
             let mut selected = self.quote_selection.borrow_mut();
             if let Some(range) = reveal {
-                let text = selected.text(id);
-                let byte = |offset: usize| {
-                    text.char_indices()
-                        .scan(0, |units, (i, c)| {
-                            let current = *units;
-                            *units += c.len_utf16();
-                            Some((i, current))
-                        })
-                        .find(|(_, units)| *units >= offset)
-                        .map_or(text.len(), |(i, _)| i)
-                };
-                selected.owner = Some(id);
-                selected.revealed = Some(id);
-                selected.anchor = byte(range.first().and_then(Value::as_u64).unwrap_or(0) as usize);
-                selected.head = byte(range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize);
-                let mut child = id;
-                while let Some(parent) = self.prepared.node(child).and_then(|n| n.parent) {
-                    if let Some(scroll) = self.scrolls.get(&parent) {
-                        if let Some(index) = self
-                            .prepared
-                            .node(parent)
-                            .and_then(|p| p.children.iter().position(|i| *i == child))
-                        {
-                            scroll.scroll_to_item(index);
+                let nonce = range.get(2).and_then(Value::as_u64).unwrap_or(0);
+                if selected.reveal_seen != Some((id, nonce)) {
+                    selected.reveal_seen = Some((id, nonce));
+                    let mut blocks = Vec::new();
+                    self.quote_blocks(id, &mut blocks);
+                    let text = blocks
+                        .into_iter()
+                        .map(|(_, text)| text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let byte = |offset: usize| {
+                        text.char_indices()
+                            .scan(0, |units, (i, c)| {
+                                let current = *units;
+                                *units += c.len_utf16();
+                                Some((i, current))
+                            })
+                            .find(|(_, units)| *units >= offset)
+                            .map_or(text.len(), |(i, _)| i)
+                    };
+                    selected.owner = Some(id);
+                    selected.revealed = Some(id);
+                    selected.anchor =
+                        byte(range.first().and_then(Value::as_u64).unwrap_or(0) as usize);
+                    selected.head =
+                        byte(range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize);
+                    let mut child = id;
+                    while let Some(parent) = self.prepared.node(child).and_then(|n| n.parent) {
+                        if let Some(scroll) = self.scrolls.get(&parent) {
+                            if let Some(index) = self
+                                .prepared
+                                .node(parent)
+                                .and_then(|p| p.children.iter().position(|i| *i == child))
+                            {
+                                scroll.scroll_to_item(index);
+                            }
                         }
+                        child = parent;
                     }
-                    child = parent;
                 }
-            } else if selected.revealed == Some(id) {
-                selected.owner = None;
-                selected.revealed = None;
+            } else {
+                if selected.revealed == Some(id) {
+                    selected.owner = None;
+                    selected.revealed = None;
+                }
+                if selected.reveal_seen.is_some_and(|(owner, _)| owner == id) {
+                    selected.reveal_seen = None;
+                }
             }
             drop(selected);
             element = element
@@ -3363,20 +3426,17 @@ impl SurfaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.modifiers.platform && event.keystroke.key == "c" {
-            let selected = self.quote_selection.borrow();
-            if let Some(owner) = selected.owner {
-                if self.focus.get(&owner).is_some_and(|f| f.is_focused(window))
-                    && !selected.range().is_empty()
-                {
-                    let text = selected.text(owner);
-                    if let Some(quote) = text.get(selected.range()) {
-                        cx.write_to_clipboard(ClipboardItem::new_string(quote.into()));
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-            }
+        let copy_quote = event.keystroke.modifiers.platform && event.keystroke.key == "c";
+        let cite_quote = event.keystroke.modifiers.platform
+            && event.keystroke.modifiers.shift
+            && matches!(event.keystroke.key.as_str(), "." | ">");
+        if cite_quote && self.cite_selection(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if copy_quote && self.copy_selection(window, cx) {
+            cx.stop_propagation();
+            return;
         }
         let key = match event.keystroke.key.as_str() {
             "up" => "ArrowUp",

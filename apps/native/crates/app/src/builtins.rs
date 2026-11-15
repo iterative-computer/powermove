@@ -165,6 +165,10 @@ impl Controller {
         {
             return;
         }
+        self.host.borrow_mut().set_contributed_bindings(
+            "native.agent.cite.",
+            [crate::v4_quote::cite_binding()],
+        );
         if let Some(job) = &self.builtins.export_job {
             job.cancel.store(true, std::sync::atomic::Ordering::Release);
         }

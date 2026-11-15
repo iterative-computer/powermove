@@ -17,6 +17,7 @@ pub struct Selection {
     pub head: usize,
     pub dragging: bool,
     pub revealed: Option<Id>,
+    pub reveal_seen: Option<(Id, u64)>,
 }
 impl Selection {
     pub fn range(&self) -> Range<usize> {
@@ -313,5 +314,70 @@ mod shaped_tests {
             assert_eq!(selected.hit(10, point), Some(35));
             assert!(first.layout.bounds().size.height > first.layout.line_height());
         });
+    }
+}
+
+pub const CITE_COMMAND: &str = "agent.citeSelection";
+pub fn cite_binding() -> pm_shell::keyboard::Binding {
+    pm_shell::keyboard::Binding {
+        id: "native.agent.cite.selection".into(),
+        chord: "cmd+shift+.".into(),
+        command: CITE_COMMAND.into(),
+        args: vec![],
+        priority: 300,
+        in_fields: false,
+        repeat: false,
+        loose: false,
+    }
+}
+pub fn cite_context(agent_prose: bool, focused: bool, range: Range<usize>) -> bool {
+    agent_prose && focused && !range.is_empty()
+}
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    use pm_shell::keyboard::{Binding, Effect, Key, Resolver};
+    #[test]
+    fn selected_agent_prose_cites_before_pause_and_other_contexts_fall_through() {
+        for (agent, focused, range, handled) in [
+            (true, true, 1..4, true),
+            (true, true, 0..0, false),
+            (true, false, 1..4, false),
+            (false, true, 1..4, false),
+        ] {
+            let mut resolver = Resolver::with(vec![
+                cite_binding(),
+                Binding {
+                    id: "test.pause".into(),
+                    chord: "cmd+shift+.".into(),
+                    command: "test.pauseAgent".into(),
+                    args: vec![],
+                    priority: 400,
+                    in_fields: false,
+                    repeat: false,
+                    loose: false,
+                },
+            ]);
+            let effects = resolver.submit(Key {
+                token: 1,
+                chord: "cmd+shift+.".into(),
+                field: false,
+                repeat: false,
+                up: false,
+                compat: false,
+            });
+            assert!(
+                matches!(&effects[..], [Effect::Dispatch { command,.. }] if command == CITE_COMMAND)
+            );
+            assert_eq!(cite_context(agent, focused, range), handled);
+            let effects = resolver.resolve(1, handled);
+            if handled {
+                assert_eq!(effects, vec![Effect::Consumed(1)]);
+            } else {
+                assert!(
+                    matches!(&effects[..],[Effect::Dispatch { command,.. }] if command == "test.pauseAgent")
+                );
+            }
+        }
     }
 }

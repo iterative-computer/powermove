@@ -89,7 +89,7 @@ test("select, cite, comment, jump, remove and sent history", async () => {
     "click",
   );
   expect((node("Transcript text").props.metadata as any).revealQuote).toEqual([
-    0, 40,
+    0, 40, 1,
   ]);
   await root.drive(node("Edit comment").id, "click");
   await root.drive(node("Add a comment about this quote").id, "input", {
@@ -102,6 +102,16 @@ test("select, cite, comment, jump, remove and sent history", async () => {
   const quotes = structuredClone(p.snapshot.draft.citations!);
   await root.drive(node("Remove quote").id, "click");
   expect(p.snapshot.draft.citations).toEqual([]);
+  await render();
+  await root.drive(node("Transcript text").id, "select", { selection: [1, 6] });
+  await root.drive(node("Transcript text").id, "keydown", {
+    key: ".",
+    metaKey: true,
+    shiftKey: true,
+  });
+  expect(p.snapshot.draft.citations?.[0]?.text).toBe("f you");
+  await render();
+  await root.drive(node("Remove quote").id, "click");
   p.snapshot.rows.items.push({
     id: "history:u",
     commandId: "u",

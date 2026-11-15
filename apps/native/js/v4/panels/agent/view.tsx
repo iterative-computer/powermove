@@ -127,7 +127,7 @@ export function elapsed(ms: number) {
 const CitationContext = createContext<{
   s: Snapshot;
   send: Send;
-  jump?: Citation;
+  jump?: Citation & { nonce: number };
   reveal: (q: Citation) => void;
 } | null>(null);
 function QuoteSource({
@@ -167,7 +167,13 @@ function QuoteSource({
         metadata: {
           quoteSource: `${context.s.threadId}:${id}`,
           ...(context.jump?.messageId === id
-            ? { revealQuote: [context.jump.start, context.jump.end] }
+            ? {
+                revealQuote: [
+                  context.jump.start,
+                  context.jump.end,
+                  context.jump.nonce,
+                ],
+              }
             : {}),
         },
         onSelect: (e) => {
@@ -179,7 +185,12 @@ function QuoteSource({
           setAnchor({ x: e.x ?? 0, y: e.y ?? 0 });
         },
         onKeyDown: (e) => {
-          if (e.metaKey && e.shiftKey && (e.key === "." || e.key === ">")) {
+          if (
+            selection &&
+            e.metaKey &&
+            e.shiftKey &&
+            (e.key === "." || e.key === ">")
+          ) {
             e.stopPropagation();
             cite();
           }
@@ -2442,7 +2453,10 @@ export function AgentView({
   /** The window's field menu (threads, run choices, access, shortcuts). */
   menu?: Menu;
 }) {
-  const [jump, setJump] = useState<Citation | undefined>();
+  const [jump, setJump] = useState<
+    (Citation & { nonce: number }) | undefined
+  >();
+  const jumpSerial = useRef(0);
   const jumpTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -2513,7 +2527,7 @@ export function AgentView({
         }
       }
       setOpen(expanded);
-      setJump(q);
+      setJump({ ...q, nonce: ++jumpSerial.current });
       if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
       jumpTimer.current = setTimeout(() => setJump(undefined), 1200);
     },
