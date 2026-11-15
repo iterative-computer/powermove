@@ -1448,6 +1448,22 @@ impl Controller {
                             })
                             .detach();
                         }
+                        // Settings follows the app's appearance: when its
+                        // window changes, it draws again once the editor
+                        // has rebuilt the tokens it is drawn with.
+                        if panel == "settings" {
+                            cx.observe_window_appearance(window, |_: &mut SurfaceWindow, window, cx| {
+                                cx.notify();
+                                cx.spawn_in(window, async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(120))
+                                        .await;
+                                    let _ = this.update(cx, |_, cx| cx.notify());
+                                })
+                                .detach();
+                            })
+                            .detach();
+                        }
                         SurfaceWindow { owner, panel, keys, chrome: None }
                     })
                 },
