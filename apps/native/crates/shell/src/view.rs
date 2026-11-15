@@ -4356,7 +4356,9 @@ mod tests {
                                 v.geometry.panels.iter().any(|p| {
                                     crate::area::Corner::ALL
                                         .into_iter()
-                                        .any(|c| c.rect(p.rect).contains(x, y))
+                                        .any(|c| v.geometry.side_docks.get(&p.dock)
+                                            .map_or(c.rect(p.rect), |clip| c.rect(p.rect).intersection(*clip))
+                                            .contains(x, y))
                                 })
                             });
                             cx.simulate_mouse_move(point(px(x), px(y)), None, none);
@@ -4380,6 +4382,10 @@ mod tests {
                     } else {
                         (r.x + thick + reach - 0.5, r.y + length / 2.)
                     };
+                    if d.group.is_some() && view.read_with(cx, |v, _|
+                        v.geometry.side_docks.get(&d.dock).is_some_and(|clip| !clip.contains(x, y))) {
+                        continue;
+                    }
                     if dividers
                         .iter()
                         .enumerate()
