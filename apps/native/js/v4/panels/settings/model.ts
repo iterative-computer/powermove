@@ -154,6 +154,10 @@ export class SettingsModel {
   range: [number, number] = [0, 0];
   anchorId?: string;
   readonly pending = new Set<string>();
+  /** A row's latest choice while it is saving, shown in its place. */
+  private readonly chosen = new Map<string, Json>();
+  /** The choice to save once a row's save in progress returns. */
+  private readonly queued = new Map<string, Json>();
   private readonly failedReads = new Set<string>();
   readonly failures = new Map<string, unknown>(); // inspection only; never rendered as product copy
   private profile = new Map<string, Json>();
@@ -217,6 +221,7 @@ export class SettingsModel {
         ...(r.profileKey && this.profile.has(r.profileKey)
           ? { value: this.profile.get(r.profileKey) }
           : {}),
+        ...(this.chosen.has(r.id) ? { value: this.chosen.get(r.id)! } : {}),
       }));
   }
   get availableSections() {
@@ -512,6 +517,8 @@ export class SettingsModel {
     if (publication.project?.id !== this.publication.project?.id) {
       this.epoch++;
       this.pending.clear();
+      this.chosen.clear();
+      this.queued.clear();
       this.failures.clear();
     }
     this.publication = publication;
@@ -523,19 +530,39 @@ export class SettingsModel {
     this.changed();
     return true;
   }
-  async write(id: string, value: Json) {
+  /** A row's choice. A choice made while an earlier one of the same row is
+   * still saving is never dropped: it shows at once and is saved when the
+   * earlier save returns, the last choice winning. */
+  async write(id: string, value: Json): Promise<boolean> {
     if (!this.alive) return false;
     const row = this.rows.find((r) => r.id === id);
     if (
       !row ||
       row.disabled ||
       row.busy ||
-      this.pending.has(id) ||
       row.control === "secure" ||
       !validValue(row, value)
     )
       return false;
-    if (!row.profileKey) return this.perform({ type: "write", id, value });
+    this.chosen.set(id, value);
+    if (this.pending.has(id)) {
+      this.queued.set(id, value);
+      this.changed();
+      return true;
+    }
+    const epoch = this.epoch;
+    const saved = row.profileKey
+      ? await this.saveProfile(id, row.profileKey, value)
+      : await this.perform({ type: "write", id, value });
+    if (!this.alive || epoch !== this.epoch) return false;
+    const next = this.queued.get(id);
+    this.queued.delete(id);
+    if (next !== undefined) return this.write(id, next);
+    this.chosen.delete(id);
+    this.changed();
+    return saved;
+  }
+  private async saveProfile(id: string, key: string, value: Json) {
     if (!this.profileSettings) return false;
     const epoch = this.epoch;
     this.pending.add(id);
@@ -543,10 +570,10 @@ export class SettingsModel {
     this.failedReads.delete(id);
     this.changed();
     try {
-      const ack = await this.profileSettings.setSetting(row.profileKey, value);
+      const ack = await this.profileSettings.setSetting(key, value);
       if (!ack.accepted) throw new Error("Profile setting write rejected");
       if (!this.alive || epoch !== this.epoch) return false;
-      this.profile.set(row.profileKey, value);
+      this.profile.set(key, value);
       this.reindex();
       return true;
     } catch (error) {
@@ -633,6 +660,8 @@ export class SettingsModel {
     this.searchEpoch++;
     this.listeners.clear();
     this.pending.clear();
+    this.chosen.clear();
+    this.queued.clear();
     this.profile.clear();
   }
 }

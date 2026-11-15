@@ -78,7 +78,12 @@ function RowControl({
   model: SettingsModel;
   key?: string;
 }) {
-  const disabled = row.disabled || row.busy || model.pending.has(row.id);
+  // A choice stays open while the previous one saves (the model keeps the
+  // last); an action waits for the one in progress.
+  const disabled =
+    row.disabled ||
+    row.busy ||
+    (row.control === "action" && model.pending.has(row.id));
   const change = (event: SurfaceEvent) => {
     if (event.value !== undefined) void model.write(row.id, event.value);
   };
