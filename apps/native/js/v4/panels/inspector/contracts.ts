@@ -111,7 +111,7 @@ export interface Section {
   action?: SectionAction;
   /** Several quiet actions in a row (Time: remap, freeze, reverse). */
   actions?: SectionAction[];
-  animators?: { id: string; name: string }[];
+  animators?: { id: string; name: string; rows: Row[] }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];

@@ -971,7 +971,7 @@ export function InspectorPanel({
                 session={session}
               />
             ) : null}
-            {section.animators?.map((animator) => (
+            {section.animators?.flatMap((animator) => [
               <InspectorRow
                 key={animator.id}
                 label={animator.name}
@@ -990,8 +990,11 @@ export function InspectorPanel({
                     })
                   }
                 />
-              </InspectorRow>
-            ))}
+              </InspectorRow>,
+              ...animator.rows.map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              )),
+            ])}
             {section.masks?.flatMap((mask) => [
               <InspectorRow key={mask.id} label={mask.name} leading={gutter}>
                 <Action
