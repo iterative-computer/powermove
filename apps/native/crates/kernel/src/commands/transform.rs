@@ -3,8 +3,8 @@
 //!
 //! Ports the arrow-key nudge (`extensions/keymap-default/keymap.ts`),
 //! Center Anchor (Cmd+Option+Home, double-click on the Pan Behind tool) and
-//! the alignment strip (`extensions/inspector/align.ts`, the engine's
-//! `pm_edit::align` and `pm_edit::anchor` kernels).
+//! the alignment strip. Native alignment uses projected anchors; the frozen
+//! Electron strip and pm_edit::align retain their original bounds semantics.
 
 use super::properties::{self, SetProperty};
 use super::{Cx, values};
@@ -34,10 +34,10 @@ impl AlignMode {
     }
 }
 
-/// How Distribute spaces the layers (`pm_edit::align::Spread`).
+/// How Distribute spaces the layer anchors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spread {
-    /// Edges or centers at equal steps between the two outermost layers.
+    /// Anchors at equal steps along the mode's axis.
     Position(AlignMode),
     /// Equal spacing between anchors along the selected axis.
     HorizontalSpace,
@@ -59,7 +59,7 @@ impl Spread {
     }
 }
 
-/// Transform commands. Locked layers refuse.
+/// Transform commands. Locked layers are skipped.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum TransformCommand {
@@ -84,7 +84,7 @@ pub enum TransformCommand {
         mode: AlignMode,
         time: f64,
     },
-    /// Distribute (`pm_edit::align::distribute`): at least three layers;
+    /// Distribute: at least three editable layers;
     /// the outermost anchors stay.
     Distribute {
         layer_ids: Vec<String>,
