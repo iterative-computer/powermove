@@ -20,6 +20,10 @@ impl MarqueeSession {
             picked: Vec::new(),
         }
     }
+    /// Whether the box is drawn in the graph (it picks the graph's keys).
+    pub fn in_graph(&self) -> bool {
+        self.graph
+    }
     pub fn update(&mut self, picked: Vec<(String, String)>, layers: Vec<String>) -> Plan {
         self.picked.clear();
         for pair in picked {
