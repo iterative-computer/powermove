@@ -26,7 +26,8 @@ fn main() {
         serde_json::from_slice(&std::fs::read(root.join("cases.json")).unwrap()).unwrap();
     let mut rows = vec![];
     for c in cases {
-        let req = RenderRequest::sized(Size::new(384, 216), Precision::Float16);
+        let mut req = RenderRequest::sized(Size::new(384, 216), Precision::Float16);
+        req.output_kind = pm_render::OutputKind::Final;
         let f = r
             .render(
                 &doc,
@@ -51,7 +52,24 @@ fn main() {
             .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
             .collect();
         e.write_header().unwrap().write_image_data(&bytes).unwrap();
-        rows.push(serde_json::json!({"case":c,"failures":format!("{:?}",f.failures)}));
+        req.output_kind = pm_render::OutputKind::Preview;
+        req.viewer = true;
+        let viewer = r
+            .render(
+                &doc,
+                "root",
+                support::ticks(c["time"].as_f64().unwrap()),
+                &req,
+                &resolver,
+            )
+            .unwrap();
+        let viewer_px = r.read_rgba(&viewer).unwrap();
+        let max_viewer_export_cv = px
+            .iter()
+            .zip(viewer_px)
+            .map(|(a, b)| (a - b).abs() * 255.)
+            .fold(0_f32, f32::max);
+        rows.push(serde_json::json!({"case":c,"failures":format!("{:?}",f.failures), "viewerFailures":format!("{:?}",viewer.failures), "maxViewerExportCV":max_viewer_export_cv}));
     }
     std::fs::write(
         root.join("native-results.json"),
