@@ -851,9 +851,9 @@ const TimelineRow = memo(
           ...(row.kind === "layer"
             ? {
                 media: row.media,
-                ...(!row.nameEditor
-                  ? { timelineLayerDrag: { layer: row.layer } }
-                  : {}),
+                // The native host derives the drag source from nativeRow.
+                // An open field explicitly opts out until rename is finished.
+                ...(row.nameEditor ? { timelineLayerDrag: null } : {}),
               }
             : {}),
         }}

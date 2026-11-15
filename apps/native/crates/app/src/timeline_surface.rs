@@ -1851,6 +1851,10 @@ impl TimelineSurface {
             Gesture::LayerPress { .. } | Gesture::Reorder { .. }
         )
     }
+    #[cfg(test)]
+    pub fn invalidate_row_frame_for_test(&mut self) {
+        self.frame = None;
+    }
     /// v1's `layerDrop` over the scene: the target layer, before / after /
     /// into a group (its middle half, past the disclosure), and the cue.
     fn layer_drop(&self, position: Point<Pixels>) -> Option<LayerDrop> {
@@ -1859,8 +1863,10 @@ impl TimelineSurface {
             return None;
         };
         let (x, y) = self.local(position);
-        let (frame, scene) = (self.frame.as_ref()?, self.scene.as_ref()?);
-        let at = scene.layer_row_at(frame.viewport, &self.tokens, y)?;
+        // Hit testing needs current geometry, not a cached paint frame:
+        // edge scrolling deliberately invalidates that frame before we get here.
+        let scene = self.scene.as_ref()?;
+        let at = scene.layer_row_at(self.viewport()?, &self.tokens, y)?;
         let pm_panel_timeline::RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&at.id).ok()?
         else {
             return None;
@@ -1906,9 +1912,12 @@ impl TimelineSurface {
         } else {
             return;
         };
-        self.view.scroll_y = (self.view.scroll_y + over.clamp(-48., 48.) * 0.25).max(0.);
+        let before = self.view.scroll_y;
+        self.view.scroll_y = (before + over.clamp(-48., 48.) * 0.25).max(0.);
         self.clamp_scroll();
-        self.changed(false, cx);
+        if self.view.scroll_y != before {
+            self.changed(false, cx);
+        }
     }
     pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>) {
         let selected = self.model.selection.layers();
@@ -2252,20 +2261,11 @@ impl TimelineSurface {
             // becomes it; a locked layer (or group) is not reordered.
             let layer = layer.clone();
             let selected = self.model.selection.layers().to_vec();
+            // A drag's selection belongs to its eventual Move layers entry.
+            // A click still reaches the row's user-selection path on release.
             let moving = if selected.contains(&layer) {
                 selected
             } else {
-                self.queue.push_back(Job::Apply(Plan {
-                    calls: vec![
-                        SelectionCall::Layers {
-                            ids: vec![layer.clone()],
-                            add: false,
-                        }
-                        .user()
-                        .into(),
-                    ],
-                    ..Default::default()
-                }));
                 vec![layer]
             };
             let index = &self.model.index;
@@ -2651,7 +2651,16 @@ impl TimelineSurface {
                         time,
                         pm_kernel::Origin::Interface,
                     ) {
-                        Ok(plan) => self.queue.push_back(Job::Apply(plan)),
+                        Ok(mut plan) => {
+                            plan.calls.push(
+                                SelectionCall::Layers {
+                                    ids: moving,
+                                    add: false,
+                                }
+                                .into(),
+                            );
+                            self.queue.push_back(Job::Apply(plan));
+                        }
                         Err(error) => self.delegate.report(error.to_string(), cx),
                     }
                 }

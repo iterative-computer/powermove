@@ -173,9 +173,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   });
   expect(switches.props.style).toMatchObject({ flexShrink: 0 });
   // The whole header is a source; interactive children keep their own pointer handlers.
-  expect(row.props.metadata).toMatchObject({
-    timelineLayerDrag: { layer: "headline" },
-  });
+  expect(row.props.metadata).toMatchObject({ nativeRow: "layer:headline" });
   expect(
     byId(root, "timeline:name:layer:headline").props.metadata,
   ).toMatchObject({
@@ -549,11 +547,20 @@ test("effect headings validate without editable controls and static layers hide 
   const { root, commits } = recorder();
   const staticLayer = { ...layer(), canOpen: false };
   const heading = {
-    id: '["effect","headline","blur"]', kind: "heading" as const,
-    layer: "headline", label: "Blur", accessibilityLabel: "Blur",
-    depth: 1, selected: false, focused: false, hovered: false, locked: false,
+    id: '["effect","headline","blur"]',
+    kind: "heading" as const,
+    layer: "headline",
+    label: "Blur",
+    accessibilityLabel: "Blur",
+    depth: 1,
+    selected: false,
+    focused: false,
+    hovered: false,
+    locked: false,
   };
-  const f = frame({ window: { total: 2, first: 0, rows: [staticLayer, heading] } });
+  const f = frame({
+    window: { total: 2, first: 0, rows: [staticLayer, heading] },
+  });
   checkFrame(f, { first: 0, visible: 10 });
   await root.render(<TimelinePanel frame={f} send={() => {}} />);
   expect(byId(root, `timeline:disclosure:${staticLayer.id}`)).toBeUndefined();
@@ -604,7 +611,7 @@ test("reorder sources belong to layer headers and pause during inline rename", a
         unknown
       >
     ).timelineLayerDrag,
-  ).toBeUndefined();
+  ).toBeNull();
   expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
   await root.dispose();
 });

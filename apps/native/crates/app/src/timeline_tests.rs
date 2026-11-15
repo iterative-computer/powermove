@@ -611,6 +611,37 @@ fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, f
         s.recorder.reports.borrow()
     );
 }
+#[gpui::test]
+fn row_drop_hit_testing_survives_an_invalidated_paint_frame(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let from = bounds(&mut s.vcx, r#"timeline:name:["layer","l2"]"#).center();
+    let target = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
+    let to = point(from.x, target.origin.y + px(2.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, _| t.invalidate_row_frame_for_test());
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(ids(&s), ["l2", "l0", "l1"]);
+    s.undo(cx);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    assert!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .is_empty()
+    );
+}
+
 /// Whole-row input must reach the reorder gesture through the mounted outline.
 #[gpui::test]
 fn row_drag_index_and_empty_space_reorder_with_one_undo(cx: &mut TestAppContext) {
@@ -644,8 +675,12 @@ fn row_drag_under_threshold_selects_and_escape_cancels(cx: &mut TestAppContext) 
     s.drag(cx, from, from + point(px(2.), px(0.)), Modifiers::none());
     assert_eq!(ids(&s), ["l0", "l1", "l2"]);
     assert!(
-        s.surface
-            .read_with(&s.vcx, |t, _| t.model().selection.contains("l2"))
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .contains("l2")
     );
     s.vcx
         .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
@@ -666,11 +701,12 @@ fn row_drag_under_threshold_selects_and_escape_cancels(cx: &mut TestAppContext) 
 fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
     for control in ["visibility", "lock", "parent", "disclosure"] {
         let mut s = stage(cx, 3);
-        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+        keyed(&mut s, cx, &[0.5]);
+        let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l0"]"#);
         s.vcx
             .simulate_mouse_move(row.center(), None, Modifiers::none());
         s.idle(cx);
-        let target = bounds(&mut s.vcx, &format!(r#"timeline:{control}:["layer","l2"]"#));
+        let target = bounds(&mut s.vcx, &format!(r#"timeline:{control}:["layer","l0"]"#));
         let from = target.center();
         s.vcx
             .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
@@ -688,6 +724,36 @@ fn row_drag_controls_do_not_arm_reorder(cx: &mut TestAppContext) {
             .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
         s.idle(cx);
         assert_eq!(ids(&s), ["l0", "l1", "l2"], "{control}");
+    }
+}
+
+#[gpui::test]
+fn row_click_modifiers_select_without_reorder_and_record_selection(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mut shift = Modifiers::none();
+    shift.shift = true;
+    let mut command = Modifiers::none();
+    command.platform = true;
+    for (id, mods, expected) in [
+        ("l0", Modifiers::none(), vec!["l0"]),
+        ("l2", shift, vec!["l0", "l1", "l2"]),
+        ("l1", command, vec!["l0", "l2"]),
+    ] {
+        let row = bounds(&mut s.vcx, &format!(r#"timeline:row:["layer","{id}"]"#));
+        let at = point(row.origin.x + px(12.), row.center().y);
+        s.drag(cx, at, at + point(px(2.), px(0.)), mods);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+            expected
+        );
+        assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    }
+    for expected in [vec!["l0", "l1", "l2"], vec!["l0"], vec![]] {
+        s.undo(cx);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+            expected
+        );
     }
 }
 

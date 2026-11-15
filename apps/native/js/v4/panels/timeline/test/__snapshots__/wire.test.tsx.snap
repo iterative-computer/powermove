@@ -1548,9 +1548,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "loading",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -2425,9 +2422,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -3305,9 +3299,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -4185,9 +4176,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -5062,9 +5050,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -6168,9 +6153,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "offline",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -7097,9 +7079,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -7973,9 +7952,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -8282,9 +8258,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:kicker",
-                              "timelineLayerDrag": {
-                                "layer": "kicker",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -9160,9 +9133,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -10027,9 +9997,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29990",
-                              "timelineLayerDrag": {
-                                "layer": "row-29990",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -10333,9 +10300,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29991",
-                              "timelineLayerDrag": {
-                                "layer": "row-29991",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -10639,9 +10603,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29992",
-                              "timelineLayerDrag": {
-                                "layer": "row-29992",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -10945,9 +10906,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29993",
-                              "timelineLayerDrag": {
-                                "layer": "row-29993",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -11251,9 +11209,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29994",
-                              "timelineLayerDrag": {
-                                "layer": "row-29994",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -11557,9 +11512,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29995",
-                              "timelineLayerDrag": {
-                                "layer": "row-29995",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -11863,9 +11815,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29996",
-                              "timelineLayerDrag": {
-                                "layer": "row-29996",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -12169,9 +12118,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29997",
-                              "timelineLayerDrag": {
-                                "layer": "row-29997",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -12475,9 +12421,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29998",
-                              "timelineLayerDrag": {
-                                "layer": "row-29998",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -12781,9 +12724,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-29999",
-                              "timelineLayerDrag": {
-                                "layer": "row-29999",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -13087,9 +13027,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30000",
-                              "timelineLayerDrag": {
-                                "layer": "row-30000",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -13393,9 +13330,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30001",
-                              "timelineLayerDrag": {
-                                "layer": "row-30001",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -13699,9 +13633,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30002",
-                              "timelineLayerDrag": {
-                                "layer": "row-30002",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -14005,9 +13936,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30003",
-                              "timelineLayerDrag": {
-                                "layer": "row-30003",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -14311,9 +14239,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30004",
-                              "timelineLayerDrag": {
-                                "layer": "row-30004",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -14617,9 +14542,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30005",
-                              "timelineLayerDrag": {
-                                "layer": "row-30005",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -14923,9 +14845,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30006",
-                              "timelineLayerDrag": {
-                                "layer": "row-30006",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -15229,9 +15148,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30007",
-                              "timelineLayerDrag": {
-                                "layer": "row-30007",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -15535,9 +15451,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30008",
-                              "timelineLayerDrag": {
-                                "layer": "row-30008",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -15841,9 +15754,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30009",
-                              "timelineLayerDrag": {
-                                "layer": "row-30009",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -16147,9 +16057,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30010",
-                              "timelineLayerDrag": {
-                                "layer": "row-30010",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -16453,9 +16360,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30011",
-                              "timelineLayerDrag": {
-                                "layer": "row-30011",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -16759,9 +16663,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30012",
-                              "timelineLayerDrag": {
-                                "layer": "row-30012",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -17065,9 +16966,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30013",
-                              "timelineLayerDrag": {
-                                "layer": "row-30013",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -17371,9 +17269,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30014",
-                              "timelineLayerDrag": {
-                                "layer": "row-30014",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -17677,9 +17572,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30015",
-                              "timelineLayerDrag": {
-                                "layer": "row-30015",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -17983,9 +17875,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30016",
-                              "timelineLayerDrag": {
-                                "layer": "row-30016",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -18289,9 +18178,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30017",
-                              "timelineLayerDrag": {
-                                "layer": "row-30017",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -18595,9 +18481,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30018",
-                              "timelineLayerDrag": {
-                                "layer": "row-30018",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -18901,9 +18784,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:row-30019",
-                              "timelineLayerDrag": {
-                                "layer": "row-30019",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -19798,9 +19678,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -20695,9 +20572,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -22335,9 +22209,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": {
-                                "layer": "headline",
-                              },
                             },
                             "preventDefault": {
                               "keydown": [
@@ -23375,6 +23246,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
+                              "timelineLayerDrag": null,
                             },
                             "preventDefault": {
                               "keydown": [
