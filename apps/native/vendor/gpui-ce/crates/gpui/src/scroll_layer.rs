@@ -32,6 +32,13 @@ pub(crate) fn key(offset: &Rc<RefCell<Point<Pixels>>>) -> ScrollLayerKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScrollLayerId(pub(crate) ScrollLayerKey);
 
+/// Off with `PM_SCROLL_LAYER=0` (a measurement: every step renders the view
+/// and truncations are shaped each time, as before the layer).
+pub(crate) fn enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PM_SCROLL_LAYER").is_none_or(|v| v != "0"))
+}
+
 /// How far past its edges a layer records, in its own sizes.
 pub(crate) const REACH: f32 = 1.0;
 

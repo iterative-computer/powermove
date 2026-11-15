@@ -1201,6 +1201,21 @@ fn truncate_to_shaped_layout<'a>(
     window: &mut Window,
 ) -> (SharedString, Cow<'a, [TextRun]>) {
     use std::hash::{Hash, Hasher};
+    if !crate::scroll_layer::enabled() {
+        return shape_truncation(
+            text,
+            font_size,
+            wrap_width,
+            truncate_width,
+            max_lines,
+            affix,
+            runs,
+            direction,
+            paragraph_direction,
+            unicode_bidi,
+            window,
+        );
+    }
     let bits = |p: Pixels| f32::from(p).to_bits();
     let sizes = (bits(font_size), wrap_width.map(bits), bits(truncate_width));
     let mut hasher = collections::FxHasher::default();

@@ -93,6 +93,14 @@ impl Outline {
         }
     }
 }
+/// A virtual list's `rangechange` as last sent.
+#[derive(Clone, Copy, PartialEq)]
+struct RangeSent {
+    range: (usize, usize),
+    width: u32,
+    count: usize,
+    published: (usize, usize),
+}
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
@@ -208,6 +216,10 @@ pub struct SurfaceView {
     dragging: Option<Id>,
     /// Each virtual list's width last told to its panel.
     list_widths: HashMap<Id, f32>,
+    /// Each virtual list's last `rangechange` (range, width, its geometry):
+    /// a wheel step within the same rows sends nothing, so the panel doesn't
+    /// commit and draw again (PM-311).
+    sent_ranges: HashMap<Id, RangeSent>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -293,6 +305,7 @@ impl SurfaceView {
             scrub_ops: VecDeque::new(),
             dragging: None,
             list_widths: HashMap::new(),
+            sent_ranges: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -480,6 +493,7 @@ impl SurfaceView {
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
         self.disclosures.clear();
+        self.sent_ranges.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -3329,12 +3343,22 @@ impl SurfaceView {
         let end = (geometry.count as f64 * geometry.item_size - height).max(0.);
         let offset = (-f32::from(scroll.offset().y) as f64).clamp(0., end);
         if let Ok(range) = geometry.visible(offset, height) {
+            let width = f32::from(bounds.size.width);
+            let sent = RangeSent {
+                range,
+                width: width.to_bits(),
+                count: geometry.count,
+                published: geometry.range,
+            };
+            if self.sent_ranges.insert(id, sent) == Some(sent) {
+                return;
+            }
             self.send(
                 id,
                 "rangechange",
                 EventDetail {
                     range: Some(range),
-                    width: Some(f32::from(bounds.size.width) as f64),
+                    width: Some(width as f64),
                     ..Default::default()
                 },
                 cx,

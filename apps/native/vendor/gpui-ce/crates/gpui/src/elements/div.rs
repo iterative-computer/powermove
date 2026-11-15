@@ -2780,7 +2780,9 @@ impl Interactivity {
     /// The offset cell of a div that is a scroll layer (read before its
     /// prepaint and paint, which borrow it).
     fn scroll_layer_cell(&self) -> Option<Rc<RefCell<Point<Pixels>>>> {
-        self.scroll_layer.then(|| self.scroll_offset.clone()).flatten()
+        (self.scroll_layer && crate::scroll_layer::enabled())
+            .then(|| self.scroll_offset.clone())
+            .flatten()
     }
 }
 
@@ -4182,8 +4184,7 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
-            let layer = self
-                .scroll_layer
+            let layer = (self.scroll_layer && crate::scroll_layer::enabled())
                 .then(|| crate::scroll_layer::key(&scroll_offset));
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
