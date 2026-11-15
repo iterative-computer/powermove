@@ -2687,7 +2687,7 @@ fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppCont
     s.idle(cx);
     let during = s.rig.kernel.published(PROJECT).unwrap();
     assert_eq!(during.revision(), before.revision());
-    assert_eq!(during.history.entries, 0);
+    assert_eq!(during.history.entries, before.history.entries);
     assert_eq!(s.start_of("l0"), 0.);
     assert!(
         s.recorder
@@ -2711,14 +2711,14 @@ fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppCont
             .unwrap()
             .is_none()
     );
-    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries);
     s.vcx
         .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
     s.idle(cx);
     let from = s.at(0, 1.);
     s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
     assert!(s.start_of("l0") > 0.);
-    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries + 1);
     assert!(
         s.recorder
             .timing_previews
