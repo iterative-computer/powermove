@@ -221,6 +221,7 @@ fn nested_wheel_hands_off_at_both_edges() {
                 delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                 modifiers: Default::default(),
                 touch_phase: Default::default(),
+                is_momentum: false,
             }
             .to_platform_input()
         };
