@@ -345,6 +345,7 @@ impl StudioService {
                 shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
             });
         }
+        let texture_start = std::time::Instant::now();
         if textures_changed {
             if let Some(maps) = &input.maps {
                 let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
@@ -356,7 +357,7 @@ impl StudioService {
             self.uploaded_maps = input.maps.clone();
         }
         if std::env::var_os("STUDIO_TIMINGS").is_some() {
-            eprintln!("STUDIO_PREPARE_TIMING ticks={} geometry_ms={geometry_ms:.3} scene_compile_ms={compile_ms:.3} resource_upload_ms={:.3} positions={} triangles={} geometry_changed={geometry_changed} textures_changed={textures_changed}", request.ticks, upload_start.elapsed().as_secs_f64()*1000., extracted.prepared.positions.len(), extracted.prepared.tris.len());
+            eprintln!("STUDIO_PREPARE_TIMING ticks={} geometry_ms={geometry_ms:.3} scene_compile_ms={compile_ms:.3} resource_upload_ms={:.3} texture_upload_ms={:.3} positions={} triangles={} geometry_changed={geometry_changed} textures_changed={textures_changed}", request.ticks, upload_start.elapsed().as_secs_f64()*1000., texture_start.elapsed().as_secs_f64()*1000., extracted.prepared.positions.len(), extracted.prepared.tris.len());
         }
         if reset {
             r.set_camera(&input.scene);
