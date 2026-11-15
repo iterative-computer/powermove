@@ -350,6 +350,10 @@ pub struct TimelineSurface {
     /// The skimmer's time while the pointer hovers the time area (Final
     /// Cut's skimming): a ghost playhead; the playhead itself stays.
     skimmer: Option<f64>,
+    /// Where the timeline last saw the pointer (a move, a press, a wheel
+    /// event): a skim starts only when the pointer moves from there, never
+    /// from a scroll or a move event that did not move it.
+    pointer: Option<Point<Pixels>>,
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
@@ -421,6 +425,7 @@ impl TimelineSurface {
             painting: false,
             told: None,
             skimmer: None,
+            pointer: None,
             hover_clip: None,
             graph_view: None,
             graph_grab: None,
@@ -1439,6 +1444,7 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.pointer = Some(event.position);
         let (x, y) = self.local(event.position);
         if let Some(bar) = self.bar()
             && let Some(part) = self.bar_part(x, y)
@@ -2231,11 +2237,15 @@ impl TimelineSurface {
         let delta = event.delta.pixel_delta(window.line_height());
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
         let (x, y) = self.local(event.position);
+        // A scroll starts no skim (the pointer did not move); a skim showing
+        // stays under the pointer as the time moves beneath it.
+        self.pointer = Some(event.position);
         // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
         // pinch reads).
         if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
             if x >= self.view.layer_column {
                 self.zoom_at(x, (dy * WHEEL_ZOOM).exp(), cx);
+                self.reskim(x, cx);
             }
             return;
         }
@@ -2264,6 +2274,7 @@ impl TimelineSurface {
             let travel = if dx.abs() > dy.abs() { dx } else { dy };
             self.view.scroll_time -= travel / self.view.pps;
             self.clamp_time();
+            self.reskim(x, cx);
         } else {
             self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
             self.clamp_scroll();
@@ -2421,6 +2432,12 @@ impl TimelineSurface {
             .then(|| frame_time(&self.model, self.time_at(x)).clamp(0., self.model.index.duration));
         self.set_skimmer(at, cx);
     }
+    /// A skim showing moves to the time now under the pointer (`x`).
+    fn reskim(&mut self, x: f64, cx: &mut Context<Self>) {
+        if self.skimmer.is_some() {
+            self.skim_to(x, cx);
+        }
+    }
     fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
         if at.is_none() && self.hover_clip.take().is_some() {
             cx.notify();
@@ -2440,6 +2457,7 @@ impl TimelineSurface {
                 let x = self.view.layer_column + (t - self.view.scroll_time) * self.view.pps;
                 let at =
                     self.bounds.origin + point(px(x as f32), px(self.tokens.metrics.ruler / 2.));
+                self.pointer = None;
                 self.hover(at, cx);
             }
             None => self.set_skimmer(None, cx),
@@ -2466,9 +2484,17 @@ impl TimelineSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// The pointer over the tracks: hover, cursor and tooltip follow it; the
+    /// skimmer follows it once it shows, and starts only when the pointer
+    /// moved here (a scroll under a resting pointer starts none: the viewer
+    /// keeps the playhead's picture).
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let moved = self.pointer != Some(position);
+        self.pointer = Some(position);
         let (x, y) = self.local(position);
-        self.skim_to(x, cx);
+        if moved || self.skimmer.is_some() {
+            self.skim_to(x, cx);
+        }
         let hovered = self
             .frame
             .as_ref()
@@ -3557,7 +3583,10 @@ impl Render for TimelineSurface {
                         let exited = this.clone();
                         window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = exited.update(cx, |s, cx| s.set_skimmer(None, cx));
+                                let _ = exited.update(cx, |s, cx| {
+                                    s.pointer = None;
+                                    s.set_skimmer(None, cx);
+                                });
                             }
                         });
                         let released = this.clone();

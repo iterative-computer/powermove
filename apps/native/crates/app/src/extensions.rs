@@ -1901,13 +1901,18 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
-        // An export's page keeps running for its job, the window hidden or not.
-        if key.starts_with(EXPORT_PAGE) && host.begin_background_job(false).is_err() {
+        // An export's page is never shown: it runs for its job in a window of
+        // its own, whatever the editor's window does. In the editor's, a window
+        // behind others or hidden held the page back (its answers came 3 to 7
+        // times slower and the export took 2 to 4 times as long as in front).
+        let exporting = key.starts_with(EXPORT_PAGE);
+        if exporting && host.begin_background_job(true).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
-        let shell = self.host.borrow();
-        host.install_below(&shell.native_container(), &shell.gpui);
-        drop(shell);
+        if !exporting {
+            let shell = self.host.borrow();
+            host.install_below(&shell.native_container(), &shell.gpui);
+        }
         drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions
