@@ -464,14 +464,12 @@ fn delete_skips_locked_layers_and_unparents_children() {
         "locked layers are skipped"
     );
     assert!(get(&layer(&s, "box"), &["parent"]).is_null());
-    let e = refused(
+    run(
         &mut s,
         LayerCommand::Delete {
             layer_ids: vec!["locked".into()],
         },
-        Origin::Interface,
     );
-    assert_eq!(e.to_string(), "All targeted layers are locked: “Locked”");
     s.undo().unwrap();
     assert_eq!(ids(&s), ids(&store()));
 }
@@ -934,4 +932,96 @@ fn align_moves_the_common_box_to_the_frame_edge_once() {
     let before = s.revision();
     run(&mut s, align());
     assert_eq!(s.revision(), before, "already aligned");
+}
+
+fn delete_groups_store() -> DocumentStore {
+    DocumentStore::new_untitled(
+        parse(
+            r#"{"id":"P","w":200,"h":100,"fps":30,"dur":10,"assets":{},"layers":[
+      {"id":"g","type":"group","name":"Group","p":{}},
+      {"id":"nested","type":"group","group":"g","p":{}},
+      {"id":"child","type":"shape","group":"nested","p":{}},
+      {"id":"other","type":"group","p":{}},
+      {"id":"sibling","type":"shape","group":"other","p":{}},
+      {"id":"locked","type":"shape","name":"Locked","lock":true,"p":{}},
+      {"id":"pre","type":"precomp","d":{"comp":"C2"},"p":{}}
+    ],"comps":{"C2":{"id":"C2","w":200,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"inside","type":"group","p":{}},{"id":"inner","type":"shape","group":"inside","p":{}}
+    ]}}}"#,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn delete_groups_overlaps_different_parents_and_precomp_restore_in_one_undo() {
+    for targets in [
+        vec!["g", "nested", "child", "g"],
+        vec!["nested", "sibling"],
+        vec!["g", "inside", "inner"],
+        vec!["pre", "inside", "g"],
+        vec!["stale-after-undo", "g", "child"],
+    ] {
+        let mut s = delete_groups_store();
+        let before = s.root().unwrap().to_value();
+        run(
+            &mut s,
+            LayerCommand::Delete {
+                layer_ids: targets.iter().map(|id| (*id).into()).collect(),
+            },
+        );
+        for id in &targets {
+            assert!(
+                pm_kernel::model::find_layer(s.root().unwrap(), id).is_none(),
+                "{id} survived {targets:?}"
+            );
+        }
+        s.undo().unwrap();
+        assert_eq!(s.root().unwrap().to_value(), before, "{targets:?}");
+        s.redo().unwrap();
+        s.undo().unwrap();
+        assert_eq!(s.root().unwrap().to_value(), before);
+    }
+}
+
+#[test]
+fn delete_groups_skips_locked_instead_of_rejecting_the_selection() {
+    let mut s = delete_groups_store();
+    let before = s.root().unwrap().to_value();
+    run(
+        &mut s,
+        LayerCommand::Delete {
+            layer_ids: vec!["g".into(), "locked".into()],
+        },
+    );
+    assert!(!ids(&s).contains(&"g".into()));
+    assert!(ids(&s).contains(&"locked".into()));
+    s.undo().unwrap();
+    assert_eq!(s.root().unwrap().to_value(), before);
+}
+
+#[test]
+fn delete_groups_preserves_locked_descendants_without_dangling_group() {
+    let mut s = delete_groups_store();
+    run(
+        &mut s,
+        patch(
+            "child",
+            LayerPatch {
+                locked: Some(true),
+                ..Default::default()
+            },
+        ),
+    );
+    let before = s.root().unwrap().to_value();
+    run(
+        &mut s,
+        LayerCommand::Delete {
+            layer_ids: vec!["g".into(), "child".into()],
+        },
+    );
+    assert!(ids(&s).contains(&"child".into()));
+    assert!(get(&layer(&s, "child"), &["group"]).is_null());
+    s.undo().unwrap();
+    assert_eq!(s.root().unwrap().to_value(), before);
 }

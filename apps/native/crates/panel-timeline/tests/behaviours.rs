@@ -2548,3 +2548,107 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
 }
+
+#[test]
+fn delete_groups_key_precedence_matches_electron_even_after_last_key() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    select_keys(&mut c, &["a0"]);
+    // Programmatic selection can contain keys before the local flag changes.
+    c.model.key_selection_active = false;
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(
+        !c.model
+            .index
+            .channel("a", "opacity")
+            .unwrap()
+            .keys
+            .iter()
+            .any(|k| k.id == "a0")
+    );
+    assert!(c.model.key_selection_active);
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_some());
+    // A layer-row gesture leaves key mode and permits layer deletion.
+    let calls = c.model.select_layer("a", Modifiers::default()).unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    command(&mut c, "delete", 1.);
+    assert!(c.model.index.layer("a").is_none());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+}
+
+#[test]
+fn delete_groups_adapter_skips_locked_and_reports_in_one_step() {
+    let value = parse(
+        r#"{"id":"P","w":100,"h":100,"fps":30,"dur":10,"layers":[
+      {"id":"g","name":"Group","type":"group","p":{}},
+      {"id":"n","type":"group","group":"g","p":{}},
+      {"id":"c","type":"shape","group":"n","p":{}},
+      {"id":"l","name":"Locked","type":"shape","lock":true,"p":{}},
+      {"id":"l2","name":"Locked 2","type":"shape","lock":true,"p":{}}
+    ]}"#,
+    )
+    .unwrap();
+    let (_actor, mut c) = client_with(value);
+    select(&mut c, &["g", "n", "c", "l", "l2"]);
+    let effects = command(&mut c, "delete", 0.);
+    assert_eq!(
+        effects,
+        vec![HostEffect::Status("Skipped 2 locked layers".into())]
+    );
+    assert_eq!(c.model.index.layers.len(), 2);
+    assert_eq!(c.model.index.layers[0].id, "l");
+    assert_eq!(c.model.index.layers[1].id, "l2");
+    undo(&mut c);
+    assert_eq!(c.model.index.layers.len(), 5);
+}
+
+#[test]
+fn delete_groups_adapter_ignores_stale_ids_after_external_edit_and_undo() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a", "b"]);
+    edit(
+        &mut c,
+        vec![
+            pm_kernel::LayerCommand::Delete {
+                layer_ids: vec!["a".into()],
+            }
+            .into(),
+        ],
+    );
+    undo(&mut c);
+    // A concurrent writer removes one of the selected items. The published
+    // selection and revision are consumed before the next user command.
+    let kernel = c.kernel.clone();
+    block_on(kernel.call(
+        "P",
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("External edit".into()),
+                expected_revision: None,
+                body: WriteBody::Commands(
+                    vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into()] }.into()],
+                ),
+            },
+        ),
+    ))
+    .unwrap()
+    .unwrap();
+    c.sync().unwrap();
+    select(&mut c, &["a", "b", "stale"]);
+    command(&mut c, "delete", 0.);
+    assert!(c.model.index.layer("a").is_none());
+    assert!(c.model.index.layer("c").is_some());
+    undo(&mut c);
+    assert!(c.model.index.layer("a").is_some());
+    assert!(c.model.index.layer("b").is_none());
+}

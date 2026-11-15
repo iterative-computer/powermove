@@ -1219,8 +1219,8 @@ fn content_audio(layer: &mut Value) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// `delete_layers` with `policyCommand`'s lock filtering, then
-/// `PM.removeLayers`.
+/// Resolve IDs per composition, expand groups once, then skip locked items.
+/// Unlike Electron's group-wide rejection, editable targets still delete.
 fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandError> {
     let mut by_comp: Vec<(Option<String>, Vec<String>)> = Vec::new();
     for id in layer_ids {
@@ -1243,39 +1243,36 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
             .filter_map(|id| find(id))
             .filter(|l| is_locked_in(&layers, l))
             .collect();
-        let mut remove: HashSet<String> = expanded.iter().cloned().collect();
-        if !locked.is_empty() {
-            if ids
-                .iter()
-                .filter_map(|id| find(id))
-                .any(|l| values::text(l, "type") == Some("group"))
-            {
-                return Err(CommandError::Invalid(
-                    "Unlock the group and its contents before deleting".into(),
-                ));
-            }
-            let names: Vec<String> = locked
-                .iter()
-                .map(|l| format!("“{}”", values::layer_name(l, "")))
-                .collect();
-            if locked.len() == expanded.len() {
-                return Err(CommandError::Invalid(format!(
-                    "All targeted layers are locked: {}",
-                    names.join(", ")
-                )));
-            }
-            for l in &locked {
-                remove.remove(values::text(l, "id").unwrap_or_default());
-            }
+        // Filter after expansion, once: re-expanding editable groups would
+        // silently put their locked descendants back into the deletion set.
+        let gone: HashSet<String> = expanded
+            .iter()
+            .filter(|id| {
+                !locked
+                    .iter()
+                    .any(|l| values::text(l, "id") == Some(id.as_str()))
+            })
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            continue;
         }
-        // `PM.removeLayers`: expand again, drop, unparent survivors.
-        let again: HashSet<&str> = remove.iter().map(String::as_str).collect();
-        let gone: HashSet<String> = expand_groups(&layers, &again).into_iter().collect();
         // Survivors parented to a deleted layer are unparented first (their
         // indexes still hold), then each deleted layer goes by id.
         let path = cx.layers_path(comp.as_deref());
         for (index, l) in layers.iter().enumerate() {
             let id = values::text(l, "id");
+            if !id.is_some_and(|i| gone.contains(i))
+                && values::text(l, "group").is_some_and(|g| gone.contains(g))
+            {
+                let mut group = values::text(l, "group");
+                while let Some(g) = group.filter(|g| gone.contains(*g)) {
+                    group = find(g).and_then(|ancestor| values::text(ancestor, "group"));
+                }
+                let mut at = path.clone();
+                at.extend([PathPart::Index(index as f64), "group".into()]);
+                cx.set(at, group.map_or(Value::Null, values::s))?;
+            }
             if !id.is_some_and(|i| gone.contains(i))
                 && values::text(l, "parent").is_some_and(|p| gone.contains(p))
             {

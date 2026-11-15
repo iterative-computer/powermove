@@ -48,6 +48,7 @@ impl std::error::Error for ModelError {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEffect {
     Seek(f64),
+    Status(String),
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.
     FitCurves(f64, f64),
@@ -408,10 +409,34 @@ impl TimelineModel {
                 }
                 .into(),
             ),
-            "delete" if self.key_selection_active => {
+            "delete" if self.key_selection_active || !keys.is_empty() => {
+                self.key_selection_active = true;
+                if keys.is_empty() {
+                    return Ok(Plan::default());
+                }
                 edit(KeyframeCommand::Delete { key_ids: keys }.into())
             }
-            "delete" => edit(LayerCommand::Delete { layer_ids: layers }.into()),
+            "delete" => {
+                let locked = self
+                    .index
+                    .expanded_ids(&layers)
+                    .iter()
+                    .filter_map(|id| self.index.layer(id))
+                    .filter(|l| l.effectively_locked)
+                    .count();
+                let mut plan = if layers.iter().any(|id| self.index.layer(id).is_some()) {
+                    edit(LayerCommand::Delete { layer_ids: layers }.into())
+                } else {
+                    Plan::default()
+                };
+                if locked > 0 {
+                    plan.effects.push(HostEffect::Status(format!(
+                        "Skipped {locked} locked {}",
+                        if locked == 1 { "layer" } else { "layers" }
+                    )));
+                }
+                plan
+            }
             "deselect" => {
                 self.key_selection_active = false;
                 Plan {
