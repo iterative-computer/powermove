@@ -69,10 +69,11 @@ describe("timeline: accepted six-op trees (provisional placeholders, not visual 
 test("one track-area focus stop, non-focusable rows, conditional graph menu and tabs", async () => {
   const { root, commits } = recorder();
   await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
-  // v1's order: the tab row (tabs, then Layers / Tracks), then the head over
+  // The tab row has tabs and their menus, then Layers / Tracks; the head over
   // the layer column (play, time, graph switch), then the tracks.
   expect(focusIds(root, replay(commits).at(-1).focusOrder)).toEqual([
     "timeline:tab:launch",
+    "timeline:tab-menu:launch",
     "P0-0:Layers",
     "timeline:play",
     "timeline:time",

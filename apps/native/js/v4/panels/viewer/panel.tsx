@@ -470,7 +470,6 @@ export function ViewerPanel({
                 style={{
                   ...row,
                   gap: token("metrics.gap"),
-                  minWidth: 0,
                   overflow: "hidden",
                 }}
               >

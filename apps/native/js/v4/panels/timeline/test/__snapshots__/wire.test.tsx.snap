@@ -235,6 +235,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -381,7 +408,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -860,6 +887,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -1006,7 +1060,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -1707,6 +1761,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -1853,7 +1934,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -2567,6 +2648,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -2713,7 +2821,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -3427,6 +3535,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -3573,7 +3708,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -4284,6 +4419,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -4430,7 +4592,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -5380,6 +5542,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -5526,7 +5715,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -6279,6 +6468,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -6425,7 +6641,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -7145,6 +7361,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -7291,7 +7534,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -8309,6 +8552,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -8455,7 +8725,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -9156,6 +9426,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -9302,7 +9599,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -18790,6 +19087,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -18936,7 +19260,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -19667,6 +19991,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -19813,7 +20164,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -20554,6 +20905,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -20700,7 +21078,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -21299,6 +21677,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -21445,7 +21850,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -22150,6 +22555,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     {
                       "props": {
                         "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
                         "id": "timeline:tab-close:launch",
                         "label": "Close Launch Film",
                         "metadata": {
@@ -22229,6 +22661,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "tabIndex": -1,
                         "title": "Endcard",
+                      },
+                      "type": "button",
+                    },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:end",
+                        "label": "Endcard menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Endcard menu",
                       },
                       "type": "button",
                     },
@@ -22378,7 +22837,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -23087,6 +23546,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "type": "button",
                     },
+                    {
+                      "props": {
+                        "data-pm-component": "toolbar-item",
+                        "id": "timeline:tab-menu:launch",
+                        "label": "Launch Film menu",
+                        "metadata": {
+                          "designTodo": "T1",
+                          "requiredSymbol": "ellipsis",
+                        },
+                        "style": {
+                          "color": {
+                            "token": "colors.muted",
+                          },
+                          "minHeight": {
+                            "token": "metrics.hit",
+                          },
+                          "minWidth": {
+                            "token": "metrics.hit",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                        },
+                        "title": "Launch Film menu",
+                      },
+                      "type": "button",
+                    },
                   ],
                   "props": {
                     "style": {
@@ -23233,7 +23719,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "glass",
+                    "data-pm-variant": "plate",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
