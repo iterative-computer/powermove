@@ -549,6 +549,10 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               range={model.range}
               metadata={{
                 rowCount: model.extensions.length,
+                // Its height (PM-386): every row up to forty, in the page
+                // that scrolls them; past that a forty-row list scrolls
+                // itself and shows only what is in view.
+                rowFloor: Math.min(model.extensions.length, 40),
                 rowHeightToken: "metrics.row",
                 anchorId: model.anchorId ?? "",
               }}

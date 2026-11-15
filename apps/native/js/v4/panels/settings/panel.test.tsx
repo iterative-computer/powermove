@@ -609,3 +609,25 @@ test("a search matching hundreds of commands lists a page the host takes: forty 
   root.dispose();
   model.dispose();
 });
+
+test("the installed extensions take their rows' height (PM-386): every row up to forty in the page, a forty-row list past that", async () => {
+  for (const [count, floor] of [
+    [39, 39],
+    [60_000, 40],
+  ] as const) {
+    const f = fixture({
+      extensions: Array.from({ length: count }, (_, i) => extension(i)),
+    });
+    f.model.show("extensions");
+    const { root } = recorder();
+    await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+    const list = root
+      .inspect()
+      .nodes.find((n) => n.props.id === "settings.extensions");
+    expect((list?.props.metadata as { rowFloor?: number })?.rowFloor).toBe(
+      floor,
+    );
+    root.dispose();
+    f.model.dispose();
+  }
+});
