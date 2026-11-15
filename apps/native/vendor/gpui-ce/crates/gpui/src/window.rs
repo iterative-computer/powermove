@@ -1355,6 +1355,8 @@ pub struct Window {
     /// The extent the last scrolling div computed (a layer reads it for its own).
     pub(crate) last_scroll_max: Point<Pixels>,
     scroll_layer_pending_deferred: Vec<usize>,
+    /// Layers resting, and the frame each records again.
+    scroll_layer_rest: FxHashMap<crate::scroll_layer::ScrollLayerKey, u64>,
     /// The layers being painted, innermost last.
     scroll_layer_painting: Vec<crate::scroll_layer::ScrollLayerKey>,
     /// Truncated labels, by what they were shaped from (`elements::text`).
@@ -2144,6 +2146,7 @@ impl Window {
             scroll_layer_moving: false,
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
+            scroll_layer_rest: FxHashMap::default(),
             scroll_layer_painting: Vec::new(),
             truncations: FxHashMap::default(),
             focus_listeners: SubscriberSet::new(),
@@ -3999,8 +4002,23 @@ impl Window {
         &mut self,
         offset: &Rc<RefCell<Point<Pixels>>>,
         reach: Point<Pixels>,
-    ) -> crate::scroll_layer::ScrollLayerKey {
+    ) -> Option<crate::scroll_layer::ScrollLayerKey> {
         let key = crate::scroll_layer::key(offset);
+        let frame_now = self.scroll_layer_frame;
+        if self.scroll_layer_rest.get(&key).is_some_and(|until| *until > frame_now) {
+            return None;
+        }
+        self.scroll_layer_rest.remove(&key);
+        if let Some(layer) = self.scroll_layers.get_mut(&key) {
+            let idle = layer.frame + 1 == frame_now && layer.generation == layer.recorded_at;
+            layer.idle_records = if idle { layer.idle_records + 1 } else { 0 };
+            if layer.idle_records >= crate::scroll_layer::IDLE_RECORDS {
+                self.scroll_layer_rest
+                    .insert(key, frame_now + crate::scroll_layer::REST);
+                self.scroll_layers.remove(&key);
+                return None;
+            }
+        }
         let clip = self.content_mask();
         let mask = crate::scroll_layer::recording_mask(&clip, reach);
         let max = self.last_scroll_max;
@@ -4025,6 +4043,8 @@ impl Window {
                 why: "",
                 frame,
                 generation: 0,
+                recorded_at: 0,
+                idle_records: 0,
             });
         layer.view = view;
         layer.offset = offset.clone();
@@ -4034,12 +4054,13 @@ impl Window {
         layer.clip = clip;
         layer.hitbox_range = start..start;
         layer.frame = frame;
+        layer.recorded_at = layer.generation;
         layer.shiftable = true;
         layer.why = "";
         self.scroll_layer_pending_deferred.push(deferred);
         self.content_mask_stack.push(mask);
         self.scroll_layer_depth += 1;
-        key
+        Some(key)
     }
 
     /// Ends a scroll layer's prepaint: its hitboxes are kept as drawn and
@@ -4070,7 +4091,11 @@ impl Window {
         &mut self,
         key: crate::scroll_layer::ScrollLayerKey,
     ) -> Option<(Scene, usize)> {
-        let layer = self.scroll_layers.get(&key)?;
+        // Recorded in this frame's prepaint (not resting).
+        let layer = self
+            .scroll_layers
+            .get(&key)
+            .filter(|l| l.frame == self.scroll_layer_frame)?;
         let mask = crate::scroll_layer::recording_mask(&layer.clip, layer.reach);
         let outer = mem::take(&mut self.next_frame.scene);
         self.content_mask_stack.push(mask);

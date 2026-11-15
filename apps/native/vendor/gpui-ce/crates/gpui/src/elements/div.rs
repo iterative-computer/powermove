@@ -2681,7 +2681,7 @@ impl Element for Div {
 
                         let layer = scroll_layer_reach(layer_cell, style, bounds);
                         window.with_element_offset(scroll_offset, |window| {
-                            let layer = layer.map(|(offset, reach)| {
+                            let layer = layer.and_then(|(offset, reach)| {
                                 window.begin_scroll_layer(&offset, reach)
                             });
                             if let Some(inline) = request_layout.standalone_inline_mut() {

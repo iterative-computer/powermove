@@ -39,6 +39,11 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("PM_SCROLL_LAYER").is_none_or(|v| v != "0"))
 }
 
+/// Recorded this many frames in a row with no step between, a layer rests
+/// (its div draws as a plain scroller) for `REST` frames.
+pub(crate) const IDLE_RECORDS: u32 = 3;
+pub(crate) const REST: u64 = 60;
+
 /// How far past its edges a layer records, in its own sizes.
 pub(crate) const REACH: f32 = 1.0;
 
@@ -71,6 +76,11 @@ pub(crate) struct ScrollLayer {
     pub frame: u64,
     /// Bumped by every offset-only step; the settle timer acts only on the last.
     pub generation: u64,
+    /// `generation` when last recorded, and how many frames in a row it was
+    /// recorded with no step between: a layer its view draws again anyway
+    /// (a panel that redraws while it scrolls) only pays for recording.
+    pub recorded_at: u64,
+    pub idle_records: u32,
 }
 
 impl ScrollLayer {

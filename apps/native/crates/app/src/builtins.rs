@@ -3102,8 +3102,12 @@ pub(crate) struct PanelBody {
 }
 impl Render for PanelBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A native view inside draws on its own: the body draws in full.
-        let native = self.view.read(cx).has_native();
+        // Only the Project panel's body: measured on the release build, a
+        // panel that redraws while it scrolls (Properties follows the
+        // playhead and its springs) pays the recording on each redraw and
+        // lost frames with the layer (PM-311). A native view inside draws on
+        // its own: the body draws in full.
+        let native = !self.id.ends_with("-assets") || self.view.read(cx).has_native();
         div()
             .id(self.id.clone())
             .size_full()
