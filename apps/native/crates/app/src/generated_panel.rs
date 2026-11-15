@@ -11,6 +11,9 @@
 //! `stateKey` edit is tool state, no Undo step (v1's `local` edit mode). A
 //! sheet or menu edits the layer its control targeted when it opened. A
 //! binding V2 can't write yet shows disabled with why.
+#[path = "panel_build.rs"]
+mod panel_build;
+
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2_app_kit::NSAccessibility;
