@@ -3149,5 +3149,15 @@
     "in_fields": true,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.agentSteer",
+    "chord": "cmd+shift+'",
+    "command": "agent.steer",
+    "args": [],
+    "priority": 50,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
   }
 ]

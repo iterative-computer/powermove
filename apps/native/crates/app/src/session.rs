@@ -3329,6 +3329,7 @@ impl Controller {
                 .detach();
             }
             "agent.undoTurn" => self.undo_agent_turn(cx),
+            "agent.steer" => self.open_agent_steer(window, cx),
             "agent.pause" => {
                 let Some(session) = &self.session else {
                     return false;

@@ -92,7 +92,7 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 295);
+    assert_eq!(bindings.len(), 296);
     let camera = bindings
         .iter()
         .find(|b| b.id == "native.newCamera")

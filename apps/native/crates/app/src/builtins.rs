@@ -931,6 +931,9 @@ impl Controller {
                 attention,
                 elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
                 background,
+                progress: runtime.agent_progress(),
+                paused: self.session.as_ref().is_some_and(|s| self.mcp.is_paused(&s.project)),
+                held: self.session.as_ref().is_some_and(|s| self.mcp.is_held(&s.project)),
             });
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
