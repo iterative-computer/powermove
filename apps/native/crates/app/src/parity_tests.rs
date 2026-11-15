@@ -438,6 +438,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "a", 1.)),
         [
             "Rename…",
+            "Save Animation Preset…",
             "Duplicate",
             "Group",
             "Simplify Keyframes",
@@ -590,7 +591,7 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     step("a", &["Hide"], "Hide Layers", &|| {
         assert_eq!(flag("a", "on"), Some(false))
     });
-    assert_eq!(labels(&menu(&desk, "a", 1.))[9], "Show");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[10], "Show");
     step("a", &["Show"], "Show Layers", &|| {
         assert_eq!(flag("a", "on"), Some(true))
     });
