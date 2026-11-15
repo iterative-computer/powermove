@@ -2493,3 +2493,33 @@ fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
         );
     }
 }
+
+#[test]
+fn a_focused_axis_plots_its_whole_track_as_v1() {
+    // v1 plots the focused track's every axis: Scale X brings Scale Y.
+    let mut m = model(fixture());
+    m.graph_focus = Some(("a".into(), "scale.x".into()));
+    let (series, picked) = m.graph_series();
+    assert!(!picked);
+    assert_eq!(
+        series,
+        vec![
+            ("a".to_owned(), "scale.x".to_owned()),
+            ("a".to_owned(), "scale.y".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn a_graph_marquee_that_picks_nothing_keeps_the_layers_whose_curves_show() {
+    // The graph plots the selected layer's curves; a box drawn in it must
+    // not deselect the layer before it picks a key (the curves would vanish).
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    let mut marquee = MarqueeSession::begin(&c.model, false, true);
+    let live = marquee.update(vec![], vec![]);
+    run(&mut c, live);
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+    run(&mut c, marquee.finish());
+    assert_eq!(c.model.selection.layers(), strings(&["a"]));
+}

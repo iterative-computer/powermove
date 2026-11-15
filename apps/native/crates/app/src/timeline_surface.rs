@@ -2436,15 +2436,15 @@ impl TimelineSurface {
         self.changed(false, cx);
     }
     fn marquee(&mut self, cx: &mut Context<Self>) {
-        let Gesture::Marquee {
-            session,
-            origin,
-            at,
-        } = &mut self.gesture
-        else {
-            return;
+        let (origin, at, in_graph) = match &self.gesture {
+            Gesture::Marquee {
+                session,
+                origin,
+                at,
+            } => (*origin, *at, session.in_graph()),
+            _ => return,
         };
-        let (a, b) = (*origin - self.bounds.origin, *at - self.bounds.origin);
+        let (a, b) = (origin - self.bounds.origin, at - self.bounds.origin);
         let (ax, ay, bx, by) = (
             f32::from(a.x.min(b.x)) as f64,
             f32::from(a.y.min(b.y)) as f64,
@@ -2461,9 +2461,34 @@ impl TimelineSurface {
             return;
         };
         let covered = scene.marquee(frame.viewport, &self.tokens, area);
+        // In the graph a box picks the curves' keys it covers, as they are
+        // drawn there (the rows under the graph are not shown).
+        let keys = if in_graph {
+            let graph = self.graph.clone();
+            self.graph_area()
+                .and_then(|a| self.graph_ops(a))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|o| {
+                    let id = o.id.strip_prefix("graph-key:")?;
+                    let (x, y) = (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+                    let inside = x >= area.x
+                        && x <= area.x + area.width
+                        && y >= area.y
+                        && y <= area.y + area.height;
+                    let layer = graph.as_ref()?.key_layer(id)?.to_owned();
+                    inside.then(|| (layer, id.to_owned()))
+                })
+                .collect()
+        } else {
+            covered.keys
+        };
+        let Gesture::Marquee { session, .. } = &mut self.gesture else {
+            return;
+        };
         // The layers whose bars (Layers) or clips (Tracks) the box touches;
         // the session takes them only when it covers no keys (v1's rule).
-        let plan = session.update(covered.keys, covered.clips);
+        let plan = session.update(keys, if in_graph { vec![] } else { covered.clips });
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);

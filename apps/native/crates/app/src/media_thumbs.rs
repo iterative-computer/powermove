@@ -18,7 +18,7 @@ use std::{
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = WIDTH * 9 / 16;
 /// The picture a cached file is made with: a change of recipe makes them again.
-const RECIPE: &str = "powermove media thumbnail 1";
+const RECIPE: &str = "powermove media thumbnail 2";
 /// At most this many made at once.
 const AT_ONCE: usize = 2;
 
@@ -168,23 +168,22 @@ pub fn make(dir: &Path, item: &Item, ffmpeg: Option<&Path>) -> Option<(String, P
 /// RGBA8 at [`WIDTH`]×[`HEIGHT`].
 type Picture = Vec<u8>;
 
-/// A picture fitted (letterboxed, transparent around it) into the frame.
+/// A picture filling the frame, cropped about its centre: v1.2.0's tile
+/// (`object-fit: cover`), so every card is a full 16:9 picture.
 fn fitted(width: usize, height: usize, rgba: &[u8]) -> Picture {
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
-    let scale = (w as f64 / width as f64).min(h as f64 / height as f64);
-    let (fw, fh) = (
-        ((width as f64 * scale).round() as usize).clamp(1, w),
-        ((height as f64 * scale).round() as usize).clamp(1, h),
+    let scale = (w as f64 / width as f64).max(h as f64 / height as f64);
+    let (ox, oy) = (
+        (width as f64 * scale - w as f64) / 2.,
+        (height as f64 * scale - h as f64) / 2.,
     );
-    let (x0, y0) = ((w - fw) / 2, (h - fh) / 2);
     let mut out = vec![0u8; w * h * 4];
-    for y in 0..fh {
-        let sy = ((y as f64 + 0.5) / scale) as usize;
-        for x in 0..fw {
-            let sx = ((x as f64 + 0.5) / scale) as usize;
+    for y in 0..h {
+        let sy = ((y as f64 + oy + 0.5) / scale) as usize;
+        for x in 0..w {
+            let sx = ((x as f64 + ox + 0.5) / scale) as usize;
             let s = (sy.min(height - 1) * width + sx.min(width - 1)) * 4;
-            let d = ((y0 + y) * w + x0 + x) * 4;
-            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+            out[(y * w + x) * 4..][..4].copy_from_slice(&rgba[s..s + 4]);
         }
     }
     out
@@ -274,8 +273,10 @@ fn fitted_into(picture: &Picture, w: usize, h: usize) -> Picture {
     out
 }
 
-/// An audio file's waveform: bars of its measured envelope (`c.text` at
-/// 75 % on the green label colour, as the timeline's audio clip).
+/// An audio file's waveform as v1.2.0's tile draws it: a wall of bars
+/// rising from the foot of the green ground, each the mean of the envelope
+/// under it (a maximum over many peaks reads as a solid block for music),
+/// leaving the top clear for the duration badge.
 fn waveform(path: &Path) -> Option<Picture> {
     let (envelope, _) = pm_audio::waveform::clip_envelope(
         path,
@@ -289,28 +290,37 @@ fn waveform(path: &Path) -> Option<Picture> {
     }
     let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
     let ground = tokens.colors.labels.green;
-    let bar = tokens.colors.text;
+    let bar = tokens.colors.success;
     let rgb = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8];
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
     let [gr, gg, gb] = rgb(ground);
     let mut out: Vec<u8> = [gr, gg, gb, 255].repeat(w * h);
     let [br, bg, bb] = rgb(bar);
-    let blend = |g: u8, b: u8| ((g as f32) * 0.25 + (b as f32) * 0.75).round() as u8;
-    let columns = w / 3;
-    let peak = envelope.iter().cloned().fold(0f32, f32::max).max(1e-6);
-    for c in 0..columns {
-        let from = c * envelope.len() / columns;
-        let to = ((c + 1) * envelope.len() / columns).max(from + 1);
-        let level = envelope[from..to.min(envelope.len())]
-            .iter()
-            .cloned()
-            .fold(0f32, f32::max)
-            / peak;
-        let half = ((level * 0.8 * h as f32 / 2.).round() as usize).max(1);
-        for y in h / 2 - half..(h / 2 + half).min(h) {
-            for x in c * 3..c * 3 + 2 {
-                let d = (y * w + x) * 4;
-                out[d..d + 4].copy_from_slice(&[blend(gr, br), blend(gg, bg), blend(gb, bb), 255]);
+    let blend = |g: u8, b: u8| ((g as f32) * 0.1 + (b as f32) * 0.9).round() as u8;
+    let ink = [blend(gr, br), blend(gg, bg), blend(gb, bb), 255];
+    // v1.2.0: 120 bars over the tile's width, 26 pt clear at the top of a
+    // 16:9 tile (≈ 23 %) and 3 pt at the foot; each bar 3–98 % of that band.
+    const BARS: usize = 120;
+    let (top, foot) = (
+        (h as f32 * 0.23).round() as usize,
+        (h as f32 * 0.03).round() as usize,
+    );
+    let band = (h - top - foot) as f32;
+    // Levels are absolute (0–1), as v1.2.0's peaks: a quiet file stays low.
+    for bar in 0..BARS {
+        let from = bar * envelope.len() / BARS;
+        let to = ((bar + 1) * envelope.len() / BARS)
+            .max(from + 1)
+            .min(envelope.len());
+        let mean = envelope[from..to].iter().sum::<f32>() / (to - from) as f32;
+        let height = ((mean.clamp(0.03, 0.98) * band).round() as usize).max(1);
+        let (x0, x1) = (
+            bar * w / BARS,
+            ((bar + 1) * w / BARS).max(bar * w / BARS + 1),
+        );
+        for y in h - foot - height..h - foot {
+            for x in x0..x1.min(w) {
+                out[(y * w + x) * 4..][..4].copy_from_slice(&ink);
             }
         }
     }

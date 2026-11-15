@@ -393,6 +393,29 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// Project media tiles (v1.2.0 `.asset-preview`): the inset of a
+    /// tile's badges and actions from its edges, a badge's side padding and
+    /// the space between a card's tile and its name.
+    pub media_inset: f32,
+    /// Height of a tile's duration and status badges.
+    pub media_badge_height: f32,
+    /// The selection ring inside a tile.
+    pub media_ring: f32,
+    /// A media kind's glyph centred on a tile without a picture.
+    pub media_glyph: f32,
+    /// The folder glyph on a folder's tile.
+    pub media_folder_glyph: f32,
+    /// A Project list row's leading thumbnail (16:9).
+    pub media_row_thumb_width: f32,
+    pub media_row_thumb_height: f32,
+    /// A composition's frame inside its tile (v1.2.0 `.comp-frame`).
+    pub media_comp_inset: f32,
+    /// The red (missing) or accent (in cloud) wash over a tile.
+    pub media_tint_opacity: f32,
+    /// A missing file's remembered picture, dimmed under its badge.
+    pub media_offline_opacity: f32,
+    /// A picture whose media is still loading.
+    pub media_loading_opacity: f32,
     /// The leading room a person's own message leaves free in the Agent
     /// conversation, so it reads as theirs (at most 84 % of the popover's
     /// content).
@@ -865,6 +888,17 @@ impl Tokens {
                 },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                media_inset: space.xs,
+                media_badge_height: 16.,
+                media_ring: 2.,
+                media_glyph: 22.,
+                media_folder_glyph: 30.,
+                media_row_thumb_width: 32.,
+                media_row_thumb_height: 18.,
+                media_comp_inset: space.md,
+                media_tint_opacity: 0.1,
+                media_offline_opacity: 0.32,
+                media_loading_opacity: 0.55,
                 message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,

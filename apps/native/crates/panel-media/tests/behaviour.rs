@@ -2132,3 +2132,25 @@ fn changed_progress_and_composition_poster_remain_observed_facts() {
         })
     );
 }
+
+#[test]
+fn open_bin_survives_undo_and_reopens_with_breadcrumbs() {
+    let (_actor, h, c) = actor();
+    let r = Runtime::ready();
+    let mut panel = MediaPanel::default();
+    applied(&h, &c.prepare(Edit::CreateFolder {
+        id: "new-bin".into(), name: "New bin".into(), parent: Some("f2".into()),
+    }).unwrap());
+    let created = current(&h);
+    panel.refresh(&created, &r);
+    panel.dispatch(&created, &r, Input::OpenFolder(Some("new-bin".into()))).unwrap();
+    assert_eq!(created.path(Some("new-bin")).iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["f1", "f2", "new-bin"]);
+    history(&h, HistoryCall::Undo);
+    panel.refresh(&current(&h), &r);
+    assert!(panel.folder.is_none());
+    history(&h, HistoryCall::Redo);
+    let restored = current(&h);
+    panel.refresh(&restored, &r);
+    panel.dispatch(&restored, &r, Input::OpenFolder(Some("new-bin".into()))).unwrap();
+    assert_eq!(panel.folder.as_deref(), Some("new-bin"));
+}

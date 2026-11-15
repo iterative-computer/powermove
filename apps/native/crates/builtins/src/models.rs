@@ -926,6 +926,8 @@ impl Backend {
                 HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
                 HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
                 HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
+                // The editor's own timeline fits its view to the curves.
+                HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
                 other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
             };

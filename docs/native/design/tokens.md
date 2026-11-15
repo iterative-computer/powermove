@@ -114,7 +114,18 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.label_column` | Most an inspector row's label takes before its value | 120 | 120 | 120 | 120 |
 | `metrics.layer_column` | Timeline layer list column width | 320 | 320 | 320 | 320 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
+| `metrics.media_badge_height` | Height of a Project tile's duration and status badges | 16 | 16 | 16 | 16 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
+| `metrics.media_comp_inset` | A composition's frame inside its Project tile | 8 | 8 | 8 | 8 |
+| `metrics.media_folder_glyph` | Folder glyph on a Project folder tile | 30 | 30 | 30 | 30 |
+| `metrics.media_glyph` | Media kind glyph on a Project tile without a picture | 22 | 22 | 22 | 22 |
+| `metrics.media_inset` | Project tile badges and actions from the tile edge; badge padding; tile-to-name gap | 4 | 4 | 4 | 4 |
+| `metrics.media_loading_opacity` | A Project tile's picture while its media loads | 0.55 | 0.55 | 0.55 | 0.55 |
+| `metrics.media_offline_opacity` | A missing file's remembered picture under its badge | 0.32 | 0.32 | 0.32 | 0.32 |
+| `metrics.media_ring` | Selection ring inside a Project tile | 2 | 2 | 2 | 2 |
+| `metrics.media_row_thumb_height` | Height of a Project list row's leading thumbnail | 18 | 18 | 18 | 18 |
+| `metrics.media_row_thumb_width` | Width of a Project list row's leading thumbnail | 32 | 32 | 32 | 32 |
+| `metrics.media_tint_opacity` | Red or accent wash over a Project tile needing attention | 0.1 | 0.1 | 0.1 | 0.1 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |
 | `metrics.message_inset` | Leading room beside a person's message in the Agent conversation | 52 | 52 | 52 | 52 |

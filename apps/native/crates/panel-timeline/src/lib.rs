@@ -449,8 +449,14 @@ impl TimelineModel {
         let Some((layer, path)) = self.graph_property() else {
             return (vec![], false);
         };
+        // The property's whole track plots, every axis of it (v1: Position
+        // shows X and Y, Scale both of its axes).
+        let track = ["position", "scale"]
+            .into_iter()
+            .find(|t| path.strip_prefix(t).is_some_and(|rest| rest.starts_with('.')))
+            .unwrap_or(path.as_str());
         let series = self
-            .track_channels(&layer, &path)
+            .track_channels(&layer, track)
             .into_iter()
             .filter(|c| numeric(c))
             .map(|c| (layer.clone(), c.path.clone()))

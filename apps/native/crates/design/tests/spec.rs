@@ -320,6 +320,44 @@ const ROLES: &[(&str, &str)] = &[
         "Opacity of the media badge fill",
     ),
     (
+        "metrics.media_inset",
+        "Project tile badges and actions from the tile edge; badge padding; tile-to-name gap",
+    ),
+    (
+        "metrics.media_badge_height",
+        "Height of a Project tile's duration and status badges",
+    ),
+    ("metrics.media_ring", "Selection ring inside a Project tile"),
+    (
+        "metrics.media_glyph",
+        "Media kind glyph on a Project tile without a picture",
+    ),
+    ("metrics.media_folder_glyph", "Folder glyph on a Project folder tile"),
+    (
+        "metrics.media_row_thumb_width",
+        "Width of a Project list row's leading thumbnail",
+    ),
+    (
+        "metrics.media_row_thumb_height",
+        "Height of a Project list row's leading thumbnail",
+    ),
+    (
+        "metrics.media_comp_inset",
+        "A composition's frame inside its Project tile",
+    ),
+    (
+        "metrics.media_tint_opacity",
+        "Red or accent wash over a Project tile needing attention",
+    ),
+    (
+        "metrics.media_offline_opacity",
+        "A missing file's remembered picture under its badge",
+    ),
+    (
+        "metrics.media_loading_opacity",
+        "A Project tile's picture while its media loads",
+    ),
+    (
         "typography.minimum",
         "Smallest text anywhere: captions, ruler, status bar",
     ),
