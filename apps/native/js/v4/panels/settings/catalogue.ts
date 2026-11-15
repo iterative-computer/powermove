@@ -155,6 +155,21 @@ export function generalRows(multiWindow: boolean): Row[] {
       profileKey: "autoDownloadCloudMedia",
       detail: "Download offloaded files when opening a project.",
     },
+    {
+      id: "open-projects-in",
+      section: "general",
+      group: "Windows",
+      label: "Open Projects In",
+      control: "choice",
+      value: "tabs",
+      profileKey: "openProjectsIn",
+      options: choices([
+        ["tabs", "Tabs"],
+        ["windows", "Separate Windows"],
+      ]),
+      detail:
+        "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own.",
+    },
     ...(multiWindow
       ? [
           {

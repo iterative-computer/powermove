@@ -1,4 +1,17 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
+/// Settings › General › "Open projects in": Tabs (the default, owner and
+/// co-founder 2026-11-14) or Separate windows (one project per window). The
+/// app sets it from the setting at launch and whenever it changes; the next
+/// project opened follows it.
+static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Projects open as tabs of the window in use (else each in a window of its own).
+pub fn tabs_mode() -> bool {
+    TABS_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Sets the mode for the projects opened from now on.
+pub fn set_tabs_mode(tabs: bool) {
+    TABS_MODE.store(tabs, std::sync::atomic::Ordering::Relaxed);
+}
 pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod grade;
@@ -43,7 +56,7 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    one_project_per_window, opens_in_place, project_menu_entries,
+    apply_tabs_mode, editor_window_tabbing, opens_in_place, project_menu_entries,
     ADD, AgentStatus, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,

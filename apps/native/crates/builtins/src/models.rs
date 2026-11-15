@@ -1864,7 +1864,11 @@ pub(crate) fn project_edit_request(
 fn profile_key(key: &str) -> bool {
     matches!(
         key,
-        "themeMode" | "previewMemoryMiB" | "autoDownloadCloudMedia" | "restoreWindows"
+        "themeMode"
+            | "previewMemoryMiB"
+            | "autoDownloadCloudMedia"
+            | "restoreWindows"
+            | "openProjectsIn"
     )
 }
 
