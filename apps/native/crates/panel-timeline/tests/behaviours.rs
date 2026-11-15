@@ -2674,7 +2674,11 @@ fn delete_groups_adapter_ignores_stale_ids_after_external_edit_and_undo() {
     .unwrap()
     .unwrap();
     c.sync().unwrap();
-    select(&mut c, &["a", "b", "stale"]);
+    // Model a stale UI snapshot; the kernel correctly refuses a fresh
+    // selection request containing IDs that no longer exist.
+    c.model.selection = pm_kernel::Selection::from_parts(
+        strings(&["a", "b", "stale"]), Vec::new(), None,
+    );
     command(&mut c, "delete", 0.);
     assert!(c.model.index.layer("a").is_none());
     assert!(c.model.index.layer("c").is_some());
