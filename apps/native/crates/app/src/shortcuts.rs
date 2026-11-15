@@ -103,7 +103,7 @@ pub fn commands(table: &[Binding]) -> Vec<(String, String, String, String, Vec<V
 /// chords, for search), whether the person changed it, whether the menu bar
 /// owns it, and the keys two commands share. `recording` is the row whose
 /// next key is being taken.
-pub fn fact(map: &Keymap, recording: Option<&str>) -> Value {
+pub fn fact(map: &Keymap, recording: Option<&str>, asked: Option<&str>) -> Value {
     let table = keymap::effective(map);
     let entries = commands(&table);
     let keys_of = |command: &str, args: &[Value]| -> Vec<String> {
@@ -144,6 +144,13 @@ pub fn fact(map: &Keymap, recording: Option<&str>) -> Value {
                 "changed": map.bindings.iter().any(|a| a.command == *command && a.args == *args),
                 "fixed": menu::is_equivalent(command),
                 "recording": recording == Some(id.as_str()),
+                // The key the recording row asked about, and who has it.
+                "asked": asked
+                    .filter(|_| recording == Some(id.as_str()))
+                    .and_then(|chord| {
+                        let (_, other, menu_owned) = holder(map, id, chord)?;
+                        Some(json!({"keys": menu::glyphs(chord), "other": other, "menu": menu_owned}))
+                    }),
             })
         })
         .collect();
@@ -245,15 +252,72 @@ pub fn act(map: Keymap, action: &Value) -> Result<Act, String> {
 }
 
 /// A recorded key for `id`: Escape cancels, anything else is its new key.
-pub fn recorded(map: Keymap, id: &str, chord: &str) -> Option<Result<Keymap, String>> {
+/// What a key pressed while a row records does.
+#[derive(Debug, PartialEq)]
+pub enum Recorded {
+    /// The key is the row's now (free, or moved from the command that had it).
+    Store(Keymap),
+    /// Another command has the key: the row asks first ("press it again to
+    /// move it here"), still recording. `chord` is the key asked about.
+    Ask { chord: String },
+    /// Escape: the row keeps its keys.
+    Cancel,
+    Error(String),
+}
+
+/// Who has `chord` besides row `id`: its row id, its name, and whether the
+/// menu bar owns it (such a key never moves).
+pub fn holder(map: &Keymap, id: &str, chord: &str) -> Option<(String, String, bool)> {
+    let table = keymap::effective(map);
+    let own = target(id);
+    let b = table
+        .iter()
+        .find(|b| b.chord == chord && (b.command.as_str(), &b.args) != (own.0.as_str(), &own.1))?;
+    let other = row_id(&b.command, &b.args);
+    let label = commands(&table)
+        .into_iter()
+        .find(|e| e.1 == other)
+        .map_or_else(|| b.command.clone(), |e| e.2);
+    Some((other, label, menu::is_equivalent(&b.command)))
+}
+
+/// The key pressed while row `id` records. `asked` is the key the row last
+/// asked about: pressed again, it moves here from the command that had it.
+pub fn recorded(map: Keymap, id: &str, chord: &str, asked: Option<&str>) -> Recorded {
     if chord == "escape" {
-        return None;
+        return Recorded::Cancel;
     }
-    Some(
-        keymap::normalize(chord)
-            .ok_or_else(|| format!("{chord} cannot be a shortcut."))
-            .and_then(|chord| assign(map, id, vec![chord])),
-    )
+    // Delete takes the row's key away, as System Settings does.
+    if matches!(chord, "backspace" | "delete") {
+        return match assign(map, id, vec![]) {
+            Ok(next) => Recorded::Store(next),
+            Err(error) => Recorded::Error(error),
+        };
+    }
+    let Some(chord) = keymap::normalize(chord) else {
+        return Recorded::Error(format!("{chord} cannot be a shortcut."));
+    };
+    let Some((other, _, menu_owned)) = holder(&map, id, &chord) else {
+        return match assign(map, id, vec![chord]) {
+            Ok(next) => Recorded::Store(next),
+            Err(error) => Recorded::Error(error),
+        };
+    };
+    if menu_owned || asked != Some(chord.as_str()) {
+        return Recorded::Ask { chord };
+    }
+    // Pressed again: the key moves here, and the other command keeps the
+    // rest of its keys.
+    let (command, args) = target(&other);
+    let rest: Vec<String> = keymap::effective(&map)
+        .into_iter()
+        .filter(|b| b.command == command && b.args == args && b.chord != chord)
+        .map(|b| b.chord)
+        .collect();
+    match assign(map, id, vec![chord]).and_then(|next| assign(next, &other, rest)) {
+        Ok(next) => Recorded::Store(next),
+        Err(error) => Recorded::Error(error),
+    }
 }
 
 /// An exported file: the keymap with a marker naming what it is.
@@ -295,7 +359,11 @@ impl crate::session::Controller {
     }
     fn rebuild_shortcuts_page(&mut self, map: &Keymap) {
         let stamp = self.shortcuts_page["stamp"].as_u64().unwrap_or(0) + 1;
-        let mut page = fact(map, self.shortcut_recording.as_deref());
+        let mut page = fact(
+            map,
+            self.shortcut_recording.as_deref(),
+            self.shortcut_asked.as_deref(),
+        );
         page["stamp"] = json!(stamp);
         self.shortcuts_page = page;
     }
@@ -335,6 +403,7 @@ impl crate::session::Controller {
     ) {
         let map = stored(&self.kernel.state());
         let recording = self.shortcut_recording.take();
+        self.shortcut_asked = None;
         self.host.borrow_mut().record_next_key(false);
         match act(map.clone(), action) {
             Ok(Act::Store(next)) => self.store_keymap(next, cx),
@@ -397,10 +466,22 @@ impl crate::session::Controller {
         let Some(id) = self.shortcut_recording.take() else {
             return;
         };
-        match recorded(map.clone(), &id, chord) {
-            Some(Ok(next)) => self.store_keymap(next, cx),
-            Some(Err(error)) => self.message = error,
-            None => {}
+        let asked = self.shortcut_asked.take();
+        match recorded(map.clone(), &id, chord, asked.as_deref()) {
+            Recorded::Store(next) => self.store_keymap(next, cx),
+            Recorded::Cancel => {}
+            // Still recording: the row says who has the key; pressed again
+            // it moves, Escape keeps the old one.
+            Recorded::Ask { chord } => {
+                self.shortcut_recording = Some(id);
+                self.shortcut_asked = Some(chord);
+                self.host.borrow_mut().record_next_key(true);
+            }
+            Recorded::Error(error) => {
+                self.message = error;
+                self.shortcut_recording = Some(id);
+                self.host.borrow_mut().record_next_key(true);
+            }
         }
         self.rebuild_shortcuts_page(&map);
         self.update_builtins(cx);
@@ -423,7 +504,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_name_and_its_keys_as_glyphs() {
-        let page = fact(&Keymap::default(), None);
+        let page = fact(&Keymap::default(), None, None);
         let unnamed: Vec<&str> = page["rows"]
             .as_array()
             .unwrap()
@@ -475,29 +556,80 @@ mod tests {
     #[test]
     fn a_recorded_key_assigns_escape_cancels_and_reset_returns_to_the_preset() {
         let map = Keymap::default();
-        assert!(recorded(map.clone(), "rippleTrimIn", "escape").is_none());
-        let map = recorded(map, "rippleTrimIn", "q").unwrap().unwrap();
-        let page = fact(&map, None);
+        assert_eq!(recorded(map.clone(), "rippleTrimIn", "escape", None), Recorded::Cancel);
+        // Q is the Shape tool's: it asks, and pressed again it moves here.
+        assert!(matches!(
+            recorded(map.clone(), "rippleTrimIn", "q", None),
+            Recorded::Ask { .. }
+        ));
+        let Recorded::Store(map) = recorded(map, "rippleTrimIn", "q", Some("q")) else {
+            panic!()
+        };
+        let page = fact(&map, None, None);
         assert_eq!(row(&page, "rippleTrimIn")["chords"], json!(["q"]));
         assert_eq!(row(&page, "rippleTrimIn")["changed"], json!(true));
         assert_eq!(row(&page, "toolShape")["chords"], json!(["shift+q"]));
         let Ok(Act::Store(map)) = act(map, &json!({"op":"reset","id":"rippleTrimIn"})) else {
             panic!()
         };
-        assert!(map.bindings.is_empty());
+        // Ripple Trim In is back to its preset key; the Shape tool keeps the
+        // change the move made to it (it lost Q).
+        assert!(!map.bindings.iter().any(|a| a.command == "rippleTrimIn"));
+        assert_eq!(map.bindings.len(), 1);
         // The menu bar's keys stay its own.
-        assert!(
-            recorded(map.clone(), "save", "cmd+shift+x")
-                .unwrap()
-                .is_err()
-        );
+        assert!(matches!(
+            recorded(map.clone(), "save", "cmd+shift+x", None),
+            Recorded::Error(_)
+        ));
         let Ok(Act::Store(map)) = act(map, &json!({"op":"clear","id":"slipLayers\u{1f}[-1]"}))
         else {
             panic!()
         };
-        let page = fact(&map, Some("play"));
+        let page = fact(&map, Some("play"), None);
         assert_eq!(row(&page, "slipLayers\u{1f}[-1]")["chords"], json!([]));
         assert_eq!(row(&page, "play")["recording"], json!(true));
+    }
+
+    #[test]
+    fn a_key_another_command_has_asks_first_and_moves_when_pressed_again() {
+        let map = Keymap::default();
+        let page = fact(&map, None, None);
+        let taken = row(&page, "play")["chords"][0].as_str().unwrap().to_owned();
+        let play = row(&page, "play")["label"].clone();
+        // The first press asks; the row still records and says who has it.
+        assert_eq!(
+            recorded(map.clone(), "rippleTrimIn", &taken, None),
+            Recorded::Ask { chord: taken.clone() }
+        );
+        let page = fact(&map, Some("rippleTrimIn"), Some(&taken));
+        assert_eq!(row(&page, "rippleTrimIn")["asked"]["other"], play);
+        assert_eq!(row(&page, "rippleTrimIn")["asked"]["menu"], json!(false));
+        assert!(row(&page, "play")["asked"].is_null());
+        // Escape keeps both as they were.
+        assert_eq!(
+            recorded(map.clone(), "rippleTrimIn", "escape", Some(&taken)),
+            Recorded::Cancel
+        );
+        // Pressed again, the key moves here and leaves the other command.
+        let Recorded::Store(next) = recorded(map.clone(), "rippleTrimIn", &taken, Some(&taken))
+        else {
+            panic!()
+        };
+        let page = fact(&next, None, None);
+        assert_eq!(row(&page, "rippleTrimIn")["chords"], json!([taken]));
+        assert!(!row(&page, "play")["chords"].as_array().unwrap().contains(&json!(taken)));
+        // A key the menu bar owns is never moved, however often it is pressed.
+        assert!(matches!(
+            recorded(map.clone(), "rippleTrimIn", "cmd+s", Some("cmd+s")),
+            Recorded::Ask { .. }
+        ));
+        let page = fact(&map, Some("rippleTrimIn"), Some("cmd+s"));
+        assert_eq!(row(&page, "rippleTrimIn")["asked"]["menu"], json!(true));
+        // Delete takes the row's key away.
+        let Recorded::Store(cleared) = recorded(map, "play", "backspace", None) else {
+            panic!()
+        };
+        assert_eq!(row(&fact(&cleared, None, None), "play")["chords"], json!([]));
     }
 
     #[test]

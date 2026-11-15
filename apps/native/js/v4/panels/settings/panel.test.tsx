@@ -232,6 +232,45 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
       model.show("shortcuts");
     },
   ],
+  [
+    // The command taking a key was given one another command has: its row
+    // asks before moving it.
+    "shortcuts-asked",
+    (model) => {
+      const row = (id: string, label: string, keys: string[], patch = {}) => ({
+        id,
+        menu: "Layer",
+        label,
+        keys,
+        chords: [],
+        changed: false,
+        fixed: false,
+        recording: false,
+        ...patch,
+      });
+      model.publish({
+        ...model.publication,
+        revision: 2,
+        shortcuts: {
+          preset: "premiere-pro",
+          changed: false,
+          rows: [
+            row("rippleTrimIn", "Ripple Trim In Point to Playhead", ["Q"]),
+            row("extendEdit", "Extend Edit to Playhead", ["E"], {
+              recording: true,
+              asked: {
+                keys: "Q",
+                other: "Ripple Trim In Point to Playhead",
+                menu: false,
+              },
+            }),
+          ],
+          conflicts: [],
+        },
+      });
+      model.show("shortcuts");
+    },
+  ],
 ];
 for (const [state, prepare] of stateCases)
   test(`${state}: six-op tree snapshot passes the real Rust wire and kit validators`, async () => {

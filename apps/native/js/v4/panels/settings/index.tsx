@@ -29,6 +29,7 @@ export interface SettingsPanelProps {
     extensionSearch: string;
     extensionType: string;
     project?: string;
+    commandSearch?: string;
   };
   /** The header's picker chose project `id`; Show in Finder. */
   window?: { project(id: string): void; reveal(): void };
@@ -768,84 +769,323 @@ function More({ count, title }: { count: number; title: string }) {
     </text>
   );
 }
-/** Settings › Shortcuts: every command with its keys, grouped by its menu;
- * Change… takes the next key pressed (Escape cancels), and keys two
- * commands share are listed with the order they are tried in. */
-function Shortcuts({ model }: { model: SettingsModel }) {
+/** Settings › Shortcuts' first card as the design has it: Your Changes
+ * counts the commands changed, and Import and Export are one row. Other
+ * groups pass through. */
+function keysCard(
+  rows: Row[],
+  model: SettingsModel,
+): (Row | { share: true })[] {
+  const shared = rows.filter((r) => SHARE.includes(r.id));
+  const changed =
+    model.publication.shortcuts?.rows.filter((r) => r.changed).length ?? 0;
+  const out: (Row | { share: true })[] = rows
+    .filter((r) => !SHARE.includes(r.id))
+    .map((r) =>
+      r.id === "shortcuts.resetAll" && changed > 0
+        ? {
+            ...r,
+            detail:
+              `${changed} ${changed === 1 ? "command" : "commands"} changed. ${r.detail ?? ""}`.trim(),
+          }
+        : r,
+    );
+  if (shared.length) out.push({ share: true });
+  return out;
+}
+const SHARE = ["shortcuts.import", "shortcuts.export"];
+/** Import… and Export… in one row (the design's Share Shortcuts). */
+function ShareRow({ model }: { model: SettingsModel; key?: string }) {
+  const run = (action: string) => {
+    void model.perform({ type: "row", id: action, action });
+  };
+  return (
+    <div
+      id="settings.row.shortcuts.share"
+      role="group"
+      label="Share Shortcuts"
+      style={describedRow}
+    >
+      <RowCopy
+        title="Share Shortcuts"
+        detail="Bring in keys from another Mac or your agent, or save them to a file."
+      />
+      <div style={trailing}>
+        <Button
+          label="Import…"
+          disabled={!model.services}
+          onClick={() => run("shortcuts.import")}
+        />
+        <Button
+          label="Export…"
+          disabled={!model.services}
+          onClick={() => run("shortcuts.export")}
+        />
+      </div>
+    </div>
+  );
+}
+/** A shortcut's keys as keycaps (the build note's custom piece): each
+ * modifier its own cap, then the key. */
+function Keycaps({ keys }: { keys: string }) {
+  const caps: string[] = [];
+  let rest = keys;
+  while (rest && "⌘⌥⇧⌃".includes(rest[0]!)) {
+    caps.push(rest[0]!);
+    rest = rest.slice(1);
+  }
+  if (rest) caps.push(rest);
+  return (
+    <div
+      style={{ display: "flex", alignItems: "center", gap: t("metrics.pill_inset") }}
+    >
+      {caps.map((cap, i) => (
+        <div
+          key={i}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            minWidth: t("metrics.field"),
+            height: t("metrics.field"),
+            paddingLeft: t("metrics.gap"),
+            paddingRight: t("metrics.gap"),
+            borderRadius: t("metrics.inner_radius"),
+            borderWidth: t("metrics.border"),
+            borderColor: t("colors.hairline"),
+            background: t("colors.fill"),
+          }}
+        >
+          <text style={text}>{cap}</text>
+        </div>
+      ))}
+    </div>
+  );
+}
+/** A command's keys, pressed to take a new one (a menu bar key is shown,
+ * not pressed). */
+function ShortcutKeys({
+  row,
+  onRecord,
+}: {
+  row: import("./model").ShortcutRow;
+  onRecord: () => void;
+}) {
+  const shown = row.keys.length ? (
+    row.keys.map((keys, i) => <Keycaps key={i} keys={keys} />)
+  ) : (
+    <text style={help}>None</text>
+  );
+  if (row.fixed)
+    return (
+      <div
+        role="group"
+        label={`${row.label}: the menu bar's key`}
+        style={trailing}
+      >
+        {shown}
+      </div>
+    );
+  return (
+    <button
+      tabIndex={0}
+      label={`Change the shortcut for ${row.label}`}
+      title="Press to type a new shortcut"
+      style={{
+        ...trailing,
+        minWidth: t("metrics.hit"),
+        minHeight: t("metrics.hit"),
+      }}
+      onClick={onRecord}
+    >
+      {shown}
+    </button>
+  );
+}
+/** The row taking a new key: a capsule ringed in the accent. */
+function Recording({ onCancel }: { onCancel: () => void }) {
+  return (
+    <button
+      tabIndex={0}
+      label="Type a shortcut. Press to stop."
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: t("metrics.gap"),
+        minWidth: t("metrics.hit"),
+        minHeight: t("metrics.hit"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+        borderRadius: t("metrics.field"),
+        borderWidth: t("metrics.border"),
+        borderColor: t("colors.accent"),
+        background: t("colors.accent_wash"),
+      }}
+      onClick={onCancel}
+    >
+      <text
+        style={{
+          color: t("colors.accent_text"),
+          fontSize: t("typography.minimum"),
+        }}
+      >
+        ●
+      </text>
+      <text style={text}>Type a shortcut…</text>
+    </button>
+  );
+}
+/** Settings › Shortcuts: every command with its keys as keycaps, grouped by
+ * its menu, filtered by Search Commands. Pressing a command's keys takes
+ * the next key; a key another command has asks first ("press it again to
+ * move it here"); Delete takes the key away, Escape keeps the old one. */
+function Shortcuts({
+  model,
+  bindings,
+}: {
+  model: SettingsModel;
+  bindings: SettingsPanelProps["bindings"];
+}) {
+  const [filter, setFilter] = useState("");
   const page = model.publication.shortcuts;
   if (!page) return null;
   const query = model.query.trim();
+  const own = filter.trim().toLocaleLowerCase();
   const matching = page.rows.filter(
-    (row) => !query || model.matches.rows.has(`shortcut.${row.id}`),
+    (row) =>
+      (!query || model.matches.rows.has(`shortcut.${row.id}`)) &&
+      (!own ||
+        `${row.label} ${row.menu} ${row.keys.join(" ")}`
+          .toLocaleLowerCase()
+          .includes(own)),
   );
-  const rows = query ? matching.slice(0, SEARCH_ROWS) : matching;
+  const rows = query || own ? matching.slice(0, SEARCH_ROWS) : matching;
   const menus = [...new Set(rows.map((row) => row.menu))];
-  const shared = new Map(
-    page.conflicts.flatMap((c) => c.labels.map((label) => [label, c])),
-  );
   const act = (op: "record" | "reset" | "clear", id: string) => {
     void model.perform({ type: "shortcut", op, id });
   };
   const disabled = (id: string) => !model.services || model.pending.has(id);
+  const commandRow = (row: import("./model").ShortcutRow) => [
+    <div
+      key={row.id}
+      id={`settings.shortcut.${row.id}`}
+      role="group"
+      label={row.label}
+      style={
+        row.recording && row.asked
+          ? { ...rowStyle, background: t("colors.accent_wash") }
+          : rowStyle
+      }
+    >
+      <div style={copyColumn}>
+        <div style={titleLine}>
+          <text style={{ ...text, fontSize: t("typography.title") }}>
+            {row.label}
+          </text>
+        </div>
+      </div>
+      <div style={trailing}>
+        {row.changed && !row.fixed && !row.recording ? (
+          <Button
+            key="reset"
+            label="Reset"
+            disabled={disabled(row.id)}
+            onClick={() => act("reset", row.id)}
+          />
+        ) : null}
+        {row.recording ? (
+          <Recording onCancel={() => act("record", row.id)} />
+        ) : (
+          <ShortcutKeys row={row} onRecord={() => act("record", row.id)} />
+        )}
+      </div>
+    </div>,
+    row.recording && row.asked ? (
+      <div
+        key={`${row.id}.asked`}
+        role="status"
+        label="Shortcut in use"
+        metadata={{ symbol: "exclamationmark.triangle.fill" }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: t("metrics.gap"),
+          paddingLeft: t("metrics.inset"),
+          paddingRight: t("metrics.inset"),
+          paddingBottom: t("metrics.gap"),
+          background: t("colors.accent_wash"),
+          color: t("colors.secondary"),
+          fontSize: t("typography.minimum"),
+        }}
+      >
+        {row.asked.menu
+          ? `${row.asked.keys} belongs to ${row.asked.other} in the menu bar. Type another, or Esc to cancel.`
+          : `${row.asked.keys} is used by ${row.asked.other}. Press it again to move it here, or Esc to cancel.`}
+      </div>
+    ) : null,
+  ];
   return (
     <>
-      {menus.map((menu) => (
-        <Group key={menu} title={menu}>
-          {rows
-            .filter((row) => row.menu === menu)
-            .map((row) => {
-              const clash = shared.get(row.label);
-              const keys = row.keys.length ? row.keys.join("  ") : "No key";
-              const detail = row.recording
-                ? "Press the new key. Escape keeps the old one."
-                : row.fixed
-                  ? `${keys} · The menu bar's key.`
-                  : clash
-                    ? `${keys} · ${clash.keys} also: ${clash.labels
-                        .filter((label) => label !== row.label)
-                        .join(", ")}`
-                    : keys;
-              return (
-                <div
-                  key={row.id}
-                  id={`settings.shortcut.${row.id}`}
-                  role="group"
-                  label={row.label}
-                  style={describedRow}
-                >
-                  <RowCopy title={row.label} detail={detail} />
-                  {!row.fixed && (
-                    <div style={trailing}>
-                      {row.changed && (
-                        <Button
-                          key="reset"
-                          label="Reset"
-                          disabled={disabled(row.id)}
-                          onClick={() => act("reset", row.id)}
-                        />
-                      )}
-                      {row.keys.length > 0 && !row.recording && (
-                        <Button
-                          key="clear"
-                          label="Remove"
-                          disabled={disabled(row.id)}
-                          onClick={() => act("clear", row.id)}
-                        />
-                      )}
-                      <Button
-                        key={row.recording ? "listening" : "change"}
-                        label={row.recording ? "Cancel" : "Change…"}
-                        disabled={disabled(row.id)}
-                        onClick={() => act("record", row.id)}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-        </Group>
+      {/* The first group's header carries Search Commands; it keeps one key
+       * so the field stays put (and focused) while typing changes which menu
+       * comes first, and it stays when nothing matches so the search can be
+       * cleared. */}
+      {(menus.length || !own ? menus : [null]).map((menu, i) => (
+        <div
+          key={i === 0 ? "first" : menu!}
+          role="group"
+          label={menu ?? "Search Commands"}
+          style={column}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: t("metrics.inset"),
+              paddingLeft: t("metrics.inset"),
+              marginBottom: t("metrics.dock_gap"),
+            }}
+          >
+            <text
+              role="heading"
+              style={{
+                color: t("colors.text"),
+                fontSize: t("typography.title"),
+                fontWeight: t("typography.medium_weight"),
+              }}
+            >
+              {menu ?? "No Matching Commands"}
+            </text>
+            {i === 0 && bindings.commandSearch ? (
+              <div
+                style={{
+                  display: "flex",
+                  width: t("metrics.settings_text_field"),
+                }}
+              >
+                <UI.TextField
+                  label="Search Commands"
+                  binding={bindings.commandSearch}
+                  value={filter}
+                  metadata={{ placeholder: "Search Commands", search: true }}
+                  onInput={(event) => {
+                    if (typeof event.value === "string") setFilter(event.value);
+                  }}
+                />
+              </div>
+            ) : null}
+          </div>
+          {menu === null ? null : (
+            <UI.FormGroup label={menu}>
+              <Rows>
+                {rows.filter((row) => row.menu === menu).flatMap(commandRow)}
+              </Rows>
+            </UI.FormGroup>
+          )}
+        </div>
       ))}
-      {!query && page.conflicts.length > 0 && (
+      {!query && !own && page.conflicts.length > 0 && (
         <Group title="Shared Keys">
           {page.conflicts.map((clash) => (
             <div
@@ -1018,11 +1258,16 @@ function SectionContent({
       ) : null}
       {groups.map((group) => (
         <Group key={group} title={group}>
-          {rows
-            .filter((row) => row.group === group)
-            .map((row) => (
+          {keysCard(
+            rows.filter((row) => row.group === group),
+            model,
+          ).map((row) =>
+            "share" in row ? (
+              <ShareRow key="share" model={model} />
+            ) : (
               <SettingRow key={row.id} row={row} model={model} />
-            ))}
+            ),
+          )}
         </Group>
       ))}
       <More count={listed.length - rows.length} title={copy.title} />
@@ -1037,7 +1282,9 @@ function SectionContent({
       {section === "extensions" && (
         <Extensions model={model} bindings={bindings} />
       )}
-      {section === "shortcuts" && <Shortcuts model={model} />}
+      {section === "shortcuts" && (
+        <Shortcuts model={model} bindings={bindings} />
+      )}
     </div>
   );
 }
