@@ -285,6 +285,20 @@ impl Command {
         state: Option<&crate::state::StateSnapshot>,
         text: Option<&crate::text_host::SharedTextHost>,
     ) -> Result<Vec<Op>, CommandError> {
+        // Bar moves only change a scalar. Avoid materializing the layer and
+        // running a scratch document write before the store applies that write.
+        if let Command::Layer(LayerCommand::Set { layer_id, patch }) = self {
+            if let Some(from) = patch.from {
+                if *patch
+                    == (layers::LayerPatch {
+                        from: Some(from),
+                        ..Default::default()
+                    })
+                {
+                    return layers::plan_start(root, layer_id, from);
+                }
+            }
+        }
         let mut cx = Cx::new(root, origin);
         cx.state = state;
         cx.text = text;

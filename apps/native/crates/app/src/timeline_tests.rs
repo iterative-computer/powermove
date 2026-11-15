@@ -14,6 +14,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 #[derive(Default)]
 pub(crate) struct Recorder {
     pub time: RefCell<f64>,
+    pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
     pub seeks: RefCell<Vec<f64>>,
     pub effects: RefCell<Vec<HostEffect>>,
     pub reports: RefCell<Vec<String>>,
@@ -31,6 +32,9 @@ pub(crate) struct Recorder {
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, _: &mut App) {
+        self.0.timing_previews.borrow_mut().push(snapshot);
+    }
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
     }
@@ -2722,4 +2726,62 @@ fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppCon
         assert_eq!(t.time_mapping(), mapping);
         assert!(t.model().index.work[1] < end);
     });
+}
+
+#[gpui::test]
+fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let from = s.at(0, 1.);
+    let to = from + point(px(60.), px(0.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.revision(), before.revision());
+    assert_eq!(during.history.entries, 0);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .iter()
+            .any(Option::is_some)
+    );
+    let frame = s.surface.read_with(&s.vcx, |s, _| s.frame().unwrap());
+    let clip = frame.ops.iter().find(|op| op.id == "clip:l0").unwrap();
+    assert!(clip.detail["from"].as_f64().unwrap() > 0.);
+    // This is the surface's Escape handler; it also clears the viewer input.
+    s.surface.update(&mut s.vcx, |s, cx| assert!(s.cancel(cx)));
+    s.idle(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let from = s.at(0, 1.);
+    s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
+    assert!(s.start_of("l0") > 0.);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    s.undo(cx);
+    assert_eq!(s.start_of("l0"), 0.);
 }

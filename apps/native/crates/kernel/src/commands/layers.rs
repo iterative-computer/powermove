@@ -785,6 +785,145 @@ fn set_switch(
     }
 }
 
+/// Plan a pure bar-move batch against one revision. Locations and inherited
+/// group locks are resolved once, rather than scanning the layer stack for
+/// every member. Mixed edits retain the sequential command planner.
+pub(crate) fn plan_starts(
+    root: &pm_model::Node,
+    commands: &[super::Command],
+) -> Option<Result<Vec<Op>, CommandError>> {
+    use crate::model;
+    use std::collections::HashMap;
+    let mut requested = Vec::with_capacity(commands.len());
+    let mut unique = HashSet::new();
+    for command in commands {
+        let super::Command::Layer(LayerCommand::Set { layer_id, patch }) = command else {
+            return None;
+        };
+        let from = patch.from?;
+        if *patch
+            != (LayerPatch {
+                from: Some(from),
+                ..Default::default()
+            })
+            || !unique.insert(layer_id.as_str())
+        {
+            return None;
+        }
+        requested.push((layer_id.as_str(), from));
+    }
+    if requested.is_empty() {
+        return None;
+    }
+    let locations = Cx::new(root, super::Origin::Interface).all_layers();
+    let mut facts = HashMap::new();
+    let mut visited_comps = HashSet::new();
+    for loc in &locations {
+        if !visited_comps.insert(loc.comp_id.clone()) {
+            continue;
+        }
+        let comp = model::comp_node(root, loc.comp_id.as_deref())?;
+        let layers: Vec<_> = model::layers_of(comp).collect();
+        let mut by_id = HashMap::new();
+        for (i, layer) in layers.iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(model::str_of) {
+                by_id.entry(id).or_insert(i);
+            }
+        }
+        let mut locked = vec![None; layers.len()];
+        for first in 0..layers.len() {
+            let mut chain = Vec::new();
+            let mut seen = HashSet::new();
+            let mut at = Some(first);
+            let mut inherited = false;
+            while let Some(i) = at {
+                if let Some(value) = locked[i] {
+                    inherited |= value;
+                    break;
+                }
+                if !seen.insert(i) {
+                    inherited |= chain.iter().any(|i: &usize| {
+                        layers[*i].get("lock").and_then(model::bool_of) == Some(true)
+                    });
+                    break;
+                }
+                chain.push(i);
+                at = layers[i]
+                    .get("group")
+                    .and_then(model::str_of)
+                    .and_then(|id| by_id.get(id))
+                    .copied()
+                    .filter(|i| layers[*i].get("type").and_then(model::str_of) == Some("group"));
+            }
+            for i in chain.into_iter().rev() {
+                inherited |= layers[i].get("lock").and_then(model::bool_of) == Some(true);
+                locked[i] = Some(inherited);
+            }
+        }
+        for (index, layer) in layers.iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(model::str_of) {
+                facts.entry(id).or_insert((
+                    model::LayerLoc {
+                        comp_id: loc.comp_id.clone(),
+                        index,
+                    },
+                    *layer,
+                    locked[index].unwrap_or(false),
+                ));
+            }
+        }
+    }
+    Some((|| {
+        let mut ops = Vec::with_capacity(requested.len());
+        for (id, from) in requested {
+            let (loc, layer, locked) = facts
+                .get(id)
+                .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+            if *locked {
+                super::spine::check_lock(root, loc, layer, id)?;
+            }
+            let from = values::finite(from, "layer start")?;
+            if layer
+                .get("from")
+                .is_some_and(|n| values::same(n, &Value::Number(from)))
+            {
+                continue;
+            }
+            let mut path = loc.path();
+            path.push("from".into());
+            ops.push(Op::Leaf(pm_model::Patch::set(path, Value::Number(from))));
+        }
+        Ok(ops)
+    })())
+}
+
+/// Scalar strip movement retains the normal lock and finite-number rules,
+/// while leaving all channel/key payloads in the immutable document.
+pub(super) fn plan_start(
+    root: &pm_model::Node,
+    id: &str,
+    from: f64,
+) -> Result<Vec<Op>, CommandError> {
+    let loc = crate::model::find_layer(root, id)
+        .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+    let layer = crate::model::layer_at(root, &loc)
+        .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+    super::spine::check_lock(root, &loc, layer, id)?;
+    let from = values::finite(from, "layer start")?;
+    if layer
+        .get("from")
+        .is_some_and(|n| values::same(n, &Value::Number(from)))
+    {
+        return Ok(vec![]);
+    }
+    let mut path = loc.path();
+    path.push("from".into());
+    Ok(vec![Op::Leaf(pm_model::Patch::set(
+        path,
+        Value::Number(from),
+    ))])
+}
+
 /// `setLayer(command)` with `policyCommand`'s lock rule.
 fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), CommandError> {
     let (loc, layer) = cx.layer(layer_id)?;
