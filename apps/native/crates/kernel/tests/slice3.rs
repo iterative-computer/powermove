@@ -1011,7 +1011,9 @@ fn coedit_undo_turn_preserves_interleaved_user_edits() {
         matches!(reply, Reply::Applied { changed: true, .. }),
         "{reply:?}"
     );
-    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
     let layers = document.get("layers").unwrap().as_array().unwrap();
     assert_eq!(layers[0].get("name"), Some(&Value::from("Mine")));
     assert_eq!(
@@ -1083,7 +1085,9 @@ fn coedit_command_z_during_a_run_skips_agent_steps() {
         matches!(reply, Reply::Applied { changed: true, .. }),
         "{reply:?}"
     );
-    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
     let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
     assert_eq!(layer.get("name"), Some(&Value::from("Layer")));
     assert_eq!(
@@ -1132,7 +1136,9 @@ fn coedit_keep_mine_undoes_independent_values_inside_one_segment() {
         matches!(reply, Reply::Applied { changed: true, .. }),
         "{reply:?}"
     );
-    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
     let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
     assert_eq!(
         layer.get("p").unwrap().get("opacity").unwrap().get("v"),

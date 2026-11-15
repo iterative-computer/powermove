@@ -112,6 +112,57 @@ pub struct McpSession {
     bypass_hold: bool,
     hold_note: Option<Value>,
 }
+fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
+    let Some(note) = pending.take() else {
+        return;
+    };
+    match result {
+        Value::Object(fields) => {
+            fields.insert("coeditNote".into(), note);
+        }
+        Value::Array(content)
+            if [
+                "render_frames",
+                "probe_media",
+                "sample_media_frames",
+                "media_contact_sheet",
+                "media_waveform",
+                "capture_panel",
+                "computer_use_panel",
+            ]
+            .contains(&name) =>
+        {
+            content.push(json!({"type":"text","text":note.to_string()}));
+        }
+        _ => *pending = Some(note),
+    }
+}
+#[cfg(test)]
+mod coedit_notes {
+    use super::*;
+    #[test]
+    fn image_results_keep_their_content_and_receive_a_text_note() {
+        let mut value = json!([{"type":"image","data":"synthetic","mimeType":"image/png"}]);
+        let original = value[0].clone();
+        let mut note = Some(json!({"status":"applied"}));
+        attach_hold_note("render_frames", &mut value, &mut note);
+        assert_eq!(value[0], original);
+        assert_eq!(value[1]["type"], "text");
+        assert!(note.is_none());
+    }
+    #[test]
+    fn plain_list_results_preserve_the_note_for_the_next_object_result() {
+        let mut list = json!(["asset"]);
+        let mut note = Some(json!({"status":"dropped"}));
+        attach_hold_note("list_media", &mut list, &mut note);
+        assert_eq!(list, json!(["asset"]));
+        assert!(note.is_some());
+        let mut next = json!({"revision":3});
+        attach_hold_note("get_project_state", &mut next, &mut note);
+        assert_eq!(next["coeditNote"]["status"], "dropped");
+        assert!(note.is_none());
+    }
+}
 fn next_writer() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1000);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -215,9 +266,7 @@ impl McpSession {
             return Ok(result);
         }
         let mut result = self.dispatch_inner(name, args)?;
-        if let Some(note) = self.hold_note.take() {
-            result["coeditNote"] = note;
-        }
+        attach_hold_note(name, &mut result, &mut self.hold_note);
         Ok(result)
     }
     fn dispatch_inner(&mut self, name: &str, args: &Value) -> Result<Value> {
