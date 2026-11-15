@@ -1324,3 +1324,56 @@ fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
         );
     }
 }
+
+#[test]
+fn citations_survive_save_reopen_and_send_structured_context() {
+    for provider in ["chatgpt", "claude", "compatible"] {
+        let mut store = Memory::default();
+        store.values.insert("agentThreads.p".into(), json!({"version":1,"activeId":"t","threads":[{"id":"t","provider":provider,"conversation":[],"composerDraft":"","attachments":[]}]}));
+        let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let quotes = vec![
+            json!({"messageId":"history:m","text":"😀 exact", "start":2,"end":10,"comment":"Explain this"}),
+        ];
+        p.draft_mut("t")
+            .unwrap()
+            .set_citations(quotes.clone())
+            .unwrap();
+        p.draft_mut("t").unwrap().set_text("My request", 1).unwrap();
+        p.save(&mut store, 2).unwrap();
+        let mut p = Panel::load(&mut store, "p", "t", 3).unwrap();
+        assert_eq!(p.session("t").unwrap().draft.citations(), quotes);
+        let effect = p.submit("t", "run", "request", 4).unwrap();
+        let EffectKind::Send { text, settings, .. } = effect.kind else {
+            panic!("send");
+        };
+        assert_eq!(settings.provider.name(), provider);
+        assert!(text.contains("<assistant_citations>"));
+        assert!(text.contains("Explain this"));
+        assert!(text.ends_with("My request"));
+        let message = p
+            .session("t")
+            .unwrap()
+            .conversation
+            .values()
+            .last()
+            .unwrap();
+        assert_eq!(message["text"], "My request");
+        assert_eq!(message["citations"], json!(quotes));
+        assert!(p.session("t").unwrap().draft.citations().is_empty());
+    }
+}
+#[test]
+fn invalid_citation_does_not_replace_existing_draft_context() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    let valid = vec![json!({"messageId":"m","text":"😀","start":0,"end":2,"comment":""})];
+    draft.set_citations(valid.clone()).unwrap();
+    assert!(draft.sendable());
+    assert!(
+        draft
+            .set_citations(vec![
+                json!({"messageId":"m","text":"😀","start":0,"end":1,"comment":""})
+            ])
+            .is_err()
+    );
+    assert_eq!(draft.citations(), valid);
+}

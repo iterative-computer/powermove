@@ -148,13 +148,17 @@ impl Session {
             }
             trace.rows.upsert(id.into(), step.clone())?;
         }
+        let mut restored_draft = Draft::from_legacy(
+            v["composerDraft"]
+                .as_str()
+                .ok_or(Error::Invalid("composer draft"))?,
+            &files,
+        )?;
+        if let Some(citations) = v["composerCitations"].as_array() {
+            restored_draft.set_citations(citations.clone())?;
+        }
         let mut s = Self {
-            draft: Draft::from_legacy(
-                v["composerDraft"]
-                    .as_str()
-                    .ok_or(Error::Invalid("composer draft"))?,
-                &files,
-            )?,
+            draft: restored_draft,
             conversation,
             trace,
             run: None,
@@ -349,7 +353,9 @@ pub enum ShellAction {
     Pin,
     BeginDrag,
     CancelDrag,
-    CommitDrag { dock: Option<String> },
+    CommitDrag {
+        dock: Option<String>,
+    },
     OpenGlobal,
     ImportWorkspace,
     RepairExtension(String),
@@ -510,6 +516,7 @@ impl Panel {
     fn capture(&mut self, id: &str, now: u64) -> Result<()> {
         let s = self.session(id)?;
         let (draft, attachments) = s.draft.legacy();
+        let citations = s.draft.citations().to_vec();
         let conversation = s.conversation.values().cloned().collect::<Vec<_>>();
         let trace = s.trace.rows.values().cloned().collect::<Vec<_>>();
         let run = s.run.as_ref().map(|r| r.id.clone());
@@ -520,8 +527,10 @@ impl Panel {
             .archive
             .thread_mut(id)
             .ok_or_else(|| Error::UnknownId(id.into()))?;
-        let touched = record["composerDraft"].as_str() != Some(&draft)
+        let touched = record["composerCitations"] != json!(citations)
+            || record["composerDraft"].as_str() != Some(&draft)
             || record["conversation"].as_array().map(Vec::len) != Some(conversation.len());
+        record["composerCitations"] = json!(citations);
         record["composerDraft"] = json!(draft);
         record["attachments"] = json!(attachments);
         record["conversation"] = json!(conversation);
@@ -862,6 +871,7 @@ impl Panel {
             && current.run.is_some()
             && target.run.as_deref() == Some(run_id)
             && current.draft.attachments().next().is_none()
+            && current.draft.citations().is_empty()
             && !current.draft.legacy().0.trim().is_empty()
         {
             let waiting = current
@@ -920,6 +930,8 @@ impl Panel {
             return Err(Error::MissingPayload(file.id().into()));
         }
         let text = session.draft.request_text();
+        let citations = session.draft.citations().to_vec();
+        let provider_text = pm_agents::citations::context(&text, &citations);
         let steer = session.run.is_some();
         if steer && target.run.as_deref() != Some(run_id) {
             return Err(Error::Stale);
@@ -929,7 +941,7 @@ impl Panel {
         if steer {
             session.archive_trace(now, true)?;
         }
-        session.append(json!({"role":"user","text":text,"attachments":files,"steering":steer}))?;
+        session.append(json!({"role":"user","text":text,"citations":citations,"attachments":files,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;
@@ -953,7 +965,7 @@ impl Panel {
         Ok(self.effect(
             target,
             EffectKind::Send {
-                text,
+                text: provider_text,
                 attachments: files,
                 settings,
                 steer,
