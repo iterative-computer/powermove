@@ -39,6 +39,9 @@ thread_local! {
     static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
     /// AppKit window number → session window id.
     static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
+    /// Each editor window's open pages (Settings, the Store): a tab strip
+    /// shows the pages of every window in its group.
+    static PAGES:RefCell<HashMap<isize,Vec<(String,String)>>>=RefCell::new(HashMap::new());
     /// Editor windows that show no project (Home alone): never a project tab.
     static HOME_WINDOWS:RefCell<std::collections::HashSet<isize>>=RefCell::new(Default::default());
     /// Menu delegates must outlive their menus (NSMenu.delegate is weak).
@@ -572,13 +575,26 @@ define_class!(
         /// the project, as Home does. The tag is its place among the pages.
         #[unsafe(method(selectPage:))]
         fn select_page(&self, sender: &AnyObject) {
-            let index: isize = unsafe { msg_send![sender, tag] };
-            self.send(Command { name: format!("showPage:{index}"), args: vec![], token: None });
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            match foreign_page(tag) {
+                // Another tab's page: that tab comes forward and shows it.
+                Some((number, index)) => {
+                    let app = NSApplication::sharedApplication(self.mtm());
+                    if let Some(window) = app.windowWithWindowNumber(number) {
+                        select_window_tab(&window);
+                    }
+                    route(number, format!("showPage:{index}"));
+                }
+                None => self.send(Command { name: format!("showPage:{tag}"), args: vec![], token: None }),
+            }
         }
         #[unsafe(method(closePage:))]
         fn close_page(&self, sender: &AnyObject) {
-            let index: isize = unsafe { msg_send![sender, tag] };
-            self.send(Command { name: format!("closePage:{index}"), args: vec![], token: None });
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            match foreign_page(tag) {
+                Some((number, index)) => route(number, format!("closePage:{index}")),
+                None => self.send(Command { name: format!("closePage:{tag}"), args: vec![], token: None }),
+            }
         }
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, sender: &AnyObject) {
@@ -621,7 +637,7 @@ define_class!(
             let number: isize = unsafe { msg_send![sender, tag] };
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
-                window.moveTabToNewWindow(None);
+                detach_tab(&window);
             }
         }
         #[unsafe(method(newTab:))]
@@ -740,8 +756,19 @@ pub fn apply_tabs_mode(tabs: bool) {
             continue;
         }
         let group = tab_windows(&window);
+        // The windows the tabs become cascade from the first, so each one
+        // shows instead of lying exactly over it.
+        let mut at = window.cascadeTopLeftFromPoint(NSPoint::ZERO);
         for other in group.iter().skip(1) {
-            other.moveTabToNewWindow(None);
+            // A tab with no project (Home alone, never shown as a tab) goes;
+            // a project's tab becomes its own window.
+            if HOME_WINDOWS.with(|h| h.borrow().contains(&other.windowNumber())) {
+                request_close(other);
+            } else {
+                detach_tab(other);
+                at = other.cascadeTopLeftFromPoint(at);
+                route(other.windowNumber(), "persistSession".into());
+            }
         }
     }
 }
@@ -762,6 +789,12 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    // Every tab of the group draws the strip again and records its group in
+    // the session (a relaunch brings the tabs back together).
+    for tab in tab_windows(&lead) {
+        route(tab.windowNumber(), "syncTabs".into());
+        route(tab.windowNumber(), "persistSession".into());
+    }
     hide_system_tab_bar(&lead);
     hide_system_tab_bar(window);
     if app.isActive() {
@@ -1264,6 +1297,11 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         f.origin.x + f.size.width - width
     });
     let start = down.locationInWindow().x;
+    let start_y = down.locationInWindow().y;
+    // Dragged this far above or below the strip, the tab tears off: let go
+    // there, its project gets a window of its own at the pointer, as the
+    // system's tab bar does.
+    let mut torn = false;
     let glide = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
     // The others in their order with a gap where the dragged tab would land.
     let settle = |target: usize, dragged: Option<f64>| {
@@ -1328,8 +1366,13 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             break button.mouse_inRect(local, button.bounds());
         }
         let by = at.x - start;
+        let off = (at.y - start_y).abs() > TAB_TEAR && tabs.len() > 1;
+        if off != torn {
+            torn = off;
+            tab.setAlphaValue(if torn { 0.45 } else { 1. });
+        }
         if !dragging {
-            if tabs.len() < 2 || by.abs() < TAB_DRAG_SLOP {
+            if tabs.len() < 2 || (by.abs() < TAB_DRAG_SLOP && !torn) {
                 continue;
             }
             dragging = true;
@@ -1366,6 +1409,24 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
                 let _: bool =
                     msg_send![button, sendAction: button.action(), to: button.target().as_deref()];
             }
+        }
+        return;
+    }
+    if torn {
+        // Off the strip: the tab's window leaves the group and stands where
+        // the pointer let go, its title bar under the pointer.
+        settle(index, None);
+        carry(false);
+        tab.setAlphaValue(1.);
+        if let Some(layer) = tab.layer() {
+            layer.setZPosition(0.);
+        }
+        let app = NSApplication::sharedApplication(window.mtm());
+        if let Some(moved) = app.windowWithWindowNumber(button.tag()) {
+            let at = NSEvent::mouseLocation();
+            detach_tab(&moved);
+            moved.setFrameTopLeftPoint(NSPoint::new(at.x - 80., at.y + 12.));
+            gpui_macos::child_window::present(&moved, true);
         }
         return;
     }
@@ -1608,7 +1669,7 @@ fn select_tab(window: &NSWindow, by: isize) {
             let _: () = msg_send![tab_group, setSelectedWindow: &**next];
         }
     }
-    next.makeKeyAndOrderFront(None);
+    gpui_macos::child_window::present(next, true);
 }
 /// Asks `window` to close on the next turn of the run loop, as its close
 /// button does. Never `performClose` directly: inside a GPUI update the
@@ -1625,6 +1686,127 @@ pub fn request_close(window: &NSWindow) {
     }
 }
 /// Moves `window` `by` places along its tab group and keeps it selected.
+/// A page cell's tag: its place among its window's pages, or (negative) the
+/// window it belongs to and that place, when it is another tab's page.
+fn page_tag(number: isize, index: usize, own: bool) -> isize {
+    if own {
+        index as isize
+    } else {
+        -(number * 32 + index as isize) - 1
+    }
+}
+/// The window and place of another tab's page cell (`page_tag`).
+fn foreign_page(tag: isize) -> Option<(isize, usize)> {
+    (tag < 0).then(|| {
+        let v = -tag - 1;
+        (v / 32, (v % 32) as usize)
+    })
+}
+/// A command to the editor window `number` (its own command queue).
+fn route(number: isize, name: String) {
+    ROUTES.with(|r| {
+        if let Some(tx) = r.borrow().get(&number) {
+            let _ = tx.try_send(Command { name, args: vec![], token: None });
+        }
+    });
+}
+/// After a relaunch: the window with session id `id` (the one that was in
+/// front) comes forward, its tab the one its group shows.
+pub fn bring_session_window(id: u64) {
+    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(window) = number.and_then(|n| app.windowWithWindowNumber(n)) else {
+        return;
+    };
+    if app.isActive() {
+        select_window_tab(&window);
+        return;
+    }
+    // Launched in the background: `present` would send it to the back.
+    // It goes just above the app's own front window (never above another
+    // app's) and is key when the app comes forward.
+    unsafe {
+        let group: *mut AnyObject = msg_send![&*window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: &*window];
+        }
+    }
+    let front = app
+        .orderedWindows()
+        .to_vec()
+        .into_iter()
+        .find(|w| w.isVisible() && w.windowNumber() != window.windowNumber());
+    if let Some(front) = front {
+        window.orderWindow_relativeTo(NSWindowOrderingMode::Above, front.windowNumber());
+    }
+    window.makeKeyWindow();
+}
+/// Brings `window`'s tab forward in its group.
+fn select_window_tab(window: &NSWindow) {
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: window];
+        }
+    }
+    gpui_macos::child_window::present(window, true);
+}
+/// Whether another tab's different title starts and ends as `title` does, so
+/// cutting both in the middle would show the same text.
+fn alike_ends(title: &str, tabs: &[Tab]) -> bool {
+    const ENDS: usize = 8;
+    let ends = |t: &str| {
+        let chars: Vec<char> = t.chars().collect();
+        let n = chars.len();
+        (
+            chars[..ENDS.min(n)].iter().collect::<String>(),
+            chars[n.saturating_sub(ENDS)..].iter().collect::<String>(),
+        )
+    };
+    let mine = ends(title);
+    tabs.iter()
+        .any(|t| t.title != title && ends(&t.title) == mine)
+}
+/// What a tab shows when its name would read like another tab's however it
+/// is cut (copies: "Accept — Recovered — Native", "Accept — Native"): the
+/// name from the word where the two part, after an ellipsis, so the part
+/// that tells them apart is what shows. `None`: the name as it is.
+fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
+    if !alike_ends(title, tabs) {
+        return None;
+    }
+    let chars: Vec<char> = title.chars().collect();
+    let shared = tabs
+        .iter()
+        .filter(|t| t.title != title && alike_ends(&t.title, tabs))
+        .map(|t| chars.iter().zip(t.title.chars()).take_while(|(a, b)| **a == *b).count())
+        .max()?;
+    // Back to the start of the word where they part.
+    let start = chars[..shared.min(chars.len())]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |i| i + 1);
+    (start > 0).then(|| format!("…{}", chars[start..].iter().collect::<String>()))
+}
+/// Takes `window` out of its tab group into a window of its own (Move Tab to
+/// New Window, a tab torn off the strip, Separate Windows chosen). The
+/// group's own removal: AppKit's Move Tab to New Window does nothing for
+/// windows that never tab on their own (`editor_window_tabbing`).
+fn detach_tab(window: &NSWindow) {
+    if tab_windows(window).len() < 2 {
+        return;
+    }
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, removeWindow: window];
+        }
+    }
+    gpui_macos::child_window::present(window, false);
+}
 fn move_tab(window: &NSWindow, by: isize) {
     let windows = tab_windows(window);
     let Some(at) = windows
@@ -1650,6 +1832,8 @@ fn move_tab(window: &NSWindow, by: isize) {
 }
 /// Widest a project tab grows; its title truncates in the middle.
 const TAB_MAX: f64 = 180.;
+/// How far above or below the strip a dragged tab tears off into a window.
+const TAB_TEAR: f64 = 36.;
 /// Narrowest a long title's tab gets: enough of a name to tell projects apart.
 const TAB_MIN: f64 = 96.;
 /// Between the strip's cells.
@@ -2972,7 +3156,16 @@ impl Host {
         edited: bool,
         path: Option<&std::path::Path>,
     ) {
-        HOME_WINDOWS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
+        let was_home = HOME_WINDOWS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
+        // A tab that showed only Home now holds a project: the group's other
+        // strips show its tab.
+        if was_home {
+            for tab in tab_windows(&self.window) {
+                if tab.windowNumber() != self.window.windowNumber() {
+                    route(tab.windowNumber(), "syncTabs".into());
+                }
+            }
+        }
         self.window.setTitle(&NSString::from_str(title));
         self.window.setDocumentEdited(edited);
         self.window.setSubtitle(&NSString::from_str(subtitle));
@@ -3001,6 +3194,26 @@ impl Host {
     fn sync_tab_strip(&self) {
         let own = self.window.windowNumber();
         let group = tab_windows(&self.window);
+        // Every tab's open pages, this window's first: Settings or the Store
+        // opened in one tab stays in the strip whichever tab shows.
+        let mut page_cells: Vec<(isize, usize, String, bool)> = vec![];
+        {
+            let own_pages = self.pages.borrow();
+            for (i, (_, title)) in own_pages.0.iter().enumerate() {
+                page_cells.push((own, i, title.clone(), own_pages.1 == Some(i)));
+            }
+        }
+        for w in &group {
+            let number = w.windowNumber();
+            if number == own {
+                continue;
+            }
+            PAGES.with(|p| {
+                for (i, (_, title)) in p.borrow().get(&number).into_iter().flatten().enumerate() {
+                    page_cells.push((number, i, title.clone(), false));
+                }
+            });
+        }
         // A window with no project is Home, not a project: it is never a tab
         // (no "Home" tab beside the home button, H3).
         let group: Vec<_> = group
@@ -3053,14 +3266,13 @@ impl Host {
             - 2. * (height + TAB_GAP))
             .max(TAB_MIN)
             .floor();
-        let pages = self.pages.borrow().clone();
         // The strip redraws when a page opens, closes or shows as well.
         let mut marked = tabs.clone();
-        marked.extend(pages.0.iter().enumerate().map(|(i, (_, title))| Tab {
-            window: -1 - i as isize,
+        marked.extend(page_cells.iter().map(|(number, i, title, selected)| Tab {
+            window: -1 - (number * 32 + *i as isize),
             title: title.clone(),
             edited: false,
-            selected: pages.1 == Some(i),
+            selected: *selected,
         }));
         if *self.tabs_shown.borrow() == (marked.clone(), room) {
             return;
@@ -3117,12 +3329,23 @@ impl Host {
         let labels: Vec<(Retained<NSTextField>, NSSize)> = tabs
             .iter()
             .map(|tab| {
-                let label = NSTextField::labelWithString(&NSString::from_str(&tab.title), mtm);
+                let distinct = distinct_title(&tab.title, &tabs);
+                let label = NSTextField::labelWithString(
+                    &NSString::from_str(distinct.as_deref().unwrap_or(&tab.title)),
+                    mtm,
+                );
                 label.setFont(Some(&NSFont::systemFontOfSize_weight(
                     t.typography.title as f64,
                     unsafe { NSFontWeightRegular },
                 )));
-                label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+                // Cut in the middle, so a name's start and end both stay;
+                // where that would read like another tab's name, the name
+                // from where they part, cut at its end (`distinct_title`).
+                label.setLineBreakMode(if distinct.is_some() {
+                    NSLineBreakMode::ByTruncatingTail
+                } else {
+                    NSLineBreakMode::ByTruncatingMiddle
+                });
                 label.setAccessibilityElement(false);
                 let natural = label.fittingSize();
                 (label, natural)
@@ -3239,7 +3462,8 @@ impl Host {
         // The open pages after the projects: a cell each, as a tab (its
         // title, its close button), in a holder of its own so a drag along
         // the strip reads the project tabs only.
-        for (index, (_, title)) in pages.0.iter().enumerate() {
+        for (number, index, title, selected) in &page_cells {
+            let (index, selected) = (*index, *selected);
             let label = NSTextField::labelWithString(&NSString::from_str(title), mtm);
             label.setFont(Some(&NSFont::systemFontOfSize_weight(
                 t.typography.title as f64,
@@ -3259,9 +3483,9 @@ impl Host {
             };
             button.setTransparent(true);
             button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
-            button.setTag(index as isize);
+            button.setTag(page_tag(*number, index, *number == own));
             button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page")));
-            button.setAccessibilitySelected(pages.1 == Some(index));
+            button.setAccessibilitySelected(selected);
             label.setFrame(NSRect::new(
                 NSPoint::new(TAB_PAD - LABEL_PAD, ((height - size.height) / 2.).floor()),
                 size,
@@ -3275,7 +3499,7 @@ impl Host {
                 )
             };
             close.setBordered(false);
-            close.setTag(index as isize);
+            close.setTag(page_tag(*number, index, *number == own));
             close.setToolTip(Some(&NSString::from_str(&format!("Close {title}"))));
             close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page.close")));
             close.setFrame(NSRect::new(
@@ -3289,7 +3513,7 @@ impl Host {
                 Some(close.clone()),
                 None,
                 false,
-                pages.1 == Some(index),
+                selected,
             );
             view.addSubview(&label);
             view.addSubview(&button);
@@ -3605,8 +3829,16 @@ impl Host {
         if *self.pages.borrow() == next {
             return;
         }
+        let own = self.window.windowNumber();
+        PAGES.with(|p| p.borrow_mut().insert(own, next.0.clone()));
         *self.pages.borrow_mut() = next;
         self.restyle_aside();
+        // The other tabs of the group show this window's pages too.
+        for other in tab_windows(&self.window) {
+            if other.windowNumber() != own {
+                route(other.windowNumber(), "syncTabs".into());
+            }
+        }
     }
     /// Home over the window: the Home item reads selected, and the
     /// document's own controls (tools, sidebars, Export, the title) step
@@ -3884,7 +4116,7 @@ impl Host {
                 if action.starts_with("hold") { 4. } else { 0.3 },
                 action == "press",
             ),
-            "out" => window.moveTabToNewWindow(None),
+            "out" => detach_tab(&window),
             // Every other editor window joins this one's group again, as
             // dragging its tab back in (or Window ▸ Merge All Windows) does.
             "merge" => {
@@ -4573,12 +4805,10 @@ impl Host {
         match name {
             "quit" => app.terminate(None),
             "closeWindow" | "closeTab" => request_close(&self.window),
+            "syncTabs" => self.sync_tabs(),
             "nextTab" => select_tab(&self.window, 1),
             "previousTab" => select_tab(&self.window, -1),
-            "moveTabToNewWindow" => unsafe {
-                let _: () =
-                    msg_send![&*self.window,moveTabToNewWindow:std::ptr::null::<AnyObject>()];
-            },
+            "moveTabToNewWindow" => detach_tab(&self.window),
             "blurField" => {
                 let Some(editor) = self
                     .window
@@ -6790,6 +7020,42 @@ mod tab_layout_tests {
         assert!(tab_layout(&[200.; 5], 0, fits).2);
         // Short titles need no pull-down in the same room.
         assert!(!tab_layout(&[70.; 5], 0, fits).2);
+    }
+
+    #[test]
+    fn copies_that_would_read_alike_cut_at_the_end() {
+        use super::{Tab, alike_ends, distinct_title};
+        let tab = |title: &str| Tab {
+            window: 0,
+            title: title.into(),
+            edited: false,
+            selected: false,
+        };
+        let tabs = [
+            tab("Accept — Recovered — Native"),
+            tab("Accept — Native"),
+            tab("Paper"),
+        ];
+        assert!(alike_ends("Accept — Recovered — Native", &tabs));
+        assert!(alike_ends("Accept — Native", &tabs));
+        assert!(!alike_ends("Paper", &tabs));
+        // The same name twice is not told apart by cutting: middle as ever.
+        assert!(!alike_ends("Paper", &[tab("Paper"), tab("Paper")]));
+        // What shows: each from the word where they part.
+        assert_eq!(
+            distinct_title("Accept — Recovered — Native", &tabs).as_deref(),
+            Some("…Recovered — Native")
+        );
+        assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
+        assert_eq!(distinct_title("Paper", &tabs), None);
+        let runs = [
+            tab("Accept - acceptance run eleven copy one - Native"),
+            tab("Accept - acceptance run eleven copy two - Native"),
+        ];
+        assert_eq!(
+            distinct_title(&runs[1].title, &runs).as_deref(),
+            Some("…two - Native")
+        );
     }
 
     #[test]

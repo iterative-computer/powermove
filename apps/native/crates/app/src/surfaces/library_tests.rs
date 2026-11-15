@@ -1107,3 +1107,20 @@ fn open_in_new_window_asks_for_a_window_of_its_own() {
         assert_eq!(opened, Some(("Trailer".into(), new_window)));
     }
 }
+#[test]
+fn a_new_project_opens_under_the_name_typed_in_its_sheet() {
+    use pm_kernel::{locks::OpenDecision, session::ShellReply};
+    let mut c = ready();
+    c.begin_new("owner".into(), None, &format()).unwrap();
+    c.form.as_mut().unwrap().name = "Launch Film".into();
+    c.create().unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    c.take_effects();
+    let reply = ShellReply::Library(OpenDecision::Writable);
+    complete(&mut c, serial, Ok(Outcome::Opened(reply)));
+    let opened = c.take_effects().into_iter().find_map(|e| match e {
+        HostEffect::OpenEditor { name, .. } => Some(name),
+        _ => None,
+    });
+    assert_eq!(opened.as_deref(), Some("Launch Film"));
+}
