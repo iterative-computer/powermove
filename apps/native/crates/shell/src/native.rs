@@ -3554,6 +3554,17 @@ impl Host {
             self.last_geometry = None;
         }
     }
+    /// Apply cached placement in the input transaction, alongside the overlay.
+    pub fn place_cached_viewer(&mut self) {
+        if self.viewer_raster.is_none() { return; }
+        if let Some(g) = self.viewer_geometry() {
+            unsafe { let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer]; }
+        }
+        if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (&self.viewer_cover, self.viewer_transform, self.viewer_rect.get()) {
+            let frame = cached_zoom_frame(cached.layer, [r.w as f64, r.h as f64], zoom / old_zoom, *old_pan, pan);
+            unsafe { let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame]; }
+        }
+    }
     /// Render the settled size below the cached composite. Reveal only a complete frame.
     pub fn stage_viewer_raster(&mut self, layer: metal::MetalLayer) -> bool {
         let Some((g, zoom, pan)) = self.viewer_raster.take() else {

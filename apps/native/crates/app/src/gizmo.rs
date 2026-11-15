@@ -1288,8 +1288,7 @@ impl GizmoSurface {
             Tool::Zoom => {
                 let factor = if event.modifiers.alt { 0.8 } else { 1.25 };
                 let at = event.position;
-                self.host.navigate(Navigate::Zoom { factor, at }, cx);
-                self.draw(cx);
+                self.zoom_view(Navigate::Zoom { factor, at }, cx);
                 return;
             }
             Tool::Rotate => {
@@ -1530,6 +1529,16 @@ impl GizmoSurface {
         })
         .detach();
     }
+    /// Content and handles reach the compositor as one navigation frame.
+    fn zoom_view(&mut self, change: Navigate, cx: &mut Context<Self>) {
+        unsafe {
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), begin];
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), setDisableActions:true];
+        }
+        self.host.navigate(change, cx);
+        self.draw(cx);
+        unsafe { let _: () = objc2::msg_send![objc2::class!(CATransaction), commit]; }
+    }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
         if event.is_momentum || self.zoom_input.owns_pinch() {
             return;
@@ -1551,8 +1560,7 @@ impl GizmoSurface {
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
         if let Some(change) = self.zoom_input.wheel(event) {
-            self.host.navigate(change, cx);
-            self.draw(cx);
+            self.zoom_view(change, cx);
         } else if m.shift {
             // A plain two-finger scroll leaves the view where it is.
             let by = if dx == 0. {
@@ -2882,8 +2890,7 @@ impl Render for GizmoSurface {
                 let Some(change) = change else {
                     return;
                 };
-                s.host.navigate(change, cx);
-                s.draw(cx);
+                s.zoom_view(change, cx);
             }))
             .child(
                 canvas(
