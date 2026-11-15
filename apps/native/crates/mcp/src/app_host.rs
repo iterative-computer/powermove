@@ -146,10 +146,21 @@ impl Host {
         self.paused.lock().unwrap().remove(project);
         self.pause_changed.notify_all();
     }
-    pub fn wait_if_paused(&self, project: &str) {
-        let mut paused = self.paused.lock().unwrap();
-        while paused.contains(project) && !self.closing.load(Ordering::Acquire) {
-            paused = self.pause_changed.wait(paused).unwrap();
+    pub fn wait_if_paused(&self, project: &str, mut running: impl FnMut() -> bool) -> bool {
+        loop {
+            // Panel Stop revokes admission without going through the toolbar.
+            // Check it outside the pause lock and wake only this MCP worker.
+            if self.closing.load(Ordering::Acquire) || !running() {
+                return false;
+            }
+            let paused = self.paused.lock().unwrap();
+            if !paused.contains(project) {
+                return true;
+            }
+            let _ = self
+                .pause_changed
+                .wait_timeout(paused, std::time::Duration::from_millis(100))
+                .unwrap();
         }
     }
     /// Presence is view-only. Hidden projects discard events; returning to a

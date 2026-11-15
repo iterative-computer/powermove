@@ -238,19 +238,7 @@ impl McpSession {
             let result = (|| {
                 let mut released: Option<Instant> = None;
                 loop {
-                    let revoked = worker.agent_token.as_deref().is_some_and(|token| {
-                        worker
-                            .host
-                            .lock()
-                            .ok()
-                            .and_then(|h| {
-                                h.agent_grants
-                                    .as_ref()
-                                    .map(|grants| grants(token).is_none())
-                            })
-                            .unwrap_or(false)
-                    });
-                    if stop.load(Ordering::Acquire) || revoked {
+                    if stop.load(Ordering::Acquire) || worker.run_revoked() {
                         return Ok(
                             json!({"status":"dropped","reason":"The run stopped before this write landed."}),
                         );
@@ -277,7 +265,13 @@ impl McpSession {
                     }
                     let _ = events.recv_timeout(Duration::from_millis(50));
                 }
-                host.wait_if_paused(&project);
+                if !host.wait_if_paused(&project, || {
+                    !stop.load(Ordering::Acquire) && !worker.run_revoked()
+                }) {
+                    return Ok(
+                        json!({"status":"dropped","reason":"The run stopped before this write landed."}),
+                    );
+                }
                 let mut automation = worker
                     .host
                     .lock()

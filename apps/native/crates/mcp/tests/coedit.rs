@@ -351,3 +351,42 @@ fn deleting_an_attached_target_reports_target_removed() {
     drop(actor);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn coedit_paused_worker_observes_panel_stop_without_a_resume() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let (root, host, actor, mut session, id) = attached_fixture();
+    let app = host.lock().unwrap().coedit_host().unwrap();
+    assert!(app.toggle_pause(&id));
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_running = running.clone();
+    let worker_app = app.clone();
+    let project = id.clone();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (send, result) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut announced = false;
+        let admitted = worker_app.wait_if_paused(&project, || {
+            if !announced {
+                started.send(()).unwrap();
+                announced = true;
+            }
+            worker_running.load(Ordering::Acquire)
+        });
+        send.send(admitted).unwrap();
+    });
+    ready.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(result.try_recv().is_err());
+    running.store(false, Ordering::Release);
+    assert!(!result.recv_timeout(Duration::from_secs(1)).unwrap());
+    worker.join().unwrap();
+    app.resume_project(&id);
+    assert!(app.wait_if_paused(&id, || true));
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    drop(app);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}

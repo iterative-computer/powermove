@@ -242,6 +242,15 @@ impl McpSession {
         assert_project(session, &host, id)?;
         host.project_memory(id, args, self.writer)
     }
+    fn run_revoked(&self) -> bool {
+        self.agent_token.as_deref().is_some_and(|token| {
+            self.host.lock().map_or(true, |host| {
+                host.agent_grants
+                    .as_ref()
+                    .is_some_and(|grants| grants(token).is_none())
+            })
+        })
+    }
     /// Called before the app acquires its session-transition fence.
     pub fn wait_for_pause(&self) -> Result<()> {
         if let Some(project) = self.active.as_ref().and_then(|s| s.project.as_deref()) {
@@ -251,7 +260,9 @@ impl McpSession {
                 .map_err(|_| Error::unavailable("MCP host stopped"))?
                 .coedit_host();
             if let Some(gate) = gate {
-                gate.wait_if_paused(project);
+                if !gate.wait_if_paused(project, || !self.run_revoked()) {
+                    return Err(Error::invalid("The agent run stopped while paused."));
+                }
             }
         }
         Ok(())
