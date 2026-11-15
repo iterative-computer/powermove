@@ -9,6 +9,9 @@
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use pm_shell::workspace;
+use pm_shell::kit::{self, Kit, Recipes};
+use pm_shell::symbol::Weight;
+use pm_design::Text;
 
 const TITLE: &str = "Panel Library";
 
@@ -160,6 +163,30 @@ pub fn shown_workspaces(
         .collect()
 }
 
+/// Pure shelf geometry, shared with Electron's shelves.ts.
+fn shelf_scale(width: f32) -> f32 {
+    if !width.is_finite() || width <= 0. { 0.5 } else { (width / 1700.).clamp(0.4, 0.56) }
+}
+fn preview_bounds((w,h): (f32,f32)) -> (f32,f32) { (w.min(960.), h.min(720.)) }
+fn cover_size(size: (f32,f32), scale: f32, max_width: f32) -> (f32,f32) {
+    let (w,h) = preview_bounds(size);
+    let fit = scale.min(420./h).min(max_width/w);
+    let next = if fit.is_finite() && fit > 0. { fit } else { scale };
+    ((w*next).round(), (h*next).round())
+}
+fn pack_rows(widths: &[f32], width: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut rows = Vec::new(); let mut row = Vec::new(); let mut used = 0.;
+    for (i, w) in widths.iter().enumerate() {
+        let next = if row.is_empty() { *w } else { used + gap + w };
+        if !row.is_empty() && next > width { rows.push(std::mem::take(&mut row)); used = *w; } else { used = next; }
+        row.push(i);
+    }
+    if !row.is_empty() { rows.push(row); } rows
+}
+fn panel_size(id: &str) -> (f32,f32) {
+    match id { "timeline" => (960.,360.), "inspector" | "layer-effects" => (320.,600.), "viewer" => (800.,480.), _ => (360.,420.) }
+}
+
 pub struct PanelLibrary {
     editor: WeakEntity<Controller>,
     /// The editor's shell view: its live layout.
@@ -168,10 +195,14 @@ pub struct PanelLibrary {
     query: String,
     search: Option<Entity<pm_shell::text::TextField>>,
     tokens: pm_design::Tokens,
+    motion: pm_shell::motion::Motion<u64>,
 }
 impl PanelLibrary {
+    fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> { &mut self.motion }
     fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
+        self.query.clear();
+        if let Some(search) = &self.search { search.update(cx, |f, cx| f.set_value("", cx)); }
         cx.notify();
     }
     fn send(&self, command: String, cx: &mut Context<Self>) {
@@ -179,7 +210,7 @@ impl PanelLibrary {
             editor.read(cx).host.borrow().send_command(&command, vec![]);
         }
     }
-    fn panel_card(&self, card: &PanelCard, cx: &mut Context<Self>) -> AnyElement {
+    fn panel_card(&self, card: &PanelCard, _kit: &Kit, _scale: f32, _width: f32, cx: &mut Context<Self>) -> AnyElement {
         let t = &self.tokens;
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
         let (label, glyph) = if card.open {
@@ -284,11 +315,12 @@ impl PanelLibrary {
     }
 }
 impl Render for PanelLibrary {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
         let t = self.tokens.clone();
+        let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
         let (ground, ground_alpha) = t.ground();
-        let (line, line_alpha) = t.line();
         let (panels, workspaces) = self
             .editor
             .upgrade()
@@ -307,12 +339,11 @@ impl Render for PanelLibrary {
             .pt(px(m.toolbar))
             .px(px(m.gap))
             .bg(pm_shell::view::tint(ground, ground_alpha))
-            .border_r(px(m.border))
-            .border_color(pm_shell::view::tint(line, line_alpha));
+            .child(kit.search(self.search.clone(), None));
         for page in Page::ALL {
             let heading = match page {
-                Page::Panels(None) => Some("Panels"),
-                Page::Workspaces(None) => Some("Workspaces"),
+                Page::Panels(None) => Some("PANELS"),
+                Page::Workspaces(None) => Some("WORKSPACES"),
                 _ => None,
             };
             if let Some(heading) = heading {
@@ -321,50 +352,61 @@ impl Render for PanelLibrary {
                         .pt(px(m.gap))
                         .px(px(m.gap))
                         .text_size(px(ty.minimum))
-                        .text_color(rgb(c.secondary))
+                        .text_color(rgb(c.faint))
                         .child(heading),
                 );
             }
-            let label = match page {
-                Page::Panels(None) => format!("{} {}", page.title(), panels.len()),
-                Page::Workspaces(None) => format!("{} {}", page.title(), workspaces.len()),
-                _ => page.title().to_owned(),
+            let count = match page {
+                Page::Panels(o) => shown_panels(&panels, o, "").len(),
+                Page::Workspaces(b) => shown_workspaces(&workspaces, b, "").len(),
             };
-            let selected = self.page == page;
-            sidebar = sidebar.child(
-                div()
-                    .id(SharedString::from(format!("library-page-{page:?}")))
-                    .role(Role::Button)
-                    .aria_label(label.clone())
-                    .flex()
-                    .items_center()
-                    .h(px(m.row))
-                    .px(px(m.gap))
-                    .rounded(px(m.control_radius))
-                    .when(selected, |d| d.bg(rgb(c.selected_fill)))
-                    .child(label)
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
-            );
+            if count == 0 && matches!(page, Page::Panels(Some(Origin::Yours)) | Page::Workspaces(Some(false))) { continue; }
+            let symbol = match page {
+                Page::Panels(None) => "square.grid.2x2",
+                Page::Panels(Some(Origin::BuiltIn)) | Page::Workspaces(Some(true)) => "square.stack",
+                Page::Panels(Some(Origin::Yours)) => "wand.and.stars",
+                Page::Panels(Some(Origin::Store)) => "basket",
+                Page::Workspaces(None) => "rectangle.3.group",
+                Page::Workspaces(Some(false)) => "person.crop.circle",
+            };
+            sidebar = sidebar.child(kit.row(format!("library-page-{page:?}"), self.page == page)
+                .role(Role::Button).aria_label(format!("{}, {count}", page.title()))
+                .child(kit.symbol(symbol, m.symbol_panel, Weight::Regular, c.muted))
+                .child(div().flex_1().child(page.title()))
+                .child(kit::shelf_count(&t, count))
+                .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))));
         }
-        let mut shelf = div()
-            .id("library-shelf")
-            .role(Role::List)
-            .aria_label(self.page.title())
-            .flex()
-            .flex_wrap()
-            .gap(px(m.gap));
+        sidebar = sidebar.child(div().flex_1()).child(kit.button("library-store", "Browse the Store", kit::Button::Neutral, Some("basket"), None)
+            .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))));
+        let width = (f32::from(window.viewport_size().width) - m.settings_sidebar - 48.).max(200.);
+        let scale = shelf_scale(width);
+        let mut shelf = div().id("library-shelf").role(Role::List).aria_label(self.page.title()).flex().flex_col().gap(px(30.));
         let empty = match self.page {
             Page::Panels(origin) => {
                 let shown = shown_panels(&panels, origin, &self.query);
-                for card in &shown {
-                    shelf = shelf.child(self.panel_card(card, cx));
+                for source in [Origin::BuiltIn, Origin::Yours, Origin::Store] {
+                    if origin.is_some_and(|o| o != source) { continue; }
+                    let books: Vec<_> = shown.iter().filter(|p| p.origin == source).collect();
+                    if books.is_empty() && source != Origin::Store { continue; }
+                    let mut section = div().flex().flex_col().gap(px(12.));
+                    if origin.is_none() {
+                        section = section.child(div().flex().items_center().gap(px(8.)).text_role(&t, Text::Title)
+                            .child(Page::Panels(Some(source)).title()).child(kit::shelf_count(&t, books.len())));
+                    }
+                    let widths: Vec<_> = books.iter().map(|p| cover_size(panel_size(&p.id), scale, width).0).collect();
+                    for row in pack_rows(&widths, width, 16.) {
+                        section = section.child(div().flex().items_end().gap(px(16.)).mb(px(24.))
+                            .children(row.into_iter().map(|i| self.panel_card(books[i], &kit, scale, width, cx))));
+                    }
+                    shelf = shelf.child(section);
                 }
                 shown.is_empty()
             }
             Page::Workspaces(builtin) => {
                 let shown = shown_workspaces(&workspaces, builtin, &self.query);
-                for card in &shown {
-                    shelf = shelf.child(self.workspace_card(card, cx));
+                let widths = vec![cover_size((400.,250.), scale, width).0; shown.len()];
+                for row in pack_rows(&widths, width, 16.) {
+                    shelf = shelf.child(div().flex().items_end().gap(px(16.)).children(row.into_iter().map(|i| self.workspace_card(&shown[i], cx))));
                 }
                 shown.is_empty()
             }
@@ -410,11 +452,7 @@ impl Render for PanelLibrary {
                             .font_weight(FontWeight(ty.semibold_weight))
                             .child(self.page.title()),
                     )
-                    .children(
-                        self.search
-                            .clone()
-                            .map(|field| div().w(px(m.settings_sidebar)).child(field)),
-                    ),
+
             )
             .child(body);
         div()
@@ -511,6 +549,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     query: String::new(),
                     search: Some(search),
                     tokens,
+                    motion: Default::default(),
                 }
             })
         },

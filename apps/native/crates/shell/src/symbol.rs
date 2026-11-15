@@ -157,3 +157,28 @@ pub fn symbol(name: &str, points: f32, weight: Weight, color: u32, window: &Wind
         None => div().flex_none().size(px(points)).into_any_element(),
     }
 }
+
+/// The shared panel identity used by library covers and workspace maps.
+pub fn panel_symbol(id: &str) -> &'static str {
+    match id {
+        "viewer" => "viewfinder",
+        "inspector" => "slider.horizontal.3",
+        "timeline" => "timeline.selection",
+        "project" | "assets" => "folder",
+        "effects" | "fxbrowser" => "wand.and.stars",
+        "effect-controls" | "layer-effects" => "diamond",
+        "agent" => "sparkles",
+        "notes" => "note.text",
+        "perf" => "speedometer",
+        "shader" => "chevron.left.forwardslash.chevron.right",
+        "takes" => "square.stack.3d.up",
+        "workspaces" => "rectangle.3.group",
+        "captions" => "captions.bubble",
+        "mixer" => "speaker.wave.2",
+        "easing" => "point.topleft.down.to.point.bottomright.curvepath",
+        "color" => "paintpalette",
+        "scopes" => "waveform.path.ecg",
+        "gradient" => "circle.lefthalf.filled",
+        _ => "rectangle.on.rectangle",
+    }
+}
