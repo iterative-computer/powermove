@@ -2027,6 +2027,10 @@ pub struct Host {
     pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
+    /// The keyboard moved the focus (Tab) since the last press of a button:
+    /// a focused control then takes Space and Return; after a click, Space
+    /// is the editor's (play), as in Electron.
+    pub keyboard_navigated: Cell<bool>,
     pub canvas_focus: Cell<bool>,
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
@@ -2227,6 +2231,7 @@ impl Host {
             viewer_tiles: Rc::default(),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
+            keyboard_navigated: Cell::new(false),
             canvas_focus: Cell::new(false),
             flowchart: None,
             layer,
@@ -2309,6 +2314,13 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // Every release of the button is told to the session, which
+                    // ends a pointer gesture whose own view never heard it (it
+                    // was drawn again, or covered, while held).
+                    if e.r#type() == NSEventType::LeftMouseUp {
+                        host.borrow().send_command("pointerReleased", vec![]);
+                        return event.as_ptr();
+                    }
                     let (palette, fields, window, splitter_focus, gpui) = {
                         let h = host.borrow();
                         (
@@ -2323,6 +2335,7 @@ impl Host {
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        host.borrow().keyboard_navigated.set(false);
                         // A press on the window's own content (a timeline, a
                         // canvas, a list), not on a hosted control or inside
                         // an extension panel, takes the keyboard back from a
@@ -2476,6 +2489,7 @@ impl Host {
                             && !canvas_tab
                         {
                             let h = host.borrow();
+                            h.keyboard_navigated.set(true);
                             let reverse = chord == "shift+tab";
                             if !h.advance_toolbar(reverse) {
                                 let native = responder.as_ref().is_some_and(|r| {
@@ -2507,6 +2521,7 @@ impl Host {
                         &chord,
                         field,
                         host.borrow().keyboard_control_focus.get(),
+                        host.borrow().keyboard_navigated.get(),
                         splitter_focus,
                         control,
                     ) {
@@ -2545,6 +2560,7 @@ impl Host {
                 NSEventMask::KeyDown
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
+                    | NSEventMask::LeftMouseUp
                     | NSEventMask::RightMouseDown,
                 &handler,
             )
@@ -4163,6 +4179,7 @@ fn passes_straight(
     chord: &str,
     editing_text: bool,
     control_focus: bool,
+    keyboard_navigated: bool,
     splitter_focus: bool,
     control: bool,
 ) -> bool {
@@ -4170,7 +4187,10 @@ fn passes_straight(
         return false;
     }
     let control_key = matches!(chord, "enter" | "space" | "up" | "down" | "left" | "right");
-    control_focus && control_key
+    // A control the keyboard moved to (Tab) presses with Space; one a
+    // click left focused (in the viewer, on a layer) keeps Return and the
+    // arrows and leaves Space to Play.
+    control_focus && (keyboard_navigated && control_key || control_keeps(chord))
         // A control a click left the keyboard with keeps Return and the
         // arrows; Space plays (`control_keeps`).
         || control && control_keeps(chord)
@@ -6235,14 +6255,19 @@ mod key_order_tests {
     /// divider, but never past the queue while text is being edited.
     #[test]
     fn keys_typed_into_text_never_skip_the_queue() {
-        assert!(passes_straight("space", false, true, false, false));
-        assert!(passes_straight("enter", false, false, false, true));
+        assert!(passes_straight("space", false, true, true, false, false));
+        assert!(passes_straight("enter", false, false, false, false, true));
         // A clicked control leaves Space to the editor (play).
-        assert!(!passes_straight("space", false, false, false, true));
-        assert!(passes_straight("left", false, false, true, false));
-        assert!(!passes_straight("a", false, true, false, false));
+        assert!(!passes_straight("space", false, false, false, false, true));
+        // Focus a click left in the viewer or on a layer: Space plays, the
+        // arrows and Return stay with what has the focus.
+        assert!(!passes_straight("space", false, true, false, false, false));
+        assert!(passes_straight("up", false, true, false, false, false));
+        assert!(passes_straight("enter", false, true, false, false, false));
+        assert!(passes_straight("left", false, false, false, true, false));
+        assert!(!passes_straight("a", false, true, true, false, false));
         for key in ["space", "enter", "up", "left"] {
-            assert!(!passes_straight(key, true, true, true, true), "{key}");
+            assert!(!passes_straight(key, true, true, true, true, true), "{key}");
         }
     }
 }

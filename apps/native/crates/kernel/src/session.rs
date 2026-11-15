@@ -363,6 +363,11 @@ pub(crate) struct Session {
     /// that file once the folder syncs, so that save expects the file that
     /// is there.
     pub unfinalized: Option<Unfinalized>,
+    /// The journal folder of a session saving to a library slot, chosen at
+    /// open and kept: the slot when that slot is what opened, otherwise the
+    /// id it opened under (a copy made by the open), where the next open of
+    /// that project looks for its unsaved work (PM-360).
+    pub journal_id: String,
 }
 /// A save that installed its file and could not sync the folder, whole:
 /// what it wrote, and for a Save As where to and the lock taken there. All
@@ -2316,10 +2321,22 @@ impl Kernel {
                 ) => slot == &lib.id && lib.journal_applied == 0 && !lib.from_autosave,
                 _ => false,
             };
-        let durable_id = match &destination {
-            Destination::Library(slot) if *slot != id => Some(slot.clone()),
-            _ => None,
+        // Where this session's journal lives: where the next open of its
+        // work looks for it. A library slot opened (under its own id, or
+        // under a file's id after Recover on a copy) and a copy of a file (the
+        // file's next open reopens that copy, `copy_of`) keep it in the slot.
+        // A copy made from a library project (its file missing, or the
+        // original app's library) keeps it under the id it opened with: that
+        // project's next open reads that id again, not this copy (PM-360).
+        let journal_id = match (&destination, &source) {
+            (
+                Destination::Library(slot),
+                OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. },
+            ) if *slot != id && lib.id != *slot => id.clone(),
+            (Destination::Library(slot), _) => slot.clone(),
+            _ => id.clone(),
         };
+        let durable_id = (journal_id != id).then(|| journal_id.clone());
         let mut info = self.open_known(&id, source, known, durable_id.as_deref())?;
         // What the first save would work out about a long undo history on
         // this thread is worked out beside it instead, from now.
@@ -2350,6 +2367,7 @@ impl Kernel {
                 rejected_history,
                 pending_save: None,
                 unfinalized: None,
+                journal_id,
             },
         );
         // A new/copy project gets a rollback-readable slot immediately.

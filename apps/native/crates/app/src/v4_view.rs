@@ -1939,6 +1939,36 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// The keyboard is on a node of this view that hears keys, itself or
+    /// through what holds it (a Project card a click focused, in a grid that
+    /// listens): its Space is its own (Quick Look), not Play.
+    pub fn focused_takes_keys(&self, window: &Window) -> bool {
+        let Some(mut at) = self
+            .focus
+            .iter()
+            .find_map(|(id, focus)| focus.is_focused(window).then_some(*id))
+        else {
+            return false;
+        };
+        while let Some(node) = self.prepared.node(at) {
+            if node.events.key_down {
+                return true;
+            }
+            let Some(parent) = node.parent else { break };
+            at = parent;
+        }
+        false
+    }
+    /// The button came up in the window while a scrub or a captured press of
+    /// this view still waits for it: its own listener never heard the
+    /// release (the panel was drawn again while held). It ends now.
+    pub fn release_unheard(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let held = self.scrub.is_some() || self.capture.is_some();
+        if held {
+            self.release_pointer(window.mouse_position(), 1, Modifiers::none(), cx);
+        }
+        held
+    }
     /// The pressed pointer comes up: a scrub or a grading drag ends (one
     /// Undo step), a captured node hears `pointerup`.
     fn release_pointer(
