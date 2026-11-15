@@ -84,7 +84,12 @@ function Icon(props: {
       }}
       onClick={(event) => {
         event.stopPropagation();
-        if (!props.disabled) props.send(props.intent);
+        if (!props.disabled)
+          props.send(
+            props.intent.type === "disclosure"
+              ? { ...props.intent, all: !!event.altKey }
+              : props.intent,
+          );
       }}
     >
       {props.children}
