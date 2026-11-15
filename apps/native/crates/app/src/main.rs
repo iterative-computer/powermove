@@ -1,3 +1,5 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 // Rust allocations use the system allocator. The bundle launches with
 // `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
 // freed large blocks go back to macOS at once; small blocks return per 16 KiB
