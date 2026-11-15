@@ -1693,7 +1693,9 @@ impl Backend {
                 }
                 self.validate_binding_owner(handle)?;
                 // Effect Controls and the Color panel write effect parameters.
-                if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
+                if matches!(self.panel_id.as_str(), "layer-effects" | "color")
+                    || (self.panel_id == "inspector" && handle.starts_with("effect-parameter:"))
+                {
                     return self
                         .parameter_write(handle, &args["value"], time)
                         .map(NativeCommand::Kernel);
