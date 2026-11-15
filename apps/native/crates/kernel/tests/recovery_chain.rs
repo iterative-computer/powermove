@@ -763,3 +763,91 @@ fn a_continued_session_matches_only_its_own_bases() {
     let (_, offered) = launch(&mut k, &path, RecoveryDecision::OpenAsCopy);
     assert!(offered.starts_with("OfferCopy"), "{offered}");
 }
+
+/// PM-360. A library project that opens as a copy each time (here: its
+/// file is missing on this Mac, as for a "— Native" project made from an
+/// original-app project): opened, edited, saved, renamed, killed before
+/// the save's journal checkpoint landed. Its journal was kept with the copy
+/// that open made, which no later open looks at: the next open asked
+/// nothing and the rename was lost. And the save's journal took the copy's
+/// saved state, which the next open does not read, as its base: replayed
+/// onto the project that opens, it could not be recovered. Now the next
+/// open of the same project asks, and Recover brings the rename back.
+#[test]
+fn a_project_opened_as_a_copy_recovers_on_the_next_open() {
+    let root = TempDir::new("recovery-as-copy");
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        let mut project = value();
+        let o = project.as_object_mut().unwrap();
+        o.insert("id", Value::from("sync"));
+        o.insert("name", Value::from("Sync — Native"));
+        let meta = pm_model::json::parse(&format!(
+            r#"{{"file":{{"path":"{}"}}}}"#,
+            root.path("gone/Sync.pmv").display()
+        ))
+        .unwrap();
+        w.save_project("sync", project, Value::Null, Value::Null, meta)
+            .unwrap();
+    }
+    let kept;
+    let open = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "sync".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "sync".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    {
+        let mut k = kernel(&root.0);
+        let ShellReply::Opened {
+            session, decision, ..
+        } = open(&mut k)
+        else {
+            panic!("not opened")
+        };
+        assert!(
+            matches!(decision, pm_kernel::locks::OpenDecision::AsCopy(_)),
+            "{decision:?}"
+        );
+        rename(&mut k, &session.project, "Before saving");
+        k.durability_barrier().unwrap();
+        let before_save = journal::sessions(&root.path("journals/sync"))
+            .pop()
+            .unwrap();
+        kept = keep(&before_save, &root);
+        k.shell(ShellCall::Save(session.clone())).unwrap();
+        rename(&mut k, &session.project, "Renamed after saving");
+        k.durability_barrier().unwrap();
+    }
+    // Killed a moment after the rename: the session the save started has
+    // no checkpoint yet, and the one before it is still there.
+    kill_before_first_checkpoint(&root.path("journals/sync"));
+    kept.put_back();
+    let mut k = kernel(&root.0);
+    let reply = open(&mut k);
+    let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+        panic!("no recovery question: {reply:?}");
+    };
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    else {
+        panic!("{recovery:?} did not open");
+    };
+    // Recovered beside the project that opened (its save went to the copy
+    // this open made, which the next open does not reopen: PM-361).
+    assert!(
+        name(&k, &session.project).starts_with("Renamed after saving"),
+        "{}",
+        name(&k, &session.project)
+    );
+}
