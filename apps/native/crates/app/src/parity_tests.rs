@@ -1278,3 +1278,68 @@ fn pasting_a_copied_picture_or_file_makes_a_layer_at_the_playhead_stored_with_th
         Some(&*still.to_string_lossy())
     );
 }
+
+#[test]
+fn project_bins_native_edits_survive_save_reopen_and_history() {
+    use pm_panel_media::{Catalog, Edit};
+    let desk = Desk::new(
+        json!({"id":"bins","compId":"c","w":64,"h":64,"fps":30,"dur":1,"layers":[],"assets":{"a":{"id":"a","name":"A","kind":"image"}}}),
+    );
+    let apply = |edit| {
+        let c = Catalog::published(&desk.published()).unwrap();
+        let ack = c
+            .prepare(edit)
+            .unwrap()
+            .submit(&desk.kernel(), Caller::native())
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    };
+    for edit in [
+        Edit::CreateFolder {
+            id: "outer".into(),
+            name: "Outer".into(),
+            parent: None,
+        },
+        Edit::CreateFolder {
+            id: "inner".into(),
+            name: "Inner".into(),
+            parent: Some("outer".into()),
+        },
+        Edit::RenameFolder {
+            id: "inner".into(),
+            name: "Selects".into(),
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: Some("inner".into()),
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: None,
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: Some("inner".into()),
+        },
+        Edit::DeleteFolder { id: "inner".into() },
+    ] {
+        let before = desk.document();
+        apply(edit);
+        let after = desk.document();
+        desk.undo();
+        assert_eq!(desk.document(), before);
+        desk.redo();
+        assert_eq!(desk.document(), after);
+    }
+    let c = Catalog::published(&desk.published()).unwrap();
+    assert_eq!(c.assets["a"].folder.as_deref(), Some("outer"));
+    let reopened = desk.reopened();
+    let saved = Catalog::published(&reopened.published).unwrap();
+    assert_eq!(saved.folders, c.folders);
+    assert_eq!(saved.assets["a"].folder, c.assets["a"].folder);
+}
