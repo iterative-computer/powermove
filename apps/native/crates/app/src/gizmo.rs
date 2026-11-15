@@ -49,13 +49,15 @@ pub const NAVIGATION_IDLE: Duration = Duration::from_millis(150);
 /// One input owner per gesture; AppKit can interleave scroll and magnify.
 #[derive(Default)]
 pub(crate) struct ZoomInput {
+    pinching: bool,
     pinch_until: Option<std::time::Instant>,
 }
 impl ZoomInput {
     fn owns_pinch(&self) -> bool {
-        self.pinch_until.is_some_and(|until| std::time::Instant::now() < until)
+        self.pinching || self.pinch_until.is_some_and(|until| std::time::Instant::now() < until)
     }
     pub(crate) fn pinch(&mut self, event: &PinchEvent) -> Option<Navigate> {
+        self.pinching = !matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled);
         self.pinch_until = Some(std::time::Instant::now() + NAVIGATION_IDLE);
         if event.phase == TouchPhase::Cancelled || !event.delta.is_finite() || event.delta == 0. {
             return None;
@@ -66,11 +68,7 @@ impl ZoomInput {
         })
     }
     pub(crate) fn wheel(&self, event: &ScrollWheelEvent) -> Option<Navigate> {
-        if event.is_momentum
-            || self
-                .pinch_until
-                .is_some_and(|until| std::time::Instant::now() < until)
-        {
+        if event.is_momentum || self.owns_pinch() {
             return None;
         }
         let m = event.modifiers;
