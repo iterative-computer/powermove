@@ -1604,6 +1604,7 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
     wait(rig.runtime.show("export").unwrap());
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
     vcx.run_until_parked();
+    vcx.update(|window, _| window.activate());
     vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.retry.4", window, cx)));
     let revealed = std::cell::Cell::new(false);
     settle(&mut vcx, |cx| {
