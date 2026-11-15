@@ -1407,13 +1407,29 @@ impl SurfaceView {
             }
         }
     }
-    /// Re-stage AppKit slots whose cached paint did not run this frame.
-    pub fn keep_native_slots(&self, cx: &App) {
+    /// Whether a native view (the timeline, the viewer's gizmos) draws
+    /// inside this node: its content is not drawn by the panel's scene.
+    fn holds_native(&self, id: Id) -> bool {
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            let Some(node) = self.prepared.node(at) else {
+                continue;
+            };
+            if node.native.is_some() {
+                return true;
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        false
+    }
+    /// Re-stage AppKit slots whose cached paint did not run this frame (a
+    /// slot inside a scroll layer follows the layer's offset).
+    pub fn keep_native_slots(&self, window: &Window, cx: &App) {
         for control in self.controls.values() {
-            control.read(cx).keep();
+            control.read(cx).keep(window);
         }
         for field in self.fields.values() {
-            field.read(cx).keep();
+            field.read(cx).keep(window);
         }
     }
     fn run(
@@ -2164,6 +2180,11 @@ impl SurfaceView {
             }
             if node.scroll_y {
                 element = element.overflow_y_scroll();
+            }
+            // A wheel step only moves the content (a native view inside
+            // draws on its own and keeps the full redraw).
+            if !self.holds_native(id) {
+                element = element.scroll_layer();
             }
             if follows {
                 // `metadata.scrollToken`: a new value goes back to the end
@@ -3300,9 +3321,13 @@ impl SurfaceView {
         let Some(scroll) = self.scrolls.get(&id) else {
             return;
         };
-        let offset = -f32::from(scroll.offset().y) as f64;
         let bounds = scroll.bounds();
         let height = f32::from(bounds.size.height) as f64;
+        // A wheel step can leave the offset past the end until the next
+        // frame clamps it: read it within the list, or the range is empty
+        // and the list shows no rows.
+        let end = (geometry.count as f64 * geometry.item_size - height).max(0.);
+        let offset = (-f32::from(scroll.offset().y) as f64).clamp(0., end);
         if let Ok(range) = geometry.visible(offset, height) {
             self.send(
                 id,

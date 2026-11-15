@@ -1049,7 +1049,7 @@ impl Controller {
             let view = view.clone();
             canvas(
                 |_, _, _| (),
-                move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
+                move |_, _, window, cx| view.read(cx).keep_native_slots(window, cx),
             )
             .absolute()
             .size_0()
