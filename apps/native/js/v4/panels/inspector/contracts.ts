@@ -112,7 +112,7 @@ export interface Section {
   action?: SectionAction;
   /** Several quiet actions in a row (Time: remap, freeze, reverse). */
   actions?: SectionAction[];
-  animators?: { id: string; name: string }[];
+  animators?: { id: string; name: string; rows: Row[] }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];
@@ -209,6 +209,7 @@ export interface ReadoutClock {
 export function sectionRows(section: Section): Row[] {
   return [
     ...section.rows,
+    ...(section.animators ?? []).flatMap((animator) => animator.rows),
     ...(section.masks ?? []).flatMap((mask) => mask.rows),
   ];
 }
