@@ -1,5 +1,6 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
 pub mod agent_menu;
+pub mod area;
 #[cfg(target_os = "macos")]
 pub mod ease;
 #[cfg(target_os = "macos")]

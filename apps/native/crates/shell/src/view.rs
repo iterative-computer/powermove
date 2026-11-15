@@ -22,7 +22,18 @@ struct PanelDrag {
     preview: Option<DropPreview>,
 }
 #[derive(Clone)]
+struct AreaDrag {
+    id: String,
+    corner: crate::area::Corner,
+    start: Point<Pixels>,
+    at: Point<Pixels>,
+    original: Layout,
+    moved: bool,
+    action: crate::area::Action,
+}
+#[derive(Clone)]
 enum Gesture {
+    Area(AreaDrag),
     Resize(Divider, Point<Pixels>, Layout),
     Panel(PanelDrag),
 }
@@ -30,6 +41,7 @@ impl Gesture {
     fn original(self) -> Layout {
         match self {
             Gesture::Resize(_, _, l) => l,
+            Gesture::Area(d) => d.original,
             Gesture::Panel(d) => d.original,
         }
     }
@@ -40,6 +52,7 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    area_hover: Option<(String, Option<crate::area::Corner>)>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -125,6 +138,7 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            area_hover: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -725,6 +739,32 @@ impl Editor {
                     None => Err(anyhow::anyhow!("Unknown panel")),
                 }
             }
+            ("area", "split") => {
+                let mut parts = rest.split(':');
+                let source = parts.next().unwrap_or("");
+                let new = parts.next().unwrap_or("");
+                let top = parts.next() == Some("top");
+                let height = parts
+                    .next()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.);
+                let total = self
+                    .layout
+                    .find(source)
+                    .and_then(|(d, g, _)| {
+                        self.geometry
+                            .panels
+                            .iter()
+                            .find(|p| (p.dock, p.group) == (d, g))
+                    })
+                    .map_or(0., |p| p.rect.h);
+                if panels.ids().contains(&new) {
+                    self.layout
+                        .split_area(source, new, top, height, total, self.tokens.metrics.gap)
+                } else {
+                    Err(anyhow::anyhow!("Unknown panel"))
+                }
+            }
             // panel:addto:<dock>:<group>:<id> — the header's + menu.
             ("panel", "addto") => {
                 let mut it = rest.splitn(3, ':');
@@ -1274,6 +1314,49 @@ impl Editor {
             return;
         };
         self.resize_live = false;
+        if let Gesture::Area(drag) = &g {
+            if drag.moved {
+                if let crate::area::Action::Split { top, height } = drag.action {
+                    let panels = self.panels(cx);
+                    let mut ids: Vec<_> = panels
+                        .ids()
+                        .into_iter()
+                        .filter(|id| *id != "toolbar" && self.layout.find(id).is_none())
+                        .collect();
+                    ids.sort_by_key(|id| panels.title(id).to_lowercase());
+                    let items: Vec<_> = ids
+                        .into_iter()
+                        .map(|id| {
+                            MenuEntry::item(
+                                panels.title(id),
+                                format!(
+                                    "area:split:{}:{id}:{}:{height}",
+                                    drag.id,
+                                    if top { "top" } else { "bottom" }
+                                ),
+                            )
+                        })
+                        .collect();
+                    if let Some(host) = &self.host {
+                        host.borrow().context_menu(
+                            &items,
+                            f32::from(drag.at.x),
+                            f32::from(drag.at.y),
+                        );
+                    }
+                    if items.is_empty() {
+                        self.notify_status("Every panel is already open".into(), cx);
+                    }
+                } else if let Err(err) = self.layout.apply_area(
+                    &drag.id,
+                    &drag.action,
+                    &self.geometry,
+                    self.tokens.metrics.gap,
+                ) {
+                    self.notify_status(err.to_string(), cx);
+                }
+            }
+        }
         if let Gesture::Panel(drag) = g
             && drag.moved
         {
@@ -1956,6 +2039,7 @@ impl Render for Editor {
         let resizing = match &self.gesture {
             Some(Gesture::Resize(d, ..)) if d.horizontal => Some(CursorStyle::ResizeUpDown),
             Some(Gesture::Resize(..)) => Some(CursorStyle::ResizeLeftRight),
+            Some(Gesture::Area(..)) => Some(CursorStyle::Crosshair),
             _ => None,
         };
         let mut root = div()
@@ -2010,6 +2094,27 @@ impl Render for Editor {
             )
             .on_mouse_move_all({
                 let listener = cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                    let at = (f32::from(e.position.x), f32::from(e.position.y));
+                    let hover = this
+                        .geometry
+                        .panels
+                        .iter()
+                        .find(|p| p.rect.contains(at.0, at.1))
+                        .map(|p| {
+                            let id = this.layout.docks[p.dock].groups[p.group]
+                                .active()
+                                .to_string();
+                            (
+                                id,
+                                crate::area::Corner::ALL
+                                    .into_iter()
+                                    .find(|c| c.rect(p.rect).contains(at.0, at.1)),
+                            )
+                        });
+                    if this.area_hover != hover {
+                        this.area_hover = hover;
+                        cx.notify();
+                    }
                     if !e.dragging() {
                         // The button is up: a release that never reached
                         // this window ends the drag here, where it showed.
@@ -2019,6 +2124,23 @@ impl Render for Editor {
                         return;
                     }
                     match &mut this.gesture {
+                        Some(Gesture::Area(drag)) => {
+                            drag.at = e.position;
+                            drag.moved |= f32::from(e.position.x - drag.start.x)
+                                .hypot(f32::from(e.position.y - drag.start.y))
+                                >= 4.;
+                            if drag.moved {
+                                drag.action = this.layout.area_action(
+                                    &this.geometry,
+                                    &drag.id,
+                                    drag.corner,
+                                    at.0,
+                                    at.1,
+                                    this.tokens.metrics.gap,
+                                );
+                            }
+                            cx.notify();
+                        }
                         Some(Gesture::Resize(d, start, original)) => {
                             let delta = if d.horizontal {
                                 f32::from(e.position.y - start.y)
@@ -2076,7 +2198,22 @@ impl Render for Editor {
                 }
             })
             .on_mouse_up_all({
-                let listener = cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
+                let listener = cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                    if let Some(Gesture::Area(drag)) = &mut this.gesture {
+                        drag.at = e.position;
+                        if drag.moved {
+                            drag.action = this.layout.area_action(
+                                &this.geometry,
+                                &drag.id,
+                                drag.corner,
+                                f32::from(e.position.x),
+                                f32::from(e.position.y),
+                                this.tokens.metrics.gap,
+                            );
+                        }
+                    }
+                    this.end_gesture(cx);
+                });
                 move |e: &MouseUpEvent, phase, _, w, cx| {
                     if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
                         listener(e, w, cx);
@@ -2765,6 +2902,196 @@ impl Render for Editor {
                     ),
             );
         }
+        if self.maximized_panel.is_none() && !dragging {
+            for p in self.geometry.panels.clone() {
+                let id = self.layout.docks[p.dock].groups[p.group]
+                    .active()
+                    .to_string();
+                let panel_hover = self.area_hover.as_ref().is_some_and(|(h, _)| h == &id);
+                for (i, corner) in crate::area::Corner::ALL.into_iter().enumerate() {
+                    let active = self
+                        .area_hover
+                        .as_ref()
+                        .is_some_and(|(h, c)| h == &id && *c == Some(corner));
+                    let goal = if active {
+                        1.
+                    } else if panel_hover {
+                        0.7
+                    } else {
+                        0.
+                    };
+                    let fade = w
+                        .use_keyed_transition(
+                            format!("area-fade-{id}-{i}"),
+                            cx,
+                            Duration::from_millis(100),
+                            |_, _| goal,
+                        )
+                        .with_easing(|p| 1. - (1. - p).powi(3));
+                    fade.update(cx, |value, _| *value = goal);
+                    let opacity = *fade.evaluate(w, cx);
+                    let ink = if active {
+                        tint(c.accent, opacity)
+                    } else {
+                        tint(c.text, 0.34 * opacity)
+                    };
+                    let id_down = id.clone();
+                    root = root.child(
+                        positioned(corner.rect(p.rect))
+                            .id(format!("area-{id}-{i}"))
+                            .tooltip(tooltip(&t, "Drag to split, join or dock"))
+                            .cursor(CursorStyle::Crosshair)
+                            .child(
+                                canvas(
+                                    move |_, _, _| (),
+                                    move |b, _, window, _| {
+                                        let x = f32::from(b.origin.x) + 2.;
+                                        let y = f32::from(b.origin.y) + 2.;
+                                        // CSS 7px square with a diagonal 30% (34% on hover) stop.
+                                        let leg = 7. * 2. * if active { 0.34 } else { 0.30 };
+                                        let x = if corner.left() { x } else { x + 7. };
+                                        let y = if corner.top() { y } else { y + 7. };
+                                        let mut path = PathBuilder::fill();
+                                        path.move_to(point(px(x), px(y)));
+                                        path.line_to(point(
+                                            px(x + if corner.left() { leg } else { -leg }),
+                                            px(y),
+                                        ));
+                                        path.line_to(point(
+                                            px(x),
+                                            px(y + if corner.top() { leg } else { -leg }),
+                                        ));
+                                        path.close();
+                                        if let Ok(path) = path.build() {
+                                            window.paint_path(path, ink);
+                                        }
+                                    },
+                                )
+                                .size_full(),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.gesture = Some(Gesture::Area(AreaDrag {
+                                        id: id_down.clone(),
+                                        corner,
+                                        start: e.position,
+                                        at: e.position,
+                                        original: this.layout.clone(),
+                                        moved: false,
+                                        action: crate::area::Action::None,
+                                    }));
+                                    this.watch_release(cx);
+                                    window.focus(&this.focus, cx);
+                                    cx.notify();
+                                }),
+                            ),
+                    );
+                }
+            }
+        }
+        if let Some(Gesture::Area(drag)) = &self.gesture
+            && drag.moved
+        {
+            let action = &drag.action;
+            let target = match action {
+                crate::area::Action::Join { target } | crate::area::Action::Dock { target, .. } => {
+                    target
+                }
+                _ => &drag.id,
+            };
+            if let Some((d, g, _)) = self.layout.find(target)
+                && let Some(p) = self
+                    .geometry
+                    .panels
+                    .iter()
+                    .find(|p| (p.dock, p.group) == (d, g))
+            {
+                let mut r = p.rect;
+                let label = match action {
+                    crate::area::Action::Split { top, height } => {
+                        r.h = *height;
+                        if !top {
+                            r.y = p.rect.y + p.rect.h - height;
+                        }
+                        "Split area"
+                    }
+                    crate::area::Action::Join { .. } => "Join areas",
+                    crate::area::Action::Dock { place, .. } => {
+                        if *place != crate::area::Place::Replace {
+                            r.h /= 2.;
+                            if *place == crate::area::Place::Below {
+                                r.y += r.h;
+                            }
+                        }
+                        "Move area here"
+                    }
+                    _ => "Drag further to split",
+                };
+                if matches!(action, crate::area::Action::Join { .. }) {
+                    let source_y = self
+                        .layout
+                        .find(&drag.id)
+                        .and_then(|(d, g, _)| {
+                            self.geometry
+                                .panels
+                                .iter()
+                                .find(|p| (p.dock, p.group) == (d, g))
+                        })
+                        .map_or(0., |p| p.rect.y);
+                    root = root.child(
+                        positioned(r)
+                            .bg(tint(0x000000, 0.46))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(34.))
+                            .text_color(tint(0xffffff, 0.82))
+                            .child(if r.y > source_y { "↓" } else { "↑" }),
+                    );
+                } else if !matches!(action, crate::area::Action::None) {
+                    root = root.child(
+                        positioned(r)
+                            .bg(tint(c.accent, 0.22))
+                            .border_2()
+                            .border_color(tint(c.accent, 0.7)),
+                    );
+                    if let crate::area::Action::Split { top, .. } = action {
+                        let y = if *top {
+                            r.y + r.h + m.gap / 2.
+                        } else {
+                            r.y - m.gap / 2.
+                        };
+                        root = root.child(
+                            positioned(Rect {
+                                x: r.x,
+                                y: y - 1.,
+                                w: r.w,
+                                h: 2.,
+                            })
+                            .bg(rgb(c.accent)),
+                        );
+                    }
+                }
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(px((f32::from(drag.at.x) + 14.)
+                            .clamp(8., (f32::from(viewport.width) - 200.).max(8.))))
+                        .top(px((f32::from(drag.at.y) + 14.)
+                            .clamp(8., (f32::from(viewport.height) - 50.).max(8.))))
+                        .px(px(m.inset))
+                        .py(px(m.gap))
+                        .rounded(px(m.control_radius))
+                        .bg(rgb(c.panel))
+                        .child(label),
+                );
+            }
+        }
+        if matches!(&self.gesture, Some(Gesture::Area(d)) if d.moved) {
+            root = root.child(div().absolute().size_full().cursor(CursorStyle::Crosshair));
+        }
         // Drop preview and a card that follows the pointer. Work-surface
         // overlays stay solid tints (no glass below the controls band).
         if let Some(Gesture::Panel(drag)) = &self.gesture
@@ -2997,6 +3324,126 @@ mod keyboard_tests {
             Arc::new(()),
             || None,
         )
+    }
+
+    #[gpui::test]
+    fn area_corners_capture_pointer_and_escape_restores_layout(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(
+                Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let original = view.read_with(cx, |v, _| v.layout.clone());
+        let r = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
+        for corner in crate::area::Corner::ALL {
+            let hit = corner.rect(r);
+            let at = point(px(hit.x + 5.), px(hit.y + 5.));
+            cx.simulate_mouse_move(at, None, Modifiers::none());
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+            view.read_with(cx, |v, _| {
+                assert!(matches!(&v.gesture,Some(Gesture::Area(d)) if d.corner==corner))
+            });
+            cx.simulate_mouse_move(
+                point(px(r.x + 20.), px(r.y + r.h / 2.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            view.update(cx, |v, cx| v.cancel_gesture(cx));
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+            view.read_with(cx, |v, _| assert_eq!(v.layout, original));
+        }
+    }
+    #[::core::prelude::v1::test]
+    fn area_corners_headless_capture() {
+        let Some(dir) = std::env::var_os("PM_PANEL_CORNERS_CAPTURE_DIR") else {
+            return;
+        };
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(gpui_parley::ParleyTextSystem::new(
+                    gpui_parley::SystemFonts::Load,
+                )),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let w = cx
+                .open_window(size(px(1440.), px(900.)), |_, cx| {
+                    cx.new(|cx| {
+                        Editor::new(
+                            Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                            None,
+                            cx,
+                        )
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let (id, r) = w
+                .update(&mut cx, |v, _, _| {
+                    let p = &v.geometry.panels[0];
+                    (
+                        v.layout.docks[p.dock].groups[p.group].active().to_string(),
+                        p.rect,
+                    )
+                })
+                .unwrap();
+            for (name, hover) in [("rest", None), ("panel-hover", Some((id.clone(), None)))]
+                .into_iter()
+                .chain(
+                    crate::area::Corner::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            (
+                                [
+                                    "top-left-hover",
+                                    "top-right-hover",
+                                    "bottom-left-hover",
+                                    "bottom-right-hover",
+                                ][i],
+                                Some((id.clone(), Some(c))),
+                            )
+                        }),
+                )
+            {
+                w.update(&mut cx, |v, _, cx| {
+                    v.area_hover = hover;
+                    cx.notify();
+                })
+                .unwrap();
+                cx.run_until_parked();
+                // Settle the finite opacity transition before each reference frame.
+                std::thread::sleep(Duration::from_millis(120));
+                w.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+                cx.run_until_parked();
+                let image = cx.capture_screenshot(w.into()).unwrap();
+                let scale = image.width() as f32 / 1440.;
+                let path = std::path::Path::new(&dir);
+                image.save(path.join(format!("native-{name}.png"))).unwrap();
+                for (i, c) in crate::area::Corner::ALL.into_iter().enumerate() {
+                    let hit = c.rect(r);
+                    let x = ((hit.x - 6.).max(0.) * scale) as u32;
+                    let y = ((hit.y - 6.).max(0.) * scale) as u32;
+                    image::imageops::crop_imm(
+                        &image,
+                        x,
+                        y,
+                        (28. * scale) as u32,
+                        (28. * scale) as u32,
+                    )
+                    .to_image()
+                    .save(path.join(format!("native-{name}-corner-{i}.png")))
+                    .unwrap();
+                }
+            }
+        });
     }
     fn command(name: &str) -> Command {
         Command {
@@ -3675,10 +4122,23 @@ mod tests {
                             if crossing {
                                 continue;
                             }
+                            // Inside the panel's 11px corner, the area operation
+                            // owns the press; the rest of the splitter grab is unchanged.
+                            let corner = view.read_with(cx, |v, _| {
+                                v.geometry.panels.iter().any(|p| {
+                                    crate::area::Corner::ALL
+                                        .into_iter()
+                                        .any(|c| c.rect(p.rect).contains(x, y))
+                                })
+                            });
                             cx.simulate_mouse_move(point(px(x), px(y)), None, none);
                             assert_eq!(
                                 cx.cursor_style(),
-                                wanted,
+                                if corner {
+                                    CursorStyle::Crosshair
+                                } else {
+                                    wanted
+                                },
                                 "{id} at {w}x{h}: {d:?} at {x},{y}"
                             );
                             checked += 1;
