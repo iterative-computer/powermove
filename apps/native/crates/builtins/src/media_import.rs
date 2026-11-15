@@ -1214,8 +1214,13 @@ mod tests {
             let published = f.actor.handle().published("p").unwrap();
             let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
             assert_eq!(root["assets"][&result.assets[0]]["kind"], "model");
+            let comp = pm_kernel::model::comp_node(
+                published.snapshot.root().unwrap(),
+                published.snapshot.open_comp().as_deref(),
+            ).unwrap();
+            let composition = crate::data::wire(&comp.to_value());
             assert!(
-                root["layers"]
+                composition["layers"]
                     .as_array()
                     .unwrap()
                     .iter()

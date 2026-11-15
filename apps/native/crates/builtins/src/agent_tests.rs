@@ -79,11 +79,15 @@ impl Agent {
         );
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
-        Self {
+        let mut panel = Self {
             panels,
             latest: None,
             typed: String::new(),
-        }
+        };
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.choose("agent-access", "editor");
+        panel
     }
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
         Self::mount_recording(actor, environment, Default::default())
@@ -99,11 +103,15 @@ impl Agent {
         let mut panels = panels;
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
-        Self {
+        let mut panel = Self {
             panels,
             latest: None,
             typed: String::new(),
-        }
+        };
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.choose("agent-access", "editor");
+        panel
     }
     /// Sign-in status arrives from a worker; a run needs it.
     fn connected(&mut self, provider: Provider) {

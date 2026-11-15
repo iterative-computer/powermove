@@ -6021,7 +6021,7 @@ fn layer_and_keyframe_deletion_never_emit_delete_toast() {
 
 #[test]
 fn properties_effects_stack_add_edit_and_multiselection_undo() {
-    let actor = actor();
+    let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
     let mut project = data::wire(&pm_model::json::parse(r##"{"id":"synthetic","name":"Effects","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Shape","from":0,"dur":10,"on":true,"p":{},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap());
     let mut second = project["layers"][0].clone();
