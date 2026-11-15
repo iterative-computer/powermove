@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
+import { binaries } from "./build-model";
 import { ProjectView, type ProjectViewProps } from "../index";
 import { asset, comp, folder, projection } from "./fixtures";
 import {
@@ -13,6 +14,11 @@ import {
 } from "./helpers";
 import { accessibleName, meta, status } from "../presentation";
 import type { Input, Projection } from "../contract";
+
+// Compile the native validator in setup, outside each five-second AX check.
+beforeAll(() => {
+  if (!process.env.PM_PROJECT_INSPECT_WIRE) binaries();
+}, 120_000);
 
 const selected = asset();
 selected.selected = true;
