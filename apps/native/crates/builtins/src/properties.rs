@@ -2557,7 +2557,7 @@ impl Properties {
             return Ok(Some(Request::new(
                 caller,
                 pm_kernel::Call::Transact {
-                    label: Some("Align Layers".into()),
+                    label: Some(mode.label().into()),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Transform(
                         TransformCommand::Align {
@@ -2582,7 +2582,7 @@ impl Properties {
             return Ok(Some(Request::new(
                 caller,
                 pm_kernel::Call::Transact {
-                    label: Some("Distribute Layers".into()),
+                    label: Some(spread.label().into()),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Transform(
                         TransformCommand::Distribute {
