@@ -2543,6 +2543,12 @@ impl Controller {
             self.message = "Finish the recovery decision or current save first".into();
             return;
         }
+        // An edit left open (its owner never ended it: no button is held,
+        // nothing is typed) would refuse the save: it is finished first, as
+        // Undo does, and the save takes it.
+        if self.edit_left_open(cx) {
+            self.call(Call::History(HistoryCall::Seal), cx);
+        }
         let path = as_path.clone();
         if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
             return;
@@ -3560,6 +3566,16 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // The button came up somewhere in the window (after the views
+            // heard it): a pointer gesture whose own view never did ends now.
+            "pointerReleased" => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                }
+                for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
+                    view.update(cx, |v, cx| v.release_unheard(window, cx));
+                }
+            }
             // Space came up after arming the hand over the viewer: it plays
             // only if the hand did not pan (After Effects' rule).
             "viewer.spaceUp" => {
@@ -3571,6 +3587,19 @@ impl Controller {
                 if !panned {
                     self.host.borrow().send_command("play", vec![]);
                 }
+            }
+            // Space on a Project item a click left with the keyboard is the
+            // item's (Quick Look, as in Finder): Play declines and the key
+            // reaches it. Everywhere else Space plays.
+            "play"
+                if cmd.token.is_some()
+                    && self
+                        .builtins
+                        .views
+                        .get("assets")
+                        .is_some_and(|v| v.read(cx).focused_takes_keys(window)) =>
+            {
+                return false;
             }
             // Space held over the viewer is the hand: Play waits for the key
             // to come up (no drag) instead of starting on the way down.

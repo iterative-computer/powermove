@@ -1590,6 +1590,40 @@ mod tests {
         );
         actor.shutdown();
     }
+    /// Save with an edit left open (a drag whose release never ended it):
+    /// the kernel refuses it as it is; finished first, as Cmd-S now does,
+    /// the save goes through and keeps the edit.
+    #[test]
+    fn a_save_finishes_an_edit_left_open_and_keeps_it() {
+        let (_dir, actor, session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Scale".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let refused = k.shell(ShellCall::Save(session.clone())).wait().unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| crate::surfaces::documents::WriteFailure::of(&format!("{e:?}"))
+                    == crate::surfaces::documents::WriteFailure::EditOpen),
+            "{refused:?}"
+        );
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        answer(&k, ShellCall::Save(session));
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none() && !p.dirty, "saved");
+        assert!(p.history.can_undo, "the edit is kept, one undo step");
+        actor.shutdown();
+    }
     /// Undo with an edit left open (a move whose drag never sent its end):
     /// the move is what is undone, and the next edit is a step of its own.
     #[test]
