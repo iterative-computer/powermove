@@ -727,13 +727,31 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             id={`timeline:value:${row.id}`}
             label={row.label}
             {...row.numeric}
+            binding={
+              typeof row.numeric.binding === "string"
+                ? row.numeric.binding
+                : row.numeric.binding.handle
+            }
             disabled={row.locked}
             tabIndex={-1}
           />
         ) : (
           (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
             (axis) =>
-              axis.editor ? (
+              axis.numeric ? (
+                <UI.NumberField
+                  id={`timeline:value:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                  {...axis.numeric}
+                  binding={
+                    typeof axis.numeric.binding === "string"
+                      ? axis.numeric.binding
+                      : axis.numeric.binding.handle
+                  }
+                  disabled={row.locked}
+                  tabIndex={-1}
+                />
+              ) : axis.editor ? (
                 <UI.TextField
                   id={`timeline:value-edit:${row.id}:${axis.path}`}
                   label={`${row.label} ${axis.path.split(".").at(-1)}`}

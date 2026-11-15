@@ -227,6 +227,10 @@ impl TextField {
     pub fn value(&self) -> &str {
         &self.value
     }
+    /// Whether this value is currently accepting typed text.
+    pub fn is_editing(&self) -> bool {
+        self.slot.is_editing()
+    }
     /// The text as it stands in the editor, typed but not yet committed.
     pub fn editing_text(&self) -> String {
         self.slot.value()

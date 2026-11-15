@@ -575,6 +575,196 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
     assert!(!p.history.can_undo, "the whole scrub was one undo step");
 }
+/// Headless input: panel handoff, phase filtering and one kernel undo.
+#[gpui::test]
+fn horizontal_wheel_scrub_is_one_undo_and_ignores_momentum(cx: &mut TestAppContext) {
+    wheel_scrub_scenario(cx, false);
+}
+#[gpui::test]
+fn horizontal_wheel_scrub_adds_an_animated_key(cx: &mut TestAppContext) {
+    wheel_scrub_scenario(cx, true);
+}
+fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    if animated {
+        project["layers"][0]["p"]["opacity"]["kf"] = json!([{"i":"existing","t":1,"v":100}]);
+    }
+    let rig = rig_project("inspector", &project.to_string());
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.number_containing("opacity"))
+        .unwrap();
+    let n = view.read_with(&vcx, |v, _| v.numeric_facts(&name));
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    let wheel = |vcx: &mut VisualTestContext, x: f32, y: f32, phase| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(x), px(y))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+    };
+    wheel(&mut vcx, 0., 24., gpui::TouchPhase::Started);
+    assert!(!rig.kernel.published(PROJECT).unwrap().history.can_undo);
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Started);
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Moved);
+    wheel(&mut vcx, 0., 0., gpui::TouchPhase::Ended);
+    wheel(&mut vcx, 500., 0., gpui::TouchPhase::Moved);
+    let expected = (n.value - 48. * 0.25 * n.step * n.speed).clamp(n.min, n.max);
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.wheel_reading()),
+        Some((expected * 10_000.).round() / 10_000.)
+    );
+    vcx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(301));
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
+    assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
+    if animated {
+        let p = rig.kernel.published(PROJECT).unwrap();
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, "l0").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+        let keys = layer
+            .get("p")
+            .and_then(|p| p.get("opacity"))
+            .and_then(|p| p.get("kf"))
+            .and_then(pm_model::Value::as_array)
+            .unwrap();
+        assert_eq!(keys.len(), 2, "scrubbing adds a key at the playhead");
+        assert!(
+            keys.iter()
+                .any(|k| k.get("t").and_then(pm_model::Value::as_f64) == Some(0.)
+                    && k.get("v").and_then(pm_model::Value::as_f64) == Some(expected))
+        );
+    }
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let after = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.snapshot.root().unwrap().to_value(), before);
+    assert!(!after.history.can_undo);
+}
+/// Timeline's expanded rows mount exactly the same field, with a real lease.
+#[gpui::test]
+fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext) {
+    let rig = rig("timeline", 1);
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let disclosure = view
+        .read_with(&vcx, |v, _| v.semantic_id_starting("timeline:disclosure:"))
+        .unwrap();
+    view.update(&mut vcx, |v, cx| v.click_semantic(&disclosure, cx));
+    settle(cx, |_| {
+        let mut context = vcx.clone();
+        for p in rig.runtime.take_publications() {
+            view.update(&mut context, |v, cx| v.publish(p, cx));
+        }
+        view.read_with(&context, |v, _| v.first_number().is_some())
+    });
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.first_number())
+        .expect("timeline uses shared numeric field");
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in 1..=4 {
+        vcx.simulate_mouse_move(
+            at + point(px(-8. * step as f32), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+    }
+    vcx.simulate_mouse_up(
+        at + point(px(-32.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
+    assert_ne!(
+        rig.kernel
+            .published(PROJECT)
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
+    assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let p = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.snapshot.root().unwrap().to_value(), before);
+    assert!(!p.history.can_undo);
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        view.read_with(&vcx, |v, _| v.number_edit_requested(&name)),
+        "a click opens the native text editor"
+    );
+}
 /// A scrub whose release never reaches the window (AppKit delivered it
 /// elsewhere, owner feedback W4/W5) ends at the next move with the button
 /// up, as one Undo step, and stops holding the window's pointer moves.
