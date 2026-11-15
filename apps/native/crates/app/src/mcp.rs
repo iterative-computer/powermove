@@ -41,12 +41,8 @@ impl Connection {
     /// Library and Store reads never touch the open project, so they also run
     /// while an open waits on a person (a recovery choice).
     fn admit(&self, name: &str) -> Result<Option<Operation>> {
-        const UNFENCED: [&str; 9] = [
+        const UNFENCED: [&str; 5] = [
             "export_video",
-            "apply_commands",
-            "edit_layer_strips",
-            "edit_video",
-            "edit_3d",
             "list_projects",
             "store_search",
             "store_extension",
@@ -82,9 +78,6 @@ impl ToolConnection for Connection {
         Ok(self.session.tools())
     }
     fn invoke(&mut self, name: &str, args: Value) -> Result<Value> {
-        if name != "finish_session" {
-            self.session.wait_for_pause()?;
-        }
         Ok(match self.admit(name) {
             Ok(_operation) => self.session.call(name, args),
             Err(error) => pm_mcp::failure(error),

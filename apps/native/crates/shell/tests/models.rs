@@ -96,11 +96,8 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 296);
-    let camera = bindings
-        .iter()
-        .find(|b| b.id == "native.newCamera")
-        .unwrap();
+    assert_eq!(bindings.len(), 292);
+    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
     assert_eq!(camera.command, "newCamera");
     assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
@@ -575,53 +572,6 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
         assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
     }
 }
-
-// Contextual commands (priority 300) get first refusal before the agent's
-// global Pause fallback (400). The Cite lane owns whether its source has a
-// focused, nonempty prose selection; the shell must honour its handled result.
-#[test]
-fn agent_prose_selection_cites_without_pausing() {
-    let mut resolver = Resolver::new();
-    resolver.bindings.push(Binding {
-        id: "context.agent.cite".into(),
-        chord: "cmd+shift+.".into(),
-        command: "agent.citeSelection".into(),
-        args: vec![],
-        priority: 300,
-        in_fields: true,
-        repeat: false,
-        loose: false,
-    });
-    let out = resolver.submit(key(500, "cmd+shift+."));
-    assert!(
-        matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.citeSelection")
-    );
-    // The focused prose source accepts Cite and stops propagation.
-    assert_eq!(resolver.resolve(500, true), [Effect::Consumed(500)]);
-}
-#[test]
-fn no_prose_selection_declines_to_global_agent_pause() {
-    let mut resolver = Resolver::new();
-    resolver.bindings.push(Binding {
-        id: "context.agent.cite".into(),
-        chord: "cmd+shift+.".into(),
-        command: "agent.citeSelection".into(),
-        args: vec![],
-        priority: 300,
-        in_fields: true,
-        repeat: false,
-        loose: false,
-    });
-    resolver.submit(key(501, "cmd+shift+."));
-    let out = resolver.resolve(501, false);
-    assert!(
-        matches!(out.as_slice(),[Effect::Dispatch{command,class:Class::MayDecline,..}] if command=="agent.pause")
-    );
-    assert_eq!(resolver.resolve(501, true), [Effect::Consumed(501)]);
-    let out = Resolver::new().submit(key(502, "cmd+shift+."));
-    assert!(matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.pause"));
-}
-
 #[test]
 fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
     let t = tokens();

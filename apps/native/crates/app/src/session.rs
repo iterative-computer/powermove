@@ -1324,15 +1324,9 @@ impl Controller {
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
-            let json = |v: &pm_model::Value| {
-                serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v))
-                    .unwrap_or_default()
-            };
-            crate::generated_panel::publication(
-                &mut self.panel_builds,
-                &json(&previous.workspace),
-                &json(&p.workspace),
-            );
+            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
+                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
+            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
         }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
@@ -2642,14 +2636,6 @@ impl Controller {
     /// placed one joins its tabs, as opening from the window does. Other
     /// windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = &self.session {
-            let events = self.mcp.take_presence(&session.project);
-            if !events.is_empty() {
-                if let Some(timeline) = &self.builtins.timeline {
-                    timeline.update(cx, |t, cx| t.agent_presence(events, cx));
-                }
-            }
-        }
         if self.opening || self.close_pending {
             return;
         }
@@ -3405,60 +3391,6 @@ impl Controller {
                     }
                     self.show_builtin("agent", window, cx);
                 }
-            }
-            "agent.stop" => {
-                let Some(session) = &self.session else {
-                    return false;
-                };
-                self.mcp.resume_project(&session.project);
-                let Some(runtime) = self.builtins.runtime.clone() else {
-                    return false;
-                };
-                let Some(thread) = runtime.agent_current_thread() else {
-                    return false;
-                };
-                if !runtime.agent_status().0 {
-                    return false;
-                }
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            runtime.agent_thread_control(
-                                "thread_cancel",
-                                &serde_json::json!({"threadId":thread,"callerAccess":"project"}),
-                            )
-                        })
-                        .await;
-                    let _ = this.update(cx, |s, cx| {
-                        s.message = match result {
-                            Ok(_) => "Agent stopped".into(),
-                            Err(error) => error,
-                        };
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            "agent.undoTurn" => self.undo_agent_turn(cx),
-            "agent.steer" => self.open_agent_steer(window, cx),
-            "agent.pause" => {
-                let Some(session) = &self.session else {
-                    return false;
-                };
-                let Some(runtime) = self.builtins.runtime.as_ref() else {
-                    return false;
-                };
-                if !runtime.agent_status().0 {
-                    return false;
-                }
-                let paused = self.mcp.toggle_pause(&session.project);
-                self.message = if paused {
-                    "Agent paused · ⇧⌘. to resume"
-                } else {
-                    "Agent resumed"
-                }
-                .into();
             }
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),

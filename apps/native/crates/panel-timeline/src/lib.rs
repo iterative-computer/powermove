@@ -2,7 +2,6 @@
 //! Document writes are requests to the kernel; see docs/native/panels/timeline.md.
 #![forbid(unsafe_code)]
 
-pub mod agent_ink;
 mod behaviour;
 mod client;
 pub mod footer;

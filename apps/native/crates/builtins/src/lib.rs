@@ -1103,29 +1103,6 @@ impl Builtins {
         let backend = backend.shared();
         backend.native.project.panel.drag.clone()
     }
-    pub fn agent_progress(&self) -> Option<String> {
-        let (agent, _) = self.agent_state().ok()?;
-        let state = agent.shared();
-        let session = state.panel.session(state.panel.active_id()).ok()?;
-        session.run.as_ref()?;
-        Some(if !session.activity.is_empty() {
-            session.activity.clone()
-        } else {
-            session
-                .progress
-                .last()
-                .cloned()
-                .unwrap_or_else(|| "Agent working".into())
-        })
-    }
-    pub fn project_id(&self) -> &str {
-        &self.broker.project
-    }
-    pub fn agent_current_thread(&self) -> Option<String> {
-        let (agent, _) = self.agent_state().ok()?;
-        let state = agent.shared();
-        Some(state.panel.active_id().to_owned())
-    }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(
         &self,

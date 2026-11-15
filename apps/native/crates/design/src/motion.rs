@@ -46,8 +46,6 @@ impl Spring {
 /// Named springs. Values are tuned by feel at 60 and 120 Hz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Preset {
-    /// The shared Light sketch hand spring (k 120, c 14).
-    LightTravel,
     /// Places and sizes: rows sliding, a selection gliding between tabs or
     /// segments, panels resizing. Slightly underdamped (k 420, c 31).
     Layout,
@@ -72,7 +70,6 @@ impl Preset {
     /// The preset's spring with full motion.
     pub fn spring(self, motion: &crate::Motion) -> Spring {
         match self {
-            Self::LightTravel => Spring::new(120., 14.),
             Self::Layout => Spring::new(420., 31.),
             Self::Show => Spring::new(260., 30.),
             Self::HoverIn => Spring::new(1100., 66.),
@@ -85,10 +82,7 @@ impl Preset {
     }
     /// Presets that move or scale something (as opposed to fading it).
     pub fn moves(self) -> bool {
-        matches!(
-            self,
-            Self::LightTravel | Self::Layout | Self::Pop | Self::Enter
-        )
+        matches!(self, Self::Layout | Self::Pop | Self::Enter)
     }
 }
 

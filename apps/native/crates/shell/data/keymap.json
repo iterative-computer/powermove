@@ -3119,45 +3119,5 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
-  },
-  {
-    "id": "native.agentPause",
-    "chord": "cmd+shift+.",
-    "command": "agent.pause",
-    "args": [],
-    "priority": 400,
-    "in_fields": true,
-    "repeat": false,
-    "loose": false
-  },
-  {
-    "id": "native.agentStop",
-    "chord": "cmd+alt+.",
-    "command": "agent.stop",
-    "args": [],
-    "priority": 50,
-    "in_fields": true,
-    "repeat": false,
-    "loose": false
-  },
-  {
-    "id": "native.agentUndoTurn",
-    "chord": "cmd+alt+z",
-    "command": "agent.undoTurn",
-    "args": [],
-    "priority": 50,
-    "in_fields": true,
-    "repeat": false,
-    "loose": false
-  },
-  {
-    "id": "native.agentSteer",
-    "chord": "cmd+shift+'",
-    "command": "agent.steer",
-    "args": [],
-    "priority": 50,
-    "in_fields": true,
-    "repeat": false,
-    "loose": false
   }
 ]
