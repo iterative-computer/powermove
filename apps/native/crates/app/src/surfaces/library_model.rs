@@ -108,6 +108,38 @@ pub struct Row {
 impl Row {
     /// v1's card line: `Edited 3 min ago · Launch Film.pmv · 1920×1080`, or
     /// `Deleted 2 d ago · 1920×1080` in the Trash. `now_ms` is the host clock.
+    /// The name a card shows: the project's own, except that one still
+    /// named "Untitled" ("Untitled 2", …) and kept in a file shows the
+    /// file's name, as a Mac document does, so projects made from files
+    /// tell apart.
+    pub fn title(&self) -> String {
+        self.file_title().unwrap_or_else(|| self.name.clone())
+    }
+    fn file_title(&self) -> Option<String> {
+        let default = self.name == "Untitled"
+            || self
+                .name
+                .strip_prefix("Untitled ")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if !default {
+            return None;
+        }
+        let stem = self.file.as_ref()?.file_stem()?.to_string_lossy().into_owned();
+        (!stem.is_empty()).then_some(stem)
+    }
+    /// How long the composition runs (`0:20`, `1:02:03`), when known.
+    pub fn length(&self) -> Option<String> {
+        let s = self.summary.as_ref()?.duration_seconds?;
+        if !s.is_finite() || s <= 0. {
+            return None;
+        }
+        let s = s.round() as u64;
+        Some(if s >= 3600 {
+            format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+        } else {
+            format!("{}:{:02}", s / 60, s % 60)
+        })
+    }
     pub fn facts(&self, now_ms: i64) -> String {
         let dims = self.dimensions().map(|(w, h)| format!("{w}×{h}"));
         if self.trashed {
@@ -122,14 +154,17 @@ impl Row {
                 .join(" · ");
         }
         let date = format!("Edited {}", ago(self.modified_ms, now_ms));
+        // A file the title already names is not said twice.
         let file = self.file.as_ref().and_then(|p| p.file_name()).map(|name| {
             let name = name.to_string_lossy().into_owned();
-            if self.edited {
-                format!("Unsaved changes · {name}")
-            } else {
-                name
+            match (self.edited, self.file_title().is_some()) {
+                (true, true) => "Unsaved changes".to_owned(),
+                (true, false) => format!("Unsaved changes · {name}"),
+                (false, true) => String::new(),
+                (false, false) => name,
             }
         });
+        let file = file.filter(|f| !f.is_empty());
         [Some(date), file, dims]
             .into_iter()
             .flatten()

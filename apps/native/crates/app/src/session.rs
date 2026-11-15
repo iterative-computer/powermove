@@ -2372,6 +2372,39 @@ impl Controller {
         })
         .detach();
     }
+    /// A project opened here has a poster for Home's card from now on, even
+    /// if it is never saved in this app (a save draws a new one): once its
+    /// open has settled and its extensions' effects are in, so the poster
+    /// shows what the project looks like. Off the screen, so a window that
+    /// is not drawing gets one too.
+    fn poster_once_open(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            for _ in 0..120 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let Ok(ready) = this.update(cx, |v, _| {
+                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                    (shown == Some(project.as_str()))
+                        .then(|| v.settling.is_none() && !v.awaiting_extension_effects())
+                }) else {
+                    return;
+                };
+                match ready {
+                    None => return,
+                    Some(false) => {}
+                    Some(true) => {
+                        let _ = this.update(cx, |v, cx| v.write_poster(cx));
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
     fn adopt(
         &mut self,
         session: SessionHandle,
@@ -2387,6 +2420,7 @@ impl Controller {
         self.rows.clear();
         self.keyframes = 0;
         self.session = Some(session);
+        self.poster_once_open(cx);
         self.media_refresh.reset();
         self.thumbs.reset();
         self.media = MediaCatalog::default();

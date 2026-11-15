@@ -1107,3 +1107,22 @@ fn open_in_new_window_asks_for_a_window_of_its_own() {
         assert_eq!(opened, Some(("Trailer".into(), new_window)));
     }
 }
+#[test]
+fn an_untitled_project_in_a_file_is_titled_by_the_file() {
+    const MIN: i64 = 60_000;
+    let now = 1_000 * MIN;
+    let mut r = row("a", "Untitled 2", false);
+    r.modified_ms = Some(now - 3 * MIN);
+    assert_eq!(r.title(), "Untitled 2");
+    r.file = Some(std::path::PathBuf::from("/tmp/Labels U3.pmv"));
+    assert_eq!(r.title(), "Labels U3");
+    // The file is in the title, so the facts do not repeat it.
+    assert_eq!(r.facts(now), "Edited 3 min ago · 1920×1080");
+    r.edited = true;
+    assert_eq!(r.facts(now), "Edited 3 min ago · Unsaved changes · 1920×1080");
+    // A project with a name of its own keeps it.
+    r.name = "Untitled film".into();
+    assert_eq!(r.title(), "Untitled film");
+    r.summary.as_mut().unwrap().duration_seconds = Some(62.4);
+    assert_eq!(r.length().as_deref(), Some("1:02"));
+}
