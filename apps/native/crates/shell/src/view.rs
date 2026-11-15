@@ -4298,6 +4298,15 @@ mod tests {
         // 2. Again, and the next thing is a press on a splitter: the panel
         // lands first and the press starts the splitter's own drag.
         let landed = view.read_with(cx, |v, _| v.layout.clone());
+        // New content floors may place Effects below the side viewport.
+        // Reveal its header before starting another real pointer drag.
+        view.update(cx, |v, cx| {
+            let (dock, _, _) = v.layout.find("fxbrowser").unwrap();
+            let id = v.layout.docks[dock].id.clone();
+            v.scroll_dock(&id, f32::MAX);
+            cx.notify();
+        });
+        cx.run_until_parked();
         let from = view.read_with(cx, |v, _| header(v, "fxbrowser"));
         // Onto the left dock's middle: it joins that stack.
         let left = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
