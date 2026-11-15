@@ -73,12 +73,23 @@ fn recipe_key_and_store_survive_relink_and_reopen() {
 }
 
 #[test]
-fn disk_guard_uses_larger_of_20_gib_and_ten_percent() {
+fn disk_guard_reserves_five_gib_or_one_percent_plus_job_output() {
     let gib = 1u64 << 30;
-    assert!(!disk_guard(19 * gib, 100 * gib));
-    assert!(disk_guard(20 * gib, 100 * gib));
-    assert!(!disk_guard(29 * gib, 300 * gib));
-    assert!(disk_guard(30 * gib, 300 * gib));
+    assert!(!disk_guard(5 * gib - 1, 460 * gib));
+    assert!(disk_guard(5 * gib, 460 * gib));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        8 * gib - 1,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(pm_proxy::disk_guard_for_job(8 * gib, 460 * gib, 3 * gib));
+    assert!(!disk_guard(9 * gib, 1000 * gib));
+    assert!(disk_guard(10 * gib, 1000 * gib));
 }
 
 #[test]
@@ -647,7 +658,7 @@ use pm_proxy::{GenerationControl, GenerationRequest, generate_with_disk_probe};
 
 #[cfg(all(target_os = "macos", feature = "generation"))]
 /// These codec tests are not about the disk guard (`disk_pause.rs` and
-/// `disk_guard_uses_larger_of_20_gib_and_ten_percent` are): a fixed quota
+/// `disk_guard_reserves_five_gib_or_one_percent_plus_job_output` are): a fixed quota
 /// keeps them independent of the shared build machine's free space.
 fn test_quota(_: &std::path::Path) -> pm_proxy::Result<(u64, u64)> {
     Ok((40 << 30, 100 << 30))
@@ -779,4 +790,44 @@ fn portrait_hd_preview_fits_the_portrait_composition() {
     assert_eq!((landscape.width, landscape.height), (1920, 1080));
     let small = recipe(540, 960);
     assert_eq!((small.width, small.height), (540, 960));
+}
+
+#[test]
+fn output_estimate_accounts_for_codec_and_long_compressed_clips() {
+    let gib = 1u64 << 30;
+    let opaque = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        3840,
+        2160,
+        8,
+        false,
+    )
+    .unwrap();
+    let alpha = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        2160,
+        3840,
+        8,
+        true,
+    )
+    .unwrap();
+    let long_output = pm_proxy::estimated_output_bytes(&opaque, 30 * 3600);
+    assert!(
+        pm_proxy::disk_guard_for_job(100 * gib, 460 * gib, long_output),
+        "an hour of compressed HD proxy footage must not reserve raw RGBA storage"
+    );
+    let alpha_output = pm_proxy::estimated_output_bytes(&alpha, 162);
+    assert!(alpha_output > pm_proxy::estimated_output_bytes(&opaque, 162));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        alpha_output
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        5 * gib,
+        460 * gib,
+        alpha_output
+    ));
 }

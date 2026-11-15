@@ -648,18 +648,29 @@ impl Controller {
         if let Some(note) = &self.closing_note {
             return note.clone();
         }
+        let preview_pause = self
+            .session
+            .as_ref()
+            .and_then(|session| self.pro_media.preview_pause_message(&session.project));
         // "Saved" is the state word the computed line already starts with.
-        if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
-            return self.message.clone();
+        let status =
+            if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
+                self.message.clone()
+            } else {
+                let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
+                panels::status_line(
+                    dirty,
+                    self.path.is_some(),
+                    self.layers().len(),
+                    self.keyframes,
+                )
+            };
+        match preview_pause {
+            Some(pause) => format!("{pause} · {status}"),
+            None => status,
         }
-        let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
-        panels::status_line(
-            dirty,
-            self.path.is_some(),
-            self.layers().len(),
-            self.keyframes,
-        )
     }
+
     pub fn new(
         kernel: KernelHandle,
         engine: Arc<EngineService>,

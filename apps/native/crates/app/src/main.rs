@@ -530,7 +530,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
 /// while the app is inactive; with `--open` it also stands them for review
 /// captures. Read from this process's own command-line flags only: an
 /// inherited environment variable never turns it on.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn sheet_hold(flags: &[&str]) -> Option<bool> {
     flags
         .contains(&"PM_NATIVE_DRAW_OCCLUDED")

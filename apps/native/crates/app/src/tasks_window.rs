@@ -202,7 +202,6 @@ impl TasksWindow {
                                 media
                                     .then(|| self.pro.waiting(id))
                                     .flatten()
-                                    .map(str::to_owned)
                                     .unwrap_or_else(|| detail(task)),
                             ),
                     ),
