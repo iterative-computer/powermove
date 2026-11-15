@@ -176,11 +176,12 @@ fn hosted_keyboard_focus_reveals_panel() {
     });
 }
 struct Nested {
+    observed: usize,
     inner: ScrollHandle,
     outer: ScrollHandle,
 }
 impl Render for Nested {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("outer")
             .size_full()
@@ -193,6 +194,7 @@ impl Render for Nested {
                     .h(px(100.))
                     .overflow_y_scroll()
                     .track_scroll(&self.inner)
+                    .on_scroll_wheel(cx.listener(|v, _, _, _| v.observed += 1))
                     .child(div().h(px(400.)).w_full()),
             )
             .child(div().h(px(500.)).w_full())
@@ -205,6 +207,7 @@ fn nested_wheel_hands_off_at_both_edges() {
         let window = cx
             .open_window(size(px(200.), px(200.)), |_, cx| {
                 cx.new(|_| Nested {
+                    observed: 0,
                     inner: ScrollHandle::new(),
                     outer: ScrollHandle::new(),
                 })
@@ -228,6 +231,7 @@ fn nested_wheel_hands_off_at_both_edges() {
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
+                assert_eq!(v.observed, 1, "inner wheel observers still run");
                 assert_eq!(v.inner.offset().y, px(-50.));
                 assert_eq!(v.outer.offset().y, px(0.));
                 v.inner.scroll_to_bottom();
