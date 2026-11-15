@@ -206,6 +206,7 @@ export interface ReadoutClock {
 export function sectionRows(section: Section): Row[] {
   return [
     ...section.rows,
+    ...(section.animators ?? []).flatMap((animator) => animator.rows),
     ...(section.masks ?? []).flatMap((mask) => mask.rows),
   ];
 }

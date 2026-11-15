@@ -598,11 +598,13 @@ impl Properties {
             .iter()
             .flat_map(|section| {
                 let masks = section["masks"].as_array().into_iter().flatten();
+                let animators = section["animators"].as_array().into_iter().flatten();
                 section["rows"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .chain(masks.flat_map(|m| m["rows"].as_array().into_iter().flatten()))
+                    .chain(animators.flat_map(|a| a["rows"].as_array().into_iter().flatten()))
             })
             .filter_map(|row| {
                 Some((
