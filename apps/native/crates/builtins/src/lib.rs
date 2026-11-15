@@ -969,7 +969,11 @@ impl Builtins {
     }
     pub fn preset_sheet(&self, hint: Value) -> Result<Ticket<Evaluation>> {
         self.show_preset_sheet(hint);
-        self.realm_of("fxbrowser")?.eval("__pmBuiltin.publish()")
+        match self.realm_of("fxbrowser") {
+            Ok(realm) => realm.eval("__pmBuiltin.publish()"),
+            Err(Error::Closed) => self.mount_builtin("fxbrowser"),
+            Err(e) => Err(e),
+        }
     }
     pub fn effect_commands(
         &self,

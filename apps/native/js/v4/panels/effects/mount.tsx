@@ -47,7 +47,8 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   let sheetOpen = false;
   const showSheet = async (hint: any) => {
     const choices = native("presets.choices", hint);
-    if (!hint.layer) hint.layer = (native("effects.target") as Target | null)?.id;
+    if (!hint.layer)
+      hint.layer = (native("effects.target") as Target | null)?.id;
     sheetOpen = true;
     await mounted.root.render(
       <PresetSheet
@@ -96,5 +97,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     if (hint && !sheetOpen) void showSheet(hint).catch(report);
     refresh();
   };
+  const pending = native("presets.takeSheet");
+  if (pending) await showSheet(pending);
   return mounted;
 }

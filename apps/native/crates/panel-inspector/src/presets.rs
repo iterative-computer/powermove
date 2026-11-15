@@ -17,12 +17,16 @@ fn portable(path: &str) -> bool {
 }
 fn shift(channel: &Value, offset: f64) -> Value {
     let mut result = channel.clone();
-    if let Some(keys) = result.get_mut("kf").and_then(Value::as_array_mut) {
+    if let Some(keys) = result
+        .as_object_mut()
+        .and_then(|m| m.get_mut("kf"))
+        .and_then(Value::as_array_mut)
+    {
         for key in keys {
             if let Some(o) = key.as_object_mut() {
                 o.remove("i");
                 let t = o.get("t").and_then(Value::as_f64).unwrap_or(0.);
-                o.insert("t".into(), (t + offset).into());
+                o.insert("t", (t + offset).into());
             }
         }
     }
@@ -41,10 +45,17 @@ impl Inspector {
         let value = self.evaluate(&PropertyId::new(layer, path), time)?;
         let mut saved = shift(channel, from - time);
         let object = saved.as_object_mut().ok_or(InspectorError::InvalidInput)?;
-        object.retain(|k, _| k == "v" || k == "kf");
-        object.insert("v".into(), value);
+        let remove: Vec<_> = object
+            .iter()
+            .filter(|(k, _)| *k != "v" && *k != "kf")
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in remove {
+            object.remove_key(&key);
+        }
+        object.insert("v", value);
         if !animated {
-            object.insert("kf".into(), Value::Array(vec![]));
+            object.insert("kf", Value::Array(vec![]));
         }
         Ok(saved)
     }
@@ -71,9 +82,9 @@ impl Inspector {
             .map(|r| Value::from(r.id.path))
             .collect();
         let mut out = Map::new();
-        out.insert("properties".into(), Value::Array(properties));
+        out.insert("properties", Value::Array(properties));
         out.insert(
-            "effects".into(),
+            "effects",
             source.get("fx").cloned().unwrap_or(Value::Array(vec![])),
         );
         Ok(Value::Object(out))
@@ -131,12 +142,9 @@ impl Inspector {
                 on
             };
             let mut object = Map::new();
-            object.insert(
-                "type".into(),
-                fx.get("type").cloned().unwrap_or(Value::Null),
-            );
-            object.insert("parameters".into(), Value::Object(parameters));
-            object.insert("enabled".into(), on);
+            object.insert("type", fx.get("type").cloned().unwrap_or(Value::Null));
+            object.insert("parameters", Value::Object(parameters));
+            object.insert("enabled", on);
             saved_effects.push(Value::Object(object));
         }
         let mut properties = Vec::new();
@@ -148,9 +156,9 @@ impl Inspector {
                 .property(&PropertyId::new(layer, path))?
                 .ok_or(InspectorError::InvalidInput)?;
             let mut entry = Map::new();
-            entry.insert("path".into(), path.clone().into());
+            entry.insert("path", path.clone().into());
             entry.insert(
-                "channel".into(),
+                "channel",
                 self.capture_preset_channel(layer, animated, time, from, path, &channel)?,
             );
             properties.push(Value::Object(entry));
@@ -159,11 +167,11 @@ impl Inspector {
             return Err(InspectorError::EmptyEdit);
         }
         let mut out = Map::new();
-        out.insert("schemaVersion".into(), 1.into());
-        out.insert("id".into(), new_id("preset").into());
-        out.insert("name".into(), name.trim().into());
-        out.insert("effects".into(), Value::Array(saved_effects));
-        out.insert("properties".into(), Value::Array(properties));
+        out.insert("schemaVersion", 1.into());
+        out.insert("id", new_id("preset").into());
+        out.insert("name", name.trim().into());
+        out.insert("effects", Value::Array(saved_effects));
+        out.insert("properties", Value::Array(properties));
         Ok(Value::Object(out))
     }
     pub fn apply_preset(
@@ -241,7 +249,7 @@ impl Inspector {
                     continue;
                 };
                 let value = saved.get("v").cloned().unwrap_or(Value::Null);
-                let mut set = SetProperty::new(layer, path, value.clone(), time);
+                let mut set = SetProperty::new(layer.as_str(), path, value.clone(), time);
                 set.mode = KeyMode::Auto;
                 commands.push(PropertyCommand::Set(set).into());
                 let keys: Vec<_> = saved
