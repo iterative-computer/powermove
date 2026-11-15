@@ -178,6 +178,9 @@ mod macos {
         probe::painted(&gpui);
         assert!(probe::pending(&gpui));
         assert!(slot.wrapper().isHidden());
+        // Not shown yet, it is not in the window: AppKit lays out none of a
+        // long list's controls until a paint shows them (P-SLOT-LAZY).
+        assert!(unsafe { slot.wrapper().superview() }.is_none());
         // A never reaches the screen (no drawable). Paint B leaves it out:
         // the frame that shows B does not show it.
         probe::painted(&gpui);
@@ -191,6 +194,7 @@ mod macos {
         assert!(probe::pending(&gpui));
         assert!(probe::place(&gpui));
         assert!(!slot.wrapper().isHidden());
+        assert!(unsafe { slot.wrapper().superview() }.is_some_and(|v| v == content));
         assert_eq!(slot.wrapper().frame(), rect(10., 256., 80., 24.));
         // Paint D reuses a cached view: it keeps its place and nothing moves.
         slot.keep();
