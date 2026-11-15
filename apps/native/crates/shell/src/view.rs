@@ -1476,6 +1476,7 @@ impl Editor {
         used
     }
     pub fn release_agent_panel(&mut self, id: &str) {
+        if self.layout.find(id).is_some() { self.slides.armed = true; }
         self.agent_build_slots.remove(id);
         layout::remove_build(&mut self.layout, id);
     }
