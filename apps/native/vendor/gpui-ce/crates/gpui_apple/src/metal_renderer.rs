@@ -428,6 +428,13 @@ impl MetalRenderer {
             .filter(|v| (2..=3).contains(v))
             .unwrap_or(3);
         layer.set_maximum_drawable_count(drawables);
+        // PM-310: a drawable goes to the compositor when it is ready, not at
+        // the next vsync: two refreshes to the glass instead of three. The
+        // compositor still composes the window whole on the vsync, so a
+        // window never tears. PM_GPUI_DISPLAY_SYNC=1 measures the old way.
+        layer.set_display_sync_enabled(
+            std::env::var_os("PM_GPUI_DISPLAY_SYNC").is_some_and(|v| v == "1"),
+        );
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         layer.set_framebuffer_only(false);
 

@@ -1075,8 +1075,14 @@ impl MacWindowState {
             if available.as_bool() && std::env::var_os("PM_GPUI_CV_DISPLAY_LINK").is_none() {
                 if self.ca_display_link.is_none() {
                     let link: Retained<Objc2Object>;
+                    // PM-310: the view's own display link paces frames. A
+                    // CAMetalDisplayLink schedules every drawable 41.6 ms ahead
+                    // on a 120 Hz display (five refreshes, whatever its frame
+                    // latency, drawable count or rate range), where a drawable
+                    // the view's link asks the layer for reaches the glass in
+                    // two. PM_GPUI_METAL_DISPLAY_LINK=1 measures the old way.
                     #[cfg(not(feature = "wgpu"))]
-                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none()
+                    if std::env::var_os("PM_GPUI_METAL_DISPLAY_LINK").is_some()
                         && self.direct_moved.is_none()
                     {
                         let allocated: *mut Objc2Object =
