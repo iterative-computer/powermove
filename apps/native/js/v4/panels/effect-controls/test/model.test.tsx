@@ -274,3 +274,23 @@ test("native menus carry exact empty clipboard guard, groups are host-owned, and
     await h.close();
   }
 });
+
+test("add acknowledgement includes the new effect controls after a zero-height viewport", async () => {
+  const h = new ModelHost();
+  try {
+    await h.start();
+    await h.controller.drive({ type: "range", range: [0, 0] });
+    const ack = await h.controller.drive({ type: "add", definition: "glow" });
+    expect(
+      ack.rows.some((r) => r.kind === "effect" && r.id === ack.focus),
+    ).toBe(true);
+    expect(
+      ack.rows.filter(
+        (r) => r.kind === "parameter" && r.parameter.effect === ack.focus,
+      ),
+    ).toHaveLength(3);
+    expect(h.controller.snapshot()).toEqual(ack);
+  } finally {
+    await h.close();
+  }
+});

@@ -898,7 +898,7 @@ impl Backend {
         if channels == Some(&["export".to_owned()][..]) {
             return self.export_snapshot().map(Some);
         }
-        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) {
+        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) && channels.is_none() {
             return self.inspector_snapshot().map(Some);
         }
         if matches!(query, Query::Time) {

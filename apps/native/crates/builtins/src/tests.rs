@@ -6018,3 +6018,209 @@ fn layer_and_keyframe_deletion_never_emit_delete_toast() {
         assert_eq!(kernel.published("synthetic").unwrap().snapshot.document.to_value().unwrap(), before);
     }
 }
+
+#[test]
+fn properties_effects_stack_add_edit_and_multiselection_undo() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut project = data::wire(&pm_model::json::parse(r##"{"id":"synthetic","name":"Effects","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Shape","from":0,"dur":10,"on":true,"p":{},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap());
+    let mut second = project["layers"][0].clone();
+    second["id"] = json!("b");
+    project["layers"].as_array_mut().unwrap().push(second);
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into(), "b".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let backend = panels
+        .broker
+        .entry("inspector")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let send = |intent: Value| {
+        let p = backend.lock().unwrap().projection().unwrap();
+        let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":"a","intent":intent});
+        finish(
+            panels
+                .realms
+                .lock()
+                .unwrap()
+                .get("inspector")
+                .unwrap()
+                .eval(format!(
+                    "__pmBuiltin.command('panel.effect-controls',{args})"
+                ))
+                .unwrap(),
+        );
+    };
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    send(json!({"type":"add","definition":"blur"}));
+    let p = kernel.published("synthetic").unwrap();
+    assert_eq!(p.history.entries, before + 1);
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    for id in ["a", "b"] {
+        assert_eq!(
+            data::wire(&model.layer(id).unwrap())["fx"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let snapshot = properties::Properties::default()
+        .snapshot(&mut model, 0., false)
+        .unwrap();
+    let sections = snapshot["sections"].as_array().unwrap();
+    let effect_index = sections.iter().position(|s| s["id"] == "effects").unwrap();
+    assert!(effect_index < sections.iter().position(|s| s["id"] == "masks").unwrap());
+    let projection = backend.lock().unwrap().projection().unwrap();
+    assert_eq!(projection["effectCount"], 1);
+    assert!(
+        projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "parameter")
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    for id in ["a", "b"] {
+        assert!(
+            data::wire(&model.layer(id).unwrap())["fx"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Redo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
+    let projection = backend.lock().unwrap().projection().unwrap();
+    let parameter = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "parameter" && r["parameter"]["control"] == "number")
+        .unwrap()["parameter"]
+        .clone();
+    finish(
+        panels
+            .write(
+                "inspector",
+                parameter["binding"].as_str().unwrap(),
+                json!(17.),
+            )
+            .unwrap(),
+    );
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let id = pm_panel_inspector::PropertyId::from_value(
+        &pm_model::json::parse(parameter["id"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(17.)
+    );
+}
+
+#[test]
+fn newly_added_effect_ack_publishes_controls_without_another_document_change() {
+    for panel in ["layer-effects", "inspector"] {
+        for definition in ["blur", "synthetic.glow"] {
+            let actor = actor();
+            let kernel = actor.handle();
+            register_synthetic_effect(&kernel);
+            select_layer(&kernel, "a");
+            let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+            finish(panels.mount(panel).unwrap());
+            let backend = panels
+                .broker
+                .entry(panel)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .backend
+                .clone();
+            let send = |intent: Value| {
+                let p = backend.lock().unwrap().projection().unwrap();
+                let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":"a","intent":intent});
+                finish(
+                    panels
+                        .realms
+                        .lock()
+                        .unwrap()
+                        .get(panel)
+                        .unwrap()
+                        .eval(format!(
+                            "__pmBuiltin.command('panel.effect-controls',{args})"
+                        ))
+                        .unwrap(),
+                )
+            };
+            // A zero-height viewport can arrive while the stack is empty.
+            send(json!({"type":"range","range":[0,0]}));
+            let before = kernel.published("synthetic").unwrap().history.entries;
+            send(json!({"type":"add","definition":definition}));
+            let p = backend.lock().unwrap().projection().unwrap();
+            assert_eq!(p["effectCount"], 1);
+            assert!(
+                p["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["kind"] == "parameter")
+            );
+            assert_eq!(
+                kernel.published("synthetic").unwrap().history.entries,
+                before + 1
+            );
+        }
+    }
+}

@@ -157,7 +157,12 @@ impl Backend {
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
             // Effect Controls folds a grade's wheels and curve points into
             // summary rows; the Color panel draws them itself.
-            panel: EffectsPanel::new(presentation, 0..96).folding_grades(panel == "layer-effects"),
+            panel: EffectsPanel::new(
+                presentation,
+                0..if panel == "inspector" { usize::MAX } else { 96 },
+            )
+            .folding_grades(panel == "layer-effects")
+            .adding_to_selection(panel == "inspector"),
             extension: format!("ext.builtin.{panel}"),
             native,
             panel_id: panel.into(),

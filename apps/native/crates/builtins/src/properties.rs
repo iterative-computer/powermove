@@ -690,6 +690,9 @@ impl Properties {
             let kind = target["first"]["type"].as_str().unwrap_or("").to_owned();
             if !matches!(kind.as_str(), "audio" | "camera") && studio.is_none() {
                 let masks = self.masks(model, &layer, time)?;
+                if target["first"]["acceptsEffects"].as_bool() == Some(true) {
+                    sections.push(json!({"id":"effects","title":"Effects","collapsed":self.collapsed.get("effects").copied().unwrap_or(false),"rows":[]}));
+                }
                 sections.push(json!({"id":"masks","title":"Masks","collapsed":self.collapsed.get("masks").copied().unwrap_or(false),"rows":[],"action":"mask","masks":masks}));
             }
             if !layer_rows.is_empty() {

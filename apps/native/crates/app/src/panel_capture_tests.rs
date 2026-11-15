@@ -141,6 +141,16 @@ fn capture_builtin_panels() {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
+                if std::env::var_os("PM_PANEL_CAPTURE_BOTTOM").is_some() {
+                    window
+                        .update(&mut cx, |frame, _, cx| {
+                            frame
+                                .view
+                                .update(cx, |view, cx| view.review_scroll_to(f32::MAX, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image.save(format!("{dir}/{panel}-{name}.png")).unwrap();
                 drop(r);
