@@ -60,7 +60,7 @@ fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, Interp
     fn content(
         c: &Content,
         matrix: &[f64; 6],
-        plane: bool,
+        plane: Option<&crate::space25d::Plane>,
         visit: &mut impl FnMut(&std::path::Path, Interpret, Option<u32>),
     ) {
         match c {
@@ -78,13 +78,13 @@ fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, Interp
             Content::Placed(placed) => content(
                 &placed.content,
                 matrix,
-                plane || placed.plane.is_some(),
+                placed.plane.as_ref(),
                 visit,
             ),
             Content::Composite(node) => {
                 if let composite::Node::Layer(layer) = &**node {
                     for draw in &layer.content {
-                        content(&draw.content, &draw.matrix, false, visit);
+                        content(&draw.content, &draw.matrix, None, visit);
                     }
                     if let Some(matte) = &layer.matte {
                         visit_stills(&matte.source, visit);
@@ -95,7 +95,7 @@ fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, Interp
         }
     }
     for draw in &plan.draws {
-        content(&draw.content, &draw.matrix, false, visit);
+        content(&draw.content, &draw.matrix, None, visit);
     }
 }
 
