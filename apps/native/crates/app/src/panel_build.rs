@@ -143,12 +143,12 @@ pub fn draw_dots(size: [f32; 2], age: f32, row: Option<f32>, light: bool, reduce
     if size.iter().any(|v| !v.is_finite() || *v <= 0.) { return dots; }
     let dim = playback(playing).0;
     let wake = fade(age, 0.24);
-    for y in (3..size[1].min(4096.) as usize).step_by(6) {
-        for x in (3..size[0].min(4096.) as usize).step_by(6) {
+    for y in (6..(size[1]-6.).max(6.).min(4096.) as usize).step_by(12) {
+        for x in (6..(size[0]-6.).max(6.).min(4096.) as usize).step_by(12) {
             let center = [x as f32, y as f32];
             if !inside_slot(center, size, 8.) { continue; }
-            dots.push(Dot { center, radius: 0.9,
-                alpha: dim * (if light { 0.06 } else { 0.08 }) * wake, orange: false });
+            dots.push(Dot { center, radius: 0.5,
+                alpha: dim * (if light { 0.05 } else { 0.06 }) * wake, orange: false });
         }
     }
     if let Some(y) = row {
@@ -189,7 +189,7 @@ mod draw_tests {
     #[test]
     fn light_and_playback_field_budget() {
         let dots = draw_dots([120., 80.], 1., None, true, true, true);
-        assert!(dots.iter().all(|d| (d.alpha - 0.024).abs() < 0.00001));
+        assert!(dots.iter().all(|d| (d.alpha - 0.02).abs() < 0.00001));
         assert!(draw_dots([f32::NAN, 80.], 1., None, false, false, false).is_empty());
     }
 }

@@ -128,10 +128,11 @@ fn build_frame(
                     window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
                 };
                 let ready = state.stage == panel_build::Stage::Ready;
-                for dot in panel_build::draw_dots(size, age, None, light, reduced, playing).into_iter().filter(|_| !ready) {
+                let field = if ready { 1. - panel_build::fade(elapsed, 0.36) } else { 1. };
+                for dot in panel_build::draw_dots(size, age, None, light, reduced, playing).into_iter().filter(|_| field > 0.) {
                     paint(dot.center[0] - dot.radius, dot.center[1] - dot.radius,
                         dot.radius * 2., dot.radius * 2., dot.radius,
-                        if light { 0x000000 } else { 0xffffff }, dot.alpha);
+                        if light { 0x000000 } else { 0xffffff }, dot.alpha * field);
                 }
                 if !ready && state.stage != panel_build::Stage::Wake {
                     let mut rows = vec![state.row];
@@ -169,6 +170,14 @@ fn build_frame(
 const BUILD_ROW: f32 = 32.;
 const BUILD_HEADER: f32 = 42.;
 const BUILD_INSET: f32 = 16.;
+
+fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u32 {
+    let Some(build) = build else { return t.colors.panel; };
+    let start = if t.scheme == pm_design::Scheme::Light { 0xfafafa } else { 0x202020 };
+    if build.stage == panel_build::Stage::Ready {
+        pm_design::mix(start, t.colors.panel, panel_build::fade(build.changed.elapsed().as_secs_f32(), 0.2))
+    } else { start }
+}
 
 fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
     div().h(px(BUILD_HEADER)).flex_none().px(px(BUILD_INSET)).flex().items_center()
@@ -813,7 +822,7 @@ fn render(
         .id(SharedString::from(format!("generated-{id}")))
         .flex()
         .flex_col()
-        .relative().bg(rgb(c.panel)).rounded(px(t.radius.lg))
+        .relative().bg(rgb(slot_surface(&t, build.as_ref()))).rounded(px(t.radius.lg))
         .w_full()
         .h(px((rect.h - m.header).max(0.)))
         .overflow_y_scroll()
@@ -1360,13 +1369,14 @@ mod panel_build_capture {
     struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32, definition: serde_json::Value }
     impl Render for Frame {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            let mut body = gpui::div().relative().size_full().bg(gpui::rgb(self.tokens.colors.panel))
+            let mut body = gpui::div().relative().w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).bg(gpui::rgb(super::slot_surface(&self.tokens, Some(&self.state))))
                 .font_family(pm_design::TEXT_FONT).child(panel_title(&self.definition, &self.tokens));
             for (index, control) in self.definition["controls"].as_array().unwrap().iter().enumerate() {
                 body = body.child(slider_control(control, &control["def"], &self.tokens)
                     .opacity(control_opacity(Some(&self.state), index, self.tokens.accessibility.reduce_motion)));
             }
-            body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 320., h: 360. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed, super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"])))
+            body = body.child(build_frame(self.state.clone(), pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header }, &self.tokens, false, self.age, self.elapsed, super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"])));
+            gpui::div().size_full().p(px(16.)).bg(gpui::rgb(if self.tokens.scheme == Scheme::Light { 0xececec } else { 0x151515 })).child(body)
 
         }
     }
@@ -1407,7 +1417,7 @@ mod panel_build_capture {
                     {"type":"slider","label":"Warmth","def":5600,"min":2000,"max":8000},
                     {"type":"slider","label":"Tint","def":-4,"min":-10,"max":20}]});
                 let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
-                let window = cx.open_window(size(px(320.), px(360.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed, definition })).unwrap();
+                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: 1., elapsed, definition })).unwrap();
                 for _ in 0..4 { cx.run_until_parked(); }
                 cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
                 cx.run_until_parked();
