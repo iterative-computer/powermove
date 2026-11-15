@@ -147,10 +147,15 @@ impl Host {
         self.pause_changed.notify_all();
     }
     pub fn wait_if_paused(&self, project: &str, mut running: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(crate::coedit::TOOL_WAIT_MS);
         loop {
             // Panel Stop revokes admission without going through the toolbar.
             // Check it outside the pause lock and wake only this MCP worker.
-            if self.closing.load(Ordering::Acquire) || !running() {
+            if self.closing.load(Ordering::Acquire)
+                || !running()
+                || std::time::Instant::now() >= deadline
+            {
                 return false;
             }
             let paused = self.paused.lock().unwrap();

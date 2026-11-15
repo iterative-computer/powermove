@@ -261,7 +261,13 @@ impl McpSession {
                 .coedit_host();
             if let Some(gate) = gate {
                 if !gate.wait_if_paused(project, || !self.run_revoked()) {
-                    return Err(Error::invalid("The agent run stopped while paused."));
+                    return Err(Error {
+                        code: "agent_paused".into(),
+                        message:
+                            "The run is paused or stopped. Resume it before the next tool call."
+                                .into(),
+                        backing: None,
+                    });
                 }
             }
         }
@@ -876,7 +882,14 @@ impl McpSession {
                     ));
                 }
                 let plan = crate::media::manage(&host.read_document(&id)?, args)?;
-                let ack = host.apply_body(&id, plan.body, "Manage media", expected, self.writer)?;
+                let ack = host.apply_body(
+                    &id,
+                    plan.body,
+                    "Manage media",
+                    expected,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
                 // Native media Undo is separate from run grouping and snapshot
                 // rollback, exactly as the frozen contract promises.
                 session.external_actions = true;
@@ -1037,7 +1050,14 @@ impl McpSession {
                 let mut clip = Value::Null;
                 let (ack, descriptions, results, strips_result) = if let Some(plan) = video {
                     clip = plan.clip;
-                    let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some(),
+                    )?;
                     let applied = if ack.revision != revision {
                         vec![crate::video::describe(args)]
                     } else {
@@ -1045,7 +1065,14 @@ impl McpSession {
                     };
                     (ack, applied, vec![], None)
                 } else if let Some(plan) = strips {
-                    let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some(),
+                    )?;
                     let result = if plan.state {
                         json!({"results":plan.results,"revision":ack.revision})
                     } else {
@@ -1054,13 +1081,14 @@ impl McpSession {
                     (ack, vec![], plan.results, Some(result))
                 } else {
                     let batch = batch.unwrap();
-                    let ack = host.apply_commands(
+                    let ack = host.apply_commands_guarded(
                         &id,
                         batch.commands,
                         &label,
                         Origin::Mcp,
                         expected,
                         self.writer,
+                        self.agent_token.is_some(),
                     )?;
                     session.focus = batch.selection;
                     for result in &batch.results {
@@ -1197,7 +1225,7 @@ impl McpSession {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
         crate::validation::session("start_session", args)?;
-        let host = self
+        let mut host = self
             .host
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
@@ -1351,7 +1379,11 @@ impl McpSession {
         Ok(result)
     }
     pub fn finish(&mut self, commit: bool) -> Result<Value> {
-        self.take_hold(true)?;
+        if !self.take_hold(true)? {
+            return Ok(
+                json!({"status":"held","reason":"A write is still waiting for the user. The session remains open; finish again after it resolves."}),
+            );
+        }
         let Some(mut session) = self.active.take() else {
             return Ok(json!({"changed":false}));
         };

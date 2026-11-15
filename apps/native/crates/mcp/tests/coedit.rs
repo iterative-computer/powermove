@@ -183,8 +183,12 @@ fn attached_fixture() -> (
         .as_str()
         .unwrap()
         .to_owned();
+    host.agent_grants = Some(Arc::new(|_| {
+        Some(("synthetic-run".into(), "project".into()))
+    }));
     let host = Arc::new(Mutex::new(host));
     let mut session = McpSession::new(host.clone());
+    session.set_agent_run("synthetic-grant");
     ok(session.call("start_session", json!({"prompt":"Synthetic hold"})));
     ok(session.call(
         "apply_commands",
@@ -194,55 +198,64 @@ fn attached_fixture() -> (
 }
 #[test]
 fn a_live_interface_lease_holds_an_agent_write_then_lands_after_release() {
-    use pm_kernel::{Caller, GestureCall, Reply, Request};
-    let (root, host, actor, mut session, id) = attached_fixture();
-    let kernel = actor.handle();
-    let ack = kernel
-        .call(
-            &id,
-            Request::new(
-                Caller::native(),
-                GestureCall::Begin {
-                    label: "User drag".into(),
-                },
-            ),
-        )
-        .wait()
-        .unwrap()
-        .unwrap();
-    let Reply::Gesture(gesture) = ack.reply else {
-        panic!("expected gesture");
-    };
-    let release = kernel.clone();
-    let project = id.clone();
-    let thread = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        release
+    for cancel in [false, true] {
+        use pm_kernel::{Caller, GestureCall, Reply, Request};
+        let (root, host, actor, mut session, id) = attached_fixture();
+        let kernel = actor.handle();
+        let ack = kernel
             .call(
-                &project,
-                Request::new(Caller::native(), GestureCall::Commit { gesture }),
+                &id,
+                Request::new(
+                    Caller::native(),
+                    GestureCall::Begin {
+                        label: "User drag".into(),
+                    },
+                ),
             )
             .wait()
             .unwrap()
             .unwrap();
-    });
-    let result = session
+        let Reply::Gesture(gesture) = ack.reply else {
+            panic!("expected gesture");
+        };
+        let release = kernel.clone();
+        let project = id.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            release
+                .call(
+                    &project,
+                    Request::new(
+                        Caller::native(),
+                        if cancel {
+                            GestureCall::Cancel { gesture }
+                        } else {
+                            GestureCall::Commit { gesture }
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+        });
+        let result = session
         .dispatch(
             "apply_commands",
             &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
         )
         .unwrap();
-    thread.join().unwrap();
-    assert_eq!(result["status"], "applied", "{result}");
-    session.finish(true).unwrap();
-    assert_eq!(
-        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
-        40
-    );
-    drop(session);
-    drop(host);
-    drop(actor);
-    std::fs::remove_dir_all(root).unwrap();
+        thread.join().unwrap();
+        assert_eq!(result["status"], "applied", "{result}");
+        session.finish(true).unwrap();
+        assert_eq!(
+            host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+            40
+        );
+        drop(session);
+        drop(host);
+        drop(actor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 #[test]
 fn typing_holds_after_four_seconds_and_user_wins_at_release() {
@@ -256,6 +269,12 @@ fn typing_holds_after_four_seconds_and_user_wins_at_release() {
         )
         .unwrap();
     assert_eq!(result["status"], "held", "{result}");
+    let started = std::time::Instant::now();
+    let pending = session
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    assert_eq!(pending["status"], "held", "{pending}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
     actor
         .handle()
         .call(

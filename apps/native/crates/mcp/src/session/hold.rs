@@ -62,8 +62,11 @@ impl McpSession {
         let result = if wait {
             pending
                 .receive
-                .recv()
-                .map_err(|_| mpsc::TryRecvError::Disconnected)
+                .recv_timeout(Duration::from_millis(crate::coedit::TOOL_WAIT_MS))
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
+                    mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
+                })
         } else {
             pending.receive.try_recv()
         };
@@ -92,7 +95,10 @@ impl McpSession {
         let _ = self.take_hold(true);
     }
     pub(super) fn defer_if_touched(&mut self, name: &str, args: &Value) -> Result<Option<Value>> {
-        if self.bypass_hold
+        // Legacy external MCP connections retain their synchronous folding
+        // contract. Co-edit admission belongs to an explicitly bound run.
+        if self.agent_token.is_none()
+            || self.bypass_hold
             || ![
                 "apply_commands",
                 "edit_layer_strips",
@@ -236,8 +242,15 @@ impl McpSession {
             let ticket = ticket;
             let events = host.kernel.subscribe();
             let result = (|| {
+                let waiting_since = Instant::now();
                 let mut released: Option<Instant> = None;
                 loop {
+                    if waiting_since.elapsed() >= Duration::from_millis(crate::coedit::MAX_HOLD_MS)
+                    {
+                        return Ok(
+                            json!({"status":"dropped","reason":"The user kept editing beyond the hold limit. This write expired; do not retry it."}),
+                        );
+                    }
                     if stop.load(Ordering::Acquire) || worker.run_revoked() {
                         return Ok(
                             json!({"status":"dropped","reason":"The run stopped before this write landed."}),

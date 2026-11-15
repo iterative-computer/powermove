@@ -529,22 +529,46 @@ impl Automation {
         expected_revision: u64,
         writer: u32,
     ) -> Result<Ack> {
+        self.apply_commands_guarded(
+            id,
+            commands,
+            label,
+            origin,
+            expected_revision,
+            writer,
+            false,
+        )
+    }
+    pub(crate) fn apply_commands_guarded(
+        &mut self,
+        id: &str,
+        commands: Vec<Command>,
+        label: &str,
+        origin: Origin,
+        expected_revision: u64,
+        writer: u32,
+        outside: bool,
+    ) -> Result<Ack> {
         if !matches!(origin, Origin::Mcp | Origin::Agent) {
             return Err(Error::invalid(
                 "Automation edits require Mcp or Agent origin",
             ));
         }
+        let request = Request::new(
+            Caller::realm(writer, 1, origin),
+            Call::Transact {
+                label: Some(label.into()),
+                body: WriteBody::Commands(commands),
+                expected_revision: Some(expected_revision),
+            },
+        );
         self.call(
             id,
-            Request::new(
-                Caller::realm(writer, 1, origin),
-                Call::Transact {
-                    label: Some(label.into()),
-                    body: WriteBody::Commands(commands),
-                    expected_revision: Some(expected_revision),
-                },
-            )
-            .outside_revision(expected_revision),
+            if outside {
+                request.outside_revision(expected_revision)
+            } else {
+                request
+            },
         )
     }
     pub(crate) fn apply_body(
@@ -554,18 +578,23 @@ impl Automation {
         label: &str,
         expected: u64,
         writer: u32,
+        outside: bool,
     ) -> Result<Ack> {
+        let request = Request::new(
+            Caller::realm(writer, 1, Origin::Mcp),
+            Call::Transact {
+                label: Some(label.into()),
+                body,
+                expected_revision: Some(expected),
+            },
+        );
         self.call(
             id,
-            Request::new(
-                Caller::realm(writer, 1, Origin::Mcp),
-                Call::Transact {
-                    label: Some(label.into()),
-                    body,
-                    expected_revision: Some(expected),
-                },
-            )
-            .outside_revision(expected),
+            if outside {
+                request.outside_revision(expected)
+            } else {
+                request
+            },
         )
     }
     fn call(&mut self, id: &str, mut request: Request) -> Result<Ack> {
