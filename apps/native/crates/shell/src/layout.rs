@@ -905,6 +905,27 @@ impl Layout {
             }
         };
         if !group {
+            // The viewer (it takes no tabs): its left and right quarters put
+            // the panel in a column of its own on that side, the rest splits
+            // it into above and below at its middle.
+            let across = (x - r.x) / r.w.max(1.);
+            let side = (across < EDGE_ZONE)
+                .then_some(false)
+                .or_else(|| (across > 1. - EDGE_ZONE).then_some(true));
+            if let Some(after) = side.filter(|_| !is_band(&self.docks[p.dock].id)) {
+                return DropPreview {
+                    target: DropTarget::Beside {
+                        dock: p.dock,
+                        after,
+                    },
+                    rect: Rect {
+                        x: if after { r.x + r.w * (1. - EDGE_ZONE) } else { r.x },
+                        w: r.w * EDGE_ZONE,
+                        ..r
+                    },
+                    near: Near::Beside(p.dock, p.group, after),
+                };
+            }
             return split(relative >= 0.5);
         }
         if relative < BODY_EDGE {
@@ -1005,6 +1026,39 @@ impl Layout {
     /// Validated, atomic move. Destination indices address the original layout.
     pub fn move_panel_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
         self.move_to(id, target, false)
+    }
+    /// A drag's drop: the move, then a panel put above or below another
+    /// (`neighbour`, the panel the preview showed it against) takes half of
+    /// that panel's height, as the preview showed. A sized neighbour would
+    /// otherwise keep all of it and leave the panel its least, two rows; a
+    /// flexible one already shares the room with it.
+    pub fn drop_panel(
+        &mut self,
+        id: &str,
+        target: DropTarget,
+        stack: bool,
+        neighbour: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.move_to(id, target, stack)?;
+        let (DropTarget::Split { .. }, Some(neighbour)) = (target, neighbour) else {
+            return Ok(());
+        };
+        let (Some((nd, ng, _)), Some((md, mg, _))) = (self.find(neighbour), self.find(id)) else {
+            return Ok(());
+        };
+        if nd != md || ng == mg {
+            return Ok(());
+        }
+        let groups = &mut self.docks[nd].groups;
+        if groups[ng].collapsed {
+            return Ok(());
+        }
+        if let Some(size) = groups[ng].size {
+            let half = size / 2.;
+            groups[ng].size = Some(half);
+            groups[mg].size = Some(half);
+        }
+        Ok(())
     }
     /// Header drags retain tab order, active tab and the stack's size.
     pub fn move_stack_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
@@ -1761,6 +1815,8 @@ pub enum Near {
     Tab(usize, usize),
     Above(usize, usize),
     Below(usize, usize),
+    /// A column of its own beside the panel: right of it when `true`.
+    Beside(usize, usize, bool),
     Dock(usize),
     Edge(Edge),
 }
