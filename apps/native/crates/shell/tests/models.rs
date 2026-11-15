@@ -551,7 +551,7 @@ fn agent_prose_selection_cites_without_pausing() {
     resolver.bindings.push(Binding {
         id: "context.agent.cite".into(),
         chord: "cmd+shift+.".into(),
-        command: "agent.cite".into(),
+        command: "agent.citeSelection".into(),
         args: vec![],
         priority: 300,
         in_fields: true,
@@ -559,7 +559,9 @@ fn agent_prose_selection_cites_without_pausing() {
         loose: false,
     });
     let out = resolver.submit(key(500, "cmd+shift+."));
-    assert!(matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.cite"));
+    assert!(
+        matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.citeSelection")
+    );
     // The focused prose source accepts Cite and stops propagation.
     assert_eq!(resolver.resolve(500, true), [Effect::Consumed(500)]);
 }
@@ -569,7 +571,7 @@ fn no_prose_selection_declines_to_global_agent_pause() {
     resolver.bindings.push(Binding {
         id: "context.agent.cite".into(),
         chord: "cmd+shift+.".into(),
-        command: "agent.cite".into(),
+        command: "agent.citeSelection".into(),
         args: vec![],
         priority: 300,
         in_fields: true,
