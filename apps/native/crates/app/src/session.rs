@@ -101,6 +101,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
@@ -850,6 +851,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),
             captions: Default::default(),
@@ -1274,6 +1276,11 @@ impl Controller {
         );
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
+        if let Some(previous) = &self.published {
+            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
+                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
+            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
+        }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
