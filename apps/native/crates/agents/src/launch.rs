@@ -63,6 +63,10 @@ pub mod grants {
             .insert(token.clone(), (run.into(), access));
         Ok(Grant(token))
     }
+    /// Build slots follow the owning process lifetime without retaining its token.
+    pub fn run_live(run: &str) -> bool {
+        table().lock().unwrap().values().any(|(id, _)| id == run)
+    }
     /// The run and access a token was issued for, while that run lives.
     pub fn resolve(token: &str) -> Option<(String, Access)> {
         table().lock().unwrap().get(token).cloned()
@@ -70,6 +74,13 @@ pub mod grants {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn panel_build_owner_expires_with_its_process_grant() {
+            let grant = issue("panel-build-owner-test", Access::Project).unwrap();
+            assert!(run_live("panel-build-owner-test"));
+            drop(grant);
+            assert!(!run_live("panel-build-owner-test"));
+        }
         #[test]
         fn a_token_names_its_run_only_while_held() {
             let grant = issue("run-a", Access::Editor).unwrap();

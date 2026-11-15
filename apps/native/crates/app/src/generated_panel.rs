@@ -1494,10 +1494,31 @@ pub(crate) struct AgentBuild {
     pub planned: Vec<Value>,
     pub target: Option<String>,
     pub finishing: bool,
+    pub owner: Option<String>,
 }
 
 pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
     let build = v.agent_panel_builds.get(id)?.clone();
+    if build.owner.as_deref().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
+        if let Some(state) = v.panel_builds.get_mut(id) {
+            if state.stage != panel_build::Stage::Erase { state.event("cancel", state.row); }
+            if state.changed.elapsed().as_secs_f32() >= 0.36 {
+                let id = id.to_owned();
+                let owner = cx.weak_entity();
+                cx.defer(move |cx| {
+                    let _ = owner.update(cx, |v, cx| {
+                    if let Some(shell) = v.shell.clone().and_then(|shell| shell.upgrade()) {
+                        shell.update(cx, |e, cx| { e.release_agent_panel(&id); cx.notify(); });
+                    }
+                    if let Some(build) = v.agent_panel_builds.remove(&id) {
+                        if let Some(target) = build.target { v.panel_builds.remove(&target); }
+                    }
+                    v.panel_builds.remove(&id); cx.notify();
+                    });
+                });
+            }
+        }
+    }
     let mut content = None;
     let mut generated = false;
     if let Some(target) = &build.target {
