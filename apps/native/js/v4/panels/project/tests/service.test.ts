@@ -137,6 +137,47 @@ test("document replacement fences an in-flight result", async () => {
   await f.service.idle();
   await f.service.dispose();
 });
+test("a new document in the window shows only its own media, from the top", async () => {
+  const f = fixture();
+  await f.service.start();
+  await f.service.page(96, 96);
+  await f.service.idle();
+  expect(f.service.view?.page.stamp.document).toBe(owner.document);
+  // New Project replaces the open project in the same window.
+  const stamp = { ...owner, document: owner.document + 1, revision: 10 };
+  f.replace(stamp);
+  const fresh = projection([asset("new")]);
+  fresh.page.stamp = { ...stamp, revision: 11 };
+  f.setReply({ view: fresh } as unknown as Json);
+  f.host.publish({
+    ...f.host.identity,
+    version: 1,
+    subscription: "fixture.project",
+    revision: 10,
+    sequence: 1,
+    value: { stamp } as unknown as Json,
+  });
+  // Nothing of the old project is shown while the new one's page is asked.
+  expect(f.service.view).toBeNull();
+  await f.service.idle();
+  const pages = f.requests
+    .filter((r) => r.operation.type === "command")
+    .map(
+      (r) =>
+        r.operation.args as unknown as {
+          owner: Stamp;
+          action: { Page?: { offset: number } };
+        },
+    )
+    .filter((a) => a.action.Page && a.owner.document === stamp.document);
+  expect(pages.length).toBeGreaterThan(0);
+  expect(pages.every((a) => a.action.Page!.offset === 0)).toBe(true);
+  expect(f.service.view?.page.stamp.document).toBe(stamp.document);
+  expect(
+    f.service.view?.page.rows.map((r) => ("Asset" in r.id ? r.id.Asset : null)),
+  ).toEqual(["new"]);
+  await f.service.dispose();
+});
 test("dispose fences late replies and releases host subscription", async () => {
   const f = fixture();
   await f.service.start();
