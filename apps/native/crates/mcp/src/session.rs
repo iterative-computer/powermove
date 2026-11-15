@@ -95,6 +95,7 @@ struct Active {
     known_layers: std::collections::HashSet<String>,
     owned_scopes: Vec<Vec<pm_model::patch::PathPart>>,
     observed_revision: u64,
+    steer_epoch: u64,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -1014,21 +1015,46 @@ impl McpSession {
                                     crate::presence::Kind::Create
                                 }
                                 "replace_keyframes" => crate::presence::Kind::Key,
+                                "set_property" if result["command"]["mode"] == "keyframe" => {
+                                    crate::presence::Kind::Key
+                                }
                                 "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
                                 _ => crate::presence::Kind::Set,
                             };
+                            let target = result["data"]["id"].as_str();
+                            let offset = target
+                                .and_then(|target| {
+                                    host.view(&id).ok().and_then(|v| {
+                                        let root = v.snapshot.root()?;
+                                        let location = pm_kernel::model::find_layer(root, target)?;
+                                        let layer = pm_kernel::model::layer_at(root, &location)?;
+                                        match layer.get("from")?.kind() {
+                                            pm_model::NodeKind::Number(n) => Some(*n),
+                                            _ => None,
+                                        }
+                                    })
+                                })
+                                .unwrap_or(0.);
+                            let mut times: Vec<f64> = result["command"]["keyframes"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|k| k["time"].as_f64())
+                                .map(|t| t + offset)
+                                .collect();
+                            if kind == crate::presence::Kind::Key && times.is_empty() {
+                                times.push(
+                                    result["command"]["time"].as_f64().unwrap_or(session.time)
+                                        + offset,
+                                );
+                            }
                             host.presence_detail(
                                 &id,
                                 &session.run,
                                 kind,
                                 result["data"]["id"].as_str().map(str::to_owned),
                                 result["command"]["path"].as_str().map(str::to_owned),
-                                result["command"]["keyframes"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|k| k["time"].as_f64())
-                                    .collect(),
+                                times,
                             );
                         }
                     }
@@ -1240,6 +1266,7 @@ impl McpSession {
             }
             host.agent_turn(id, self.writer, true)?;
         }
+        let steer_epoch = project.as_deref().map_or(0, crate::coedit::steer_epoch);
         self.active = Some(Active {
             project,
             document,
@@ -1258,6 +1285,7 @@ impl McpSession {
             known_layers,
             owned_scopes: Vec::new(),
             observed_revision: baseline,
+            steer_epoch,
             focus,
         });
         Ok(result)

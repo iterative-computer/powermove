@@ -126,6 +126,28 @@ impl McpSession {
                 return Ok(None);
             }
 
+            for command in args["commands"].as_array().into_iter().flatten() {
+                let target = command["target"]
+                    .as_str()
+                    .filter(|t| !t.starts_with('$'))
+                    .or_else(|| active.focus.first().map(String::as_str));
+                if let Some(target) = target {
+                    if active.known_layers.contains(target)
+                        && view
+                            .snapshot
+                            .root()
+                            .is_none_or(|r| pm_kernel::model::find_layer(r, target).is_none())
+                    {
+                        return Err(Error {
+                            code: "target_removed".into(),
+                            message: format!(
+                                "The user deleted {target}. Skip it, do not recreate it, and mention it in your reply."
+                            ),
+                            backing: None,
+                        });
+                    }
+                }
+            }
             let scopes = if name == "apply_commands" {
                 let cleaned = commands::clean_commands(
                     args["commands"]
@@ -152,6 +174,16 @@ impl McpSession {
             } else {
                 vec![Vec::new()]
             };
+            let epoch = crate::coedit::steer_epoch(&project);
+            let explicit_batch = args["commands"].as_array().is_some_and(|commands| {
+                !commands.is_empty() && commands.iter().all(|c| c["preserveHandEdits"] == false)
+            });
+            if epoch > active.steer_epoch && explicit_batch {
+                active
+                    .owned_scopes
+                    .retain(|owned| !scopes.iter().any(|path| overlaps(path, owned)));
+                active.steer_epoch = epoch;
+            }
             if scopes.iter().any(|path| {
                 active
                     .owned_scopes
@@ -159,7 +191,7 @@ impl McpSession {
                     .any(|owned| overlaps(path, owned))
             }) {
                 return Ok(Some(
-                    json!({"error":"user_owned","status":"dropped","reason":"The user owns this value for the rest of the turn."}),
+                    json!({"error":"user_owned","status":"dropped","reason":"The user owns this value for this turn. A fresh human steer must explicitly ask to change it; then send only those requested values with preserveHandEdits:false."}),
                 ));
             }
             let Some(host) = automation.coedit_host() else {

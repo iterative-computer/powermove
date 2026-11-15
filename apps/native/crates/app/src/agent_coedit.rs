@@ -104,6 +104,7 @@ impl Controller {
                     let events=cx.subscribe_in(&field,window,move |_:&mut Steer,_,event,window,cx| {
                         match event {
                             TextEvent::Submitted(text) if !text.trim().is_empty()=>{
+                                pm_mcp::coedit::record_steer(runtime.project_id());
                                 let (runtime,thread,message,owner)=(runtime.clone(),thread.clone(),text.trim().to_owned(),owner.clone());
                                 cx.spawn(async move |_,cx| {
                                     let result=cx.background_executor().spawn(async move {

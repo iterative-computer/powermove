@@ -254,3 +254,17 @@ pub fn touch_field(project: &str, field: &str, active: bool) {
 pub fn typing(project: &str) -> bool {
     fields().lock().unwrap().iter().any(|(id, _)| id == project)
 }
+
+// A fresh human steer can authorize a specific owned value. The write must
+// explicitly opt out of preserveHandEdits; the grant is consumed by that batch.
+fn steers() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+    static STEERS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    STEERS.get_or_init(Default::default)
+}
+pub fn record_steer(project: &str) {
+    *steers().lock().unwrap().entry(project.into()).or_default() += 1;
+}
+pub fn steer_epoch(project: &str) -> u64 {
+    steers().lock().unwrap().get(project).copied().unwrap_or(0)
+}

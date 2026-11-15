@@ -311,3 +311,43 @@ fn agent_evaluation_time_is_private_and_reported_consistently() {
     drop(host);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn deleting_an_attached_target_reports_target_removed() {
+    use pm_kernel::{Call, Caller, LayerCommand, Request};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    actor
+        .handle()
+        .call(
+            &id,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some("User delete".into()),
+                    expected_revision: None,
+                    body: vec![
+                        LayerCommand::Delete {
+                            layer_ids: vec!["L".into()],
+                        }
+                        .into(),
+                    ]
+                    .into(),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let error = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "target_removed");
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
