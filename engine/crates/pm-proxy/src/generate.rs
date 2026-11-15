@@ -421,6 +421,9 @@ fn transcode(
         "disabled",
         "-noautorotate",
     ]);
+    // A playing viewer allows one job; idle allows two. Four input workers
+    // keep VP9 alpha preparation fast without unbounded filter parallelism.
+    cmd.args(["-threads", "4", "-filter_threads", "2"]);
     // FFmpeg's native VP8/VP9 decoders do not expose Matroska's
     // BlockAdditional alpha. Select the wrapper that pairs both streams
     // before the input is opened, or a 4444 output silently becomes opaque.
