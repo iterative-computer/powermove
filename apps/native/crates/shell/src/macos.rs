@@ -337,6 +337,28 @@ fn open_editor_window(
 /// Development builds only: `--open a,b` (`PM_NATIVE_REVIEW_OPEN`) runs those
 /// commands in the first editor window once it has settled, so design review
 /// captures reach Settings, sheets and the palette without the menu bar or focus.
+#[cfg(debug_assertions)]
+pub(crate) fn review_splitter(
+    action: &str,
+    x: f32,
+    y: f32,
+    offset: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    thread_local! { static ORIGIN: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) }; }
+    ORIGIN.with(|origin| {
+        if action == "press" {
+            origin.set(Some((x, y)));
+        }
+        if let Some((x, y)) = origin.get() {
+            review_pointer(&format!("{action}:{x}:{}", y + offset), window, cx);
+        }
+        if action == "release" {
+            origin.set(None);
+        }
+    });
+}
 /// Development builds: `pointer:x:y`, `click:x:y`, `dblclick:x:y` and
 /// `drag:x:y:x:y` (window points) as GPUI input, so a review can hover,
 /// click and drag without the real pointer; `press:x:y`, `move:x:y` and
@@ -455,6 +477,9 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                 let _ = handle.update(cx, |_, window, cx| {
                     editor.update(cx, |v, cx| v.command(cmd, window, cx))
                 });
+                if name.starts_with("reviewSplitter:") {
+                    wait = 1;
+                }
             }
         })
         .detach();

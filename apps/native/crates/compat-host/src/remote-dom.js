@@ -130,8 +130,57 @@
     }));
     call({ kind: "fonts_loaded", panel: 0, payload: { keys: faces.map((face) => face.key) } });
   };
+  const panelLayouts = new PMPanelLayout((frame) => requestAnimationFrame(frame), ({ id, rect }) => {
+    const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
+      .find((node) => node.getAttribute('data-pm-contribution') === id);
+    if (!root) return false;
+    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px'}))
+      root.style.setProperty(key, value, 'important');
+  }, (placement) => {
+    const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
+      .find((node) => node.getAttribute('data-pm-contribution') === placement.id);
+    if (!root) return;
+    const box = root.getBoundingClientRect();
+    call({kind:'panel_layout_applied', panel:0, payload:{...placement,
+      rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
+  });
+  document.addEventListener('scroll', (event) => {
+    if (event.target.closest?.('[data-pm-overscan]')) return;
+    const root = event.target.closest?.('[data-pm-contribution]');
+    if (root) call({kind:'overscan_dirty',panel:0,payload:{id:root.getAttribute('data-pm-contribution')}});
+  }, true);
   const apply = async (event) => {
-    if (event.kind === "fonts") {
+    if (event.kind === "overscan_clear") {
+      document.querySelector('[data-pm-overscan]')?.remove();
+      requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_cleared',panel:0,payload:{id:event.id,generation:event.generation}})));
+    } else if (event.kind === "overscan_prepare") {
+      document.querySelector('[data-pm-overscan]')?.remove();
+      const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
+        .find((node) => node.getAttribute('data-pm-contribution') === event.id);
+      if (!root) return;
+      const clone = root.cloneNode(true);
+      clone.setAttribute('data-pm-overscan', '');
+      clone.setAttribute('aria-hidden', 'true');
+      clone.setAttribute('inert', '');
+      const rect = event.rect;
+      clone.style.cssText = `position:fixed!important;left:${rect.x}px!important;top:0!important;width:${rect.w}px!important;height:${rect.h}px!important;max-height:${rect.h}px!important;box-sizing:border-box!important;overflow-x:hidden!important;overflow-y:${root.scrollHeight > root.clientHeight ? "scroll" : "hidden"}!important;pointer-events:none!important;z-index:2147483647`;
+      document.body.append(clone);
+      const originals = [root, ...root.querySelectorAll('*')];
+      const copies = [clone, ...clone.querySelectorAll('*')];
+      originals.forEach((node, i) => {
+        if (node.scrollTop > 0) {
+          const tail = document.createElement('div');
+          tail.style.cssText = `height:${rect.h}px;flex:none;visibility:hidden;pointer-events:none`;
+          copies[i].append(tail);
+        }
+        copies[i].scrollTop = node.scrollTop;
+        copies[i].scrollLeft = node.scrollLeft;
+        if (node.localName === 'canvas') copies[i].getContext('2d')?.drawImage(node, 0, 0);
+      });
+      requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_ready',panel:0,payload:{id:event.id,generation:event.generation}})));
+    } else if (event.kind === "panel_layout") {
+      panelLayouts.enqueue(event.placements);
+    } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
     } else if (event.kind === "create") {
       if (panel !== null)
@@ -165,6 +214,7 @@
             },
           });
         if (!applier.apply(batch)) throw Error("Remote DOM page fault");
+        panelLayouts.refresh();
         applied = batch.seq;
         await drawWaiting();
       } else if (event.kind === "canvas") {
