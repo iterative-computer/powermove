@@ -8,11 +8,14 @@ import {
   type Projection,
   type EffectHeader,
   type ParameterRow,
+  type SummaryRow,
   type Intent,
 } from "./contract";
 const t = UI.token;
 const hit = { minWidth: t("metrics.hit"), minHeight: t("metrics.hit") };
 const stop = (e: SurfaceEvent) => e.stopPropagation();
+/** The rows the panel first publishes (the native side's 0..96 window). */
+const ROW_WINDOW = 96;
 export interface PanelProps {
   controller: EffectsController;
   /** Must be resolved from pm-design Tokens.metrics.row by the native worker. */
@@ -252,11 +255,15 @@ export function EffectControls(props: PanelProps) {
           <UI.List
             id={`${PANEL_ID}:list`}
             label="Effects"
-            style={hit}
+            style={{ ...hit, flexGrow: 1, flexShrink: 1 }}
             tabIndex={p.locked ? -1 : 0}
             disabled={p.locked}
             metadata={{
               multiselectable: true,
+              // The rows keep their height: in a dock too short for them the
+              // panel's body scrolls (a short dock left them none, U4). A
+              // stack longer than the first row window scrolls in the list.
+              rowFloor: Math.min(p.count, ROW_WINDOW),
               rowCount: p.count,
               effectCount: p.effectCount,
               focus: p.focus,
@@ -304,6 +311,13 @@ export function EffectControls(props: PanelProps) {
                         index: row.index,
                       });
                     }}
+                  />
+                ) : row.kind === "summary" ? (
+                  <SummaryView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
                   />
                 ) : row.kind === "parameter" ? (
                   <ParameterView
@@ -539,6 +553,7 @@ export function EffectControls(props: PanelProps) {
             style={{
               display: "flex",
               flexDirection: "row",
+              flexShrink: 0,
               paddingLeft: t("metrics.inset"),
               paddingRight: t("metrics.inset"),
               paddingBottom: t("metrics.inset"),
@@ -552,6 +567,130 @@ export function EffectControls(props: PanelProps) {
   );
 }
 /** Read-only text for a value without a registry control (design review T4). */
+/** A channel value as a colourist reads it: two places, a true minus. */
+function signed(v: unknown) {
+  return typeof v === "number" && Number.isFinite(v)
+    ? v.toFixed(2).replace("-", "\u2212")
+    : "\u2013";
+}
+/** A grade instrument summed up on one row: a wheel's master (a field) and
+ * its red, green and blue in their inks, or a curve's point count; the
+ * Color panel, where the instrument is drawn, is one press away. */
+function SummaryView({
+  row,
+  locked,
+  controller: c,
+}: {
+  key?: string;
+  row: SummaryRow;
+  locked: boolean;
+  controller: EffectsController;
+}) {
+  const by = (suffix: string) =>
+    row.parameters.find((p) => p.key?.endsWith(suffix));
+  const master = row.group === "curve" ? undefined : by("Master");
+  const channels =
+    row.group === "curve" ? [] : [by("Red"), by("Green"), by("Blue")];
+  const count = row.group === "curve" ? by("count") : undefined;
+  const points = Number(count?.value ?? 0);
+  const muted = locked || !row.enabled;
+  const value =
+    row.group === "curve"
+      ? `${points} ${points === 1 ? "point" : "points"}`
+      : channels.map((ch) => signed(ch?.value)).join(", ");
+  return (
+    <div
+      role="group"
+      label={`${row.effectLabel}, ${row.label}, ${master ? `master ${signed(master.value)}, ` : ""}${value}`}
+      onClick={stop}
+      onKeyDown={stop}
+    >
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+        }}
+        style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
+        leading={<div role="presentation" style={hit} />}
+        trailing={
+          <UI.ToolbarItem
+            id={`${PANEL_ID}:open-color:${row.id}`}
+            label={`Open ${row.effectLabel} in Color`}
+            title="Open in Color"
+            attr={{ symbol: "camera.filters" }}
+            onClick={(e) => {
+              stop(e);
+              // A maximised Effect Controls gives way first.
+              c.platform.command("restorePanel");
+              c.platform.command("panel:activate:color");
+            }}
+            style={{
+              ...hit,
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+            flexGrow: 1,
+            minWidth: 0,
+          }}
+        >
+          {master && (
+            <UI.NumberField
+              id={`${PANEL_ID}:field:${row.id}:master`}
+              label={`${row.label} Master`}
+              binding={master.binding}
+              value={master.value as number}
+              step={master.step}
+              min={master.min}
+              max={master.max}
+              precision={master.precision}
+              disabled={locked || master.readonly}
+              mixed={master.mixed}
+              onKeyDown={stop}
+              onClick={stop}
+              style={{ width: t("metrics.grade_field"), flexGrow: 0 }}
+            />
+          )}
+          {row.group === "curve" ? (
+            <text
+              style={{
+                color: t("colors.secondary"),
+                fontSize: t("typography.body"),
+              }}
+            >
+              {value}
+            </text>
+          ) : (
+            (["channel_red", "channel_green", "channel_blue"] as const).map(
+              (ink, i) => (
+                <text
+                  key={ink}
+                  style={{
+                    color: t(muted ? "colors.muted" : `colors.${ink}`),
+                    fontSize: t("typography.caption"),
+                    fontVariantNumeric: "tabular-nums",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {signed(channels[i]?.value)}
+                </text>
+              ),
+            )
+          )}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
 function scalar(value: unknown): string | undefined {
   if (typeof value === "string") return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);

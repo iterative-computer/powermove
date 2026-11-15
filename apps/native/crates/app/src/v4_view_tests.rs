@@ -457,23 +457,21 @@ fn a_real_control_click_edits_the_document_and_undo_reverts(cx: &mut TestAppCont
     let first = publication(&rig);
     let (view, mut vcx) = window(cx, &rig, first, Default::default());
     vcx.run_until_parked();
-    let id = view.read_with(&vcx, |v, _| v.semantic_id_starting("timeline:solo:"));
+    // A layer row's Visibility switch (always on the row).
+    let id = view.read_with(&vcx, |v, _| v.semantic_id_starting("timeline:visibility:"));
     let name = id.unwrap();
     let at = bounds(&mut vcx, &name).center();
-    let solo = |rig: &Rig| {
-        let p = rig.kernel.published(PROJECT).unwrap();
-        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)[0].solo
+    // Every layer shows; the click hides the row's layer.
+    let visible = |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .iter()
+            .all(|l| l.visible)
     };
-    assert!(solo(&rig));
+    assert!(visible(&rig.kernel));
     vcx.simulate_click(at, Modifiers::none());
     let check = rig.kernel.clone();
-    settle(cx, move |_| {
-        !pm_kernel::model::list_layers(
-            check.published(PROJECT).unwrap().snapshot.root().unwrap(),
-            None,
-        )[0]
-        .solo
-    });
+    settle(cx, move |_| !visible(&check));
     rig.kernel
         .call(
             PROJECT,
@@ -485,7 +483,7 @@ fn a_real_control_click_edits_the_document_and_undo_reverts(cx: &mut TestAppCont
         .wait()
         .unwrap()
         .unwrap();
-    assert!(solo(&rig));
+    assert!(visible(&rig.kernel));
 }
 /// Dragging a real Properties number field writes through one kernel gesture.
 #[gpui::test]
@@ -700,6 +698,121 @@ fn a_key_the_window_hands_over_reaches_the_panels_root(cx: &mut TestAppContext) 
         ]
     );
 }
+/// U4: a scroller that asks to keep rows keeps them in a body too short for
+/// its panel (the body scrolls instead); one that does not may shrink away.
+#[gpui::test]
+fn a_scroller_keeps_the_rows_its_panel_asks_for_in_a_short_body(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","width":200,"height":60});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"style":{"height":50,"flexShrink":0}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"rowFloor":3}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "div", json!({"style":{"height":500}}), &[]));
+    ops.extend(node_ops(5, 1, "scroll", json!({}), &[]));
+    ops.extend(node_ops(6, 5, "div", json!({"style":{"height":500}}), &[]));
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let row = tokens().metrics.row;
+    assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 3. * row);
+    assert!(f32::from(bounds(&mut vcx, "n5").size.height) < row);
+}
+/// A side panel's body as `panel_body` builds it: a slot that scrolls, the
+/// panel as tall as its content and at least the slot.
+struct ScrollingBody {
+    view: Entity<SurfaceView>,
+    scroll: gpui::ScrollHandle,
+}
+impl Render for ScrollingBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::{InteractiveElement, StatefulInteractiveElement};
+        div().w(px(200.)).h(px(60.)).child(
+            div()
+                .id("body")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child({
+                    let content = self.view.read(cx).in_body(60.);
+                    self.view.clone().cached(content)
+                }),
+        )
+    }
+}
+/// U4: a side panel taller than its body grows with its rows (the body then
+/// scrolls to them); a panel that fits still fills its body.
+#[gpui::test]
+fn a_side_panel_taller_than_its_body_gives_the_body_something_to_scroll(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    for (rows, scrolls) in [(3, true), (0, false)] {
+        let column = json!({"display":"flex","flexDirection":"column","flexGrow":1});
+        let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"style":{"height":50,"flexShrink":0}}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "scroll",
+            json!({"metadata":{"rowFloor":rows}}),
+            &[],
+        ));
+        ops.extend(node_ops(4, 3, "div", json!({"style":{"height":500}}), &[]));
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let first = synthetic(&rig, ops);
+        let scroll = gpui::ScrollHandle::new();
+        let handle = scroll.clone();
+        let (_, mut vcx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut v =
+                    SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx);
+                v.grows = true;
+                v
+            });
+            ScrollingBody {
+                view,
+                scroll: handle,
+            }
+        });
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        vcx.run_until_parked();
+        // The first frame measures the panel; the next sizes the body by it.
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let reach = f32::from(scroll.max_offset().y);
+        eprintln!(
+            "DEBUG rows={rows} reach={reach} n1={:?} n3={:?}",
+            bounds(&mut vcx, "n1"),
+            bounds(&mut vcx, "n3")
+        );
+        if scrolls {
+            let row = tokens().metrics.row;
+            assert_eq!(reach, 50. + 3. * row - 60., "the rows are within reach");
+        } else {
+            assert_eq!(reach, 0., "a panel that fits does not scroll");
+            // Its list fills what the header leaves.
+            assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 10.);
+        }
+    }
+}
 /// S3: a real panel and its real V8 worker under the production gate.
 #[gpui::test]
 fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppContext) {
@@ -903,6 +1016,86 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
         let texts = texts(cx);
         !texts.iter().any(|t| t.starts_with("Exporting")) && texts.iter().any(|t| t == "Export")
     });
+}
+
+/// Cancel reaches the app however the export began: Export Video, the
+/// refusal naming offline clips, Export Without Them, then Cancel while it
+/// renders sends `export.cancel` (the sheet closed and the export ran on).
+#[gpui::test]
+fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let rig = rig_project(
+        "export",
+        r##"{"id":"integration","name":"Strips","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","exportDefaults":{"format":"mp4"},"assets":{"a0":{"id":"a0","kind":"video","dur":10}},"comps":{},"layers":[]}"##,
+    );
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    let mut sent: Vec<String> = Vec::new();
+    // Publications to the sheet, the host's platform requests answered as
+    // the app answers them, until `operation` is asked for.
+    let mut until_asked = |vcx: &mut VisualTestContext, operation: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            for p in rig.runtime.take_publications() {
+                view.update(vcx, |v, cx| v.publish(p, cx));
+            }
+            vcx.run_until_parked();
+            for r in rig.runtime.take_platform_requests() {
+                sent.push(r.operation.clone());
+                rig.runtime.platform_reply(r.id, Ok(Value::Null));
+            }
+            if sent.iter().any(|s| s == operation) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{operation} never asked; asked {sent:?}; errors {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // Clicks a control once it is painted (publications keep arriving).
+    let click = |vcx: &mut VisualTestContext, id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let b = loop {
+            for p in rig.runtime.take_publications() {
+                view.update(vcx, |v, cx| v.publish(p, cx));
+            }
+            vcx.run_until_parked();
+            if let Some(b) = vcx.debug_bounds(Box::leak(id.to_owned().into_boxed_str())) {
+                break b;
+            }
+            assert!(Instant::now() < deadline, "{id} never painted");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        vcx.simulate_click(b.center(), Modifiers::none());
+        vcx.run_until_parked();
+    };
+    click(&mut vcx, "export.start");
+    until_asked(&mut vcx, "export.begin");
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"failed","message":"1 clip is offline: a.mov. Relink the originals, or export without them.","offline":true}))
+            .unwrap(),
+    );
+    until_asked(&mut vcx, "export.begin");
+    click(&mut vcx, "export.without");
+    until_asked(&mut vcx, "export.without");
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"rendering","frame":12,"total":300,"elapsed":2}))
+            .unwrap(),
+    );
+    until_asked(&mut vcx, "export.without");
+    click(&mut vcx, "export.cancel");
+    until_asked(&mut vcx, "export.cancel");
 }
 
 #[gpui::test]
@@ -1286,4 +1479,45 @@ fn a_disclosure_press_shows_in_the_next_frame(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("content").is_some());
     assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
+}
+
+/// A press on a panel's item gives the keyboard to the nearest focusable
+/// node holding it, as a click does on the web and in AppKit: the Project
+/// panel's cards (pressed, so the press stopped there) left its list without
+/// focus, and Space and the arrow keys went to the app instead of the grid.
+#[gpui::test]
+fn a_press_focuses_the_item_it_lands_in(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"id":"list","role":"listbox","tabIndex":0,"style":{"width":200,"height":80}}),
+        &["keydown"],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id":"card","role":"cell","tabIndex":-1,"style":{"width":60,"height":40}}),
+        &["pointerdown"],
+    ));
+    ops.extend(node_ops(
+        3,
+        2,
+        "div",
+        json!({"id":"name","style":{"width":40,"height":10}}),
+        &["pointerdown"],
+    ));
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "name").center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    let focused = view.update_in(&mut vcx, |v, window, _| v.focused_node(window));
+    // The card (tabIndex -1, no control) is not a focus target here; its
+    // list is, and the panel's model knows which card was pressed.
+    assert_eq!(focused, Some(1), "the list holding the pressed card");
 }

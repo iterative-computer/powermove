@@ -206,6 +206,8 @@ pub struct SurfaceView {
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
+    /// Each virtual list's width last told to its panel.
+    list_widths: HashMap<Id, f32>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -236,6 +238,13 @@ pub struct SurfaceView {
     /// Told when a new tree is installed: the timeline's native timecode
     /// layer steps aside while its time field is open, and back after.
     pub(crate) installed: Option<async_channel::Sender<()>>,
+    /// The panel sits in a body that scrolls (every side panel): its root
+    /// is at least the body (`fit`) and grows with content taller than it,
+    /// whose height (`natural`) sizes the body's content, so the body has
+    /// something to scroll. The viewer and the timeline fit their slot.
+    pub(crate) grows: bool,
+    fit: Cell<f32>,
+    natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -283,6 +292,7 @@ impl SurfaceView {
             scrub: None,
             scrub_ops: VecDeque::new(),
             dragging: None,
+            list_widths: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -300,6 +310,9 @@ impl SurfaceView {
             focus_text: None,
             reveal: None,
             installed: None,
+            grows: false,
+            fit: Cell::new(0.),
+            natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -1656,6 +1669,24 @@ impl SurfaceView {
             ..modified(modifiers)
         }
     }
+    /// The nearest focusable node holding `id` (itself first) takes the
+    /// keyboard, as a click focuses it on the web and in AppKit. Text fields
+    /// and native controls keep their own focus handling.
+    fn focus_pressed(&self, id: Id, window: &mut Window, cx: &mut App) {
+        let mut at = Some(id);
+        while let Some(node) = at {
+            if self.fields.contains_key(&node) || self.controls.contains_key(&node) {
+                return;
+            }
+            if let Some(focus) = self.focus.get(&node) {
+                if !focus.is_focused(window) {
+                    focus.focus(window, cx);
+                }
+                return;
+            }
+            at = self.prepared.node(node).and_then(|n| n.parent);
+        }
+    }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
         self.capture = Some(Capture {
@@ -2036,6 +2067,13 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        // In a body that scrolls, the root and the panel fill the body by
+        // growing into it, not as a share of a height that their content
+        // sets (which would leave them their content's height).
+        if self.grows && (id == 0 || node.parent == Some(0)) {
+            element.style().size.height = None;
+            element = element.flex_grow(1.);
+        }
         if let Some(sample) = &node.fixed_width {
             let mut text = window.text_style();
             text.refine(&node.style.text);
@@ -2066,14 +2104,30 @@ impl SurfaceView {
             element = element.debug_selector(|| name);
         }
         if let Some(scroll) = self.scrolls.get(&id) {
+            // A scroller may shrink to nothing unless its panel asks to keep
+            // some rows (`metadata.rowFloor`, Effect Controls' effects): a
+            // panel body shorter than those rows scrolls instead.
+            let floor = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("rowFloor"))
+                .and_then(Value::as_f64)
+                .filter(|rows| rows.is_finite() && *rows > 0.)
+                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
                 element.flex_grow(1.).flex_shrink(1.)
+            } else if self.grows {
+                // In a body that scrolls the panel's height comes from its
+                // content: a scroller adds only its floor, then fills.
+                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(floor))
             } else {
                 element.flex_1()
             };
-            element = element.min_h(px(0.)).track_scroll(scroll);
+            element = element.min_h(px(floor)).track_scroll(scroll);
             // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
             // was at its end stays there as content grows; once scrolled up,
             // it stays where the person left it.
@@ -2149,25 +2203,36 @@ impl SurfaceView {
         }
         if let Some(geometry) = node.virtual_window {
             element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
-                cx.defer_in(window, move |v, _, cx| {
-                    let Some(scroll) = v.scrolls.get(&id) else {
-                        return;
-                    };
-                    let offset = -f32::from(scroll.offset().y) as f64;
-                    let height = f32::from(scroll.bounds().size.height) as f64;
-                    if let Ok(range) = geometry.visible(offset, height) {
-                        v.send(
-                            id,
-                            "rangechange",
-                            EventDetail {
-                                range: Some(range),
-                                ..Default::default()
-                            },
-                            cx,
-                        );
-                    }
-                });
+                cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
             }));
+            // A list laid out from its width (a grid's columns) hears of a
+            // new width as soon as a frame lays it out (measured after
+            // layout: a panel maximized or resized draws nothing more until
+            // something else does, so a check while rendering saw the size
+            // before and the grid kept its old columns).
+            let known = self.list_widths.get(&id).copied();
+            let view = cx.entity().downgrade();
+            element = element.child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let width = f32::from(bounds.size.width);
+                        if width > 0. && known != Some(width) {
+                            let view = view.clone();
+                            cx.defer(move |cx| {
+                                let _ = view.update(cx, |v, cx| {
+                                    if v.list_widths.get(&id) != Some(&width) {
+                                        v.list_widths.insert(id, width);
+                                        v.range_change(id, geometry, cx);
+                                    }
+                                });
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         }
         // A floating surface springs in when it appears and out while its
         // panel keeps it for the exit (`pmKit.closing`): opacity, and a
@@ -2272,6 +2337,18 @@ impl SurfaceView {
                     if let Some(text) = &c.text {
                         children.push(text.clone().into_any_element());
                     }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
                 }
                 _ => children.push(self.element(*child, window, cx, skip)),
             }
@@ -2670,7 +2747,12 @@ impl SurfaceView {
         if events.pointer() {
             element = element.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |v, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    // Stopping here also stops GPUI's own focus transfer:
+                    // the press gives the keyboard to the item it lands in.
+                    if !window.default_prevented() {
+                        v.focus_pressed(id, window, cx);
+                    }
                     v.press(id, event, cx);
                     cx.stop_propagation();
                 }),
@@ -3023,6 +3105,21 @@ impl SurfaceView {
                 window,
             ));
         }
+        // A picture the host made (a Project thumbnail): it fills the node,
+        // cropped to its shape; until it exists the node shows its fill.
+        if let Some(path) = node
+            .resource
+            .as_ref()
+            .and_then(|key| crate::media_thumbs::resolve(key))
+        {
+            element = element.child(
+                img(path)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+        }
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
@@ -3172,6 +3269,32 @@ impl Render for PanelDrag {
     }
 }
 impl SurfaceView {
+    /// A virtual list's visible rows and width (`rangechange`).
+    fn range_change(
+        &mut self,
+        id: Id,
+        geometry: pm_builtins::virtualization::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.scrolls.get(&id) else {
+            return;
+        };
+        let offset = -f32::from(scroll.offset().y) as f64;
+        let bounds = scroll.bounds();
+        let height = f32::from(bounds.size.height) as f64;
+        if let Ok(range) = geometry.visible(offset, height) {
+            self.send(
+                id,
+                "rangechange",
+                EventDetail {
+                    range: Some(range),
+                    width: Some(f32::from(bounds.size.width) as f64),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+    }
     /// The item drag is over (dropped anywhere, or let go): the panel
     /// clears its drag state.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {
@@ -3233,10 +3356,21 @@ impl Render for SurfaceView {
         self.presence = presence;
         self.motion.frame(window);
         let t = &self.table.tokens;
-        div()
-            .relative()
-            .size_full()
-            .flex()
+        let root = div().relative().w_full();
+        let root = if self.grows {
+            // Measured each frame: a change resizes the body's content.
+            let natural = self.natural.clone();
+            root.min_h(px(self.fit.get()))
+                .on_children_prepainted(move |children, window, _| {
+                    let height = children.first().map_or(0., |b| f32::from(b.size.height));
+                    if (natural.replace(height) - height).abs() > 0.5 {
+                        window.refresh();
+                    }
+                })
+        } else {
+            root.h_full()
+        };
+        root.flex()
             .flex_col()
             .text_color(rgb(t.colors.text))
             .text_size(px(t.typography.body))
@@ -3626,5 +3760,16 @@ fn button_held() -> bool {
         true
     } else {
         pm_shell::left_button_held()
+    }
+}
+
+impl SurfaceView {
+    /// The style of a scrolling body's content (`panel_body`): the panel at
+    /// least `body` tall, and as tall as it last measured.
+    pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
+        self.fit.set(body);
+        gpui::StyleRefinement::default()
+            .w_full()
+            .h(px(body.max(self.natural.get())))
     }
 }

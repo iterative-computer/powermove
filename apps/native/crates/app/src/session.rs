@@ -48,6 +48,8 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
+    /// The Project panel grid's thumbnails.
+    pub(crate) thumbs: crate::media_thumbs::Thumbs,
     /// What the media resolver found; `media` adds the renditions.
     pub(crate) media_base: MediaCatalog,
     /// A media resolution for this session has landed: only then do missing
@@ -778,6 +780,7 @@ impl Controller {
             viewer: None,
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
+            thumbs: Default::default(),
             media_base: MediaCatalog::default(),
             media_resolved: false,
             pro_media,
@@ -1817,16 +1820,19 @@ impl Controller {
                 });
                 if let Some(recovery) = recovery {
                     let answer = this.update(cx, |v, _| {
-                        if matches!(
-                            reply,
-                            ShellReply::RecoveryRequired {
-                                recovery: RecoveryResult::Unrecoverable { .. },
-                                ..
-                            }
-                        ) {
-                            v.errors
-                                .borrow_mut()
-                                .push("Project", &recovery.alert.message);
+                        if let ShellReply::RecoveryRequired {
+                            recovery: RecoveryResult::Unrecoverable { reason, .. },
+                            ..
+                        } = &reply
+                        {
+                            // The log has what the alert leaves out: why.
+                            v.errors.borrow_mut().push(
+                                "Project",
+                                &format!(
+                                    "{} {} The recovery data could not be replayed: {reason}.",
+                                    recovery.alert.message, recovery.alert.informative
+                                ),
+                            );
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));
@@ -2375,6 +2381,7 @@ impl Controller {
         self.keyframes = 0;
         self.session = Some(session);
         self.media_refresh.reset();
+        self.thumbs.reset();
         self.media = MediaCatalog::default();
         self.media_base = MediaCatalog::default();
         self.media_resolved = false;

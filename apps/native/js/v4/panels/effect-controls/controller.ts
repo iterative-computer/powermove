@@ -44,21 +44,25 @@ export class EffectsController {
     if (this.disposed) return;
     const next = projection(json(value));
     if (next.revision < this.current.revision) return;
-    const wanted = new Set(
-      next.rows.flatMap((r) =>
-        r.kind === "parameter" && !r.parameter.readonly && !next.locked
-          ? [r.parameter.binding]
-          : [],
-      ),
-    );
-    for (const handle of wanted)
+    // A parameter's binding, and each one a summary row edits (a wheel's
+    // master field).
+    const editable = new Map<string, string>();
+    if (!next.locked)
+      for (const r of next.rows) {
+        const list =
+          r.kind === "parameter"
+            ? [r.parameter]
+            : r.kind === "summary"
+              ? r.parameters
+              : [];
+        for (const parameter of list)
+          if (!parameter.readonly)
+            editable.set(parameter.binding, parameter.id);
+      }
+    const wanted = new Set(editable.keys());
+    for (const [handle, id] of editable)
       if (!this.bindings.has(handle)) {
-        const row = next.rows.find(
-          (r) => r.kind === "parameter" && r.parameter.binding === handle,
-        )!;
-        await this.host.registerBinding(handle, [
-          row.kind === "parameter" ? row.parameter.id : "",
-        ]);
+        await this.host.registerBinding(handle, [id]);
         this.bindings.add(handle);
       }
     // Native binding disposal must cancel any captured gesture before retirement.

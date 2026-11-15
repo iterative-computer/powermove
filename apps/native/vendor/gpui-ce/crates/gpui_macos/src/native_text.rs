@@ -886,6 +886,20 @@ fn place(key: usize, apply: bool) -> bool {
                     crate::composition_accessibility::changed(key);
                 }
             }
+            // A field that is no longer drawn (its panel went to another
+            // tab) takes its caret with it: the system's insertion indicator
+            // stayed where the field was, over the panel shown there now.
+            // (The keyboard comes back to the editor through the shell's
+            // stray-responder check.)
+            if let Some((host, indicator)) = &state.caret
+                && !host.isHidden()
+            {
+                moved = true;
+                if apply {
+                    indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
+                    host.setHidden(true);
+                }
+            }
             continue;
         };
         let h = state

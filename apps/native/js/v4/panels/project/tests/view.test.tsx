@@ -535,9 +535,155 @@ test("the search field follows a query the host set, not late answers to typing"
   const field = find(root, "Search media");
   expect(field.props.value).toBe("");
   expect((field.props.metadata as { hostValue: number }).hostValue).toBe(1);
-  // A late publication from before the host's change doesn't undo it.
+  // At rest the field shows what filters the list, whoever set it.
   view = { ...view, query: "cl", host_filter: 1 };
   await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  await root.dispose();
+});
+test("the search field never shows its placeholder over a filtered list", async () => {
+  const { root } = recorder();
+  const draw = (view: Projection) =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
+  // The panel drawn again (a new view) while the model filters by "pex".
+  await draw({ ...projection([asset()]), query: "pex" });
+  await event(root, find(root, "Search Media").id, "click");
+  expect(find(root, "Search media").props.value).toBe("pex");
+  // Cleared by the person: the field and the filter are empty together.
+  await event(root, find(root, "Search media").id, "input", {
+    value: "",
+    composing: false,
+  });
   expect(find(root, "Search media").props.value).toBe("");
+  await draw({ ...projection([asset()]), query: "" });
+  expect(find(root, "Search media").props.value).toBe("");
+  await root.dispose();
+});
+test("the header chooses list or grid; the grid's rows are a column wide each", async () => {
+  const { root, commits } = recorder();
+  const chosen: string[] = [];
+  const widths: number[] = [];
+  const view = projection([asset("a"), asset("b"), asset("c")]);
+  const render = (mode: "list" | "grid") =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={
+          mode === "grid"
+            ? { columns: 2, rowHeight: 140, thumbWidth: 160, thumbHeight: 90 }
+            : { columns: 1, rowHeight: 28 }
+        }
+        viewMode={mode}
+        onViewMode={(m) => chosen.push(m)}
+        onWidth={(w) => widths.push(w)}
+      />,
+    );
+  await render("list");
+  expect(find(root, "List").props["aria-checked"]).toBe(true);
+  expect(find(root, "Grid").props["aria-checked"]).toBe(false);
+  await event(root, find(root, "Grid").id, "click");
+  expect(chosen).toEqual(["grid"]);
+  await render("grid");
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  expect(list.props.metadata).toEqual({ fixedItems: true });
+  // The host's rangechange carries the grid's width.
+  await event(root, list.id, "rangechange", { range: [0, 2], width: 412 });
+  expect(widths).toEqual([412]);
+  // Three cards in two columns: the short last row keeps a space beside c.
+  const nodes = root.inspect().nodes;
+  const rows = list.children.map((id) => nodes.find((n) => n.id === id)!);
+  expect(rows.map((r) => r.children.length)).toEqual([2, 2]);
+  for (const id of ["a", "b", "c"])
+    expect(card(root, id).props.style).toMatchObject({
+      flexGrow: 1,
+      flexBasis: { token: "metrics.thumbnail_min" },
+    });
+  const report = replay(commits, view).at(-1)!;
+  expect(report.diagnostics).toEqual([]);
+  await root.dispose();
+});
+test("the page asked for leaves room for media imported later", async () => {
+  const { root } = recorder();
+  const pages: [number, number][] = [];
+  const view = projection([asset("a"), asset("b")]);
+  await root.render(
+    <ProjectView
+      view={view}
+      input={() => {}}
+      menu={() => {}}
+      page={(offset, limit) => pages.push([offset, limit])}
+      native={native}
+      layout={{ columns: 2, rowHeight: 140 }}
+    />,
+  );
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  // The host's visible range stops at the rows there are (one row of two).
+  await event(root, list.id, "rangechange", { range: [0, 1], width: 300 });
+  const [offset, limit] = pages.at(-1)!;
+  expect(offset).toBe(0);
+  // Not the two items there are now: a third imported later must arrive
+  // with the next publication, without a scroll asking again.
+  expect(limit).toBeGreaterThanOrEqual(96);
+  await root.dispose();
+});
+test("keys on a clicked card reach the grid: Space previews, arrows move", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  const view = projection([asset("a"), asset("b")]);
+  view.page.rows[0].focused = true;
+  view.focused = view.page.rows[0].id;
+  await root.render(
+    <ProjectView
+      view={view}
+      input={(i) => inputs.push(i)}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={{ columns: 2, rowHeight: 140 }}
+    />,
+  );
+  // A click focuses the card, so the key's target is the card itself.
+  await event(root, card(root, "a").id, "keydown", { key: " " });
+  await event(root, card(root, "a").id, "keydown", { key: "ArrowRight" });
+  expect(
+    inputs.map((i) => (i as { GridKey?: { key: string } }).GridKey?.key),
+  ).toEqual(["Space", "Right"]);
+  await root.dispose();
+});
+test("scrolling within the same rows asks for no new page", async () => {
+  const { root } = recorder();
+  const pages: unknown[] = [];
+  await root.render(
+    <ProjectView
+      view={huge}
+      input={() => {}}
+      menu={() => {}}
+      page={(...p) => pages.push(p)}
+      native={native}
+      layout={layout}
+    />,
+  );
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  // Every wheel event reports the range; most leave it where it was.
+  for (let i = 0; i < 5; i++)
+    await event(root, list.id, "rangechange", { range: [100, 106] });
+  await event(root, list.id, "rangechange", { range: [101, 107] });
+  expect(pages).toEqual([
+    [200, 12],
+    [202, 12],
+  ]);
   await root.dispose();
 });

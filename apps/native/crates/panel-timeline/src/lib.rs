@@ -94,6 +94,9 @@ pub struct TimelineModel {
     /// Merge Selected Curves: the graph's curves drawn as the one motion
     /// they describe together. A view of the same keys, not saved.
     pub graph_merge: bool,
+    /// The curves the graph showed for the last key selection (v1's
+    /// `graphShown`): deselecting every key keeps them on screen.
+    pub graph_shown: Vec<(String, String)>,
     pub reveal: RevealState,
     pub key_selection_active: bool,
     pub track_snap_disabled: bool,
@@ -342,11 +345,20 @@ impl TimelineModel {
         }
     }
     /// The property the graph plots: the focused curve, else the selected
-    /// layer's selected property, else the first revealed one.
+    /// layer's selected property, else the first revealed one. A revealed
+    /// row counts while it is animated or is the selected property (v1's
+    /// `drawGraph` rows): a static row first in the list must not leave the
+    /// graph empty.
     pub fn graph_property(&self) -> Option<(String, String)> {
         let mut candidates: Vec<(String, String)> = vec![];
         for row in self.rows() {
-            if let RowId::Property { layer_id, channel } = &row.id {
+            if let RowId::Property { layer_id, channel } = &row.id
+                && (self.selection.channel() == Some(channel.as_str())
+                    || self
+                        .track_channels(layer_id, channel)
+                        .iter()
+                        .any(|c| !c.keys.is_empty()))
+            {
                 candidates.push((layer_id.clone(), channel.clone()));
             }
         }
@@ -377,14 +389,87 @@ impl TimelineModel {
     }
     /// Composition times of the first and last keyframe on the graph's curves.
     pub fn graph_span(&self) -> Option<(f64, f64)> {
-        let (layer_id, path) = self.graph_property()?;
-        let from = self.index.layer(&layer_id)?.from;
-        self.track_channels(&layer_id, &path)
+        let (series, _) = self.graph_series();
+        series
             .iter()
-            .flat_map(|c| c.keys.iter().map(|k| from + k.time))
+            .filter_map(|(layer, path)| Some((self.index.layer(layer)?, self.index.channel(layer, path)?)))
+            .flat_map(|(layer, channel)| channel.keys.iter().map(|k| layer.from + k.time))
             .fold(None, |span: Option<(f64, f64)>, t| {
                 Some(span.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
             })
+    }
+    /// The channels the graph plots, as `(layer, channel)`, in layer and
+    /// channel order, and whether the key selection chose them (v1's
+    /// `drawGraph`): every numeric channel holding a selected key, with the
+    /// other animated axes of a position, scale, anchor or rotation one of
+    /// them belongs to; with no key selected, the curves shown for the last
+    /// selection while they still exist; else the target property's axes.
+    pub fn graph_series(&self) -> (Vec<(String, String)>, bool) {
+        let numeric = |c: &Channel| c.value.as_f64().is_some() && !c.keys.is_empty();
+        let family = |path: &str| {
+            ["x", "y", "z"]
+                .iter()
+                .find_map(|axis| path.strip_suffix(&format!(".{axis}")))
+                .map(str::to_owned)
+        };
+        let mut picked: HashSet<(String, String)> = HashSet::new();
+        let mut families: HashSet<(String, String)> = HashSet::new();
+        for layer in &self.index.layers {
+            for channel in layer.channels.iter().filter(|c| numeric(c)) {
+                if channel
+                    .keys
+                    .iter()
+                    .any(|k| self.selection.key_selected(&layer.id, &k.id))
+                {
+                    picked.insert((layer.id.clone(), channel.path.clone()));
+                    if let Some(f) = family(&channel.path) {
+                        families.insert((layer.id.clone(), f));
+                    }
+                }
+            }
+        }
+        let in_order = |keep: &dyn Fn(&Layer, &Channel) -> bool| -> Vec<(String, String)> {
+            self.index
+                .layers
+                .iter()
+                .flat_map(|layer| {
+                    layer
+                        .channels
+                        .iter()
+                        .filter(|c| numeric(c) && keep(layer, c))
+                        .map(|c| (layer.id.clone(), c.path.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        if !picked.is_empty() {
+            let series = in_order(&|layer, c| {
+                picked.contains(&(layer.id.clone(), c.path.clone()))
+                    || family(&c.path).is_some_and(|f| families.contains(&(layer.id.clone(), f)))
+            });
+            return (series, true);
+        }
+        let shown: HashSet<_> = self.graph_shown.iter().cloned().collect();
+        let series = in_order(&|layer, c| shown.contains(&(layer.id.clone(), c.path.clone())));
+        if !series.is_empty() {
+            return (series, false);
+        }
+        let Some((layer, path)) = self.graph_property() else {
+            return (vec![], false);
+        };
+        // The property's whole track plots, every axis of it (v1: Position
+        // shows X and Y, Scale both of its axes).
+        let track = ["position", "scale"]
+            .into_iter()
+            .find(|t| path.strip_prefix(t).is_some_and(|rest| rest.starts_with('.')))
+            .unwrap_or(path.as_str());
+        let series = self
+            .track_channels(&layer, track)
+            .into_iter()
+            .filter(|c| numeric(c))
+            .map(|c| (layer.clone(), c.path.clone()))
+            .collect();
+        (series, false)
     }
     pub fn row_position(&self, id: &RowId) -> Option<usize> {
         self.row_positions.get(id).copied()

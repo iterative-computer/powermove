@@ -32,23 +32,30 @@ pub(crate) fn effect_binding_rows<'a>(
     handle: &str,
     channels: &[String],
 ) -> Option<Vec<&'a Value>> {
-    let rows = projection["rows"].as_array()?;
-    let row = |id: &str| {
-        rows.iter().find(|r| {
-            r["kind"] == "parameter"
-                && r["parameter"]["id"] == id
-                && r["parameter"]["readonly"] == false
+    // Every editable parameter the panel shows: its own rows, and those a
+    // summary row edits (Effect Controls' wheel master).
+    let parameters: Vec<&Value> = projection["rows"]
+        .as_array()?
+        .iter()
+        .flat_map(|r| match r["kind"].as_str() {
+            Some("parameter") => vec![&r["parameter"]],
+            Some("summary") => r["parameters"]
+                .as_array()
+                .map(|list| list.iter().collect())
+                .unwrap_or_default(),
+            _ => vec![],
         })
-    };
+        .filter(|p| p["readonly"] == false)
+        .collect();
     let found = channels
         .iter()
-        .map(|id| row(id))
+        .map(|id| parameters.iter().copied().find(|p| p["id"] == id.as_str()))
         .collect::<Option<Vec<_>>>()?;
     let handles = found
         .iter()
-        .map(|r| r["parameter"]["binding"].as_str())
+        .map(|p| p["binding"].as_str())
         .collect::<Option<Vec<_>>>()?;
-    let effect = &found.first()?["parameter"]["effect"];
+    let effect = &found.first()?["effect"];
     let distinct = channels
         .iter()
         .collect::<std::collections::BTreeSet<_>>()
@@ -56,7 +63,7 @@ pub(crate) fn effect_binding_rows<'a>(
         == channels.len();
     (distinct
         && handles.join("+") == handle
-        && found.iter().all(|r| r["parameter"]["effect"] == *effect))
+        && found.iter().all(|p| p["effect"] == *effect))
     .then_some(found)
 }
 pub(crate) fn model(value: &Value) -> Result<pm_model::Value, String> {
@@ -147,7 +154,9 @@ impl Backend {
             document,
             caller: Caller::realm(realm, 1, Origin::Interface),
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
-            panel: EffectsPanel::new(presentation, 0..96),
+            // Effect Controls folds a grade's wheels and curve points into
+            // summary rows; the Color panel draws them itself.
+            panel: EffectsPanel::new(presentation, 0..96).folding_grades(panel == "layer-effects"),
             extension: format!("ext.builtin.{panel}"),
             native,
             panel_id: panel.into(),
@@ -464,7 +473,7 @@ impl Backend {
         let bindings = rows
             .iter()
             .map(|row| {
-                let address = model(&row["parameter"]["id"])?;
+                let address = model(&row["id"])?;
                 pm_panel_inspector::PropertyId::from_value(
                     &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
                         .map_err(|e| e.to_string())?,
@@ -500,6 +509,12 @@ impl Backend {
             Ok(v) => (Some(v), None),
             Err(e) => (None, Some(e)),
         };
+        // Traced runs: when a panel's request is answered (its queue waits on it).
+        if crate::tracing() {
+            crate::trace(
+                json!({"panel": self.panel_id, "replied": operation_name(&request.operation), "id": request.request_id, "accepted": error.is_none()}),
+            );
+        }
         tx.try_send(HostAck {
             version: HOST_API_VERSION,
             realm: request.realm,
@@ -566,6 +581,16 @@ impl Backend {
             self.reply(item.request, item.reply, result)?;
         }
         Ok(())
+    }
+}
+/// A request's kind for the traces: a command by its name.
+fn operation_name(operation: &HostOperation) -> String {
+    match operation {
+        HostOperation::Command { command, .. } => command.clone(),
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v["type"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "?".into()),
     }
 }
 /// A mark of what the timeline's own chrome shows of its saved view: the
@@ -638,13 +663,22 @@ impl KernelData for Data {
             return Err("built-in retired".into());
         }
         b.sync()?;
+        if crate::tracing() {
+            crate::trace(
+                json!({"panel": b.panel_id, "request": operation_name(&request.operation), "id": request.request_id}),
+            );
+        }
         let revision = b.published().as_ref().map_or(0, |p| p.revision());
         let needs_current = match &request.operation {
             HostOperation::Edit { .. } => true,
-            HostOperation::Command { command, .. } => !matches!(
-                command.as_str(),
-                "profile.get" | "panel.agent.read" | "export.plan" | "panel.project"
-            ),
+            // The Export sheet's commands edit no document (Cancel, above
+            // all, must reach a running export whatever changed meanwhile).
+            HostOperation::Command { command, .. } => {
+                !(matches!(
+                    command.as_str(),
+                    "profile.get" | "panel.agent.read" | "panel.project"
+                ) || command.starts_with("export."))
+            }
             _ => false,
         };
         if needs_current && request.expected_revision != revision {

@@ -133,6 +133,78 @@ test("native plan acks cannot overwrite a newer draft or observation", async () 
   await f.model.refreshPlan();
   expect(f.model.canExport).toBe(true);
 });
+test("export pressed while its plan is out starts the moment the plan returns, by click or Return", async () => {
+  for (const press of ["click", "return"] as const) {
+    const f = fixture();
+    await f.model.show();
+    await f.model.refreshPlan();
+    let release!: () => void;
+    f.delay = () =>
+      new Promise<void>((r) => {
+        release = r;
+      });
+    // A setting changed, its plan out, and Export pressed at once.
+    f.model.set("format", "prores");
+    const plan = f.model.refreshPlan();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.model.canExport).toBe(false);
+    if (press === "click") await f.model.start();
+    else expect(await f.model.key("Enter")).toBe(true);
+    expect(f.model.startWanted).toBe(true);
+    expect(f.model.actionLabel).toBe("Preparing…");
+    expect(f.model.canPress).toBe(false);
+    expect(commands(f)).not.toContain("export.begin");
+    f.delay = undefined;
+    release();
+    await plan;
+    expect(commands(f).filter((c) => c === "export.begin")).toHaveLength(1);
+    const begin = f.requests.find(
+      (r) =>
+        r.operation.type === "command" &&
+        r.operation.command === "export.begin",
+    )!;
+    expect((begin.operation as any).args.options.format).toBe("prores");
+    expect(f.model.startWanted).toBe(false);
+    expect(f.model.state.run.phase).toBe("preparing");
+  }
+});
+test("a held export press does not start when its plan fails or the sheet is cancelled", async () => {
+  const f = fixture();
+  await f.model.show();
+  await f.model.refreshPlan();
+  let release!: () => void;
+  f.delay = () =>
+    new Promise<void>((r) => {
+      release = r;
+    });
+  f.model.set("scale", 0.5);
+  const plan = f.model.refreshPlan().catch(() => undefined);
+  await new Promise((r) => setTimeout(r, 0));
+  await f.model.start();
+  expect(f.model.startWanted).toBe(true);
+  f.rejection = "Can't plan this";
+  f.delay = undefined;
+  release();
+  await plan;
+  expect(f.model.startWanted).toBe(false);
+  expect(commands(f)).not.toContain("export.begin");
+  // Pressed, then Cancel: nothing starts when the plan returns.
+  f.rejection = undefined;
+  f.delay = () =>
+    new Promise<void>((r) => {
+      release = r;
+    });
+  f.model.set("scale", 1);
+  const again = f.model.refreshPlan();
+  await new Promise((r) => setTimeout(r, 0));
+  await f.model.start();
+  expect(f.model.startWanted).toBe(false); // the failed plan's sheet: nothing to hold
+  f.delay = undefined;
+  const cancelled = f.model.cancel();
+  release();
+  await Promise.all([again, cancelled]);
+  expect(commands(f)).not.toContain("export.begin");
+});
 test("destination cancel retains every option and no local progress appears before ack", async () => {
   const f = fixture();
   f.cancelled = true;
