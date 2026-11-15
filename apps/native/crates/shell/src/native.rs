@@ -677,6 +677,9 @@ define_class!(
         fn tool(&self, sender: &NSSegmentedControl) {
             if let Some((command, _, _)) = TOOLS.get(sender.selectedSegment() as usize)
                 && let Some(tx) = &self.ivars().sender {
+                let double_click = NSApplication::sharedApplication(self.mtm())
+                    .currentEvent().is_some_and(|event| unsafe { event.clickCount() } == 2);
+                let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
         }
@@ -6481,5 +6484,23 @@ mod sidebar_rect_tests {
             x + w > f64::from(width + t.metrics.panel_radius),
             "trailing edge under the sheet's corner"
         );
+    }
+}
+
+fn toolbar_click_command(command: &str, double_click: bool) -> &str {
+    if command == "toolAnchor" && double_click { "centerAnchor" } else { command }
+}
+
+#[cfg(test)]
+mod anchor_toolbar_tests {
+    use super::toolbar_click_command;
+    #[test]
+    fn anchor_double_click_centres_anchor() {
+        assert_eq!(toolbar_click_command("toolAnchor", true), "centerAnchor");
+    }
+    #[test]
+    fn ordinary_tool_clicks_keep_selecting_tools() {
+        assert_eq!(toolbar_click_command("toolAnchor", false), "toolAnchor");
+        assert_eq!(toolbar_click_command("toolSelect", true), "toolSelect");
     }
 }
