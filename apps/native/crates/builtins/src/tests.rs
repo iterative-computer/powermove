@@ -2462,6 +2462,97 @@ fn the_timeline_panel_hears_of_a_view_change_made_outside_it() {
     assert_eq!(frame(&backend)["mode"], "Tracks");
 }
 
+/// The Export sheet's commands edit no document: Cancel (and the others)
+/// reach a running export after the project changed under the sheet (an
+/// edit, an autosave), where a stale document revision refused them with
+/// "Kernel changed". A document edit with a stale revision is still refused.
+#[test]
+fn export_sheet_commands_are_not_refused_after_the_project_changes() {
+    use pm_surface::host_api::{HOST_API_VERSION, HostOperation, HostRequest};
+    use pm_surface::host_data::KernelData;
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "export-stale".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let backend = Arc::new(Mutex::new(
+        data::Backend::new(kernel.clone(), identity.clone(), "export", false).unwrap(),
+    ));
+    backend.lock().unwrap().export_snapshot().unwrap();
+    let mut service = data::Data(backend.clone());
+    let seen = kernel.published("synthetic").unwrap().revision();
+    // The project changes under the sheet.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Rename".into()),
+                    expected_revision: Some(seen),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some("Renamed Film".into()),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_ne!(kernel.published("synthetic").unwrap().revision(), seen);
+    let send = |service: &mut data::Data, id: u64, operation: HostOperation| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        service
+            .enqueue(
+                HostRequest {
+                    version: HOST_API_VERSION,
+                    realm: identity.realm.clone(),
+                    generation: identity.generation,
+                    project: identity.project.clone(),
+                    request_id: id,
+                    expected_revision: seen,
+                    expected_state_revision: None,
+                    operation,
+                },
+                tx,
+            )
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    };
+    for (id, command) in [(1, "export.cancel"), (2, "export.dismiss")] {
+        let ack = send(
+            &mut service,
+            id,
+            HostOperation::Command {
+                command: command.into(),
+                args: json!({}),
+            },
+        );
+        assert!(ack.accepted, "{command}: {:?}", ack.error);
+    }
+    let ack = send(
+        &mut service,
+        4,
+        HostOperation::Edit {
+            label: "Stale".into(),
+            commands: vec![],
+        },
+    );
+    assert!(!ack.accepted, "a stale edit is still refused");
+    assert_eq!(
+        ack.error.as_deref(),
+        Some("Kernel changed; retry from its latest publication")
+    );
+}
+
 /// A viewer pane shorter than two insets still publishes (fit edge to edge),
 /// and a 32 × 18 composition fits a real pane.
 #[test]

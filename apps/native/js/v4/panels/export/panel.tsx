@@ -122,7 +122,14 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
   const o = model.options;
   const busy = model.locked;
   const watch = (job: Promise<unknown>) => {
-    void job.catch(() => update(null));
+    void job.catch((error) => {
+      // A command that failed is said (an ambiguous host acknowledgement
+      // fences every later one, Cancel included).
+      console.error(
+        `export: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      update(null);
+    });
   };
   const edit = <K extends keyof Options>(key: K, value: Options[K]) => {
     model.set(key, value);
@@ -763,7 +770,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 id="export.start"
                 label={model.actionLabel}
                 primary
-                disabled={!model.canExport}
+                disabled={!model.canExport && !model.canPress}
                 onClick={() => watch(model.start())}
               />
             </div>
