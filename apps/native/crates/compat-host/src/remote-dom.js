@@ -210,6 +210,28 @@
       payload: { keys: faces.map((face) => face.key) },
     });
   };
+  // Route each momentum/wheel event independently, as Electron's side docks do.
+  document.addEventListener('wheel', (event) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
+    const root = event.target.closest?.('[data-pm-contribution]');
+    if (!root) return;
+    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientHeight : 1);
+    for (let node = event.target; node; node = node.parentElement) {
+      const overflow = getComputedStyle(node).overflowY;
+      const remaining = node.scrollHeight - node.clientHeight;
+      if ((overflow === 'auto' || overflow === 'scroll') && remaining > 1 &&
+          (delta < 0 ? node.scrollTop > 0.5 : node.scrollTop < remaining - 0.5)) return;
+      if (node === root) break;
+    }
+    event.preventDefault();
+    call({kind:'dock_scroll', panel:0, payload:{id:root.getAttribute('data-pm-contribution'),delta}});
+  }, {passive:false});
+  document.addEventListener('focusin', (event) => {
+    const root = event.target.closest?.('[data-pm-contribution]');
+    if (!root) return;
+    const rect = event.target.getBoundingClientRect(), body = root.getBoundingClientRect();
+    call({kind:'dock_reveal',panel:0,payload:{id:root.getAttribute('data-pm-contribution'),top:rect.top-body.top,height:rect.height}});
+  });
   const panelLayouts = new PMPanelLayout((frame) => requestAnimationFrame(frame), ({ id, rect }) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
       .find((node) => node.getAttribute('data-pm-contribution') === id);

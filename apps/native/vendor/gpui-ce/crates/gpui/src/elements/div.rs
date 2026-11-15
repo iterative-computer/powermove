@@ -4113,6 +4113,9 @@ impl Interactivity {
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
+            let padding = style.padding.to_pixels(hitbox.size.into(), window.rem_size());
+            let content = self.content_size + size(padding.left + padding.right, padding.top + padding.bottom);
+            let scroll_max = Point::from(content - hitbox.size).max(&Default::default());
             let ongoing_scroll = self.ongoing_scroll.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
@@ -4160,9 +4163,12 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
+                    scroll_offset.y = (scroll_offset.y + delta_y).clamp(-scroll_max.y, px(0.));
+                    scroll_offset.x = (scroll_offset.x + delta_x).clamp(-scroll_max.x, px(0.));
                     if *scroll_offset != old_scroll_offset {
+                        // The innermost region takes this event. At its edge the
+                        // next event bubbles to the enclosing panel/column.
+                        cx.stop_propagation();
                         cx.notify(current_view);
                     }
                 }

@@ -627,67 +627,7 @@
     outline-offset: var(--pm-focus-offset);
   }
 
-  :where(
-    :not(
-      [data-pm-style="none"],
-      [data-pm-style="none"] *,
-      [data-pm-style="tokens-only"],
-      [data-pm-style="tokens-only"] *
-    )
-  )::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  :where(
-    :not(
-      [data-pm-style="none"],
-      [data-pm-style="none"] *,
-      [data-pm-style="tokens-only"],
-      [data-pm-style="tokens-only"] *
-    )
-  )::-webkit-scrollbar-thumb {
-    border: 2px solid transparent;
-    background: transparent;
-    background-clip: padding-box;
-    border-radius: var(--pm-r-capsule);
-  }
-  :hover:where(
-      :not(
-        [data-pm-style="none"],
-        [data-pm-style="none"] *,
-        [data-pm-style="tokens-only"],
-        [data-pm-style="tokens-only"] *
-      )
-    )::-webkit-scrollbar-thumb,
-  .pm-scrolling:where(
-      :not(
-        [data-pm-style="none"],
-        [data-pm-style="none"] *,
-        [data-pm-style="tokens-only"],
-        [data-pm-style="tokens-only"] *
-      )
-    )::-webkit-scrollbar-thumb {
-    background-color: color-mix(in srgb, var(--pm-text) 28%, transparent);
-  }
-  :where(
-    :not(
-      [data-pm-style="none"],
-      [data-pm-style="none"] *,
-      [data-pm-style="tokens-only"],
-      [data-pm-style="tokens-only"] *
-    )
-  )::-webkit-scrollbar-track,
-  :where(
-    :not(
-      [data-pm-style="none"],
-      [data-pm-style="none"] *,
-      [data-pm-style="tokens-only"],
-      [data-pm-style="tokens-only"] *
-    )
-  )::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-
+  /* WebKit follows the system scrollbar appearance and visibility setting. */
   [data-pm-style="none"],
   [data-pm-style="tokens-only"] {
     font: initial;
@@ -733,17 +673,6 @@
     min-width: 0;
   }
 
-  .pm-scrolling
-    *:where(
-      :not(
-        [data-pm-style="none"],
-        [data-pm-style="none"] *,
-        [data-pm-style="tokens-only"],
-        [data-pm-style="tokens-only"] *
-      )
-    )::-webkit-scrollbar-thumb {
-    background-color: color-mix(in srgb, var(--pm-text) 28%, transparent);
-  }
 
   .pm-list:where(
     :not(
