@@ -5,6 +5,7 @@
  * and draws it with the native kit and pm-design tokens.
  */
 import type { ComponentChildren } from "preact";
+import { memo } from "preact/compat";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
@@ -140,7 +141,13 @@ function Para({ runs, style }: { runs: Run[]; style?: Style }) {
   );
 }
 /** Markdown as native text: paragraphs, headings, lists, quotes and code. */
-function Prose({ text, style = reading }: { text: string; style?: Style }) {
+const Prose = memo(function Prose({
+  text,
+  style = reading,
+}: {
+  text: string;
+  style?: Style;
+}) {
   const blocks = markdown(text);
   return (
     <div style={{ ...column, ...shrink, gap: t("metrics.text_padding") }}>
@@ -149,7 +156,8 @@ function Prose({ text, style = reading }: { text: string; style?: Style }) {
       ))}
     </div>
   );
-}
+});
+
 function ProseBlock({
   block: b,
   style,

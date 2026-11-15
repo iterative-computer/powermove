@@ -53,7 +53,8 @@ export class HostAgentModel implements AgentModel {
       this.host.identity.generation,
     );
     if (this.current && value.sequence <= this.current.sequence) return;
-    this.current = structuredClone(value);
+    // json(input) already owns a detached copy.
+    this.current = value;
     for (const callback of this.listeners) callback();
   }
   inspect() {
@@ -72,10 +73,14 @@ export class HostAgentModel implements AgentModel {
   async dispatch(action: Action) {
     const data = json(action);
     // Capture at invocation, not when a queued operation happens to execute.
-    const { sequence, snapshot: s } = this.inspect();
+    if (this.error) throw this.error;
+    if (this.retired || !this.current)
+      throw new Error("Agent publication unavailable");
+    const { sequence, snapshot: s } = this.current;
     const target = { project: s.projectId, thread: s.threadId, run: s.runId };
     const operation = this.queue.then(async () => {
-      this.inspect();
+      if (this.error) throw this.error;
+      if (this.retired) throw new Error("Agent publication unavailable");
       await this.host.command(this.registration.dispatch, {
         sequence,
         target,
