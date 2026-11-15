@@ -66,49 +66,43 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-/// Content-width tab titles. Tabs that do not fit fold into the trailing More
-/// Panels menu, whose hit square is always reserved; the active tab always
-/// stays shown. A title truncates only when the active tab alone is wider than
-/// the room left beside More Panels (`active_limit`).
+/// Every panel has a tab. Long titles share the remaining space and truncate;
+/// the trailing More Panels menu lists the complete group.
 /// The caller reserves space for header tools before asking for this track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabTrack {
     pub visible: Vec<usize>,
+    /// Titles that are truncated in the strip; all are reachable in More Panels.
     pub overflow: Vec<usize>,
-    /// Width the active tab must fit in, when it cannot take its full title.
-    pub active_limit: Option<f32>,
+    /// Shared title width limit when the group cannot take its full titles.
+    pub title_limit: Option<f32>,
 }
 impl Group {
     /// `widths[i]` is the room tab `i` takes, padding and spacing included.
     pub fn tab_track(&self, available: f32, widths: &[f32], tokens: &Tokens) -> TabTrack {
         let n = self.tabs.len();
         let width = |i: usize| widths.get(i).copied().unwrap_or(tokens.metrics.hit * 3.);
-        let total = |set: &[usize]| set.iter().map(|&i| width(i)).sum::<f32>();
-        let all: Vec<_> = (0..n).collect();
-        if total(&all) <= available {
-            return TabTrack {
-                visible: all,
-                overflow: vec![],
-                active_limit: None,
-            };
-        }
-        // The More Panels chevron takes one hit square.
-        let room = (available - tokens.metrics.hit).max(0.);
-        let active = self.active.min(n.saturating_sub(1));
-        let mut visible = vec![active];
-        for i in (0..n).filter(|&i| i != active) {
-            let mut next = visible.clone();
-            next.push(i);
-            if total(&next) <= room {
-                visible = next;
+        // Keep every member in the strip. Share the space between long titles,
+        // leaving short titles at their natural width, like Electron's flex tabs.
+        let room = (available - if n > 1 { tokens.metrics.hit } else { 0. }).max(0.);
+        let mut remaining = room;
+        let mut count = n;
+        let mut sorted: Vec<f32> = (0..n).map(width).collect();
+        sorted.sort_by(f32::total_cmp);
+        let mut limit = room;
+        for w in sorted {
+            limit = remaining / count.max(1) as f32;
+            if w > limit {
+                break;
             }
+            remaining -= w;
+            count -= 1;
         }
-        visible.sort_unstable();
-        let overflow = (0..n).filter(|i| !visible.contains(i)).collect();
+        let overflow: Vec<_> = (0..n).filter(|&i| width(i) > limit).collect();
         TabTrack {
-            visible,
+            visible: (0..n).collect(),
+            title_limit: (!overflow.is_empty()).then_some(limit),
             overflow,
-            active_limit: (width(active) > room).then_some(room),
         }
     }
 }
@@ -1858,5 +1852,65 @@ mod view_tile_tests {
         assert_eq!((t[0].w, t[0].h), (200., 100.));
         assert_eq!((t[3].x, t[3].y), (212., 122.));
         assert_eq!(view_tiles(r, 1, 2.), vec![r]);
+    }
+}
+
+#[cfg(test)]
+mod dock_tabs_tests {
+    use super::*;
+    #[test]
+    fn every_add_restore_close_and_active_change_keeps_all_tabs() {
+        let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+        let panels = Panels::new(vec![
+            ("agent-created".into(), "Agent created".into()),
+            ("late-compat".into(), "Late compat".into()),
+        ]);
+        let mut layout = Layout::preset("design");
+        for id in ["fxbrowser", "agent-created", "late-compat"] {
+            layout.show_panel(id, &panels).unwrap();
+            layout.move_panel(id, 0, 0, true).unwrap();
+            let group = &layout.docks[0].groups[0];
+            assert_eq!(
+                group
+                    .tab_track(180., &vec![90.; group.tabs.len()], &t)
+                    .visible
+                    .len(),
+                group.tabs.len()
+            );
+        }
+        let mut layout: Layout =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        let group = &mut layout.docks[0].groups[0];
+        for active in 0..group.tabs.len() {
+            group.active = active;
+            let track = group.tab_track(180., &vec![90.; group.tabs.len()], &t);
+            assert_eq!(track.visible, (0..group.tabs.len()).collect::<Vec<_>>());
+            assert!(!track.overflow.is_empty());
+        }
+        layout.close_panel("agent-created").unwrap();
+        let group = &layout.docks[0].groups[0];
+        assert_eq!(
+            group
+                .tab_track(180., &vec![90.; group.tabs.len()], &t)
+                .visible
+                .len(),
+            group.tabs.len()
+        );
+        assert!(!group.tabs.iter().any(|t| t == "agent-created"));
+    }
+    #[test]
+    fn exact_fit_and_empty_groups_have_no_phantom_tabs() {
+        let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+        let mut g = Group {
+            tabs: vec!["a".into(), "b".into()],
+            active: 1,
+            size: None,
+            collapsed: false,
+        };
+        let track = g.tab_track(100. + t.metrics.hit, &[50., 50.], &t);
+        assert_eq!(track.visible, [0, 1]);
+        assert!(track.overflow.is_empty());
+        g.tabs.clear();
+        assert!(g.tab_track(0., &[], &t).visible.is_empty());
     }
 }
