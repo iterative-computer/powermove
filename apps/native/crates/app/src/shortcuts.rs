@@ -38,6 +38,7 @@ fn key_only_label(command: &str, args: &[Value]) -> Option<String> {
         "blurField" => "Leave Text Field".into(),
         "toggleLayerStrips" => "Show Layer Bars".into(),
         "renameLayer" => "Rename Layer".into(),
+        "newCamera" => "New Camera".into(),
         "studio.view" => {
             let action = args.first().and_then(Value::as_str).unwrap_or("");
             let view = args.get(1).and_then(Value::as_str).unwrap_or("");
