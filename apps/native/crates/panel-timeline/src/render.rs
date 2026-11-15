@@ -398,7 +398,8 @@ impl Scene {
             };
             let layer = match &id {
                 crate::RowId::Layer(id) => id,
-                crate::RowId::Property { layer_id, .. } => layer_id,
+                crate::RowId::Property { layer_id, .. }
+                | crate::RowId::Effect { layer_id, .. } => layer_id,
             };
             let Some(offset) = offsets.get(layer) else {
                 continue;
