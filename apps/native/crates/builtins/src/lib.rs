@@ -249,7 +249,9 @@ mod project_layout_tests {
 
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
+type AgentStatus = (bool, bool, Option<u64>, usize);
 pub struct Builtins {
+    agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
     broker: Arc<Broker>,
     /// Built-in panels by id; a fork that replaces one runs in its place here.
@@ -942,22 +944,41 @@ impl Builtins {
     /// a question or approval waiting, the run in view's time, and how many
     /// threads run behind the one in view.
     pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
-        let Ok((agent, _)) = self.agent_state() else {
-            return (false, false, None, 0);
-        };
-        let state = agent.shared();
-        let panel = &state.panel;
-        let Ok(session) = panel.session(panel.active_id()) else {
-            return (false, false, None, 0);
-        };
-        let background = panel.background_runs();
-        (
-            session.run.is_some() || background > 0,
-            session.needs_answer(),
-            session.elapsed_ms(agent_host::now_ms()),
-            background,
-        )
+        // Called by the UI drain. Never wait for the JS backend, provider launch,
+        // prompt construction or durable storage. The next drain refreshes facts.
+        let mut cached = self
+            .agent_status_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let observed = (|| {
+            let entries = self.broker.entries.try_lock().ok()?;
+            let Some(entry) = entries.get("agent").cloned() else {
+                return Some((false, false, None, 0));
+            };
+            drop(entries);
+            let backend = entry.try_lock().ok()?.backend.clone();
+            let backend = backend.try_lock().ok()?;
+            let Some(agent) = backend.native.agent.clone() else {
+                return Some((false, false, None, 0));
+            };
+            drop(backend);
+            let state = agent.try_lock().ok()?;
+            let panel = &state.panel;
+            let session = panel.session(panel.active_id()).ok()?;
+            let background = panel.background_runs();
+            Some((
+                session.run.is_some() || background > 0,
+                session.needs_answer(),
+                session.elapsed_ms(agent_host::now_ms()),
+                background,
+            ))
+        })();
+        if let Some(observed) = observed {
+            *cached = observed;
+        }
+        *cached
     }
+
     /// Adding the effect `definition` to `layer` at `time` as the Effects
     /// panel `panel` adds one (its definitions, extensions' included): the
     /// commands of one Undo step.
@@ -1200,6 +1221,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
+            agent_status_cache: Mutex::new((false, false, None, 0)),
             pool,
             broker,
             realms: Mutex::default(),
