@@ -157,10 +157,11 @@ impl Host {
             if !paused.contains(project) {
                 return true;
             }
-            let _ = self
-                .pause_changed
-                .wait_timeout(paused, std::time::Duration::from_millis(100))
-                .unwrap();
+            drop(
+                self.pause_changed
+                    .wait_timeout(paused, std::time::Duration::from_millis(100))
+                    .unwrap(),
+            );
         }
     }
     /// Presence is view-only. Hidden projects discard events; returning to a
