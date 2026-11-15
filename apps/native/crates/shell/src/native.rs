@@ -6521,3 +6521,13 @@ fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     objc2_foundation::NSUserDefaults::standardUserDefaults()
         .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
 }
+
+/// Viewer preferences share the shell's native application settings store.
+pub fn viewer_preference(key: &str, default: bool) -> bool {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(key);
+    if defaults.objectForKey(&key).is_none() { default } else { defaults.boolForKey(&key) }
+}
+pub fn set_viewer_preference(key: &str, value: bool) {
+    objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+}

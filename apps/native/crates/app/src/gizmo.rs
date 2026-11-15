@@ -626,8 +626,8 @@ impl GizmoSurface {
             panning: None,
             space_hand: false,
             space_panned: false,
-            rulers: Default::default(),
-            snapping_enabled: true,
+            rulers: viewer_rulers::Rulers { guides_locked: pm_shell::viewer_preference("PowermoveGuidesLocked", false), ..Default::default() },
+            snapping_enabled: pm_shell::viewer_preference("PowermoveViewerSnapping", true),
             cursor: CursorStyle::Arrow,
             focus: None,
             refreshing: false,
@@ -923,10 +923,12 @@ impl GizmoSurface {
     }
     pub fn toggle_snapping(&mut self, cx: &mut Context<Self>) {
         self.snapping_enabled = !self.snapping_enabled;
+        pm_shell::set_viewer_preference("PowermoveViewerSnapping", self.snapping_enabled);
         cx.notify();
     }
     pub fn toggle_guides_locked(&mut self, cx: &mut Context<Self>) {
         self.rulers.toggle_locked();
+        pm_shell::set_viewer_preference("PowermoveGuidesLocked", self.rulers.guides_locked);
         cx.notify();
     }
     /// View ▸ Clear Guides.

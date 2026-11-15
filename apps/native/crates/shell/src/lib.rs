@@ -45,7 +45,7 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    one_project_per_window, opens_in_place, project_menu_entries,
+    viewer_preference, set_viewer_preference, one_project_per_window, opens_in_place, project_menu_entries,
     ADD, AgentStatus, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
