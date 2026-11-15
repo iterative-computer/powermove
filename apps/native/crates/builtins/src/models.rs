@@ -1652,7 +1652,8 @@ impl Backend {
         let time = self.time();
         if matches!(
             command,
-            "export.begin"
+            "export.queue.add"
+                | "export.begin"
                 | "export.retry"
                 | "export.without"
                 | "export.plan"
@@ -2051,6 +2052,22 @@ impl Backend {
                 self.command_reply(command)?
             }
             // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.showInFinder" => {
+                if self.native.export["run"]["phase"] != "done" {
+                    return Err("No completed export to reveal".into());
+                }
+                let path = self.native.export["run"]["path"].clone();
+                self.native.platform.push((command.into(), json!({"path":path})));
+                self.export_snapshot()?
+            }
+            "export.queue.add" | "export.queue.list" | "export.queue.render" | "export.queue.action" | "export.queue.finder" => {
+                if command == "export.queue.add" {
+                    crate::delivery::options(&args["options"])?.validate()?;
+                    self.native.export["run"] = json!({"phase":"choosingDestination"});
+                }
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
             "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?

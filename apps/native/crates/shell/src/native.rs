@@ -4000,6 +4000,7 @@ impl Host {
                 .disabled
                 .contains(menu::split_palette_command(&c.command).0)
         });
+        choices.push(Choice::new("Render Pending", "renderPending").within("Export"));
         choices.extend(state.palette_layers.iter().map(|(id, name)| {
             Choice::new(
                 name.clone(),

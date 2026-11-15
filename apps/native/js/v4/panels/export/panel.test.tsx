@@ -236,6 +236,7 @@ test("hover/focus use system controls; op tree stays stable, with one selected k
     "export.preset",
     "export.presetName",
     "export.cancel",
+    "export.queue.add",
     "export.start",
   ]);
   expect(after.ax.find((n: any) => n.id === segment.id)).toMatchObject({
@@ -318,11 +319,12 @@ test("Return in preset field saves without starting export; Save joins focus ord
   await f.root.flush();
   let row = check(replay(f.commits));
   expect(
-    row.focusOrder.map((id: number) => row.nodes[id].props.id).slice(-4),
+    row.focusOrder.map((id: number) => row.nodes[id].props.id).slice(-5),
   ).toEqual([
     "export.presetName",
     "export.savePreset",
     "export.cancel",
+    "export.queue.add",
     "export.start",
   ]);
   await event(f.root, named(f.root, "export.presetName").id, "keydown", {
@@ -379,7 +381,7 @@ test("drag/drop, multi-select and 60k rows are N/A; the sheet declares no list o
   // sheet and its footer stay on screen.
   expect(
     nodes.filter((n) => n.type === "scroll").map((n) => n.props.id),
-  ).toEqual(["export.options"]);
+  ).toEqual(["export.options", "export.queue.rows"]);
   expect(JSON.stringify(f.commits)).not.toMatch(
     /dragstart|dragover|drop|multiselect/,
   );
@@ -479,9 +481,9 @@ test("a 3D export states its preset's promise, its render time and the 75% optio
   );
   expect(named(f.root, "export.summary").props.label).toBe(project.summary);
   expect(
-    (named(f.root, "export.summaryTime").props.style as { fontWeight: string })
+    (named(f.root, "export.summaryTime").props.style as { fontWeight: unknown })
       .fontWeight,
-  ).toBe("600");
+  ).toEqual({ token: "typography.display_weight" });
   // Render at 75% Size is offered, and off unless chosen.
   expect(named(f.root, "export.studioReducedSize").props.value).toBe(false);
   await f.root.dispose();
@@ -557,5 +559,145 @@ test("the dynamic range opens on what the host chose: the project's Output", asy
   const f = await mounted(seed);
   expect(f.model.options.dynamicRange).toBe("hlg");
   expect(named(f.root, "export.dynamicRange").props.value).toBe("hlg");
+  await f.root.dispose();
+});
+
+test("queue shows progress, pending controls, failed retry and completed Finder action", async () => {
+  const seed = initial();
+  seed.queue = [
+    {
+      id: 1,
+      name: "Opening",
+      format: "mp4",
+      path: "/Exports/Opening.mp4",
+      status: "Rendering",
+      progress: 0.42,
+      error: "",
+    },
+    {
+      id: 2,
+      name: "Logo",
+      format: "prores",
+      path: "/Exports/Logo.mov",
+      status: "Pending",
+      progress: 0,
+      error: "",
+    },
+    {
+      id: 3,
+      name: "Yesterday",
+      format: "mp4",
+      path: "/Exports/Yesterday.mp4",
+      status: "Done",
+      progress: 1,
+      error: "",
+    },
+    {
+      id: 4,
+      name: "Credits",
+      format: "mp4",
+      path: "/Exports/Credits.mp4",
+      status: "Failed",
+      progress: 0,
+      error: "Missing media",
+    },
+  ];
+  const f = await mounted(seed);
+  expect(named(f.root, "queue.cancel.1")).toBeDefined();
+  expect(named(f.root, "queue.cancel.2")).toBeDefined();
+  expect(named(f.root, "queue.finder.3")).toBeDefined();
+  expect(named(f.root, "queue.retry.4")).toBeDefined();
+  expect(
+    [...f.root.host.nodes.values()].some(
+      (n) => n.props.id === "queue.remove.1",
+    ),
+  ).toBe(false);
+  check(replay(f.commits));
+  await f.root.dispose();
+});
+
+test("each queue status has exactly its inline actions, revealed on hover and keyboard focus", async () => {
+  const seed = initial();
+  seed.run = { phase: "rendering", frame: 42, total: 100, elapsed: 2 };
+  seed.queue = (
+    ["Pending", "Rendering", "Done", "Failed", "Cancelled"] as const
+  ).map((status, index) => ({
+    id: index + 1,
+    name: `Job ${index + 1}`,
+    format: "mp4",
+    path: `/Exports/Job-${index + 1}.mp4`,
+    status,
+    progress: 0.42,
+    error: "",
+    finishedAt:
+      status === "Done" || status === "Failed" || status === "Cancelled"
+        ? 1700000000 + index
+        : 0,
+  }));
+  const f = await mounted(seed);
+  expect(named(f.root, "queue.time.5").textContent).not.toBe("");
+  const expected = [
+    ["cancel"],
+    ["cancel"],
+    ["finder", "remove"],
+    ["retry", "remove"],
+    ["remove"],
+  ];
+  for (const [index, actions] of expected.entries()) {
+    const id = index + 1;
+    const jobRow = named(f.root, `queue.job.${id}`);
+    expect(jobRow.props.style).toMatchObject({
+      height: { token: "metrics.export_job_row" },
+    });
+    for (const action of ["cancel", "retry", "finder", "remove"]) {
+      const node = [...f.root.host.nodes.values()].find(
+        (n) => n.props.id === `queue.${action}.${id}`,
+      );
+      expect(!!node).toBe(actions.includes(action));
+      if (node) {
+        expect(node.props.title).toBeTruthy();
+        expect(node.props.label).toContain(`Job ${id}`);
+        expect(node.parent?.props.style).toMatchObject({ opacity: 0 });
+      }
+    }
+    await event(f.root, jobRow.id, "pointerenter");
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "pointerleave");
+    await event(f.root, jobRow.id, "focus");
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "blur", {
+      value: `queue.${actions.at(-1)}.${id}`,
+    });
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "blur", { value: "export.cancel" });
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 0 });
+  }
+  check(replay(f.commits));
+  await f.root.dispose();
+});
+
+test("project-file exports keep one queue below the current export block", async () => {
+  const seed = initial();
+  seed.options.format = "json";
+  seed.run = { phase: "preparing" };
+  const f = await mounted(seed);
+  expect(
+    [...f.root.host.nodes.values()].filter(
+      (n) => n.props.id === "export.queue",
+    ),
+  ).toHaveLength(1);
+  check(replay(f.commits));
   await f.root.dispose();
 });

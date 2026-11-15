@@ -27,6 +27,7 @@ mod dialogs;
 mod entry;
 mod error_log;
 mod export_coordinator;
+mod render_queue;
 mod expression_sheet;
 mod extension_authoring;
 mod extension_transfer;

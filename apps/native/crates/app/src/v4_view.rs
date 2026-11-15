@@ -201,6 +201,7 @@ pub struct SurfaceView {
     /// in they are this frame, 0–1. Set before the motion frame steps.
     presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
+    focus_events: std::collections::BTreeSet<Id>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The height a sheet's body wants, measured as it is laid out.
@@ -311,6 +312,7 @@ impl SurfaceView {
             ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
+            focus_events: Default::default(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
             sheet_fit: Default::default(),
@@ -373,6 +375,7 @@ impl SurfaceView {
             self.leases.clear();
             self.option_sets.clear();
             self.subscriptions.clear();
+            self.focus_events.clear();
             cx.defer_in(window, move |v, window, cx| {
                 v.reconcile(window, cx);
                 for (id, text) in texts {
@@ -523,6 +526,7 @@ impl SurfaceView {
         self.option_sets.clear();
         self.focus.clear();
         self.subscriptions.clear();
+        self.focus_events.clear();
         self.anchors.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
@@ -542,6 +546,7 @@ impl SurfaceView {
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| live(id));
         self.focus.retain(|id, _| live(id));
+        self.focus_events.retain(|id| live(id));
         self.leases.retain(|id, _| live(id));
         self.option_sets.retain(|id, _| live(id));
         if self.capture.is_some_and(|c| !live(&c.target)) {
@@ -638,6 +643,32 @@ impl SurfaceView {
             self.mount_field(view, node, lease, window, cx);
             mounts.2 += 1;
             mounts.3 += started.elapsed();
+        }
+        // Glyph actions deliver focus to their row as well as pointer hover.
+        // Text fields and AppKit form controls keep their existing lifecycle.
+        for (&id, handle) in &self.focus {
+            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) { continue; }
+            let mut at = Some(id);
+            let mut interested = false;
+            while let Some(target) = at {
+                let Some(node) = surface.node(target) else { break; };
+                interested |= node.listeners.contains_key("focus") || node.listeners.contains_key("blur");
+                at = node.parent;
+            }
+            if !interested { continue; }
+            let focused = cx.on_focus(handle, window, move |v, _, cx| {
+                v.pointer(id, "focus", EventDetail::default(), cx);
+            });
+            let blurred = cx.on_blur(handle, window, move |v, window, cx| {
+                // Carry the next control's semantic name so a row retains its
+                // reveal while Tab moves between actions in that same row.
+                let next = v.publication.surface.node(id).filter(|node|node.input.is_none())
+                    .and_then(|_|v.focused_node(window)).and_then(|next|v.publication.surface.node(next))
+                    .and_then(|node|node.props.get("id")).cloned();
+                v.pointer(id, "blur", EventDetail { value: next, ..Default::default() }, cx);
+            });
+            self.subscriptions.entry(id).or_default().extend([focused, blurred]);
+            self.focus_events.insert(id);
         }
         if crate::diag::enabled() {
             crate::diag::line(
@@ -3284,6 +3315,32 @@ impl SurfaceView {
                         )
                         .into_any_element()
                 });
+            }
+            Kit::QueueProgress { value, ring } => {
+                if *ring {
+                    let value = *value;
+                    let accent = t.colors.accent;
+                    let track = t.colors.field;
+                    let stroke = t.metrics.export_job_progress_height;
+                    let side = t.metrics.symbol_panel;
+                    element = element.child(canvas(|_,_,_|(), move |bounds,_,window,_| {
+                        let center = bounds.center();
+                        let radius = side / 2. - stroke;
+                        for (fraction, color) in [(1., track), (value, accent)] {
+                            let mut path = PathBuilder::stroke(px(stroke));
+                            for step in 0..=48 {
+                                let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * fraction * step as f32 / 48.;
+                                let p = center + point(px(radius * angle.cos()), px(radius * angle.sin()));
+                                if step == 0 { path.move_to(p); } else { path.line_to(p); }
+                            }
+                            if let Ok(path) = path.build() { window.paint_path(path, rgb(color)); }
+                        }
+                    }).size(px(side)).flex_none());
+                } else {
+                    element = element.child(div().h(px(t.metrics.export_job_progress_height)).w_full()
+                        .rounded(px(t.metrics.border)).overflow_hidden().bg(rgb(t.colors.field))
+                        .child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent))));
+                }
             }
             Kit::Progress(Some(value)) => {
                 let track = div()

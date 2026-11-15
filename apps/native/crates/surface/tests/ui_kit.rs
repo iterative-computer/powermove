@@ -719,3 +719,16 @@ fn design_review_shapes_follow_the_panel_specs() {
     assert_eq!(pm_surface::kit::spoken_number(100.0), "100");
     assert_eq!(pm_surface::kit::spoken_number(-0.0001), "0");
 }
+
+#[test]
+fn token_spacing_and_binary_visibility_keep_literal_visual_values_rejected() {
+    let mut s = surface(Component::ProgressRow);
+    for opacity in [0,1] {
+        patch(&mut s,json!({"style":{"padding":{"token":"space.xl"},"gap":{"token":"space.sm"},"opacity":opacity}}));
+        assert!(validate_panel(&s,&tokens(),&Layout::new()).is_empty());
+    }
+    for style in [json!({"opacity":0.5}),json!({"padding":16}),json!({"fontSize":{"token":"space.xl"}})] {
+        patch(&mut s,json!({"style":style}));
+        assert!(validate_panel(&s,&tokens(),&Layout::new()).iter().any(|d|d.code == "nonTokenValue"));
+    }
+}
