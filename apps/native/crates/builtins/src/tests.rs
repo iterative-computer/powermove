@@ -5926,11 +5926,20 @@ fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs
         )
         .unwrap();
     if let crate::models::NativeCommand::Value(menu) = menu {
-        assert!(
-            menu.as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["label"] == "Close Others")
+        let labels: Vec<_> = menu
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Composition Settings…",
+                "New Composition…",
+                "Close",
+                "Close Others"
+            ]
         );
     }
     backend

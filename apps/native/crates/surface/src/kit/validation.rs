@@ -136,12 +136,28 @@ pub fn validate_panel_with_table(
             let height = bounds
                 .map(|r| r.y1 - r.y0)
                 .or_else(|| style.get("minHeight").and_then(|v| token_number(v, table)));
+            // Compact composition tabs have their own kit hit geometry.
+            // Other controls retain the standard minimum.
+            let metadata = node.props.get("metadata");
+            let minimum = if node.props.get("role").and_then(Value::as_str) == Some("tab")
+                && metadata.and_then(|m| m.get("compositionTab")) == Some(&Value::Bool(true))
+            {
+                tokens.metrics.comp_tab_height
+            } else if component == Some(Component::ToolbarItem)
+                && metadata
+                    .and_then(|m| m.get("compositionTabClose"))
+                    .is_some_and(Value::is_object)
+            {
+                tokens.metrics.comp_tab_close
+            } else {
+                tokens.metrics.hit
+            };
             match (width, height) {
                 (Some(w), Some(h))
                     if w.is_finite()
                         && h.is_finite()
-                        && w >= f64::from(tokens.metrics.hit)
-                        && h >= f64::from(tokens.metrics.hit) => {}
+                        && w >= f64::from(minimum)
+                        && h >= f64::from(minimum) => {}
                 (Some(_), Some(_)) => flag("hitTarget", "smallHitTarget"),
                 _ => flag("hitTarget", "missingHitTarget"),
             }

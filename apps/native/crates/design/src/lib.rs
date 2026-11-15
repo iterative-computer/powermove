@@ -228,6 +228,13 @@ pub struct Metrics {
     pub toolbar_title_width: f32,
     pub toolbar_title_line: f32,
     pub control: f32,
+    /// Compact composition tab geometry.
+    pub comp_tab_height: f32,
+    pub comp_tab_leading: f32,
+    pub comp_tab_trailing: f32,
+    pub comp_tab_close: f32,
+    pub comp_tab_gap: f32,
+    pub comp_tab_content_gap: f32,
     /// Space between docked panels, and between them and the window edge.
     pub dock_gap: f32,
     /// Sidebar width of full-window screens (Home, Settings).
@@ -795,6 +802,12 @@ impl Tokens {
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
                 control: 28.,
+                comp_tab_height: 22.,
+                comp_tab_leading: 10.,
+                comp_tab_trailing: 6.,
+                comp_tab_close: 16.,
+                comp_tab_gap: 2.,
+                comp_tab_content_gap: 4.,
                 dock_gap: space.md,
                 sidebar: 224.,
                 border: 1.,
