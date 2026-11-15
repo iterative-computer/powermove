@@ -147,11 +147,30 @@ pub fn draw_dots(size: [f32; 2], age: f32, row: Option<f32>, light: bool, reduce
         for x in (3..size[0].min(4096.) as usize).step_by(6) {
             let center = [x as f32, y as f32];
             if !inside_slot(center, size, 8.) { continue; }
-            let pencil = row.is_some_and(|r| (center[1] - r).abs() < 3.4);
-            let strength = if reduced { fade(age, 0.12) } else { wake };
-            dots.push(Dot { center, radius: if pencil { 1.45 } else { 0.9 },
-                alpha: dim * if pencil { 0.38 * strength } else { (if light { 0.06 } else { 0.08 }) * wake },
-                orange: pencil });
+            dots.push(Dot { center, radius: 0.9,
+                alpha: dim * (if light { 0.06 } else { 0.08 }) * wake, orange: false });
+        }
+    }
+    if let Some(y) = row {
+        dots.extend(sketch_dots(size, y, dim * if reduced { fade(age, 0.12) } else { wake }));
+    }
+    dots
+}
+
+/// Pencil anatomy stays within the same content inset as actual controls.
+pub fn sketch_dots(size: [f32; 2], y: f32, strength: f32) -> Vec<Dot> {
+    let width = (size[0] - 32.).max(0.);
+    let mut dots = Vec::new();
+    for (start, end, jitter) in [(0., 0.22, true), (0.38, 0.82, false), (0.88, 0.94, false)] {
+        let mut x = 16. + width * start;
+        let mut index = 0;
+        while x <= 16. + width * end {
+            let cy = y + if jitter { (index as f32 * 1.7).sin() } else { 0. };
+            if inside_slot([x, cy], size, 8.) {
+                dots.push(Dot { center: [x, cy], radius: 0.85, alpha: 0.25 * strength, orange: true });
+            }
+            index += 1;
+            x += if start > 0.8 { (width * 0.03).max(1.) } else { 6. };
         }
     }
     dots
@@ -165,7 +184,7 @@ mod draw_tests {
         let dots = draw_dots([120., 80.], 0.24, Some(39.), false, false, false);
         assert_eq!(dots, draw_dots([120., 80.], 0.24, Some(39.), false, false, false));
         assert!(dots.iter().all(|d| inside_slot(d.center, [120., 80.], 8.)));
-        assert!(dots.iter().any(|d| d.orange && d.alpha == 0.38));
+        assert!(dots.iter().any(|d| d.orange && d.alpha == 0.25));
     }
     #[test]
     fn light_and_playback_field_budget() {
@@ -267,5 +286,19 @@ mod ink_tests {
         assert_eq!(ink_color(0.2, true, true), 0x111111);
         assert_eq!(ink_color(0., false, false), 0xf0580a);
         assert_eq!(ink_color(0.58, false, false), 0xf2f2f2);
+    }
+}
+
+#[cfg(test)]
+mod anatomy_tests {
+    use super::*;
+    #[test]
+    fn pencil_has_three_inset_parts_and_a_jittered_label() {
+        let dots = sketch_dots([300., 260.], 58., 1.);
+        assert!(dots.iter().all(|d| d.center[0] >= 16. && d.center[0] <= 284.));
+        for (lo, hi) in [(0.,0.22),(0.38,0.82),(0.88,0.94)] {
+            assert!(dots.iter().any(|d| (16.+268.*lo..=16.+268.*hi).contains(&d.center[0])));
+        }
+        assert!(dots.iter().all(|d| (d.center[1]-58.).abs() <= 1.));
     }
 }

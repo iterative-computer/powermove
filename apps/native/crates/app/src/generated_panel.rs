@@ -112,13 +112,13 @@ fn build_frame(
 ) -> AnyElement {
     let light = t.scheme == pm_design::Scheme::Light;
     let reduced = t.accessibility.reduce_motion;
-    let row_height = t.metrics.row;
+    let row_height = BUILD_ROW;
     let height = (rect.h - t.metrics.header).max(0.);
     let dim = panel_build::playback(playing).0;
     div().absolute().inset_0().occlude().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-            let y = ((state.row as f32 + 0.5) * row_height).min((size[1] - 8.).max(0.));
+            let y = (BUILD_HEADER + (state.row as f32 + 0.5) * row_height).min((size[1] - 16.).max(0.));
             window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
 
                 let mut paint = |x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, alpha: f32| {
@@ -126,10 +126,24 @@ fn build_frame(
                     window.paint_quad(PaintQuad::new(b).corner_radii(px(radius)).background(pm_shell::kit::ink(color, alpha)));
                 };
                 let ready = state.stage == panel_build::Stage::Ready;
-                for dot in panel_build::draw_dots(size, age, Some(y), light, reduced, playing).into_iter().filter(|_| !ready) {
+                for dot in panel_build::draw_dots(size, age, None, light, reduced, playing).into_iter().filter(|_| !ready) {
                     paint(dot.center[0] - dot.radius, dot.center[1] - dot.radius,
                         dot.radius * 2., dot.radius * 2., dot.radius,
-                        if dot.orange { 0xf0580a } else if light { 0x000000 } else { 0xffffff }, dot.alpha);
+                        if light { 0x000000 } else { 0xffffff }, dot.alpha);
+                }
+                if !ready && state.stage != panel_build::Stage::Wake {
+                    let mut rows = vec![state.row];
+                    rows.extend(state.pending.iter().copied().filter(|row| *row > state.row).take(2));
+                    for row in rows {
+                        let row_y = BUILD_HEADER + (row as f32 + 0.5) * BUILD_ROW;
+                        let erasure = if row == state.row && state.stage == panel_build::Stage::Ink {
+                            1. - panel_build::fade(elapsed - 0.06, 0.22)
+                        } else { 1. };
+                        for dot in panel_build::sketch_dots(size, row_y, erasure * dim) {
+                            paint(dot.center[0]-dot.radius, dot.center[1]-dot.radius, dot.radius*2., dot.radius*2., dot.radius,
+                                if light { 0x8f7868 } else { 0xc4aa96 }, dot.alpha);
+                        }
+                    }
                 }
                 if !reduced && !ready {
                     let x = 12. + (size[0] - 24.).max(0.) * panel_build::ink_ease((elapsed % 1.).min(1.));
