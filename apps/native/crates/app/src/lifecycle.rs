@@ -92,6 +92,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"cancelled"}));
     crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
         ._delegate
@@ -169,7 +170,14 @@ fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
     )
 }
 pub fn begin_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"begin"}));
     let q = cx.global_mut::<QuitCoordinator>();
+    if q.terminating {
+        if !q.quitting {
+            start_quit(cx);
+        }
+        return;
+    }
     if q.quitting {
         return ask_quit_now(cx);
     }
@@ -226,11 +234,6 @@ pub fn begin_quit(cx: &mut App) {
 fn start_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
-    // SIGTERM: nobody is there to answer a Save question. Unsaved work is
-    // archived as Don't Save archives it (recoverable), and the app ends.
-    if q.terminating {
-        q.discard = true;
-    }
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
     let controllers = q.controllers.clone();
@@ -244,7 +247,8 @@ fn start_quit(cx: &mut App) {
     q.queue = questions_first(std::mem::take(&mut q.queue), |weak| {
         asked.contains(&weak.entity_id())
     });
-    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard) else {
+    let unattended = cx.global::<QuitCoordinator>().terminating;
+    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard || unattended) else {
         return next_quit(cx);
     };
     // S002: two or more dirty projects get one question before any per-project sheet.
@@ -443,6 +447,7 @@ fn ask_session_failed(error: &str, cx: &mut App) {
 }
 /// Compacts and releases the library, then quits.
 fn finish_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
     let host = cx.global::<QuitCoordinator>().host.clone();
     for weak in cx.global::<QuitCoordinator>().controllers.clone() {
         let _ = weak.update(cx, |v, cx| {
@@ -770,6 +775,7 @@ impl Controller {
         .detach();
     }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        crate::diag::line(serde_json::json!({"quit":"request_close", "intent":format!("{intent:?}"), "pending":self.close_pending}));
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
@@ -829,6 +835,7 @@ impl Controller {
         let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
+        crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
         let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
             && self.mcp.operation_in_progress();
         if intent == Intent::Quit
@@ -891,6 +898,12 @@ impl Controller {
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
+            self.complete_close(intent, cx);
+            return;
+        }
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
+            // Close saves the project and completes its durability barrier.
+            // No unattended Save/Dont Save sheet may hold SIGTERM open.
             self.complete_close(intent, cx);
             return;
         }
@@ -1341,6 +1354,26 @@ mod tests {
             !pm_kernel::journal::sessions(&dir.path().join("journals/test")).is_empty(),
             "the unsaved edit is kept for recovery"
         );
+        actor.shutdown();
+    }
+
+    #[test]
+    fn unattended_quit_saves_open_dirty_project_before_releasing_library() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unattended.pmv");
+        answer(&k, ShellCall::SaveAs {
+            session: session.clone(), path: file.clone(), replace: false,
+        });
+        let before = std::fs::read(&file).unwrap();
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        // The unattended controller uses Close, which saves and fsyncs,
+        // instead of archiving a rejected edit or waiting for a sheet.
+        expect_closed(k.shell(ShellCall::Close(session)).wait()).unwrap();
+        assert_ne!(std::fs::read(&file).unwrap(), before);
+        assert!(matches!(answer(&k, ShellCall::PrepareQuit), ShellReply::Compacted { .. }));
+        answer(&k, ShellCall::ReleaseLibrary);
         actor.shutdown();
     }
 
