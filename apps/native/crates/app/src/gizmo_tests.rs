@@ -2919,4 +2919,18 @@ fn viewer_zoom_synthetic_sequences(_: &mut TestAppContext) {
         assert!((0.05..=0.8).contains(&view.scale.get()));
         assert_anchor(&view);
     }
+    for _ in 0..20 {
+        let before = view.scale.get();
+        view.navigate(input.wheel(&wheel).unwrap(), center, 0.8);
+        assert!(view.scale.get() <= before);
+        assert_anchor(&view);
+    }
+    assert_eq!(view.scale.get(), 0.05);
+    let clamped_pan = view.pan;
+    view.navigate(input.wheel(&wheel).unwrap(), center, 0.8);
+    assert_eq!(view.pan, clamped_pan, "the limit cannot accumulate anchor drift");
+    wheel.delta = ScrollDelta::Pixels(point(px(0.), px(10000.)));
+    view.navigate(input.wheel(&wheel).unwrap(), center, 0.8);
+    assert_eq!(view.scale.get(), 0.1, "reversal starts at the clamped value");
+    assert_anchor(&view);
 }
