@@ -1726,6 +1726,12 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if !matches!(source, SessionSource::New(_)) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
         let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
@@ -1885,6 +1891,8 @@ impl Controller {
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
                         v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
                     }
                 }
                 match result {
