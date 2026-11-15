@@ -853,3 +853,61 @@ fn coedit_segmented_squash_preserves_interleaved_user_steps_and_redo() {
     assert_eq!(opacity_of(&s, "s1"), Some(50.));
     assert_eq!(name(&s, "s1"), "Mine");
 }
+
+/// Viewer controls address parameters outside layer.p. Keep the evaluator's
+/// current-time semantics instead of reading the channel's static `v` field.
+#[test]
+fn evaluate_property_reads_animated_effects_shader_uniforms_and_extension_params() {
+    let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+    let animated = serde_json::json!({"v":99,"kf":[{"i":"a","t":0,"v":20},{"i":"b","t":1,"v":40}]});
+    project["layers"][0]["fx"] =
+        serde_json::json!([{"id":"ramp","type":"gradient","p":{"startX":animated}}]);
+    project["layers"][0]["d"] =
+        serde_json::json!({"uniforms":{"uX":animated},"params":{"xX":animated}});
+    let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+    for key in ["ramp.startX", "u.uX", "x.xX"] {
+        assert_eq!(
+            store
+                .queries()
+                .evaluate_property(None, "s1", key, 0.5)
+                .unwrap()
+                .as_f64(),
+            Some(30.)
+        );
+    }
+    assert!(
+        store
+            .queries()
+            .evaluate_property(None, "s1", "ramp.missing", 0.5)
+            .is_err()
+    );
+}
+
+#[test]
+fn evaluate_property_preserves_stop_collections_and_composition_context() {
+    let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+    let stops =
+        serde_json::json!([{"position":0,"color":[1,0,0,1]},{"position":1,"color":[0,0,1,1]}]);
+    project["comps"]["C2"]["layers"][0]["fx"] =
+        serde_json::json!([{"id":"ramp","type":"gradient","p":{"stops":{"v":stops,"kf":[]}}}]);
+    project["comps"]["C2"]["layers"][0]["d"] =
+        serde_json::json!({"uniforms":{"uX":{"v":99,"kf":[],"expr":"time * 10"}}});
+    let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+    let value = store
+        .queries()
+        .evaluate_property(Some("C2"), "inner", "ramp.stops", 0.5)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(&value))
+            .unwrap(),
+        stops
+    );
+    assert_eq!(
+        store
+            .queries()
+            .evaluate_property(Some("C2"), "inner", "u.uX", 0.5)
+            .unwrap()
+            .as_f64(),
+        Some(5.)
+    );
+}
