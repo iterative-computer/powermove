@@ -1451,11 +1451,17 @@ impl TimelineSurface {
             return;
         }
         // Final Cut: a click moves the playhead to the skimmer; the gesture
-        // (selection, a drag) goes on from there, without a skimmer.
-        if let Some(at) = self.skimmer {
+        // (selection, a drag) goes on from there, without a skimmer. A key, a
+        // direction handle or a transform grip under the pointer takes the
+        // press as it stands: the playhead stays where it is.
+        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
+            || self.graph_point_at(x, y);
+        if let Some(at) = self.skimmer
+            && !grabs
+        {
             self.delegate.seek(at, cx);
-            self.set_skimmer(None, cx);
         }
+        self.set_skimmer(None, cx);
         let (x, y) = self.local(event.position);
         let Some(frame) = self.frame.clone() else {
             return;
@@ -1807,6 +1813,32 @@ impl TimelineSurface {
                 at: event.position,
             };
         }
+    }
+    /// Whether `(x, y)` lands on a graph key, a direction handle or a grip of
+    /// the transform box (what a press there takes hold of).
+    fn graph_point_at(&self, x: f64, y: f64) -> bool {
+        let (Some(area), Some(region)) = (self.graph_area(), self.graph_region()) else {
+            return false;
+        };
+        if y < region.y {
+            return false;
+        }
+        if self
+            .viewport()
+            .and_then(|v| self.graph.as_ref()?.transform_box(v, area))
+            .is_some_and(|b| b.grip_at(x, y).is_some())
+        {
+            return true;
+        }
+        self.graph_ops(area).is_some_and(|ops| {
+            ops.iter().any(|o| {
+                (o.id.starts_with("graph-handle:") || o.id.starts_with("graph-key:"))
+                    && x >= o.bounds.x - 3.
+                    && x <= o.bounds.x + o.bounds.width + 3.
+                    && y >= o.bounds.y - 3.
+                    && y <= o.bounds.y + o.bounds.height + 3.
+            })
+        })
     }
     /// The graph key nearest `(x, y)` within v1's 8 point reach.
     fn graph_key_at(&self, x: f64, y: f64) -> Option<String> {
