@@ -348,7 +348,10 @@ impl StudioService {
         let texture_start = std::time::Instant::now();
         if textures_changed {
             if let Some(maps) = &input.maps {
-                let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
+                let mut pixels = Vec::with_capacity(maps.layers.iter().map(|m| m.len()).sum());
+                for layer in &maps.layers {
+                    pixels.extend_from_slice(layer);
+                }
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
