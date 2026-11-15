@@ -2278,6 +2278,13 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // Every release of the button is told to the session, which
+                    // ends a pointer gesture whose own view never heard it (it
+                    // was drawn again, or covered, while held).
+                    if e.r#type() == NSEventType::LeftMouseUp {
+                        host.borrow().send_command("pointerReleased", vec![]);
+                        return event.as_ptr();
+                    }
                     let (palette, fields, window, splitter_focus) = {
                         let h = host.borrow();
                         (
@@ -2494,6 +2501,7 @@ impl Host {
                 NSEventMask::KeyDown
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
+                    | NSEventMask::LeftMouseUp
                     | NSEventMask::RightMouseDown,
                 &handler,
             )

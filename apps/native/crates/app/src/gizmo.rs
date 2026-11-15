@@ -1606,6 +1606,20 @@ impl GizmoSurface {
             self.pick(press, cx);
         }
     }
+    /// The button came up in the window while a pointer gesture of this
+    /// surface still waits for it: its own listener never heard the release
+    /// (the viewer was drawn again or covered while held). It ends now, as a
+    /// release does, so no edit stays open.
+    pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let held = self.drag.is_some()
+            || self.pen_drag.is_some()
+            || self.panning.is_some()
+            || self.rulers.dragging.is_some();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
+    }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {
             return true;

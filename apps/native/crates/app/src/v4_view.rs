@@ -1908,6 +1908,16 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// The button came up in the window while a scrub or a captured press of
+    /// this view still waits for it: its own listener never heard the
+    /// release (the panel was drawn again while held). It ends now.
+    pub fn release_unheard(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let held = self.scrub.is_some() || self.capture.is_some();
+        if held {
+            self.release_pointer(window.mouse_position(), 1, Modifiers::none(), cx);
+        }
+        held
+    }
     /// The pressed pointer comes up: a scrub or a grading drag ends (one
     /// Undo step), a captured node hears `pointerup`.
     fn release_pointer(

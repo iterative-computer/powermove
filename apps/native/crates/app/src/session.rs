@@ -3559,6 +3559,16 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // The button came up somewhere in the window (after the views
+            // heard it): a pointer gesture whose own view never did ends now.
+            "pointerReleased" => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                }
+                for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
+                    view.update(cx, |v, cx| v.release_unheard(window, cx));
+                }
+            }
             // Space came up after arming the hand over the viewer: it plays
             // only if the hand did not pan (After Effects' rule).
             "viewer.spaceUp" => {

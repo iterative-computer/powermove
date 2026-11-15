@@ -401,6 +401,43 @@ fn an_untraced_drag_reads_no_input_times(cx: &mut TestAppContext) {
     assert!(s.recorder.reports.borrow().is_empty());
     assert!(s.recorder.stamps.borrow().is_empty());
 }
+/// A corner drag whose release the viewer never hears (it was drawn again
+/// or covered while held) still ends when the window reports the release:
+/// the Scale edit is closed and kept, nothing is left open to block a save.
+#[gpui::test]
+fn a_drag_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(50.), px(50.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    let open = |s: &Stage| s.rig.kernel.published(PROJECT).unwrap().entry.is_some();
+    assert!(open(&s), "the drag holds its edit");
+    // The window's report of the release, without the viewer's mouse-up.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| kernel.published(PROJECT).unwrap().entry.is_none());
+    s.refresh(cx);
+    assert!(s.pose().scale[0] > before.scale[0], "the scale is kept");
+    // A second report (the viewer did hear it) changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
+    });
+}
 #[gpui::test]
 fn dragging_a_corner_scales_and_undo_restores_it(cx: &mut TestAppContext) {
     let mut s = stage(cx);
