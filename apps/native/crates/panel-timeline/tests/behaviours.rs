@@ -2829,3 +2829,208 @@ fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
     assert_eq!(m.rows().last().unwrap().depth, 1);
     assert!(m.reveal.layers["g"].paths.is_none());
 }
+
+#[test]
+fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
+    let m = model(parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"work":[6,18],"markers":[{"id":"m","t":12}],"layers":[{"id":"a","type":"shape","from":2,"dur":2,"p":{"opacity":{"v":0,"kf":[{"i":"k","t":0,"v":0}]}}},{"id":"b","type":"shape","from":8,"dur":2,"on":false,"collapsed":true,"p":{"opacity":{"v":0,"kf":[{"i":"other","t":1,"v":0}]}}}]}"#).unwrap());
+    for pps in [40., 100., 400.] {
+        for kind in [
+            DragKind::Layers {
+                ids: strings(&["a"]),
+            },
+            DragKind::TrimIn {
+                ids: strings(&["a"]),
+            },
+            DragKind::TrimOut {
+                ids: strings(&["a"]),
+            },
+            DragKind::Keys {
+                ids: strings(&["k"]),
+            },
+            DragKind::GraphKeys {
+                ids: strings(&["k"]),
+            },
+        ] {
+            let keys = matches!(kind, DragKind::Keys { .. } | DragKind::GraphKeys { .. });
+            let anchor = if matches!(kind, DragKind::TrimOut { .. }) {
+                4.
+            } else {
+                2.
+            };
+            let (acquire, release) = snap::tolerances(keys, pps);
+            for target in [0., 20., 6., 18., 12., 8., 10., 14.] {
+                for inside in [true, false] {
+                    let mut drag = Drag::begin(&m, kind.clone()).unwrap();
+                    let direction = if target < anchor { -1. } else { 1. };
+                    let overshoot = if inside {
+                        acquire * 0.5
+                    } else {
+                        release + 2. / pps
+                    };
+                    drag.commands(DragSample {
+                        time_delta: target - anchor + direction * overshoot,
+                        modifiers: Modifiers {
+                            shift: true,
+                            ..mods()
+                        },
+                        acquire_tolerance: acquire,
+                        release_tolerance: release,
+                        playhead: 14.,
+                        ..sample(0.)
+                    })
+                    .unwrap();
+                    let lock = if keys {
+                        drag.key_snap.map(|s| s.target)
+                    } else {
+                        drag.snap_target()
+                    };
+                    assert_eq!(
+                        lock,
+                        inside.then_some(target),
+                        "{kind:?}, target {target}, pps {pps}, inside {inside}"
+                    );
+                    assert_eq!(drag.snap_target().is_some(), inside && !keys);
+                    drag.commands(DragSample {
+                        time_delta: target - anchor,
+                        acquire_tolerance: acquire,
+                        release_tolerance: release,
+                        playhead: 14.,
+                        ..sample(0.)
+                    })
+                    .unwrap();
+                    assert!(drag.snap_target().is_none() && drag.key_snap.is_none());
+                }
+            }
+            let mut drag = Drag::begin(&m, kind).unwrap();
+            drag.commands(DragSample {
+                time_delta: 9. - anchor + 0.01 / pps,
+                modifiers: Modifiers {
+                    shift: true,
+                    ..mods()
+                },
+                acquire_tolerance: acquire,
+                release_tolerance: release,
+                playhead: 14.,
+                ..sample(0.)
+            })
+            .unwrap();
+            assert_eq!(drag.key_snap.map(|s| s.target), keys.then_some(9.));
+            assert!(drag.snap_target().is_none());
+        }
+    }
+}
+
+#[test]
+fn electron_scrub_target_matrix_feedback_and_shift_release() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let radius = snap::tolerances(false, pps).1;
+        for target in playhead_targets(&m.index).into_iter().filter(|t| *t > 0.) {
+            let mut scrub = Scrub::begin(m.index.clone(), target - 0.5).unwrap();
+            assert_eq!(
+                scrub.update(target + 1e-6, true, radius).unwrap(),
+                HostEffect::Seek(target)
+            );
+            assert_eq!(scrub.snap_target(), Some(target));
+            scrub.modifiers(false, radius).unwrap();
+            assert_eq!(scrub.snap_target(), None);
+        }
+    }
+}
+
+#[test]
+fn electron_work_area_is_frame_only_even_with_shift() {
+    let m = model(fixture());
+    for kind in [DragKind::WorkIn, DragKind::WorkOut, DragKind::WorkMove] {
+        let mut drag = Drag::begin(&m, kind).unwrap();
+        drag.commands(DragSample {
+            modifiers: Modifiers {
+                shift: true,
+                ..mods()
+            },
+            acquire_tolerance: 0.1,
+            release_tolerance: 0.15,
+            ..sample(0.99)
+        })
+        .unwrap();
+        assert!(drag.snap_target().is_none() && drag.key_snap.is_none());
+    }
+}
+
+#[test]
+fn electron_key_tie_prefers_head() {
+    let m = model(fixture());
+    let mut drag = Drag::begin(
+        &m,
+        DragKind::Keys {
+            ids: strings(&["a0"]),
+        },
+    )
+    .unwrap();
+    drag.commands(DragSample {
+        modifiers: Modifiers {
+            shift: true,
+            ..mods()
+        },
+        acquire_tolerance: 0.3,
+        release_tolerance: 0.4,
+        playhead: 2.5,
+        ..sample(1.75)
+    })
+    .unwrap();
+    assert_eq!(drag.key_snap.unwrap().target, 2.5);
+    assert!(drag.snap_target().is_none());
+}
+
+#[test]
+fn electron_multi_key_rigid_snap_and_modifier_release() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let (acquire, release) = snap::tolerances(true, pps);
+        let mut drag = Drag::begin(
+            &m,
+            DragKind::Keys {
+                ids: strings(&["a0", "a2"]),
+            },
+        )
+        .unwrap();
+        drag.commands(DragSample {
+            modifiers: Modifiers {
+                shift: true,
+                ..mods()
+            },
+            acquire_tolerance: acquire,
+            release_tolerance: release,
+            ..sample(3. - acquire / 2.)
+        })
+        .unwrap();
+        assert_eq!(
+            drag.key_snap,
+            Some(snap::GroupLock {
+                anchor: 1.,
+                target: 4.
+            })
+        );
+        assert!(drag.snap_target().is_none());
+        drag.commands(DragSample {
+            acquire_tolerance: acquire,
+            release_tolerance: release,
+            ..sample(3.)
+        })
+        .unwrap();
+        assert!(drag.key_snap.is_none());
+    }
+}
+
+#[test]
+fn electron_scrub_has_no_attraction_before_crossing_or_beyond_pixel_radius() {
+    let m = model(fixture());
+    for pps in [40., 100., 400.] {
+        let radius = snap::tolerances(false, pps).1;
+        let mut scrub = Scrub::begin(m.index.clone(), 3.).unwrap();
+        scrub.update(4. - 0.001, true, radius).unwrap();
+        assert_eq!(scrub.snap_target(), None);
+        scrub.update(4. + radius + 0.001, true, radius).unwrap();
+        assert_ne!(scrub.snap_target(), Some(4.));
+    }
+}
