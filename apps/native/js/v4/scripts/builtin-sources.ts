@@ -54,13 +54,29 @@ const output: Record<string, Record<string, string>> = {};
 for (const { id, folder, title: name } of panels) {
   const base = join(ROOT, "panels", folder);
   const tree: Record<string, string> = {};
-  for (const path of files(base)) {
-    const file = join(base, path);
+  // Properties embeds the same effect controls as the dedicated panel. Ship
+  // that source beside the inspector so a fork remains self-contained.
+  const dependencies = folder === "inspector" ? ["effect-controls"] : [];
+  const sources = [base, ...dependencies.map((name) => join(ROOT, "panels", name))]
+    .flatMap((sourceBase) => files(sourceBase).map((path) => ({
+      sourceBase,
+      file: join(sourceBase, path),
+      path: sourceBase === base ? path : `${relative(join(ROOT, "panels"), sourceBase)}/${path}`,
+    })));
+  for (const { path, file, sourceBase } of sources) {
     tree[path] = readFileSync(file, "utf8").replace(
       /(\bfrom\s*|\bimport\s*\(\s*)"(\.[^"]*)"/g,
       (match, keyword: string, specifier: string) => {
-        const inside = resolve(dirname(file), specifier).startsWith(base);
+        const target = resolve(dirname(file), specifier);
+        const inside = target.startsWith(sourceBase + "/");
         if (inside) return match;
+        for (const dependency of dependencies) {
+          const dependencyBase = join(ROOT, "panels", dependency);
+          if (target.startsWith(dependencyBase + "/")) {
+            const local = relative(dirname(path), join(dependency, relative(dependencyBase, target)));
+            return `${keyword}"${local.startsWith(".") ? local : "./" + local}"`;
+          }
+        }
         const module = runtimeModule(file, specifier);
         if (!module)
           throw new Error(`${folder}/${path} imports ${specifier} outside its panel`);
