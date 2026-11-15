@@ -109,7 +109,12 @@ fn run(legacy: bool, snapping: bool) -> Value {
     let kind = DragKind::Layers {
         ids: (0..11).map(|g| format!("g{g}")).collect(),
     };
-    wait(c.begin_drag(kind.clone())).unwrap();
+    if legacy {
+        wait(c.begin_drag(kind.clone())).unwrap();
+    } else {
+        c.begin_preview_drag(kind.clone()).unwrap();
+    }
+    let revision = c.model.index.revision;
     let mut oracle = Drag::begin(&c.model, kind.clone()).unwrap();
     // Baseline uses the same gesture and planner, with an inert time field
     // to retain the original generic SetLayer implementation.
@@ -140,6 +145,7 @@ fn run(legacy: bool, snapping: bool) -> Value {
     let mut paint_times = vec![];
     let mut actor_times = vec![];
     let mut publication_times = vec![];
+    let mut scene = Scene::from_model(&c.model, &Presenter, &tokens, 0.).unwrap();
     for n in 0..60 {
         let sample = DragSample {
             time_delta: (n + 1) as f64 / 25.0,
@@ -176,11 +182,16 @@ fn run(legacy: bool, snapping: bool) -> Value {
         }
         kernel_times.push(started.elapsed().as_secs_f64() * 1000.);
         let published = c.kernel.published("drag").unwrap();
-        actor_times.push(published.actor_work.as_secs_f64() * 1000.);
-        publication_times.push(published.publication_work.as_secs_f64() * 1000.);
+        actor_times.push(if legacy {published.actor_work.as_secs_f64() * 1000.} else {0.});
+        publication_times.push(if legacy {published.publication_work.as_secs_f64() * 1000.} else {0.});
         drop(published);
         let started_scene = Instant::now();
-        let scene = Scene::from_model(&c.model, &Presenter, &tokens, 0.).unwrap();
+        if legacy {
+            scene = Scene::from_model(&c.model, &Presenter, &tokens, 0.).unwrap();
+        } else {
+            scene.preview_times(&c.model, &c.layer_preview().unwrap().starts);
+            assert_eq!(c.kernel.published("drag").unwrap().revision(), revision);
+        }
         scene_times.push(started_scene.elapsed().as_secs_f64() * 1000.);
         let started_paint = Instant::now();
         let frame = scene
@@ -203,11 +214,24 @@ fn run(legacy: bool, snapping: bool) -> Value {
     let name = if legacy { "before" } else { "after" };
     println!("{name}, shift={snapping}, 60 events, 435 layers / 831 keys");
     stats("event end-to-end", &mut total);
-    stats("gesture + kernel + sync", &mut kernel_times);
+    stats("gesture / preview worker", &mut kernel_times);
     stats("kernel actor", &mut actor_times);
     stats("publication", &mut publication_times);
     stats("scene build (worker)", &mut scene_times);
     stats("frame prepare (main-thread work)", &mut paint_times);
+    let preview = if legacy {
+        None
+    } else {
+        assert_eq!(root(&c), before);
+        Some(
+            c.layer_preview()
+                .unwrap()
+                .snapshot
+                .root()
+                .unwrap()
+                .to_value(),
+        )
+    };
     if legacy {
         wait(c.call(GestureCall::Commit { gesture }.into())).unwrap();
     } else {
@@ -215,11 +239,14 @@ fn run(legacy: bool, snapping: bool) -> Value {
     }
     assert_eq!(c.kernel.published("drag").unwrap().history.entries, 1);
     let after = root(&c);
+    if let Some(preview) = preview {
+        assert_eq!(preview, after);
+    }
     wait(c.call(HistoryCall::Undo.into())).unwrap();
     assert_eq!(root(&c), before);
     wait(c.call(HistoryCall::Redo.into())).unwrap();
     assert_eq!(root(&c), after);
-    wait(c.begin_drag(kind)).unwrap();
+    c.begin_preview_drag(kind).unwrap();
     for n in 0..3 {
         wait(c.drag(DragSample {
             time_delta: n as f64 + 2.,
@@ -265,4 +292,95 @@ fn scalar_start_planner_preserves_validation_and_leaf_operations() {
             }
         }
     }
+}
+
+#[test]
+fn batch_start_planner_matches_original_locks_cycles_and_duplicate_targets() {
+    use pm_kernel::commands::layers::LayerPatch;
+    for locked in [false, true] {
+        for cycle in [false, true] {
+            let value=pm_model::json::parse(&serde_json::json!({"id":"batch","compId":"C","fps":30,"dur":20,"assets":{},"comps":{},"layers":[
+                {"id":"g0","type":"group","from":0,"dur":20,"lock":locked,"group":if cycle {"g1"}else{""},"p":{}},
+                {"id":"g1","type":"group","from":0,"dur":20,"group":"g0","p":{}},
+                {"id":"l","type":"shape","from":0,"dur":20,"group":"g1","p":{}}
+            ]}).to_string()).unwrap();
+            for ids in [vec!["g0", "g1", "l"], vec!["l", "l"], vec!["missing", "l"]] {
+                let mut fast = DocumentStore::new_untitled(value.clone());
+                let mut old = DocumentStore::new_untitled(value.clone());
+                let commands = |time| {
+                    ids.iter()
+                        .enumerate()
+                        .map(|(n, id)| {
+                            LayerCommand::Set {
+                                layer_id: (*id).into(),
+                                patch: LayerPatch {
+                                    from: Some(n as f64 + 1.),
+                                    time,
+                                    ..Default::default()
+                                },
+                            }
+                            .into()
+                        })
+                        .collect::<Vec<Command>>()
+                };
+                let a = fast.transact("Move", Origin::Interface, &commands(0.));
+                let b = old.transact("Move", Origin::Interface, &commands(1.));
+                match (a, b) {
+                    (Ok(_), Ok(_)) => assert_eq!(
+                        fast.snapshot().root().unwrap().to_value(),
+                        old.snapshot().root().unwrap().to_value()
+                    ),
+                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                    _ => panic!("batch behavior changed"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn preview_shares_unmoved_rows_and_cancel_keeps_foreign_edits() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    wait(kernel.open("drag", OpenSource::Untitled(project())))
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(kernel, "drag", Caller::native()).unwrap();
+    let tokens =
+        pm_design::Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+    let scene = Scene::from_model(&c.model, &Presenter, &tokens, 0.).unwrap();
+    let mut moved = scene.clone();
+    c.begin_preview_drag(DragKind::Layers {
+        ids: vec!["g0".into()],
+    })
+    .unwrap();
+    wait(c.drag(DragSample {
+        time_delta: 2.,
+        ..Default::default()
+    }))
+    .unwrap();
+    moved.preview_times(&c.model, &c.layer_preview().unwrap().starts);
+    let row = |id: &str| pm_panel_timeline::v4::row_id(&RowId::Layer(id.into()));
+    assert!(std::ptr::eq(
+        scene.row(&row("g1")).unwrap(),
+        moved.row(&row("g1")).unwrap()
+    ));
+    assert!(!std::ptr::eq(
+        scene.row(&row("g0")).unwrap(),
+        moved.row(&row("g0")).unwrap()
+    ));
+    wait(c.call(Call::Transact {
+        label: None,
+        body: WriteBody::Commands(vec![Command::SetLayerName {
+            layer_id: "l1".into(),
+            name: "Foreign edit".into(),
+        }]),
+        expected_revision: None,
+    }))
+    .unwrap();
+    let foreign = root(&c);
+    wait(c.finish_drag(false)).unwrap();
+    assert_eq!(root(&c), foreign);
+    assert_eq!(c.kernel.published("drag").unwrap().history.entries, 1);
+    actor.shutdown();
 }

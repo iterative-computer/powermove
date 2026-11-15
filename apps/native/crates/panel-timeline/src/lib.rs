@@ -19,7 +19,7 @@ pub mod v4;
 mod v4_actions;
 
 pub use behaviour::*;
-pub use client::{ClientError, TimelineClient};
+pub use client::{ClientError, LayerPreviewFrame, TimelineClient};
 pub use interaction::*;
 pub use marquee::*;
 pub use reveal::{Disclosure, PropertyFacts, RevealState};

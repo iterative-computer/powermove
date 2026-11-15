@@ -2137,6 +2137,18 @@ impl Controller {
 }
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| {
+            if let Some(viewer) = &v.viewer {
+                let _ = viewer.transient_snapshot(snapshot.clone());
+            }
+            if let Some(popout) = &v.popout {
+                if let Some(viewer) = &*popout.viewer.borrow() {
+                    let _ = viewer.transient_snapshot(snapshot);
+                }
+            }
+        });
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }

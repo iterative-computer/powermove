@@ -469,6 +469,8 @@ impl ViewerStatus {
 }
 struct View {
     config: ViewerConfig,
+    transient_snapshot: Option<Snapshot>,
+    transient_content: Option<u64>,
     stamp: Stamp,
     content: u64,
     dirty: bool,
@@ -813,6 +815,37 @@ impl Viewer {
             export_estimate::cancel(v,"export estimate cancelled by input");
             v.pending_input.get_or_insert(input);
         }
+    }
+    /// Disposable native timing preview. The authoritative snapshot/revision
+    /// and history stay untouched. A distinct content identity keeps transient
+    /// pixels out of the committed frame cache, including on Escape.
+    pub fn transient_snapshot(&self, snapshot: Option<Snapshot>) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        let content = state.content + 1;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        if let Some(snapshot) = &snapshot {
+            ensure!(
+                snapshot.doc_id == v.stamp.doc_id,
+                "preview document changed"
+            );
+        }
+        if snapshot.is_none() && v.transient_snapshot.is_none() {
+            return Ok(());
+        }
+        if snapshot.is_none() || v.edit_rested {self.shared.supersede();}
+        v.set_editing(snapshot.is_some());
+        v.edit_rested=false;
+        v.transient_content = snapshot.as_ref().map(|_| content);
+        v.transient_snapshot = snapshot;
+        v.stamp.sequence += 1;
+        v.dirty = true;
+        state.content = content;
+        self.shared.interactive.set(true);
+        self.shared.wake.try_send(()).ok();
+        Ok(())
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
         self.snapshot_traced(snapshot, None, None, None)
@@ -1642,6 +1675,8 @@ impl EngineService {
             id,
             View {
                 config,
+                transient_snapshot: None,
+                transient_content: None,
                 stamp,
                 content,
                 dirty: true,
@@ -1898,6 +1933,7 @@ const MAX_LEAD_REFRESHES: f64 = 6.;
 const DROPS_AT_MOST: i64 = 48;
 /// One frame taken from the shared state, drawn without its lock.
 struct Work {
+    transient: bool,
     id: u64,
     stamp: Stamp,
     moves: u64,
@@ -3109,10 +3145,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     r.settle_at = None;
                     let scene = Scene {
-                        doc: v.config.snapshot.document.clone(),
+                        doc: v
+                            .transient_snapshot
+                            .as_ref()
+                            .unwrap_or(&v.config.snapshot)
+                            .document
+                            .clone(),
                         comp: v.config.composition.clone(),
                         media: v.paused_paths.clone(),
-                        content: v.content,
+                        content: v.transient_content.unwrap_or(v.content),
                     };
                     let media = v.skim.unwrap_or(sample.media_time);
                     let time = Ticks::new(r.transport.clock.snap(media.get()).max(0))
@@ -3198,7 +3239,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Moment::Paused
             };
             let scene = Scene {
-                doc: v.config.snapshot.document.clone(),
+                doc: v
+                    .transient_snapshot
+                    .as_ref()
+                    .unwrap_or(&v.config.snapshot)
+                    .document
+                    .clone(),
                 comp: v.config.composition.clone(),
                 media: if capture {
                     Arc::new(v.config.media.export_paths(false))
@@ -3207,7 +3253,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 } else {
                     v.paths.clone()
                 },
-                content: v.content,
+                content: v.transient_content.unwrap_or(v.content),
             };
             cursor = id;
             let budget = frame.max(interval);
@@ -3253,6 +3299,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 (quality, false)
             };
             work = Some(Work {
+                transient: v.transient_snapshot.is_some(),
                 id,
                 stamp: v.stamp,
                 moves: v.moves,
@@ -3383,6 +3430,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             continue;
         }
         if let Some(Work {
+            transient,
             id,
             stamp,
             moves,
@@ -3440,7 +3488,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             // Partial definitions while extensions load are never a fill's
             // source: its frames would be drawn without their effects.
-            if !engine.definitions_pending()
+            if !transient
+                && !engine.definitions_pending()
                 && shared.disk.observe(
                     &rendered,
                     engine.definitions(),
@@ -4245,6 +4294,64 @@ mod worker_tests {
             render::Engine::with_shader_cache(gpu, Some(shaders.path().to_owned())).unwrap();
         let service = EngineService::start_engine(device, engine).unwrap();
         (shaders, service)
+    }
+    #[test]
+    fn transient_timing_preview_preserves_authoritative_snapshot_and_audio_identity() {
+        let (_shaders, service) = rebuilding_service("transient-timing-preview");
+        let v = shapes_viewer(&service, None);
+        let (base, content) = {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            (view.config.snapshot.clone(), view.content)
+        };
+        let mut document =
+            pm_model::Document::from_root(base.document.root().cloned(), base.revision);
+        let path = vec![
+            "comps".into(),
+            base.open_comp().unwrap().into(),
+            "layers".into(),
+            0usize.into(),
+            "from".into(),
+        ];
+        document
+            .apply_ops_at(
+                &[pm_model::Op::Leaf(pm_model::Patch::set(
+                    path,
+                    pm_model::Value::Number(2.),
+                ))],
+                base.revision + 1,
+            )
+            .unwrap();
+        let preview = Snapshot {
+            doc_id: base.doc_id,
+            revision: base.revision + 1,
+            document: Arc::new(document),
+        };
+        v.transient_snapshot(Some(preview.clone())).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            assert!(Arc::ptr_eq(&view.config.snapshot.document, &base.document));
+            assert!(Arc::ptr_eq(
+                &view.transient_snapshot.as_ref().unwrap().document,
+                &preview.document
+            ));
+            assert_eq!(view.stamp.revision, base.revision);
+            assert_eq!(
+                view.content, content,
+                "preview must not rebuild the audio graph"
+            );
+            assert_ne!(view.transient_content, Some(content));
+        }
+        v.transient_snapshot(None).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = &state.views[&v.id];
+            assert!(view.transient_snapshot.is_none());
+            assert!(view.transient_content.is_none());
+            assert!(Arc::ptr_eq(&view.config.snapshot.document, &base.document));
+            assert_eq!(view.stamp.revision, base.revision);
+        }
     }
     fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
         service.viewer(shapes_config(layer)).unwrap()

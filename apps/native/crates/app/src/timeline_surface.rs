@@ -64,6 +64,7 @@ pub struct EffectDrop {
     pub layer: Option<String>,
 }
 pub trait Delegate: 'static {
+    fn timing_preview(&self, _snapshot: Option<pm_kernel::Snapshot>, _cx: &mut App) {}
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -374,6 +375,8 @@ pub struct TimelineSurface {
     client: Option<TimelineClient>,
     queue: VecDeque<Job>,
     busy: bool,
+    sample_scheduled: bool,
+    viewer_previewing: bool,
     /// Assets this editor's viewer cannot read: their clips show Media
     /// Offline (docs/native/design/media-offline.md).
     offline: Arc<BTreeSet<String>>,
@@ -479,6 +482,8 @@ impl TimelineSurface {
             client: None,
             queue: VecDeque::new(),
             busy: true,
+            sample_scheduled: false,
+            viewer_previewing: false,
             offline: Arc::new(offline),
             sources: Default::default(),
             reading: Default::default(),
@@ -514,6 +519,13 @@ impl TimelineSurface {
             effect_over: None,
             late: None,
         };
+        cx.on_release(|s, cx| {
+            if s.viewer_previewing {
+                let delegate=s.delegate.clone();
+                cx.defer(move |cx|delegate.timing_preview(None,cx));
+            }
+        })
+        .detach();
         this.restore_view();
         // The render bar follows the disk render cache (Render Selection).
         let changes = crate::render_frames::watch();
@@ -693,7 +705,11 @@ impl TimelineSurface {
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
-            Gesture::Dragging { .. } => self.queue.push_back(Job::Finish(false)),
+            Gesture::Dragging { .. } => {
+                self.queue.retain(|job| !matches!(job, Job::Sample(_)));
+                self.sample_scheduled = false;
+                self.queue.push_back(Job::Finish(false));
+            }
             Gesture::Marquee { session, .. } => {
                 self.queue.push_back(Job::Apply(session.cancel()));
             }
@@ -969,6 +985,9 @@ impl TimelineSurface {
         Some((range.start, range.end))
     }
     fn pump(&mut self, cx: &mut Context<Self>) {
+        if self.sample_scheduled && matches!(self.queue.front(), Some(Job::Sample(_))) {
+            return;
+        }
         if self.busy {
             return;
         }
@@ -984,24 +1003,50 @@ impl TimelineSurface {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
+        let previous_scene = self.scene.clone();
+        let preview_update = matches!(&job, Job::Sample(_));
         let (tokens, offline, sources) = (
             self.tokens.clone(),
             self.offline.clone(),
             self.sources.clone(),
         );
         cx.spawn(async move |this, cx| {
-            let (client, effects, built) = cx
+            let (client, effects, built, preview) = cx
                 .background_executor()
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
-                    let built = build(&client, &tokens, offline, sources);
+                    let preview = client.layer_preview().cloned();
+                    let built = if preview_update && preview.is_some() && previous_scene.is_some() {
+                        let mut scene = (*previous_scene.unwrap()).clone();
+                        scene.preview_times(&client.model, &preview.as_ref().unwrap().starts);
+                        Some(Built {
+                            scene: Arc::new(scene),
+                            graph: None,
+                            model: Arc::new(client.model.clone()),
+                            wanted: vec![],
+                        })
+                    } else {
+                        let mut built = build(&client, &tokens, offline, sources);
+                        if let (Some(built), Some(preview)) = (&mut built, &preview) {
+                            Arc::make_mut(&mut built.scene)
+                                .preview_times(&client.model, &preview.starts);
+                        }
+                        built
+                    };
                     remember_shown(&mut client, &built);
-                    (client, effects, built)
+                    (client, effects, built, preview)
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.client = Some(client);
                 s.busy = false;
+                if let Some(preview) = preview {
+                    s.delegate.timing_preview(Some(preview.snapshot), cx);
+                    s.viewer_previewing = true;
+                } else if s.viewer_previewing {
+                    s.delegate.timing_preview(None, cx);
+                    s.viewer_previewing = false;
+                }
                 s.install(built, cx);
                 match effects {
                     Ok(effects) => {
@@ -2129,7 +2174,12 @@ impl TimelineSurface {
     fn snap_radius(&self) -> f64 {
         self.tokens.metrics.keyframe as f64 / self.view.pps
     }
-    fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+    fn on_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
             let target = self.parent_target(ids, event.position);
             let delta = event.position - *origin;
@@ -2376,8 +2426,20 @@ impl TimelineSurface {
                     self.readout = Some((self.graph_readout(&sample), lx, ly));
                 }
                 self.autoscroll(event.position, cx);
+                // Keep one sample for the next display refresh. A mouse-up
+                // remains behind that sample, so the last position commits.
+                if matches!(self.queue.back(), Some(Job::Sample(_))) {
+                    self.queue.pop_back();
+                }
                 self.queue.push_back(Job::Sample(sample));
-                self.pump(cx);
+                if !self.sample_scheduled {
+                    self.sample_scheduled = true;
+                    cx.on_next_frame(window, |s, _, cx| {
+                        s.sample_scheduled = false;
+                        s.pump(cx);
+                    });
+                    window.request_animation_frame();
+                }
             }
             Gesture::Scrub(scrub) => {
                 let (x, _) = {
@@ -3108,7 +3170,14 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Begin(spec, time) => {
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            client.begin_drag(kind).await.map_err(text)?;
+            if matches!(&kind, DragKind::Layers { .. })
+                && client.model.mode == TimelineMode::Layers
+                && client.model.graph_display == GraphDisplay::DopeSheet
+            {
+                client.begin_preview_drag(kind).map_err(text)?;
+            } else {
+                client.begin_drag(kind).await.map_err(text)?;
+            }
             Ok(vec![])
         }
         Job::Sample(sample) => {
@@ -4207,10 +4276,10 @@ impl Render for TimelineSurface {
                             }
                         }
                         let moved = this.clone();
-                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moved.update(cx, |s, cx| {
-                                    if s.on_move(e, cx) {
+                                    if s.on_move(e, window, cx) {
                                         cx.stop_propagation();
                                         return;
                                     }

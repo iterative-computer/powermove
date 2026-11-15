@@ -328,7 +328,8 @@ pub struct LayerRowAt {
 }
 #[derive(Clone, Debug)]
 pub struct Scene {
-    rows: Vec<PaintRow>,
+    rows: Vec<std::sync::Arc<PaintRow>>,
+    time_preview: HashMap<String, f64>,
     tops: Vec<f64>,
     positions: HashMap<String, usize>,
     control_times: HashMap<String, std::sync::Arc<[f64]>>,
@@ -384,6 +385,67 @@ pub trait ModelPresenter {
     }
 }
 impl Scene {
+    /// Update only moved rows; all other row payloads remain shared. No model
+    /// rebuild or JS publication is needed for a transient scalar offset.
+    pub fn preview_times(&mut self, model: &crate::TimelineModel, starts: &[(String, f64)]) {
+        let offsets: HashMap<_, _> = starts
+            .iter()
+            .filter_map(|(id, from)| model.index.layer(id).map(|l| (id.clone(), from - l.from)))
+            .collect();
+        for row in &mut self.rows {
+            let Ok(id) = crate::v4::parse_row(&row.id) else {
+                continue;
+            };
+            let layer = match &id {
+                crate::RowId::Layer(id) => id,
+                crate::RowId::Property { layer_id, .. } => layer_id,
+            };
+            let Some(offset) = offsets.get(layer) else {
+                continue;
+            };
+            let delta = offset - self.time_preview.get(layer).copied().unwrap_or(0.);
+            if delta == 0. {
+                continue;
+            }
+            let row = std::sync::Arc::make_mut(row);
+            match &mut row.content {
+                RowContent::Layer { clip, summary } => {
+                    if let Some(bands) = self.stagger.get_mut(layer) {
+                        for band in bands {band.start += delta;band.end += delta;}
+                    }
+                    if let Some(clip) = clip {
+                        clip.from += delta;
+                    }
+                    *summary = summary
+                        .iter()
+                        .cloned()
+                        .map(|mut k| {
+                            k.seconds += delta;
+                            k
+                        })
+                        .collect();
+                }
+                RowContent::Property { keys, state } => {
+                    for k in keys.iter_mut() {
+                        k.seconds += delta;
+                    }
+                    *state = if keys.is_empty() {
+                        KeyState::Static
+                    } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
+                        KeyState::AtPlayhead
+                    } else {
+                        KeyState::Animated
+                    };
+                    self.control_times.insert(
+                        row.id.clone(),
+                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                    );
+                }
+                RowContent::Track { .. } => {}
+            }
+        }
+        self.time_preview = offsets;
+    }
     pub fn from_model(
         model: &crate::TimelineModel,
         p: &dyn ModelPresenter,
@@ -658,7 +720,8 @@ impl Scene {
             })
             .collect();
         Ok(Self {
-            rows,
+            rows: rows.into_iter().map(std::sync::Arc::new).collect(),
+            time_preview: HashMap::new(),
             tops,
             positions,
             control_times,
@@ -720,19 +783,19 @@ impl Scene {
         self.rows.len()
     }
     pub fn row(&self, id: &str) -> Option<&PaintRow> {
-        self.positions.get(id).map(|i| &self.rows[*i])
+        self.positions.get(id).map(|i| self.rows[*i].as_ref())
     }
     /// AX virtual navigation resolves any ID/ordinal without mounting 60k nodes.
     pub fn navigate(&self, id: &str, delta: isize) -> Option<&PaintRow> {
         let i = self.positions.get(id)?.checked_add_signed(delta)?;
-        self.rows.get(i)
+        self.rows.get(i).map(std::sync::Arc::as_ref)
     }
     pub fn navigate_first(&self, ordinal: usize) -> Option<String> {
         self.rows.get(ordinal).map(|r| r.id.clone())
     }
     /// Row `i` and its top and bottom in content space.
     pub fn span(&self, i: usize) -> Option<(&PaintRow, f64, f64)> {
-        let row = self.rows.get(i)?;
+        let row = self.rows.get(i)?.as_ref();
         let top = self.tops[i];
         Some((row, top, self.tops.get(i + 1).copied().unwrap_or(top)))
     }
@@ -757,6 +820,7 @@ impl Scene {
         }
         self.rows
             .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
+            .map(std::sync::Arc::as_ref)
     }
     /// Where media dropped at a content-space y joins the stack (v1.2.0's
     /// `mediaDropAt`): a new layer is always its own strip, so the pointer
