@@ -68,21 +68,29 @@ fn command(c: &mut TimelineClient, id: &str, time: f64) -> Vec<HostEffect> {
         .unwrap();
     run(c, p)
 }
+// Fixture setup is navigation outside the user gestures exercised below.
 fn select(c: &mut TimelineClient, ids: &[&str]) {
     block_on(
         c.call(
-            SelectionCall::Layers {
+            SelectionCall::Preview(vec![SelectionCall::Layers {
                 ids: ids.iter().map(|s| (*s).into()).collect(),
                 add: false,
-            }
+            }])
             .into(),
         ),
     )
     .unwrap();
 }
 fn select_keys(c: &mut TimelineClient, ids: &[&str]) {
-    block_on(c.call(SelectionCall::Keys(ids.iter().map(|s| (*s).into()).collect()).into()))
-        .unwrap();
+    block_on(
+        c.call(
+            SelectionCall::Preview(vec![SelectionCall::Keys(
+                ids.iter().map(|s| (*s).into()).collect(),
+            )])
+            .into(),
+        ),
+    )
+    .unwrap();
 }
 fn edit(c: &mut TimelineClient, commands: Vec<Command>) {
     let p = Plan::edit(commands, c.model.index.revision);
@@ -2547,4 +2555,51 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         }
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
+}
+
+#[test]
+fn selection_history_marquee_is_one_entry_and_restores_key_active_state() {
+    let (_actor, mut c) = client();
+    let before = c.model.selection.clone();
+    let mut marquee = MarqueeSession::begin(&c.model, false, false);
+    for ids in [vec!["a0"], vec!["a0", "a2"], vec!["a2"]] {
+        run(&mut c, marquee.update(on("a", &ids), Vec::new()));
+    }
+    run(&mut c, marquee.finish());
+    assert!(c.model.key_selection_active);
+    undo(&mut c);
+    assert_eq!(c.model.selection, before);
+    assert!(!c.model.key_selection_active);
+    block_on(c.call(HistoryCall::Redo.into())).unwrap();
+    assert_eq!(c.model.selection.keys(), strings(&["a2"]));
+    assert!(c.model.key_selection_active);
+    // A second Undo reaches the beginning: no individual sample entries.
+    undo(&mut c);
+    assert!(matches!(block_on(c.call(HistoryCall::Undo.into())), Err(_)));
+}
+
+#[test]
+fn selection_history_key_click_is_one_entry_for_layers_keys_and_channel() {
+    let (_actor, mut c) = client();
+    let before = c.model.selection.clone();
+    let calls = c
+        .model
+        .select_keys("a", "opacity", &strings(&["a0"]), false, false)
+        .unwrap();
+    run(
+        &mut c,
+        Plan {
+            calls,
+            ..Default::default()
+        },
+    );
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    assert_eq!(c.model.selection.channel(), Some("opacity"));
+    assert_eq!(c.model.selection.keys(), strings(&["a0"]));
+    undo(&mut c);
+    assert_eq!(c.model.selection, before);
+    assert!(!c.model.key_selection_active);
+    block_on(c.call(HistoryCall::Redo.into())).unwrap();
+    assert_eq!(c.model.selection.channel(), Some("opacity"));
+    assert!(c.model.key_selection_active);
 }

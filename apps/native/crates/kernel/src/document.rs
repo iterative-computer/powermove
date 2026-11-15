@@ -2149,7 +2149,7 @@ impl DocumentStore {
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
         if let Some(selection) = &record.selection {
-            self.set_selection(selection.0.clone());
+            self.restore_history_selection(selection.0.clone());
             self.history.mark_undone();
             self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
@@ -2193,7 +2193,7 @@ impl DocumentStore {
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
         if let Some(selection) = &record.selection {
-            self.set_selection(selection.1.clone());
+            self.restore_history_selection(selection.1.clone());
             self.history.mark_redone();
             self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
@@ -2227,6 +2227,17 @@ impl DocumentStore {
             reverse,
             label: record.label,
         })
+    }
+
+    // Electron restores keys/channel verbatim and filters only missing layers.
+    fn restore_history_selection(&mut self, mut selection: Selection) {
+        let live = self
+            .root()
+            .map(|r| model::layer_ids(r, None))
+            .unwrap_or_default();
+        selection.prune(&live, None);
+        self.selection = selection;
+        self.emit(StoreEvent::SelectionChanged);
     }
 
     /// Replaces the selection (a cancelled edit restores the one it began
