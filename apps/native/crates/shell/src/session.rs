@@ -68,7 +68,7 @@ impl Session {
             self.key = None;
         }
     }
-    /// Windows to reopen. With `all == false` (the system's "Close windows when
+    /// Separate windows mode: the windows to reopen. With `all == false` (the system's "Close windows when
     /// quitting an app" setting) only the key window's arrangement is restored.
     /// Each entry has a sane frame; tab members follow their leader.
     pub fn restore_plan(&self, all: bool) -> Vec<WindowState> {
@@ -106,6 +106,35 @@ impl Session {
             w.tab_group = None;
         }
         kept
+    }
+    /// Tabs mode: the windows to reopen with their tab groups as they were
+    /// (`all == false`: the key window's alone). Each entry has a sane frame;
+    /// a group's leader comes before its members, so `addTabbedWindow`
+    /// always has the leader open.
+    pub fn restore_plan_tabs(&self, all: bool) -> Vec<WindowState> {
+        let mut list: Vec<WindowState> = if all {
+            self.windows.clone()
+        } else {
+            self.key
+                .and_then(|k| self.windows.iter().find(|w| w.id == k))
+                .or_else(|| self.windows.first())
+                .cloned()
+                .map(|w| WindowState {
+                    tab_group: None,
+                    ..w
+                })
+                .into_iter()
+                .collect()
+        };
+        let ids: Vec<u64> = list.iter().map(|w| w.id).collect();
+        for w in &mut list {
+            w.frame = sane_frame(w.frame);
+            if w.tab_group.is_some_and(|g| g == w.id || !ids.contains(&g)) {
+                w.tab_group = None;
+            }
+        }
+        list.sort_by_key(|w| w.tab_group.is_some());
+        list
     }
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let s: Self = serde_json::from_slice(&std::fs::read(path)?)?;

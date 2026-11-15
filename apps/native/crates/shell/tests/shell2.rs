@@ -234,6 +234,29 @@ fn win(id: u64, tab: Option<u64>) -> WindowState {
     }
 }
 
+/// Tabs mode: a session comes back with its tab groups as they were, each
+/// group's leader before its members (it must be open for them to join).
+#[test]
+fn tabs_mode_restores_tab_groups_leaders_first() {
+    let mut s = Session::default();
+    s.upsert(win(2, Some(1)));
+    s.upsert(win(1, None));
+    s.upsert(win(3, None));
+    s.upsert(win(4, Some(1)));
+    s.key = Some(4);
+    let plan = s.restore_plan_tabs(true);
+    let ids: Vec<u64> = plan.iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 4);
+    let at = |id| ids.iter().position(|i| *i == id).unwrap();
+    assert!(at(1) < at(2) && at(1) < at(4), "{ids:?}");
+    assert_eq!(plan[at(2)].tab_group, Some(1));
+    assert_eq!(plan[at(4)].tab_group, Some(1));
+    assert_eq!(plan[at(3)].tab_group, None);
+    // "Close windows when quitting": the key window alone, untabbed.
+    let one = s.restore_plan_tabs(false);
+    assert_eq!((one.len(), one[0].id, one[0].tab_group), (1, 4, None));
+}
+
 #[test]
 fn session_restores_one_window_per_tab_group_and_respects_close_windows_on_quit() {
     let mut s = Session::default();

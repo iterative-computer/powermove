@@ -160,7 +160,13 @@ fn restore_session(cx: &mut App) {
                 None
             }
         })
-        .map(|s| s.restore_plan(keeps_windows()))
+        .map(|s| {
+            if crate::tabs_mode() {
+                s.restore_plan_tabs(keeps_windows())
+            } else {
+                s.restore_plan(keeps_windows())
+            }
+        })
         .unwrap_or_default();
     if plan.is_empty() {
         open_editor_window(cx, true, None, None);
@@ -187,11 +193,11 @@ fn keeps_windows() -> bool {
 pub fn open_editor(cx: &mut App) {
     open_editor_window(cx, true, None, None);
 }
-/// Was: a new editor window as a native tab of `leader`'s. One project per
-/// window now, so it is a window of its own.
+/// A new editor window as a native tab of `leader`'s (Tabs mode), else a
+/// window of its own.
 pub fn open_editor_tab(cx: &mut App, leader: u64) {
-    let _ = leader;
-    open_editor_window(cx, true, None, None);
+    let leader = (crate::tabs_mode() && leader != 0).then_some(leader);
+    open_editor_window(cx, true, None, leader);
 }
 fn next_window_id() -> u64 {
     thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }

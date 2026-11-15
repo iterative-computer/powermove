@@ -491,9 +491,7 @@ impl Controller {
             window.focus(&focus, cx);
             // A window with no project is Home (its tab's name too).
             if self.session.is_none() {
-                self.host
-                    .borrow()
-                    .set_document_metadata("Home", "", false, None);
+                self.host.borrow().set_home_title();
             }
         }
         Some(library.into_any_element())
