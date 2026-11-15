@@ -381,3 +381,38 @@ mod resolver_tests {
         }
     }
 }
+
+/// Place the pill within both its source and the visible transcript viewport.
+pub fn pill_origin(
+    caret: Point<Pixels>,
+    source: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    pill: Size<Pixels>,
+) -> Point<Pixels> {
+    let left = source.left().max(viewport.left());
+    let top = source.top().max(viewport.top());
+    let right = (source.right().min(viewport.right()) - pill.width).max(left);
+    let bottom = (source.bottom().min(viewport.bottom()) - pill.height).max(top);
+    point(
+        caret.x.max(left).min(right) - source.left(),
+        caret.y.max(top).min(bottom) - source.top(),
+    )
+}
+#[cfg(test)]
+mod pill_tests {
+    use super::*;
+    #[test]
+    fn a_selection_near_the_viewport_edge_keeps_the_whole_pill_visible() {
+        let source = Bounds::new(point(px(20.), px(-100.)), size(px(300.), px(600.)));
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(360.), px(300.)));
+        let pill = size(px(48.), px(24.));
+        let local = pill_origin(point(px(310.), px(290.)), source, viewport, pill);
+        let screen = source.origin + local;
+        assert_eq!(screen, point(px(272.), px(276.)));
+        assert!(screen.x >= viewport.left() && screen.y >= viewport.top());
+        assert!(
+            screen.x + pill.width <= viewport.right()
+                && screen.y + pill.height <= viewport.bottom()
+        );
+    }
+}

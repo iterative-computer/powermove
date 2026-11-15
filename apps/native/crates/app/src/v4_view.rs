@@ -2270,40 +2270,26 @@ impl SurfaceView {
             text[..start].encode_utf16().count(),
             text[..end].encode_utf16().count(),
         );
-        let position = selected.end_position().map(|p| {
-            let blocks: Vec<_> = selected
-                .blocks
-                .values()
-                .filter(|b| b.owner == owner)
-                .collect();
-            let left = blocks
-                .iter()
-                .map(|b| b.layout.bounds().left())
-                .min()
-                .unwrap_or(p.x);
-            let top = blocks
-                .iter()
-                .map(|b| b.layout.bounds().top())
-                .min()
-                .unwrap_or(p.y);
-            let right = blocks
-                .iter()
-                .map(|b| b.layout.bounds().right())
-                .max()
-                .unwrap_or(p.x);
-            let bottom = blocks
-                .iter()
-                .map(|b| b.layout.bounds().bottom())
-                .max()
-                .unwrap_or(p.y);
-            point(
-                (p.x - left)
-                    .max(px(0.))
-                    .min((right - left - px(self.table.tokens.metrics.hit * 2.)).max(px(0.))),
-                (p.y - top)
-                    .max(px(0.))
-                    .min((bottom - top - px(self.table.tokens.metrics.hit)).max(px(0.))),
-            )
+        let position = selected.end_position().and_then(|caret| {
+            let source = self.anchors.borrow().get(&owner).copied()?;
+            let mut viewport = source;
+            let mut ancestor = owner;
+            while let Some(parent) = self.prepared.node(ancestor).and_then(|node| node.parent) {
+                if let Some(scroll) = self.scrolls.get(&parent) {
+                    viewport = scroll.bounds();
+                    break;
+                }
+                ancestor = parent;
+            }
+            Some(crate::v4_quote::pill_origin(
+                caret,
+                source,
+                viewport,
+                size(
+                    px(self.table.tokens.metrics.hit * 2.),
+                    px(self.table.tokens.metrics.hit),
+                ),
+            ))
         });
         drop(selected);
         self.send(
@@ -3483,7 +3469,7 @@ impl SurfaceView {
         window: &Window,
     ) -> Stateful<Div> {
         let t = &self.table.tokens;
-        if self.prepared.anchors.contains(&node.id) {
+        if self.prepared.anchors.contains(&node.id) || self.quote_owner(node.id) == Some(node.id) {
             let (id, anchors) = (node.id, self.anchors.clone());
             element = element.child(
                 canvas(
