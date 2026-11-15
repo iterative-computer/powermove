@@ -176,6 +176,7 @@ pub struct SurfaceView {
     pub(crate) prepared: Rc<Prepared>,
     window: AnyWindowHandle,
     appkit: bool,
+    quote_selection: Rc<RefCell<crate::v4_quote::Selection>>,
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
@@ -285,6 +286,7 @@ impl SurfaceView {
             window: (*window).window_handle(),
             appkit: HasWindowHandle::window_handle(window).is_ok(),
             natives,
+            quote_selection: Default::default(),
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
             row_sources: HashMap::new(),
@@ -469,9 +471,27 @@ impl SurfaceView {
         if self.publication.generation != compiled.publication.generation {
             self.restart();
         }
+        let quote_owner = self.quote_selection.borrow().owner;
+        if let Some(owner) = quote_owner {
+            let source = |surface: &pm_surface::Surface| {
+                surface
+                    .node(owner)
+                    .and_then(|n| n.props.get("metadata"))
+                    .and_then(|m| m.get("quoteSource"))
+                    .cloned()
+            };
+            if source(&self.publication.surface) != source(&compiled.publication.surface) {
+                // The same row id in another thread is a different source.
+                self.quote_selection.borrow_mut().owner = None;
+            }
+        }
         self.table = compiled.table;
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        self.quote_selection
+            .borrow_mut()
+            .blocks
+            .retain(|id, _| self.prepared.node(*id).is_some());
         self.settle_disclosures();
         {
             let _span = crate::diag::span("panel.reconcile");
@@ -497,6 +517,7 @@ impl SurfaceView {
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
+        self.quote_selection = Default::default();
         self.disclosures.clear();
         self.controls.clear();
         self.fields.clear();
@@ -2073,6 +2094,178 @@ impl SurfaceView {
             self.pointer(capture.target, "pointerup", detail, cx);
         }
     }
+    fn quote_owner(&self, mut id: Id) -> Option<Id> {
+        loop {
+            if self
+                .publication
+                .surface
+                .node(id)?
+                .listeners
+                .contains_key("click")
+            {
+                return None;
+            }
+            if self
+                .publication
+                .surface
+                .node(id)?
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("quoteSource"))
+                .is_some()
+            {
+                return Some(id);
+            }
+            id = self.prepared.node(id)?.parent?;
+        }
+    }
+    fn quote_blocks(&self, root: Id, out: &mut Vec<(Id, String)>) {
+        if self
+            .publication
+            .surface
+            .node(root)
+            .is_some_and(|n| n.listeners.contains_key("click"))
+        {
+            return;
+        }
+        let Some(n) = self.prepared.node(root) else {
+            return;
+        };
+        if let Some(rich) = &n.rich {
+            out.push((root, rich.text.to_string()));
+        } else if let Some(text) = &n.text {
+            out.push((root, text.to_string()));
+        }
+        for child in &n.children {
+            self.quote_blocks(*child, out);
+        }
+    }
+    fn quote_range(&self, id: Id) -> Option<std::ops::Range<usize>> {
+        let selected = self.quote_selection.borrow();
+        let block = selected.blocks.get(&id)?;
+        if selected.owner != Some(block.owner) {
+            return None;
+        }
+        let range = selected.range();
+        let node = self.prepared.node(id)?;
+        let current: &str = node
+            .rich
+            .as_ref()
+            .map(|r| r.text.as_ref())
+            .or_else(|| node.text.as_deref())?;
+        let mut start = range.start.saturating_sub(block.offset).min(current.len());
+        let mut end = range.end.saturating_sub(block.offset).min(current.len());
+        while !current.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !current.is_char_boundary(end) {
+            end -= 1;
+        }
+        (start < end).then_some(start..end)
+    }
+    fn quote_text(&self, id: Id, mut text: StyledText, plain: String) -> AnyElement {
+        let Some(owner) = self.quote_owner(id) else {
+            return text.into_any_element();
+        };
+        if self.prepared.node(id).is_none_or(|n| n.rich.is_none()) {
+            if let Some(range) = self.quote_range(id) {
+                text = text.with_highlights([(
+                    range,
+                    HighlightStyle {
+                        color: Some(rgb(self.table.tokens.colors.selected_text).into()),
+                        ..Default::default()
+                    },
+                )]);
+            }
+        }
+        let mut blocks = Vec::new();
+        self.quote_blocks(owner, &mut blocks);
+        let mut offset = 0;
+        for (block, content) in blocks {
+            if block == id {
+                break;
+            }
+            offset += content.len() + 1;
+        }
+        crate::v4_quote::Selectable {
+            block: crate::v4_quote::Block {
+                owner,
+                offset,
+                text: plain,
+                layout: text.layout().clone(),
+            },
+            text,
+            id,
+            selection: self.quote_selection.clone(),
+            color: rgb(self.table.tokens.colors.selected_fill).into(),
+        }
+        .into_any_element()
+    }
+    fn publish_quote(&mut self, owner: Id, cx: &mut Context<Self>) {
+        let selected = self.quote_selection.borrow();
+        let text = selected.text(owner);
+        let range = selected.range();
+        let mut start = range.start.min(text.len());
+        let mut end = range.end.min(text.len());
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let utf16 = (
+            text[..start].encode_utf16().count(),
+            text[..end].encode_utf16().count(),
+        );
+        let position = selected.end_position().map(|p| {
+            let blocks: Vec<_> = selected
+                .blocks
+                .values()
+                .filter(|b| b.owner == owner)
+                .collect();
+            let left = blocks
+                .iter()
+                .map(|b| b.layout.bounds().left())
+                .min()
+                .unwrap_or(p.x);
+            let top = blocks
+                .iter()
+                .map(|b| b.layout.bounds().top())
+                .min()
+                .unwrap_or(p.y);
+            let right = blocks
+                .iter()
+                .map(|b| b.layout.bounds().right())
+                .max()
+                .unwrap_or(p.x);
+            let bottom = blocks
+                .iter()
+                .map(|b| b.layout.bounds().bottom())
+                .max()
+                .unwrap_or(p.y);
+            point(
+                (p.x - left)
+                    .max(px(0.))
+                    .min((right - left - px(self.table.tokens.metrics.hit * 2.)).max(px(0.))),
+                (p.y - top)
+                    .max(px(0.))
+                    .min((bottom - top - px(self.table.tokens.metrics.hit)).max(px(0.))),
+            )
+        });
+        drop(selected);
+        self.send(
+            owner,
+            "select",
+            EventDetail {
+                value: Some(json!(text)),
+                selection: Some(utf16),
+                x: position.map(|p| f32::from(p.x) as f64),
+                y: position.map(|p| f32::from(p.y) as f64),
+                ..Default::default()
+            },
+            cx,
+        );
+    }
     fn element(
         &self,
         id: Id,
@@ -2355,9 +2548,117 @@ impl SurfaceView {
             // order, as on the web (a segmented control's other segments).
             let tab = node.tab_index.unwrap_or(0);
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
+            element = element.track_focus(focus).tab_index(tab.max(0));
+        }
+        if self.quote_owner(id) == Some(id) {
+            let reveal = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("revealQuote"))
+                .and_then(Value::as_array);
+            let mut selected = self.quote_selection.borrow_mut();
+            if let Some(range) = reveal {
+                let text = selected.text(id);
+                let byte = |offset: usize| {
+                    text.char_indices()
+                        .scan(0, |units, (i, c)| {
+                            let current = *units;
+                            *units += c.len_utf16();
+                            Some((i, current))
+                        })
+                        .find(|(_, units)| *units >= offset)
+                        .map_or(text.len(), |(i, _)| i)
+                };
+                selected.owner = Some(id);
+                selected.revealed = Some(id);
+                selected.anchor = byte(range.first().and_then(Value::as_u64).unwrap_or(0) as usize);
+                selected.head = byte(range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize);
+                let mut child = id;
+                while let Some(parent) = self.prepared.node(child).and_then(|n| n.parent) {
+                    if let Some(scroll) = self.scrolls.get(&parent) {
+                        if let Some(index) = self
+                            .prepared
+                            .node(parent)
+                            .and_then(|p| p.children.iter().position(|i| *i == child))
+                        {
+                            scroll.scroll_to_item(index);
+                        }
+                    }
+                    child = parent;
+                }
+            } else if selected.revealed == Some(id) {
+                selected.owner = None;
+                selected.revealed = None;
+            }
+            drop(selected);
             element = element
-                .track_focus(focus)
-                .tab_index(tab.max(0));
+                .cursor_text()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        let at = v.quote_selection.borrow().hit(id, event.position);
+                        if let Some(at) = at {
+                            if let Some(focus) = v.focus.get(&id) {
+                                window.focus(focus);
+                            }
+                            let mut selected = v.quote_selection.borrow_mut();
+                            selected.owner = Some(id);
+                            selected.revealed = None;
+                            selected.anchor = at;
+                            selected.head = at;
+                            selected.dragging = true;
+                            if event.click_count == 2 {
+                                let text = selected.text(id);
+                                let word = crate::v4_quote::word_range(&text, at);
+                                selected.anchor = word.start;
+                                selected.head = word.end;
+                                selected.dragging = false;
+                            }
+                            drop(selected);
+                            v.publish_quote(id, cx);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |v, event: &MouseMoveEvent, _, cx| {
+                    let mut selected = v.quote_selection.borrow_mut();
+                    if selected.dragging && selected.owner == Some(id) {
+                        if let Some(at) = selected.hit(id, event.position) {
+                            selected.head = at;
+                        }
+                        drop(selected);
+                        v.publish_quote(id, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.quote_selection.borrow_mut().dragging = false;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(move |v, _, _, cx| {
+                    if v.quote_selection.borrow().owner == Some(id) {
+                        {
+                            let mut selected = v.quote_selection.borrow_mut();
+                            selected.head = selected.anchor;
+                            selected.dragging = false;
+                        }
+                        v.publish_quote(id, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.quote_selection.borrow_mut().dragging = false;
+                        cx.notify();
+                    }),
+                );
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -2450,7 +2751,11 @@ impl SurfaceView {
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
-                        children.push(text.clone().into_any_element());
+                        children.push(self.quote_text(
+                            c.id,
+                            StyledText::new(text.clone()),
+                            text.to_string(),
+                        ));
                     }
                 }
                 _ if node.fixed_items => {
@@ -3058,6 +3363,21 @@ impl SurfaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.modifiers.platform && event.keystroke.key == "c" {
+            let selected = self.quote_selection.borrow();
+            if let Some(owner) = selected.owner {
+                if self.focus.get(&owner).is_some_and(|f| f.is_focused(window))
+                    && !selected.range().is_empty()
+                {
+                    let text = selected.text(owner);
+                    if let Some(quote) = text.get(selected.range()) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(quote.into()));
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+        }
         let key = match event.keystroke.key.as_str() {
             "up" => "ArrowUp",
             "down" => "ArrowDown",
@@ -3271,10 +3591,18 @@ impl SurfaceView {
             );
         }
         if let Some(text) = &node.text {
-            element = element.child(text.clone());
+            element = element.child(self.quote_text(
+                node.id,
+                StyledText::new(text.clone()),
+                text.to_string(),
+            ));
         }
         if let Some(rich) = &node.rich {
-            element = element.child(rich_text(rich, t));
+            element = element.child(self.quote_text(
+                node.id,
+                rich_text(rich, t, self.quote_range(node.id)),
+                rich.text.to_string(),
+            ));
         }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
@@ -3585,26 +3913,53 @@ pub(crate) fn status_announcements(
 }
 /// A paragraph of styled runs: bold and italic as the system font draws
 /// them, code on a quiet fill, links in the accent's text ink.
-fn rich_text(rich: &crate::v4_compile::Rich, t: &pm_design::Tokens) -> StyledText {
+fn rich_text(
+    rich: &crate::v4_compile::Rich,
+    t: &pm_design::Tokens,
+    selected: Option<std::ops::Range<usize>>,
+) -> StyledText {
     use crate::v4_compile::Rich;
     let ink = |c: u32| gpui::rgb_to_hsla(rgb(c));
-    let highlights = rich.runs.iter().map(|(range, bits)| {
-        let mut style = HighlightStyle::default();
-        if bits & Rich::BOLD != 0 {
-            style.font_weight = Some(FontWeight(t.typography.display_weight));
-        }
-        if bits & Rich::ITALIC != 0 {
-            style.font_style = Some(FontStyle::Italic);
-        }
-        if bits & Rich::CODE != 0 {
-            style.background_color = Some(ink(t.colors.fill));
-            style.color = Some(ink(t.colors.text));
-        }
-        if bits & Rich::LINK != 0 {
-            style.color = Some(ink(t.colors.accent_text));
-        }
-        (range.clone(), style)
-    });
+    let highlights = rich
+        .runs
+        .iter()
+        .map(|(range, bits)| {
+            let mut style = HighlightStyle::default();
+            if bits & Rich::BOLD != 0 {
+                style.font_weight = Some(FontWeight(t.typography.display_weight));
+            }
+            if bits & Rich::ITALIC != 0 {
+                style.font_style = Some(FontStyle::Italic);
+            }
+            if bits & Rich::CODE != 0 {
+                style.background_color = Some(ink(t.colors.fill));
+                style.color = Some(ink(t.colors.text));
+            }
+            if bits & Rich::LINK != 0 {
+                style.color = Some(ink(t.colors.accent_text));
+            }
+            let mut boundaries = vec![range.start, range.end];
+            if let Some(selected) = &selected {
+                for i in [selected.start, selected.end] {
+                    if i > range.start && i < range.end {
+                        boundaries.push(i);
+                    }
+                }
+            }
+            boundaries.sort_unstable();
+            boundaries
+                .windows(2)
+                .map(|pair| {
+                    let mut style = style.clone();
+                    if selected.as_ref().is_some_and(|s| s.contains(&pair[0])) {
+                        style.background_color = Some(ink(t.colors.selected_fill));
+                        style.color = Some(ink(t.colors.selected_text));
+                    }
+                    (pair[0]..pair[1], style)
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten();
     StyledText::new(rich.text.clone()).with_highlights(highlights.collect::<Vec<_>>())
 }
 /// A segmented control's segments as the native control takes them (a label,
