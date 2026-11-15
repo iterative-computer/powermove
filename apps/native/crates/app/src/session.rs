@@ -3294,6 +3294,59 @@ impl Controller {
                 self.close_tab_page("settings", cx)
             }
             "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.stop" => {
+                let Some(session) = &self.session else {
+                    return false;
+                };
+                self.mcp.resume_project(&session.project);
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(thread) = runtime.agent_current_thread() else {
+                    return false;
+                };
+                if !runtime.agent_status().0 {
+                    return false;
+                }
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime.agent_thread_control(
+                                "thread_cancel",
+                                &serde_json::json!({"threadId":thread,"callerAccess":"project"}),
+                            )
+                        })
+                        .await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.message = match result {
+                            Ok(_) => "Agent stopped".into(),
+                            Err(error) => error,
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            "agent.undoTurn" => self.undo_agent_turn(cx),
+            "agent.pause" => {
+                let Some(session) = &self.session else {
+                    return false;
+                };
+                let Some(runtime) = self.builtins.runtime.as_ref() else {
+                    return false;
+                };
+                if !runtime.agent_status().0 {
+                    return false;
+                }
+                let paused = self.mcp.toggle_pause(&session.project);
+                self.message = if paused {
+                    "Agent paused · ⇧⌘. to resume"
+                } else {
+                    "Agent resumed"
+                }
+                .into();
+            }
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),

@@ -179,6 +179,20 @@ impl McpSession {
         assert_project(session, &host, id)?;
         host.project_memory(id, args, self.writer)
     }
+    /// Called before the app acquires its session-transition fence.
+    pub fn wait_for_pause(&self) -> Result<()> {
+        if let Some(project) = self.active.as_ref().and_then(|s| s.project.as_deref()) {
+            let gate = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("MCP host stopped"))?
+                .coedit_host();
+            if let Some(gate) = gate {
+                gate.wait_if_paused(project);
+            }
+        }
+        Ok(())
+    }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
         if name == "project_memory" {
             return self
@@ -985,6 +999,13 @@ impl McpSession {
                 let tx = session.transaction.as_mut().unwrap();
                 tx.revision = ack.revision;
                 tx.label = label.clone();
+                if let Some(app) = host.coedit_host() {
+                    app.record_turn(
+                        &id,
+                        pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                        &label,
+                    );
+                }
                 tx.changed |= ack.revision != revision;
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
@@ -1166,6 +1187,13 @@ impl McpSession {
             .collect();
         self.writer = next_writer();
         if let Some(id) = project.as_deref() {
+            if let Some(app) = host.coedit_host() {
+                app.record_turn(
+                    id,
+                    pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                    "Edit project",
+                );
+            }
             host.agent_turn(id, self.writer, true)?;
         }
         self.active = Some(Active {
@@ -1356,7 +1384,9 @@ impl McpSession {
         Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
     }
     pub fn close(&mut self) -> Result<()> {
-        let result = self.finish(false).map(|_| ());
+        // In-app Stop preserves every acknowledged edit. Explicit rollback
+        // and external MCP disconnect retain their existing contract.
+        let result = self.finish(self.agent_token.is_some()).map(|_| ());
         self.closed = true;
         result
     }

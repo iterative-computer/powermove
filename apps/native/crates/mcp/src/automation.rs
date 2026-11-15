@@ -266,6 +266,12 @@ impl Automation {
             Backend::App(host) => Some(host),
         }
     }
+    pub fn coedit_host(&self) -> Option<Arc<crate::app_host::Host>> {
+        match &self.backend {
+            Backend::App(host) => Some(host.clone()),
+            _ => None,
+        }
+    }
     pub fn active_project(&self) -> Option<String> {
         match &self.backend {
             Backend::Owned(_) => self.active.clone(),

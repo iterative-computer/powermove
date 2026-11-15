@@ -92,8 +92,11 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 292);
-    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
+    assert_eq!(bindings.len(), 295);
+    let camera = bindings
+        .iter()
+        .find(|b| b.id == "native.newCamera")
+        .unwrap();
     assert_eq!(camera.command, "newCamera");
     assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
@@ -537,4 +540,48 @@ fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
             && b.command == "studio.view"
             && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
     }
+}
+
+// Contextual commands (priority 300) get first refusal before the agent's
+// global Pause fallback (400). The Cite lane owns whether its source has a
+// focused, nonempty prose selection; the shell must honour its handled result.
+#[test]
+fn agent_prose_selection_cites_without_pausing() {
+    let mut resolver = Resolver::new();
+    resolver.bindings.push(Binding {
+        id: "context.agent.cite".into(),
+        chord: "cmd+shift+.".into(),
+        command: "agent.cite".into(),
+        args: vec![],
+        priority: 300,
+        in_fields: true,
+        repeat: false,
+        loose: false,
+    });
+    let out = resolver.submit(key(500, "cmd+shift+."));
+    assert!(matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.cite"));
+    // The focused prose source accepts Cite and stops propagation.
+    assert_eq!(resolver.resolve(500, true), [Effect::Consumed(500)]);
+}
+#[test]
+fn no_prose_selection_declines_to_global_agent_pause() {
+    let mut resolver = Resolver::new();
+    resolver.bindings.push(Binding {
+        id: "context.agent.cite".into(),
+        chord: "cmd+shift+.".into(),
+        command: "agent.cite".into(),
+        args: vec![],
+        priority: 300,
+        in_fields: true,
+        repeat: false,
+        loose: false,
+    });
+    resolver.submit(key(501, "cmd+shift+."));
+    let out = resolver.resolve(501, false);
+    assert!(
+        matches!(out.as_slice(),[Effect::Dispatch{command,class:Class::MayDecline,..}] if command=="agent.pause")
+    );
+    assert_eq!(resolver.resolve(501, true), [Effect::Consumed(501)]);
+    let out = Resolver::new().submit(key(502, "cmd+shift+."));
+    assert!(matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.pause"));
 }

@@ -1018,6 +1018,11 @@ impl Builtins {
         let backend = backend.shared();
         backend.native.project.panel.drag.clone()
     }
+    pub fn agent_current_thread(&self) -> Option<String> {
+        let (agent, _) = self.agent_state().ok()?;
+        let state = agent.shared();
+        Some(state.panel.active_id().to_owned())
+    }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(
         &self,
@@ -2605,7 +2610,9 @@ impl Builtins {
                 for f in all.values() {
                     for root in &roots {
                         if f.path.starts_with(&all[root].path) {
-                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                            if let Some(state) = folders.get(root).cloned() {
+                                folders.insert(f.id.clone(), state);
+                            }
                         }
                     }
                 }

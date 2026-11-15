@@ -78,6 +78,9 @@ impl ToolConnection for Connection {
         Ok(self.session.tools())
     }
     fn invoke(&mut self, name: &str, args: Value) -> Result<Value> {
+        if name != "finish_session" {
+            self.session.wait_for_pause()?;
+        }
         Ok(match self.admit(name) {
             Ok(_operation) => self.session.call(name, args),
             Err(error) => pm_mcp::failure(error),
