@@ -425,12 +425,18 @@ pub(crate) fn extension_layer<'d>(
         let value = match property {
             Some(p) => scope.channel_p(layer, Some(p), time, k)?,
             None => match spec {
+                ParamSpec::GradientStops { default, .. } => JsValue::from(&pm_model::json::parse(&serde_json::to_string(default).expect("stops JSON")).expect("stops model")),
                 ParamSpec::Number { default, .. } => JsValue::Number(*default),
                 ParamSpec::Color { default, .. } => JsValue::from(default.as_str()),
                 ParamSpec::Toggle { default, .. } => JsValue::Bool(*default),
             },
         };
+        if matches!(spec, ParamSpec::GradientStops{..}) {
+            if let crate::effects::plan::Binding::Stops(stops)=crate::effects::plan::binding(spec,&value) { calls.extend(crate::effects::exec::stop_calls(k,&stops)); }
+            continue;
+        }
         let call = match spec {
+            ParamSpec::GradientStops { .. } => unreachable!("handled above"),
             ParamSpec::Color { .. } => color_call(&value),
             ParamSpec::Toggle { .. } => Call::I(i32::from(value.truthy())),
             ParamSpec::Number { .. } => f(&[number_or_zero(&value)]),

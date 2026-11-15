@@ -8,6 +8,7 @@ publish = false
 name = "powermove-native"
 path = "src/main.rs"
 [dependencies]
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-mcp = { path = "../mcp" }
 pm-export = { path = "../../../../engine/crates/pm-export" }
 url = "2.5"

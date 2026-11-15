@@ -65,7 +65,7 @@ pub fn validate(def: &Value) -> Result<Value> {
             return Err(bad(format!("{what}: duplicate param key \"{key}\"")));
         }
         if !param["type"].is_null()
-            && !["number", "toggle", "color", "layer", "path", "asset"]
+            && !["number", "toggle", "color", "gradientStops", "layer", "path", "asset"]
                 .iter()
                 .any(|t| param["type"] == *t)
         {
@@ -82,6 +82,13 @@ pub fn validate(def: &Value) -> Result<Value> {
             return Err(bad(format!("{what}: invalid contextual default")));
         }
     }
+    if def.get("viewerHandles").is_some() {
+        let handle_params =
+            serde_json::from_value::<Vec<pm_fx_defs::Parameter>>(Value::Array(params.clone()))
+                .map_err(|e| bad(format!("{what}: invalid handle parameters: {e}")))?;
+        pm_fx_defs::handles::parse(def.get("viewerHandles"), &handle_params).map_err(bad)?;
+    }
+    for p in params.iter().filter(|p|p["type"]=="gradientStops") { pm_fx_defs::handles::validate_stops(&p["def"]).map_err(bad)?; }
     let mut generated = HashSet::<String>::new();
     for param in params.iter().filter(|p| reference(p)) {
         for suffix in [

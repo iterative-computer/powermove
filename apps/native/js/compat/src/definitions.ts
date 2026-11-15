@@ -31,6 +31,7 @@ function wrapped(source: string, body: string) {
 }
 function params(list: Data[] | undefined) {
   return (list ?? []).map((param) => {
+    if (param.type === "gradientStops") return { type: "gradientStops", key: param.k, default: param.def };
     if (param.type === "color")
       return {
         type: "color",

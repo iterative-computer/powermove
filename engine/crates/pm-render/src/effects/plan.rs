@@ -14,14 +14,19 @@ use crate::capability::Feature;
 use crate::composite::Padding;
 
 /// A parameter value as the compositor binds it (`setParam`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
+    Stops(Box<StopBindings>),
     /// Numbers (`Number(value) || 0`) and toggles (`value ? 1 : 0`):
     /// `uniform1f`.
     Float(f64),
     /// Colors (`PM.hex2rgb(String(value))`): `uniform3fv`.
     Color([f64; 3]),
 }
+
+/// Deterministic uniform slots, stored separately so numeric and colour bindings stay small.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StopBindings { pub count: usize, pub positions: [f64;16], pub colors: [[f64;4];16] }
 
 /// One parameter of a step: its key, whether it is a color (positional
 /// alias `u_c<i>` rather than `u_p<i>`), and its value.
@@ -167,6 +172,12 @@ pub fn hex2rgb(text: &JsString) -> [f64; 3] {
 /// `setParam(p, pd, i, value)`'s value.
 pub fn binding(spec: &ParamSpec, value: &JsValue) -> Binding {
     match spec {
+        ParamSpec::GradientStops { default, .. } => {
+            let stops = value.to_json().and_then(|v|serde_json::from_str::<Vec<pm_protocol::definitions::GradientStop>>(&pm_model::json::to_canonical_string(&v)).ok()).filter(|s| (2..=16).contains(&s.len()) && s.iter().all(|s|s.position.is_finite() && (0. ..=1.).contains(&s.position) && s.color.iter().all(|v|v.is_finite() && (0. ..=1.).contains(v)))).unwrap_or_else(||default.clone());
+            let mut stops=stops; stops.sort_by(|a,b|a.position.total_cmp(&b.position));
+            let mut out=StopBindings{count:stops.len().min(16),positions:[0.;16],colors:[[0.;4];16]};
+            for (i,s) in stops.iter().take(16).enumerate(){out.positions[i]=s.position;out.colors[i]=s.color;} Binding::Stops(Box::new(out))
+        }
         ParamSpec::Color { .. } => Binding::Color(hex2rgb(&value.to_js_string())),
         ParamSpec::Toggle { .. } => Binding::Float(if value.truthy() { 1.0 } else { 0.0 }),
         ParamSpec::Number { .. } => {
@@ -179,6 +190,7 @@ pub fn binding(spec: &ParamSpec, value: &JsValue) -> Binding {
 /// A parameter's default as the value `effectParamValue` falls back to.
 fn default_value(spec: &ParamSpec) -> JsValue {
     match spec {
+        ParamSpec::GradientStops { default, .. } => JsValue::from(&pm_model::json::parse(&serde_json::to_string(default).expect("stops JSON")).expect("stops model")),
         ParamSpec::Number { default, .. } => JsValue::Number(*default),
         ParamSpec::Color { default, .. } => JsValue::from(default.as_str()),
         ParamSpec::Toggle { default, .. } => JsValue::Bool(*default),
@@ -217,7 +229,7 @@ pub fn effect_step(
         .filter_map(|k| params.iter().find(|p| &p.key == k))
         .map(|p| match p.value {
             Binding::Float(v) => v.abs(),
-            Binding::Color(_) => 0.0,
+            Binding::Color(_) | Binding::Stops(_) => 0.0,
         })
         .sum();
     EffectStep {
@@ -436,10 +448,9 @@ pub(crate) fn effect_steps_frame<'d>(
             ));
             continue;
         }
-        if effects.versioned_builtins
-            && def.glsl.as_ref().is_some_and(|g| {
-                g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
-            })
+        if def.glsl.as_ref().is_some_and(|g| {
+            g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
+        })
         {
             match raster.map_or_else(
                 || match space {
@@ -1194,4 +1205,23 @@ mod tests {
         assert_eq!(binding(&toggle, &JsValue::from("")), Binding::Float(0.0));
         assert_eq!(binding(&toggle, &JsValue::Number(2.0)), Binding::Float(1.0));
     }
+}
+
+#[cfg(test)]
+mod stop_transport_tests {
+ use super::*;
+ #[test]
+ fn agent_stop_parameter_sorts_and_binds_rgba_with_defaults() {
+  let defaults:Vec<pm_protocol::definitions::GradientStop>=serde_json::from_value(serde_json::json!([
+   {"position":0.,"color":[0.,0.,0.,1.]},{"position":1.,"color":[1.,1.,1.,1.]}
+  ])).unwrap();
+  let spec=ParamSpec::GradientStops{key:"ramp".into(),default:defaults};
+  let value=pm_model::json::parse(r#"[{"position":1,"color":[1,0,0,0.5]},{"position":0,"color":[0,0,1,1]}]"#).unwrap();
+  let Binding::Stops(bound)=binding(&spec,&JsValue::from(&value)) else {panic!("stop binding")};
+  assert_eq!(bound.count,2);assert_eq!(bound.positions[..2],[0.,1.]);assert_eq!(bound.colors[1],[1.,0.,0.,0.5]);
+  let calls=super::super::exec::stop_calls("ramp",&bound);
+  assert!(calls.contains(&("u_rampC1".into(),super::super::program::Call::F(vec![1.,0.,0.,0.5]))));
+  assert!(calls.contains(&("u_rampCount".into(),super::super::program::Call::F(vec![2.]))));
+  let Binding::Stops(fallback)=binding(&spec,&JsValue::Number(42.)) else {panic!("stop fallback")};assert_eq!(fallback.colors[1],[1.;4]);
+ }
 }
