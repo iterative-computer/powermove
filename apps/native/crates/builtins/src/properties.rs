@@ -580,7 +580,37 @@ impl Properties {
                             .as_str()
                             .or_else(|| animator["p"][field]["v"].as_str())
                             .unwrap_or(default);
-                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"control":{"kind":"choice","binding":lease,"value":value,"options":choices}}));
+                        let options = choices
+                            .into_iter()
+                            .map(|v| {
+                                let label = match v {
+                                    "characters" => "Characters",
+                                    "words" => "Words",
+                                    "lines" => "Lines",
+                                    "forward" => "First to last",
+                                    "reverse" => "Last to first",
+                                    "center" => "Center out",
+                                    "edges" => "Edges in",
+                                    "random" => "Random",
+                                    "square" => "Square",
+                                    "rampUp" => "Ramp up",
+                                    "rampDown" => "Ramp down",
+                                    "triangle" => "Triangle",
+                                    "round" => "Round",
+                                    "expoOut" => "Expo out",
+                                    "cubicOut" => "Ease out",
+                                    "cubicInOut" => "Ease in-out",
+                                    "cubicIn" => "Ease in",
+                                    "backOut" => "Back out",
+                                    "spring" => "Spring",
+                                    "power" => "Power",
+                                    "linear" => "Linear",
+                                    _ => v,
+                                };
+                                json!({"v":v,"label":label})
+                            })
+                            .collect::<Vec<_>>();
+                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
                     }
                     for (key, label, unit) in [
                         ("amount", "Amount", "%"),
