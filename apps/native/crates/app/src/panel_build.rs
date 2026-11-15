@@ -75,3 +75,59 @@ mod tests {
     #[test]
     fn playback_budget() { assert_eq!(playback(true), (0.4, 30)); }
 }
+
+/// A slot-local brush. Integrating in bounded steps keeps the spring stable
+/// when a background window resumes after a long pause.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Brush { pub position: [f32; 2], velocity: [f32; 2] }
+impl Brush {
+    pub fn advance(&mut self, target: [f32; 2], seconds: f32) {
+        let mut remaining = seconds.clamp(0., 1.);
+        while remaining > 0. {
+            let dt = remaining.min(1. / 120.);
+            for axis in 0..2 {
+                self.velocity[axis] += (120. * (target[axis] - self.position[axis]) - 14. * self.velocity[axis]) * dt;
+                self.position[axis] += self.velocity[axis] * dt;
+            }
+            remaining -= dt;
+        }
+    }
+}
+
+/// Analytic accumulation decay is independent of the rendering frame rate.
+pub fn afterglow(age: f32) -> f32 { (-3.712 * age.max(0.)).exp() }
+
+/// Test a dot against the rounded slot before submitting paint primitives.
+pub fn inside_slot(point: [f32; 2], size: [f32; 2], radius: f32) -> bool {
+    if size.iter().any(|v| !v.is_finite() || *v <= 0.) || point.iter().any(|v| !v.is_finite()) { return false; }
+    let r = radius.max(0.).min(size[0].min(size[1]) / 2.);
+    if point[0] < 0. || point[1] < 0. || point[0] > size[0] || point[1] > size[1] { return false; }
+    let dx = point[0] - point[0].clamp(r, size[0] - r);
+    let dy = point[1] - point[1].clamp(r, size[1] - r);
+    dx * dx + dy * dy <= r * r
+}
+
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+    #[test]
+    fn spring_settles() {
+        let mut brush = Brush::default();
+        for _ in 0..180 { brush.advance([100., 50.], 1. / 60.); }
+        assert!((brush.position[0] - 100.).abs() < 0.01);
+        assert!((brush.position[1] - 50.).abs() < 0.01);
+    }
+    #[test]
+    fn rounded_clip() {
+        assert!(!inside_slot([0., 0.], [100., 80.], 8.));
+        assert!(inside_slot([8., 0.], [100., 80.], 8.));
+        assert!(inside_slot([50., 40.], [100., 80.], 8.));
+        assert!(!inside_slot([101., 40.], [100., 80.], 8.));
+        assert!(!inside_slot([f32::NAN, 0.], [100., 80.], 8.));
+    }
+    #[test]
+    fn decay_matches_reference() {
+        assert!((afterglow(1. / 60.) - 0.94).abs() < 0.0001);
+        assert!((afterglow(1. / 30.) - afterglow(1. / 60.).powi(2)).abs() < 0.0001);
+    }
+}
