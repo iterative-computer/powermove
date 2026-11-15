@@ -945,6 +945,7 @@ mod tests {
         let mut a11y = A11y::new(
             Arc::new(AtomicBool::new(true)),
             Default::default(),
+            Default::default(),
             false,
             false,
             None,
@@ -958,6 +959,7 @@ mod tests {
         // No assistive technology has activated the platform adapter.
         let mut a11y = A11y::new(
             Arc::new(AtomicBool::new(false)),
+            Default::default(),
             Default::default(),
             false,
             true,
@@ -975,6 +977,7 @@ mod tests {
     fn force_disabled_wins_over_forced() {
         let mut a11y = A11y::new(
             Arc::new(AtomicBool::new(true)),
+            Default::default(),
             Default::default(),
             true,
             true,
@@ -1212,7 +1215,7 @@ mod tests {
         a11y.nodes.pop(); // c
         a11y.nodes.pop(); // b
 
-        let update = a11y.end_frame(Default::default());
+        let update = a11y.end_frame(Default::default(), false).expect("full tree update");
         assert_eq!(update.focus, a);
     }
 }
