@@ -8859,7 +8859,7 @@ mod tests {
             let ran = ran.clone();
             move |_, window, _| window.on_next_frame(move |window, _| {
                 ran.set(true);
-                window.request_animation_frame();
+                window.on_next_frame(|_, _| {});
             })
         }).unwrap();
         platform.simulate_frame_request(frame());
