@@ -692,6 +692,8 @@ impl Controller {
             }
         })
         .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -735,6 +737,11 @@ impl Controller {
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {
                                     v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { .. } => {
+                                    crate::appearance::follow(&v.kernel.state())
                                 }
                                 _ => {}
                             }

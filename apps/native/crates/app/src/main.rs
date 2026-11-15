@@ -11,6 +11,7 @@ mod access;
 mod after_open;
 mod agent_clients;
 mod alert;
+mod appearance;
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;

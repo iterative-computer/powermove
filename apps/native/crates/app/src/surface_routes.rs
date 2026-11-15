@@ -50,6 +50,17 @@ impl Controller {
                     self.hide_home(cx)
                 }
             }
+            // Development builds: the app's appearance as Settings › General
+            // › Appearance sets it (`reviewAppearance:light|dark|system`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewAppearance:") => {
+                use crate::appearance::{Mode, apply_later};
+                apply_later(match &command["reviewAppearance:".len()..] {
+                    "light" => Mode::Light,
+                    "dark" => Mode::Dark,
+                    _ => Mode::System,
+                });
+            }
             // Development builds: an event on a built-in panel's node, by
             // semantic id (`reviewPanel:<panel>:<event>:<semantic>`).
             #[cfg(debug_assertions)]
