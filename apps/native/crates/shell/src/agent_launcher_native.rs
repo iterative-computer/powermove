@@ -429,8 +429,10 @@ pub(super) fn image(model: &Launcher, time: u64, t: &Tokens) -> Retained<NSImage
             ))
             .fill();
         } else {
-            toolbar_symbol("sparkles", "Agent", &t)
-                .drawInRect(NSRect::new(NSPoint::new(5., 5.), NSSize::new(14., 14.)));
+            let rect = NSRect::new(NSPoint::new(5., 5.), NSSize::new(14., 14.));
+            toolbar_symbol("sparkles", "Agent", &t).drawInRect(rect);
+            ink.set();
+            NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
         }
         if count > 1 {
             native_color(t.colors.fill).setFill();
