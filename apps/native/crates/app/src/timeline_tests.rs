@@ -2657,6 +2657,131 @@ fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppCon
     });
 }
 
+/// Headless replay through real GPUI wheel dispatch, including abrupt reversals.
+/// Run optimized for the 8ms gate; debug builds still check every invariant.
+#[gpui::test]
+fn timeline_scroll_436_rows_benchmark(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(436)).unwrap();
+    let rows = project["layers"].as_array_mut().unwrap();
+    rows[0]["type"] = "group".into();
+    rows[0]["collapsed"] = false.into();
+    for (i, row) in rows.iter_mut().enumerate().skip(1) {
+        row["group"] = "l0".into();
+        row["from"] = 0.into();
+        row["collapsed"] = true.into();
+        let count = if i <= 415 {
+            2
+        } else if i == 416 {
+            1
+        } else {
+            0
+        };
+        row["p"]["opacity"]["kf"] = serde_json::json!(
+            (0..count)
+                .map(|k| serde_json::json!({"i": format!("k{i}-{k}"), "t": k, "v": 100}))
+                .collect::<Vec<_>>()
+        );
+    }
+    let mut s = stage_project(cx, project.to_string());
+    let at = s.origin() + point(px(600.), px(100.));
+    let revision = s.rig.kernel.published(PROJECT).unwrap().revision();
+    let state_revision = s.rig.kernel.state().revision;
+    let mut samples = Vec::new();
+    for i in 0..120 {
+        let started = std::time::Instant::now();
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(if i < 80 { -37.25 } else { 61.5 }))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+        samples.push(started.elapsed());
+        let (offset, frame, scene) = s.surface.read_with(&s.vcx, |t, _| {
+            (t.scroll_y(), t.frame().unwrap(), t.scene().unwrap())
+        });
+        let header = s.view.read_with(&s.vcx, |v, _| v.outline_scroll_for_test());
+        assert_eq!(header, offset as f32, "header and tracks move together");
+        assert_eq!(frame.viewport.scroll_y, offset);
+        let height = frame.viewport.height - tokens().metrics.ruler as f64;
+        let visible = scene.visible_range(offset, height);
+        for row in visible.clone() {
+            assert!(frame.range.contains(&row), "no blank visible track row");
+        }
+        let mounted = scene.mount_range(offset, height);
+        assert!(mounted.start <= visible.start && mounted.end >= visible.end);
+        assert!(mounted.len() <= visible.len() + 4);
+        assert_eq!(
+            s.rig.kernel.published(PROJECT).unwrap().revision(),
+            revision
+        );
+        assert_eq!(
+            s.rig.kernel.state().revision,
+            state_revision,
+            "scroll publishes no model state"
+        );
+    }
+    samples.sort();
+    eprintln!(
+        "timeline scroll 120 events: p50={:?}, p95={:?}, max={:?}",
+        samples[60], samples[114], samples[119]
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            samples[119] < Duration::from_millis(8),
+            "scroll frame exceeds 8ms"
+        );
+    }
+    // A disclosure publication must replace row geometry, not retain child height.
+    let full_height = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().content_height());
+    for (closed, expected) in [(true, 1), (false, 436)] {
+        let published = s.rig.kernel.published(PROJECT).unwrap();
+        let mut model = s.surface.read_with(&s.vcx, |t, _| (*t.model()).clone());
+        model.reveal.layers.insert(
+            "l0".into(),
+            pm_panel_timeline::Disclosure {
+                collapsed: closed,
+                group_collapsed: closed,
+                paths: None,
+            },
+        );
+        let ui = model.patch_ui(&published.ui_state);
+        s.rig
+            .kernel
+            .state_transaction(pm_kernel::state::StateTransaction {
+                expected_revision: None,
+                ops: vec![pm_kernel::state::StateOp::Ui {
+                    project: PROJECT.into(),
+                    next: ui,
+                }],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| {
+            let scene = t.scene().unwrap();
+            assert_eq!(scene.total(), expected);
+            if closed {
+                assert!(scene.content_height() < full_height);
+                assert_eq!(t.scroll_y(), 0.);
+            } else {
+                assert_eq!(scene.content_height(), full_height);
+            }
+            assert_eq!(
+                t.frame().unwrap().range,
+                scene.visible_range(
+                    t.scroll_y(),
+                    t.frame().unwrap().viewport.height - tokens().metrics.ruler as f64
+                )
+            );
+        });
+    }
+}
+
 #[gpui::test]
 fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
     let mut s = stage(cx, 2);

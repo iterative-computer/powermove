@@ -63,7 +63,12 @@ export function completeFrame(
     shyLayers: native.shyLayers === true,
     indexDigits: native.indexDigits,
     selection: native.selection,
-    window: { first: window.first, total: window.total, rows },
+    window: {
+      first: window.first,
+      total: window.total,
+      rows,
+      ...(window.retained === true ? { retained: true } : {}),
+    },
   } as unknown as TimelineFrame;
   return checkFrame(frame, request);
 }
