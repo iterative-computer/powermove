@@ -604,6 +604,11 @@ impl Properties {
     ) -> Result<Vec<Value>, String> {
         use pm_panel_studio3d::properties::Role;
         let mut rows = vec![];
+        // A camera aims at its point of interest unless Auto-Orient is Off.
+        let one_node = role == Role::Camera
+            && super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?)["d"]["data"]["camera"]
+                ["autoOrient"]
+                == "off";
         let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
             "position",
             "Position",
@@ -615,7 +620,22 @@ impl Properties {
             "",
             0.1,
         )];
-        if role != Role::Camera {
+        // The point of interest is what turns the view when the camera moves,
+        // so it sits under Position (After Effects' two-node camera).
+        if role == Role::Camera && !one_node {
+            groups.push((
+                "target",
+                "Point of Interest",
+                vec![
+                    ("camera.targetX", "X"),
+                    ("camera.targetY", "Y"),
+                    ("camera.targetZ", "Z"),
+                ],
+                "",
+                0.1,
+            ));
+        }
+        if role != Role::Camera || one_node {
             groups.push((
                 "rotation3d",
                 "Rotation",
@@ -1437,6 +1457,24 @@ impl Properties {
                         "3d.projection",
                         "Projection",
                         json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
+                    ),
+                );
+                // Off moves the camera without re-aiming it; switching keeps the view.
+                let lease = self.control_lease("3d.autoOrient");
+                let value = if data["camera"]["autoOrient"] == "off" {
+                    "off"
+                } else {
+                    "target"
+                };
+                push(
+                    &mut groups,
+                    "Camera",
+                    row(
+                        "3d.autoOrient",
+                        "Auto-Orient",
+                        json!({"kind":"choice","binding":lease,"value":value,"options":[
+                            {"v":"target","label":"Toward Point of Interest","detail":"Moving the camera turns it to keep looking at the point of interest."},
+                            {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
                     ),
                 );
             }

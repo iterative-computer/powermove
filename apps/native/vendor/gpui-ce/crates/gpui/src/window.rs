@@ -1370,6 +1370,7 @@ pub struct Window {
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
+    pub(crate) modifiers_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
     /// Incremented every time focus moves. Used to invalidate a
@@ -2151,6 +2152,7 @@ impl Window {
             long_press_capture: None,
             refreshing: false,
             activation_observers: SubscriberSet::new(),
+            modifiers_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
             focus_generation: 0,
@@ -6006,6 +6008,9 @@ impl Window {
             PlatformInput::ModifiersChanged(modifiers_changed) => {
                 self.modifiers = modifiers_changed.modifiers;
                 self.capslock = modifiers_changed.capslock;
+                self.modifiers_observers
+                    .clone()
+                    .retain(&(), |callback| callback(self, cx));
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
             PlatformInput::ScrollWheel(scroll_wheel) => {

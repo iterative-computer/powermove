@@ -20,6 +20,8 @@ export interface ViewerModel {
     tier: "fast" | "live" | "refine";
     tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
     look?: "camera" | "free";
+    /** Fly navigation is on (Shift+`): the viewer shows its keys. */
+    fly?: boolean;
     /** Handles follow the scene's axes or the object's own. */
     axes?: "scene" | "object";
     /** Panes in the viewer: one, two side by side, or four. */

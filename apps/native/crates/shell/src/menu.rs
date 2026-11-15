@@ -95,9 +95,25 @@ pub fn tools() -> Vec<Item> {
 /// in the bar's order (command `studio.view`, arguments `[group, value]`).
 /// Empty labels are separators.
 pub fn view3d() -> Vec<Item> {
+    let keymap = crate::keymap::current();
     [
         ("Camera", "look", "camera"),
         ("Free View", "look", "free"),
+        ("", "", ""),
+        // Blender's numpad views (the number row stands in, as Emulate
+        // Numpad), Frame Selected (numpad .) and Align Camera to View.
+        ("Front", "nav", "front"),
+        ("Back", "nav", "back"),
+        ("Right", "nav", "right"),
+        ("Left", "nav", "left"),
+        ("Top", "nav", "top"),
+        ("Bottom", "nav", "bottom"),
+        ("Perspective / Orthographic", "nav", "persp"),
+        ("Roll Left", "nav", "roll-left"),
+        ("Roll Right", "nav", "roll-right"),
+        ("Opposite Side", "nav", "opposite"),
+        ("Frame Selected", "nav", "selected"),
+        ("Align Camera to View", "nav", "camera-to-view"),
         ("", "", ""),
         ("Move", "tool", "move"),
         ("Rotate", "tool", "rotate"),
@@ -106,6 +122,8 @@ pub fn view3d() -> Vec<Item> {
         ("Pan", "tool", "pan"),
         ("Zoom", "tool", "zoom"),
         ("Light", "tool", "light"),
+        ("", "", ""),
+        ("Fly Navigation", "fly", ""),
         ("", "", ""),
         ("Scene Axes", "axes", "scene"),
         ("Object Axes", "axes", "object"),
@@ -124,10 +142,8 @@ pub fn view3d() -> Vec<Item> {
         if label.is_empty() {
             Item::command("", "", "")
         } else {
-            Item {
-                args: vec![json!(group), json!(value)],
-                ..Item::command(label, "studio.view", "")
-            }
+            // Each shows the key the shipped keymap gives it, if any.
+            Item::registered(&keymap, label, "studio.view", json!([group, value]))
         }
     })
     .collect()
@@ -457,6 +473,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Fit Selected Curves", "graph.fit", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
+                r_args("2D / 3D", "studio.view", json!(["look", "toggle"])),
                 Item::command("3D", "view3d", ""),
                 sep(),
                 Item::command("Show/Hide Sidebar", "toggleSidebar", ""),

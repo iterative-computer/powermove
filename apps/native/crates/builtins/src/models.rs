@@ -444,6 +444,10 @@ impl Backend {
         let mut model = model;
         // Refine progress for the status capsule (3d-studio.md §3).
         if model["studio"].is_object() {
+            // Flying (Shift+`): the viewer shows its keys.
+            model["studio"]["fly"] = json!(
+                p.ui_state.viewer.get("studioFly").and_then(pm_model::Value::as_str) == Some("on")
+            );
             model["studio"]["denoiser"] = self.native.facts["studioDenoiser"].clone();
             let refine = &self.native.facts["studioRefineProgress"];
             if refine.is_object() {

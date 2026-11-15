@@ -1653,6 +1653,195 @@ fn the_viewer_shows_transport_only_when_no_timeline_is_shown() {
     assert!(shown["host"]["transport"]["timecode"].is_string());
 }
 
+/// "When I adjust position of the camera, it rotates the view" (Chike,
+/// 2026-11-14): a camera aims at its point of interest, so moving it re-aims
+/// it. Properties now shows that point and an Auto-Orient choice; Off keeps
+/// the view exactly when switched, and from then on Position only slides it.
+#[test]
+fn camera_position_only_translates_once_auto_orient_is_off() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    run(json!({"operation":"add_object","id":"ui","object":{"source":{"primitive":"box"}}}));
+    run(
+        json!({"operation":"add_camera","id":"cam","camera":{"p":{"x":0,"y":0,"z":50,"targetX":0,"targetY":0,"targetZ":0,"fov":13}}}),
+    );
+    let mut presenter = properties::Properties::default();
+    select_layer(&kernel, "cam");
+    let publish = |presenter: &mut properties::Properties| {
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        (model, publication)
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let transform = |p: &Value| -> Vec<String> {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "transform")
+            .unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let write = |presenter: &properties::Properties,
+                 model: &mut pm_panel_inspector::Inspector,
+                 row: &Value,
+                 axis: usize,
+                 value: Value| {
+        let handle = row["control"]["binding"]["handle"]
+            .as_str()
+            .or(row["control"]["axes"][axis]["binding"]["handle"].as_str())
+            .unwrap();
+        let request = presenter
+            .write(
+                model,
+                Caller::native(),
+                handle,
+                data::model(&value).unwrap(),
+                0.,
+            )
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{value}: {e}");
+        }
+    };
+    // Where the shot camera stands and which way it looks.
+    let view = || {
+        let p = kernel.published("synthetic").unwrap();
+        let r = pm_kernel::commands::scene3d::resolve_scene(
+            &p.snapshot,
+            p.snapshot.open_comp().as_deref(),
+            0.,
+        )
+        .unwrap();
+        let at = r.camera_position.unwrap();
+        let t = r.targets[r.camera_id.as_ref().unwrap()];
+        let d = [t[0] - at[0], t[1] - at[1], t[2] - at[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        (at, [d[0] / l, d[1] / l, d[2] / l])
+    };
+    let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
+
+    // Aiming at its point of interest: Properties shows the point, and moving
+    // the camera turns it (the reported behaviour, now explained).
+    let (mut model, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+    assert_eq!(
+        row(&p, "3d.autoOrient").unwrap()["control"]["value"],
+        "target"
+    );
+    let (_, straight) = view();
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "position").unwrap(),
+        0,
+        json!(8.),
+    );
+    let (_, turned) = view();
+    assert!(
+        !close(straight, turned),
+        "a two-node camera re-aims when it moves"
+    );
+
+    // Auto-Orient Off keeps that turned view exactly (a real yaw, so the
+    // rotation it writes is checked), and shows Rotation instead.
+    let before = view();
+    let (mut model, p) = publish(&mut presenter);
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.autoOrient").unwrap(),
+        0,
+        json!("off"),
+    );
+    let after = view();
+    assert!(
+        close(before.0, after.0) && close(before.1, after.1),
+        "{before:?} -> {after:?}"
+    );
+    let (mut model, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Rotation"]);
+
+    // Now Position only slides the camera: the view direction is unchanged
+    // and the camera moved by exactly the edit.
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "position").unwrap(),
+        0,
+        json!(16.),
+    );
+    let moved = view();
+    assert!(
+        close(moved.1, after.1),
+        "orientation unchanged: {:?} -> {:?}",
+        after.1,
+        moved.1
+    );
+    assert!(
+        close(moved.0, [after.0[0] + 8., after.0[1], after.0[2]]),
+        "{:?}",
+        moved.0
+    );
+
+    // Back toward a point of interest, the view still doesn't jump.
+    let (mut model, p) = publish(&mut presenter);
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.autoOrient").unwrap(),
+        0,
+        json!("target"),
+    );
+    let back = view();
+    assert!(
+        close(back.0, moved.0) && close(back.1, moved.1),
+        "{moved:?} -> {back:?}"
+    );
+    let (_, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+}
+
 #[test]
 fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -4049,6 +4238,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         labels(&p, "Camera"),
         [
             "Projection",
+            "Auto-Orient",
             "Field of View",
             "Clip Start",
             "Clip End",
@@ -4073,7 +4263,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         json!("orthographic"),
     );
     let (_, p) = publish(&mut presenter, "cam");
-    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert_eq!(labels(&p, "Camera")[2], "Zoom");
     // The camera shows the composition's Render Quality, not a second sampler.
     assert!(row(&p, "3d.samples").is_none());
     assert_eq!(

@@ -9,7 +9,8 @@ use pm_engine_service::{OverlayLine, studio::FreeView};
 use pm_kernel::{Caller, Command, Request, Scene3dCommand, SelectionCall};
 use pm_panel_studio3d::viewport::{Eye, Item, Scene};
 use pm_scene3d::navigation::{
-    Lens, Pose as View, Vec3, add, cross, dolly, dot, length, mul, normalize, orbit, pan, sub,
+    Lens, ORBIT_STEP, Pose as View, Side, Vec3, add, cross, dolly, dot, length, mul, normalize,
+    orbit, orbit_by, pan, side_view, sub, zoom_step,
 };
 use pm_scene3d::schema::Role;
 use std::sync::Arc;
@@ -153,6 +154,34 @@ struct LightOrbit {
     active: bool,
     time: f64,
 }
+/// A flight: the model, where it began, and the hooks that hold the
+/// keyboard and the frame clock while it lasts.
+/// Navigation through the shot camera (Blender's Lock Camera to View): the
+/// camera is written once, when the gesture settles.
+pub(super) struct CamNav {
+    start: View,
+    prev_free: Option<View>,
+    /// Each new input restarts the settle timer; only the newest one stores.
+    generation: u64,
+    _settle: Option<Task<()>>,
+}
+/// After the last wheel notch, trackpad scroll or view key, the camera move
+/// is stored this long later (one undo step for the whole burst).
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+/// One pan step (Ctrl+wheel, Shift+wheel, Ctrl+numpad), a share of the
+/// viewer's height.
+const PAN_STEP: f64 = 0.1;
+pub(super) struct FlyRun {
+    pub(super) fly: super::fly::Fly,
+    /// It began looking through the shot camera: confirm stores the flight
+    /// on that camera; otherwise only the editor view moves.
+    camera: bool,
+    was_free: bool,
+    prev_free: Option<View>,
+    last: std::time::Instant,
+    _keys: Option<Subscription>,
+    _clock: Option<Task<()>>,
+}
 #[derive(Default)]
 pub struct State {
     pub scene: Option<Arc<Scene>>,
@@ -165,6 +194,9 @@ pub struct State {
     /// an older publication must not snap the view back meanwhile.
     pub look_pending: Option<bool>,
     pub free: Option<View>,
+    /// The composition the scene belongs to: switching compositions brings
+    /// back that composition's own 2D/3D choice (`studioLookByComp`).
+    pub comp: Option<String>,
     /// Handles follow the object's own axes (UI state `studioAxes`).
     pub object_axes: bool,
     /// The Light panel's kind to add and whether Add is armed (UI state
@@ -176,6 +208,11 @@ pub struct State {
     /// drags it around what it lights.
     pub light_aim: String,
     light_orbit: Option<LightOrbit>,
+    /// Fly navigation in progress (Shift+`).
+    fly: Option<FlyRun>,
+    /// Navigating in camera view: the move previews here and is stored on
+    /// the shot camera, as one undo step, when the gesture ends.
+    cam_nav: Option<CamNav>,
     /// The handle under the pointer, drawn in text colour (§5).
     pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
@@ -238,7 +275,11 @@ impl State {
         self.scene.is_some()
     }
     pub fn busy(&self) -> bool {
-        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some()
+        self.nav.is_some()
+            || self.drag.is_some()
+            || self.light_orbit.is_some()
+            || self.fly.is_some()
+            || self.cam_nav.is_some()
     }
     fn view(&self) -> Option<View> {
         let scene = self.scene.as_ref()?;
@@ -248,9 +289,20 @@ impl State {
             scene.shot
         })
     }
+    fn nav_lens(&self, scene: &Scene) -> Lens {
+        if self.cam_nav.is_some() {
+            scene.lens
+        } else {
+            scene.editor_lens
+        }
+    }
     fn eye(&self) -> Option<Eye> {
         let scene = self.scene.as_ref()?;
-        Some(scene.eye(self.view()))
+        let mut eye = scene.eye(self.free_look.then(|| self.view()).flatten());
+        if self.cam_nav.is_some() {
+            eye.lens = scene.lens;
+        }
+        Some(eye)
     }
     /// Unlocked selected items the current tool can move.
     fn movable(&self) -> Vec<Item> {
@@ -292,10 +344,30 @@ impl GizmoSurface {
     /// The viewer worker sees this viewer's Free View, or the shot.
     pub(super) fn studio_push_view(&mut self, cx: &mut Context<Self>) {
         let view = if self.studio.free_look {
-            self.studio.free.map(|v| FreeView {
-                eye: v.position,
-                target: v.target,
-                zoom: v.zoom,
+            self.studio.free.map(|v| {
+                // Camera-view navigation retains the shot's fixed ortho span.
+                let shot_ortho = self.studio.cam_nav.is_some()
+                    && self
+                        .studio
+                        .scene
+                        .as_ref()
+                        .is_some_and(|s| matches!(s.lens, Lens::Orthographic { .. }));
+                let zoom = if shot_ortho {
+                    let scene = self.studio.scene.as_ref().unwrap();
+                    let Lens::Perspective { fov, .. } = scene.editor_lens else {
+                        unreachable!()
+                    };
+                    v.zoom * length(sub(v.position, v.target)) * (fov.to_radians() / 2.).tan() / 3.
+                } else {
+                    v.zoom
+                };
+                FreeView {
+                    ortho: v.ortho || shot_ortho,
+                    roll: v.roll,
+                    eye: v.position,
+                    target: v.target,
+                    zoom,
+                }
             })
         } else {
             None
@@ -310,12 +382,36 @@ impl GizmoSurface {
                 let Some(p) = kernel.published(&project) else {
                     return;
                 };
-                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value) {
+                // 2D/3D (the look) is also remembered per composition.
+                let comp = (key == "studioLook").then(|| p.snapshot.render_comp());
+                let kept = |ui: &pm_kernel::state::UiState| {
+                    comp.as_ref().is_none_or(|c| {
+                        ui.viewer
+                            .get("studioLookByComp")
+                            .and_then(|m| m.get(c))
+                            .and_then(pm_model::Value::as_str)
+                            == Some(value)
+                    })
+                };
+                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value)
+                    && kept(&p.ui_state)
+                {
                     return;
                 }
                 let mut ui = p.ui_state.clone();
                 if let Some(v) = ui.viewer.as_object_mut() {
                     v.insert(key, pm_model::Value::from(value));
+                    if let Some(c) = &comp {
+                        let mut by = v
+                            .get("studioLookByComp")
+                            .filter(|m| m.as_object().is_some())
+                            .cloned()
+                            .unwrap_or_else(|| pm_model::Value::Object(Default::default()));
+                        if let Some(m) = by.as_object_mut() {
+                            m.insert(c.as_str(), pm_model::Value::from(value));
+                        }
+                        v.insert("studioLookByComp", by);
+                    }
                 }
                 let state = kernel.state();
                 let _ = kernel
@@ -346,8 +442,22 @@ impl GizmoSurface {
         const AXES_: &[&str] = &["scene", "object"];
         const VIEWS: &[&str] = &["1", "2", "4"];
         const TIERS: &[&str] = &["fast", "live", "refine"];
+        // A camera move still settling is stored before the look changes.
+        if group == "look" {
+            self.studio_cam_nav_end(true, cx);
+        }
+        // View ▸ 2D / 3D (0, numpad 0): the composition through its camera,
+        // or the scene's editor view (Blender's camera view toggle).
+        let value = match (group, value) {
+            ("look", "toggle") if !self.studio.active() => return,
+            ("look", "toggle") if self.studio.free_look => "camera",
+            ("look", "toggle") => "free",
+            _ => value,
+        };
         let (key, allowed) = match group {
             "frame" => return self.studio_frame(cx),
+            "fly" => return self.studio_fly_start(cx),
+            "nav" => return self.studio_nav_key(value, cx),
             "look" => ("studioLook", LOOKS),
             "tool" => ("studioTool", TOOLS),
             "axes" => ("studioAxes", AXES_),
@@ -374,7 +484,11 @@ impl GizmoSurface {
     /// Looking through Free View in a 3D composition: the viewer fills its
     /// whole body with the editor view.
     pub fn studio_free(&self) -> bool {
-        self.studio.active() && self.studio.free_look
+        // Flying through the shot camera keeps the shot's framing.
+        self.studio.active()
+            && self.studio.free_look
+            && !self.studio.fly.as_ref().is_some_and(|run| run.camera)
+            && self.studio.cam_nav.is_none()
     }
     /// Where a light's marker and its ◆ target sit, in composition pixels,
     /// with the whole composition in view (tests drive them as a person would).
@@ -396,6 +510,179 @@ impl GizmoSurface {
     pub(crate) fn studio_free_pose(&self) -> Option<View> {
         self.studio.free_look.then_some(self.studio.free).flatten()
     }
+    /// Tests: speed up `notches` and fly `seconds` without the frame clock.
+    #[cfg(test)]
+    pub(crate) fn studio_fly_advance(&mut self, notches: f64, seconds: f64, cx: &mut Context<Self>) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.accelerate(notches);
+            run.fly.tick(seconds.min(0.1));
+            for _ in 1..(seconds / 0.1).round() as usize {
+                run.fly.tick(0.1);
+            }
+            self.studio.free = Some(run.fly.pose());
+            self.studio_push_view(cx);
+        }
+    }
+    /// Flying (Shift+`): every other shortcut waits.
+    pub fn studio_flying(&self) -> bool {
+        self.studio.fly.is_some()
+    }
+    /// Shift+`: start flying from the view on screen, the shot camera's or
+    /// the editor view's (Blender's Fly navigation).
+    pub fn studio_fly_start(&mut self, cx: &mut Context<Self>) {
+        // A camera move still settling is stored first.
+        self.studio_cam_nav_end(true, cx);
+        if self.studio.fly.is_some() || self.studio.busy() {
+            return;
+        }
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        let start = self.studio.view().unwrap_or(scene.shot);
+        let (was_free, prev_free) = (self.studio.free_look, self.studio.free);
+        // Fly in the editor view; through the camera it is stored on confirm.
+        self.studio.free_look = true;
+        self.studio.look_pending = Some(true);
+        self.studio.free = Some(start);
+        let this = cx.entity().downgrade();
+        let keys = cx.intercept_keystrokes(move |event, _, cx| {
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |s, cx| s.studio_fly_key(&event.keystroke, true, cx));
+                cx.stop_propagation();
+            }
+        });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let Ok(going) = this.update(cx, |s, cx| s.studio_fly_tick(cx)) else {
+                    break;
+                };
+                if !going {
+                    break;
+                }
+            }
+        });
+        self.studio.fly = Some(FlyRun {
+            fly: super::fly::Fly::new(start),
+            camera: !was_free,
+            was_free,
+            prev_free,
+            last: std::time::Instant::now(),
+            _keys: Some(keys),
+            _clock: Some(clock),
+        });
+        self.cursor = CursorStyle::Crosshair;
+        // The viewer shows the keys while flying (UI state, not the document).
+        self.studio_ui("studioFly", "on", cx);
+        self.studio_push_view(cx);
+        self.draw(cx);
+        cx.notify();
+    }
+    fn studio_fly_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(run) = self.studio.fly.as_mut() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        run.fly.tick(now.duration_since(run.last).as_secs_f64());
+        run.last = now;
+        self.studio.free = Some(run.fly.pose());
+        self.studio_push_view(cx);
+        self.draw(cx);
+        true
+    }
+    /// A key while flying. Down: W/S (and ↑/↓) change speed, A/D (←/→)
+    /// strafe, E/R climb, Q/F descend, Enter confirms, Esc cancels, +/−
+    /// change speed. Up releases a held move.
+    pub(super) fn studio_fly_key(&mut self, key: &Keystroke, down: bool, cx: &mut Context<Self>) {
+        let Some(run) = self.studio.fly.as_mut() else {
+            return;
+        };
+        run.fly.fast = key.modifiers.shift;
+        run.fly.slow = key.modifiers.alt;
+        let held = &mut run.fly.held;
+        match (key.key.as_str(), down) {
+            ("w" | "up" | "+" | "=", true) => run.fly.accelerate(1.),
+            ("s" | "down" | "-", true) => run.fly.accelerate(-1.),
+            ("a" | "left", d) => held.left = d,
+            ("d" | "right", d) => held.right = d,
+            ("e" | "r", d) => held.up = d,
+            ("q" | "f", d) => held.down = d,
+            ("enter", true) => return self.studio_fly_end(true, cx),
+            ("escape", true) => return self.studio_fly_end(false, cx),
+            _ => {}
+        }
+    }
+    /// Shift and Option while flying (pressed or released alone).
+    pub(super) fn studio_fly_modifiers(&mut self, m: Modifiers) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.fast = m.shift;
+            run.fly.slow = m.alt;
+        }
+    }
+    /// The pointer while flying: its offset from the viewer's centre steers.
+    pub(super) fn studio_fly_pointer(&mut self, at: Point<Pixels>) {
+        let b = self.bounds;
+        let Some(run) = self.studio.fly.as_mut() else {
+            return;
+        };
+        let (w, h) = (f32::from(b.size.width) as f64, f32::from(b.size.height) as f64);
+        if w <= 0. || h <= 0. {
+            return;
+        }
+        run.fly.pointer = [
+            ((f32::from(at.x - b.origin.x) as f64) - w / 2.) / (w / 2.),
+            ((f32::from(at.y - b.origin.y) as f64) - h / 2.) / (h / 2.),
+        ];
+    }
+    /// Scroll while flying: each notch is one speed step.
+    pub(super) fn studio_fly_scroll(&mut self, notches: f64) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.accelerate(notches);
+        }
+    }
+    /// Confirm (click, Enter) keeps the flight; cancel (Esc, right-click)
+    /// returns to exactly where it began. Through the shot camera, confirm
+    /// stores the flight on the camera as one Undo, "Fly Camera".
+    pub fn studio_fly_end(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let Some(run) = self.studio.fly.take() else {
+            return;
+        };
+        let end = run.fly.pose();
+        if keep && run.camera {
+            let time = self.host.time(cx);
+            let stored = self
+                .kernel
+                .published(&self.project)
+                .ok_or_else(|| "Project closed".to_string())
+                .and_then(|p| {
+                    pm_panel_studio3d::properties::fly_camera(&p, time, run.fly.start, end)
+                        .map_err(|e| e.to_string())
+                });
+            match stored {
+                Ok((_, commands)) => {
+                    self.queue.push_back(Job::Transact("Fly Camera", commands, None));
+                    self.pump(cx);
+                }
+                Err(e) => self.host.report(e, cx),
+            }
+        }
+        // Kept in the editor view, the view simply stays where it flew to.
+        // Otherwise back to the look it began in: the shot (now carrying the
+        // flight, on confirm) or the editor view exactly as it was.
+        if !(keep && !run.camera) {
+            self.studio.free_look = run.was_free;
+            self.studio.look_pending = Some(run.was_free);
+            self.studio.free = run.prev_free;
+            self.studio_ui("studioLook", if run.was_free { "free" } else { "camera" }, cx);
+        }
+        self.cursor = CursorStyle::Arrow;
+        self.studio_ui("studioFly", "off", cx);
+        self.studio_push_view(cx);
+        self.draw(cx);
+        cx.notify();
+    }
     /// Whether the composition shows Studio 3D layers (F frames them).
     pub fn studio_active(&self) -> bool {
         self.studio.active()
@@ -406,12 +693,219 @@ impl GizmoSurface {
             return;
         };
         let from = self.studio.view().unwrap_or(scene.shot);
-        if let Some(pose) = pm_panel_studio3d::viewport::framed(&scene, from, &self.studio.selected)
+        let framing = Scene {
+            lens: if self.studio.free_look && self.studio.cam_nav.is_none() {
+                scene.editor_lens
+            } else {
+                scene.lens
+            },
+            ..(*scene).clone()
+        };
+        if let Some(pose) =
+            pm_panel_studio3d::viewport::framed(&framing, from, &self.studio.selected)
+            && self.studio_nav_start(cx).is_some()
         {
-            self.studio_go_free(cx);
-            self.studio.free = Some(pose);
+            self.studio_nav_set(pose, true, cx);
+        }
+    }
+    /// Where navigation starts: the editor view, or in camera view the shot
+    /// itself (the move will be stored on the camera, Blender's Lock Camera
+    /// to View, as Fly does).
+    pub(super) fn studio_nav_start(&mut self, cx: &mut Context<Self>) -> Option<View> {
+        let scene = self.studio.scene.clone()?;
+        if !self.studio.free_look && self.studio.cam_nav.is_none() {
+            self.studio.cam_nav = Some(CamNav {
+                start: scene.shot,
+                prev_free: self.studio.free,
+                generation: 0,
+                _settle: None,
+            });
+            self.studio.free_look = true;
+            self.studio.free = Some(scene.shot);
             self.studio_push_view(cx);
-            self.draw(cx);
+        }
+        Some(self.studio.view().unwrap_or(scene.shot))
+    }
+    /// Shows `pose`; in camera view, `settle` stores it after a pause (a
+    /// drag stores on release instead).
+    pub(super) fn studio_nav_set(&mut self, pose: View, settle: bool, cx: &mut Context<Self>) {
+        self.studio.free = Some(pose);
+        self.studio_push_view(cx);
+        self.draw(cx);
+        if settle && let Some(run) = self.studio.cam_nav.as_mut() {
+            run.generation += 1;
+            let generation = run.generation;
+            run._settle = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SETTLE).await;
+                let _ = this.update(cx, |s, cx| {
+                    if s.studio.cam_nav.as_ref().map(|r| r.generation) == Some(generation)
+                        && s.studio.nav.is_none()
+                    {
+                        s.studio_cam_nav_end(true, cx);
+                    }
+                });
+            }));
+        }
+    }
+    /// Ends a camera-view move: stores it on the shot camera (`keep`) or
+    /// drops it, and looks through the camera again.
+    pub(super) fn studio_cam_nav_end(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let Some(run) = self.studio.cam_nav.take() else {
+            return;
+        };
+        let end = self.studio.free.unwrap_or(run.start);
+        if keep && end != run.start {
+            let time = self.host.time(cx);
+            let stored = self
+                .kernel
+                .published(&self.project)
+                .ok_or_else(|| "Project closed".to_string())
+                .and_then(|p| {
+                    pm_panel_studio3d::properties::fly_camera(&p, time, run.start, end)
+                        .map_err(|e| e.to_string())
+                });
+            match stored {
+                Ok((_, commands)) => {
+                    self.queue.push_back(Job::Transact("Move Camera", commands, None));
+                    self.pump(cx);
+                }
+                // No camera to carry it: the move stays, in the editor view.
+                Err(_) => {
+                    self.studio.look_pending = Some(true);
+                    self.studio_ui("studioLook", "free", cx);
+                    self.draw(cx);
+                    return;
+                }
+            }
+        }
+        self.studio.free_look = false;
+        self.studio.look_pending = Some(false);
+        self.studio.free = run.prev_free;
+        self.studio_push_view(cx);
+        self.draw(cx);
+    }
+    /// Blender's numpad (and, with no numpad, number-row) view keys, from
+    /// View ▸ 3D: `front`/`back`/`right`/`left`/`top`/`bottom`, the
+    /// `orbit-*` and `pan-*` steps, `opposite`, `zoom-in`/`zoom-out`,
+    /// `selected`, and `camera-to-view` (the shot takes the editor view).
+    pub fn studio_nav_key(&mut self, value: &str, cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        if self.studio.fly.is_some() || self.studio.nav.is_some() {
+            return;
+        }
+        if value == "selected" {
+            return self.studio_frame(cx);
+        }
+        if value == "camera-to-view" {
+            return self.studio_camera_to_view(cx);
+        }
+        if matches!(
+            value,
+            "persp"
+                | "front"
+                | "back"
+                | "left"
+                | "right"
+                | "top"
+                | "bottom"
+                | "roll-left"
+                | "roll-right"
+        ) && (!self.studio.free_look || self.studio.cam_nav.is_some())
+        {
+            let current = self.studio.view().unwrap_or(scene.shot);
+            self.studio_cam_nav_end(true, cx);
+            self.studio.free = Some(current);
+            self.studio.free_look = true;
+            self.studio.look_pending = Some(true);
+            self.studio_ui("studioLook", "free", cx);
+        }
+        let lens = self.studio.nav_lens(&scene);
+        let side = |s| move |p: View| side_view(p, s);
+        let step: Box<dyn Fn(View) -> View> = match value {
+            "persp" => Box::new(|p| View {
+                ortho: !p.ortho,
+                ..p
+            }),
+            "roll-left" => Box::new(|p| View {
+                roll: p.roll - ORBIT_STEP,
+                ..p
+            }),
+            "roll-right" => Box::new(|p| View {
+                roll: p.roll + ORBIT_STEP,
+                ..p
+            }),
+            "front" => Box::new(side(Side::Front)),
+            "back" => Box::new(side(Side::Back)),
+            "right" => Box::new(side(Side::Right)),
+            "left" => Box::new(side(Side::Left)),
+            "top" => Box::new(side(Side::Top)),
+            "bottom" => Box::new(side(Side::Bottom)),
+            "orbit-left" => Box::new(|p| orbit_by(p, -ORBIT_STEP, 0.)),
+            "orbit-right" => Box::new(|p| orbit_by(p, ORBIT_STEP, 0.)),
+            "orbit-up" => Box::new(|p| orbit_by(p, 0., ORBIT_STEP)),
+            "orbit-down" => Box::new(|p| orbit_by(p, 0., -ORBIT_STEP)),
+            "opposite" => Box::new(|p| View {
+                ortho: p.ortho,
+                ..orbit_by(p, 180., 0.)
+            }),
+            "zoom-in" => Box::new(move |p| zoom_step(p, 1., lens)),
+            "zoom-out" => Box::new(move |p| zoom_step(p, -1., lens)),
+            "pan-left" | "pan-right" | "pan-up" | "pan-down" => {
+                let Some(frame) = self.host.frame(self.bounds, cx) else {
+                    return;
+                };
+                let height = frame.size[1] * frame.scale;
+                let by = height * PAN_STEP;
+                let (dx, dy) = match value {
+                    "pan-left" => (by, 0.),
+                    "pan-right" => (-by, 0.),
+                    "pan-up" => (0., by),
+                    _ => (0., -by),
+                };
+                let scene = scene.clone();
+                Box::new(move |p| {
+                    let (right, up) = scene.eye(Some(p)).right_up();
+                    pan(p, dx, dy, lens, height, right, up)
+                })
+            }
+            _ => return,
+        };
+        let Some(start) = self.studio_nav_start(cx) else {
+            return;
+        };
+        self.studio_nav_set(step(start), true, cx);
+    }
+    /// Ctrl+Alt+Numpad 0: the shot camera takes the editor view (one undo
+    /// step), and the viewer looks through it.
+    fn studio_camera_to_view(&mut self, cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        if !self.studio.free_look {
+            return;
+        }
+        let Some(view) = self.studio.free else {
+            return;
+        };
+        let time = self.host.time(cx);
+        let stored = self
+            .kernel
+            .published(&self.project)
+            .ok_or_else(|| "Project closed".to_string())
+            .and_then(|p| {
+                pm_panel_studio3d::properties::fly_camera(&p, time, scene.shot, view)
+                    .map_err(|e| e.to_string())
+            });
+        match stored {
+            Ok((_, commands)) => {
+                self.queue
+                    .push_back(Job::Transact("Align Camera to View", commands, None));
+                self.pump(cx);
+                self.studio_setting("look", "camera", cx);
+            }
+            Err(e) => self.host.report(e, cx),
         }
     }
     /// Lines for the 3D selection and its handles, in normalized frame space.
@@ -420,6 +914,21 @@ impl GizmoSurface {
     /// end): handles first, then the selected lights' emitter and aim, the
     /// light markers, and last the shot camera's frustum.
     pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+        // Flying: only a small crosshair at the centre, where the view heads.
+        if self.studio.fly.is_some() {
+            let v = self.studio_visible(frame);
+            let (c, s) = ([(v[0] + v[2]) / 2., (v[1] + v[3]) / 2.], 9. / frame.scale);
+            let [w, h] = frame.size;
+            let ink = rgb(self.tokens.colors.text);
+            let line = |a: [f64; 2], b: [f64; 2]| OverlayLine {
+                ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|x| x as f32),
+                color: ink,
+            };
+            return vec![
+                line([c[0] - s, c[1]], [c[0] + s, c[1]]),
+                line([c[0], c[1] - s], [c[0], c[1] + s]),
+            ];
+        }
         let mut lines = self.studio_handle_lines(frame);
         let (selected, markers, camera) = self.studio_light_lines(frame);
         lines.extend(selected);
@@ -999,8 +1508,12 @@ impl GizmoSurface {
         }
         let middle = event.button == MouseButton::Middle;
         let alt = event.modifiers.alt;
+        // Blender: middle drag orbits, ⇧ pans, ⌃ zooms; ⌥ with the left
+        // button stands in for the middle one (Emulate 3 Button Mouse).
         let nav = if middle || alt || view_tool == Some(false) {
-            Some(if event.modifiers.shift {
+            Some(if event.modifiers.control {
+                Nav::Dolly
+            } else if event.modifiers.shift {
                 Nav::Pan
             } else {
                 Nav::Orbit
@@ -1016,11 +1529,9 @@ impl GizmoSurface {
             }
         };
         if let Some(mode) = nav {
-            self.studio_go_free(cx);
-            let start = self
-                .studio
-                .view()
-                .unwrap_or(self.studio.scene.as_ref().unwrap().shot);
+            let Some(start) = self.studio_nav_start(cx) else {
+                return false;
+            };
             self.studio.nav = Some(NavDrag {
                 mode,
                 start,
@@ -1053,6 +1564,8 @@ impl GizmoSurface {
                 self.studio.light_orbit = Some(LightOrbit {
                     id: light.id,
                     start: View {
+                        ortho: false,
+                        roll: 0.,
                         position: light.pivot,
                         target,
                         zoom: 1.,
@@ -1457,13 +1970,19 @@ impl GizmoSurface {
                 Nav::Pan => {
                     let (right, up) = eye.right_up();
                     let height = frame.size[1] * frame.scale;
-                    pan(nav.start, dx, dy, scene.lens, height, right, up)
+                    pan(
+                        nav.start,
+                        dx,
+                        dy,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
                 }
-                Nav::Dolly => dolly(nav.start, dy * fine, scene.lens),
+                Nav::Dolly => dolly(nav.start, dy * fine, self.studio.nav_lens(&scene)),
             };
-            self.studio.free = Some(pose);
-            self.studio_push_view(cx);
-            self.draw(cx);
+            self.studio_nav_set(pose, false, cx);
             return true;
         }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
@@ -1735,6 +2254,10 @@ impl GizmoSurface {
                 self.studio.free = Some(nav.start);
                 self.studio_push_view(cx);
             }
+            // In camera view the release stores the move on the camera.
+            if self.studio.cam_nav.is_some() {
+                self.studio_cam_nav_end(commit, cx);
+            }
             self.cursor = CursorStyle::Arrow;
             cx.notify();
             self.draw(cx);
@@ -1750,9 +2273,12 @@ impl GizmoSurface {
         self.draw(cx);
         true
     }
-    /// Scrolling in a 3D composition moves the editor view, never the shot:
-    /// a trackpad's two-finger scroll orbits, ⇧ pans, and ⌥, ⌘ or a mouse
-    /// wheel dollies. The first one leaves the camera for Free View.
+    /// Scrolling and pinching in the 3D view, as Blender's defaults:
+    /// - a mouse wheel zooms toward the view centre, 1.2× a notch; ⌃+wheel
+    ///   pans sideways and ⇧+wheel up and down;
+    /// - a trackpad's two-finger scroll orbits, ⇧ pans, ⌃ zooms (⌘ and ⌥
+    ///   zoom too, as before), and a pinch zooms.
+    /// In camera view the camera itself moves, stored once the input pauses.
     pub(super) fn studio_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -1762,57 +2288,94 @@ impl GizmoSurface {
         let Some(scene) = self.studio.scene.clone() else {
             return false;
         };
-        let d = event.delta.pixel_delta(line);
-        let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+        if self.studio.fly.is_some() || self.studio.nav.is_some() {
+            return true;
+        }
         let m = event.modifiers;
-        let wheel = matches!(event.delta, ScrollDelta::Lines(_));
         let frame = self.host.frame(self.bounds, cx);
-        self.studio_go_free(cx);
-        let start = self.studio.view().unwrap_or(scene.shot);
-        self.studio.free = Some(
-            if wheel || m.alt || m.platform || m.control || self.studio.tool == Tool::Zoom {
-                let fine = if m.shift && !wheel { 0.1 } else { 1. };
-                dolly(start, -dy * fine, scene.lens)
-            } else if m.shift {
-                let Some(frame) = frame else {
-                    return true;
-                };
-                let (right, up) = scene.eye(Some(start)).right_up();
-                pan(
-                    start,
-                    dx,
-                    dy,
-                    scene.lens,
-                    frame.size[1] * frame.scale,
-                    right,
-                    up,
-                )
-            } else {
-                orbit(start, dx, dy)
-            },
-        );
-        self.studio_push_view(cx);
-        self.draw(cx);
+        let Some(start) = self.studio_nav_start(cx) else {
+            return true;
+        };
+        let height = frame.map_or(1., |f| f.size[1] * f.scale);
+        let (right, up) = scene.eye(Some(start)).right_up();
+        let pose = match event.delta {
+            ScrollDelta::Lines(l) => {
+                let (lx, ly) = (l.x as f64, l.y as f64);
+                if m.control {
+                    // Sideways: a notch up pans right, as Blender.
+                    let n = if ly != 0. { ly } else { lx };
+                    pan(
+                        start,
+                        -n * height * PAN_STEP,
+                        0.,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
+                } else if m.shift {
+                    let n = if ly != 0. { ly } else { lx };
+                    pan(
+                        start,
+                        0.,
+                        n * height * PAN_STEP,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
+                } else {
+                    zoom_step(start, ly, self.studio.nav_lens(&scene))
+                }
+            }
+            ScrollDelta::Pixels(_) => {
+                let d = event.delta.pixel_delta(line);
+                let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+                if m.control || m.platform || m.alt || self.studio.tool == Tool::Zoom {
+                    dolly(start, -dy, self.studio.nav_lens(&scene))
+                } else if m.shift {
+                    pan(
+                        start,
+                        dx,
+                        dy,
+                        self.studio.nav_lens(&scene),
+                        height,
+                        right,
+                        up,
+                    )
+                } else {
+                    orbit(start, dx, dy)
+                }
+            }
+        };
+        self.studio_nav_set(pose, true, cx);
         true
     }
-    /// Pinching in a 3D composition dollies the editor view.
-    pub(super) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
+    /// Pinching zooms (Blender's trackpad zoom), the camera in camera view.
+    pub(crate) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
         let Some(scene) = self.studio.scene.clone() else {
             return false;
         };
-        self.studio_go_free(cx);
-        let start = self.studio.view().unwrap_or(scene.shot);
+        if self.studio.fly.is_some() || self.studio.nav.is_some() {
+            return true;
+        }
+        let Some(start) = self.studio_nav_start(cx) else {
+            return true;
+        };
         // Pinching out moves closer; a positive dolly moves away.
-        self.studio.free = Some(dolly(start, -delta * 400., scene.lens));
-        self.studio_push_view(cx);
-        self.draw(cx);
+        self.studio_nav_set(
+            dolly(start, -delta * 400., self.studio.nav_lens(&scene)),
+            true,
+            cx,
+        );
         true
     }
     /// Tracks the handle under the pointer; `true` when it changed, so the
     /// overlay redraws with that handle in text colour.
     pub(super) fn studio_hover(&mut self, at: [f64; 2], frame: ViewFrame) -> bool {
         let next = if self.studio.active() && !self.studio.busy() {
-            self.studio_handle(at, frame).filter(|h| *h != Handle::Plane)
+            self.studio_handle(at, frame)
+                .filter(|h| *h != Handle::Plane)
         } else {
             None
         };
@@ -1863,6 +2426,8 @@ mod light_marker_tests {
     fn eye() -> Eye {
         Eye {
             pose: View {
+                ortho: false,
+                roll: 0.,
                 position: [0., 0., 5.],
                 target: [0., 0., 0.],
                 zoom: 1.,

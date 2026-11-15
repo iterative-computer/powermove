@@ -4314,7 +4314,7 @@ mod worker_tests {
         let (entered,signal)=std::sync::mpsc::channel();let (release,barrier)=std::sync::mpsc::channel();
         *service.shared.before_submit.lock().unwrap()=Some(Box::new(move||{entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();}));
         let origin=trace::now();v.input_event(origin);
-        let mut camera=studio::FreeView{eye:[0.,0.,5.],target:[0.;3],zoom:1.};
+        let mut camera=studio::FreeView{ortho:false,roll:0.,eye:[0.,0.,5.],target:[0.;3],zoom:1.};
         v.studio_view_at(Some(camera),origin+0.001).unwrap();signal.recv_timeout(Duration::from_secs(10)).unwrap();
         camera.eye[0]=1.;v.studio_view_at(Some(camera),origin+0.002).unwrap();v.capture_next().unwrap();release.send(()).unwrap();
         let status=drawn(&v);assert!(status.stale_rejections>0);assert_eq!(status.frame.unwrap().input_host_seconds,Some(origin));

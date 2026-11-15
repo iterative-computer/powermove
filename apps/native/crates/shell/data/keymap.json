@@ -2588,5 +2588,486 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.dimension",
+    "chord": "0",
+    "command": "studio.view",
+    "args": [
+      "look",
+      "toggle"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.fly",
+    "chord": "shift+`",
+    "command": "studio.view",
+    "args": [
+      "fly",
+      ""
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.front",
+    "chord": "1",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "front"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.front",
+    "chord": "numpad1",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "front"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.right",
+    "chord": "3",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.right",
+    "chord": "numpad3",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.top",
+    "chord": "7",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "top"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.top",
+    "chord": "numpad7",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "top"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.opposite",
+    "chord": "9",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "opposite"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.opposite",
+    "chord": "numpad9",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "opposite"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.orbit-down",
+    "chord": "2",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-down"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.orbit-down",
+    "chord": "numpad2",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-down"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.orbit-left",
+    "chord": "4",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.orbit-left",
+    "chord": "numpad4",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.orbit-right",
+    "chord": "6",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.orbit-right",
+    "chord": "numpad6",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.orbit-up",
+    "chord": "8",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-up"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.orbit-up",
+    "chord": "numpad8",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "orbit-up"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.left",
+    "chord": "ctrl+3",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.bottom",
+    "chord": "ctrl+7",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "bottom"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.back",
+    "chord": "ctrl+numpad1",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "back"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.left",
+    "chord": "ctrl+numpad3",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.bottom",
+    "chord": "ctrl+numpad7",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "bottom"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.pan-down",
+    "chord": "ctrl+numpad2",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "pan-down"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.pan-left",
+    "chord": "ctrl+numpad4",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "pan-left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.pan-right",
+    "chord": "ctrl+numpad6",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "pan-right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.pan-up",
+    "chord": "ctrl+numpad8",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "pan-up"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.dimension.numpad",
+    "chord": "numpad0",
+    "command": "studio.view",
+    "args": [
+      "look",
+      "toggle"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.cameraToView",
+    "chord": "ctrl+alt+0",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "camera-to-view"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.cameraToView",
+    "chord": "ctrl+alt+numpad0",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "camera-to-view"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.selected",
+    "chord": "numpad.",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "selected"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.zoomIn",
+    "chord": "numpad+",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "zoom-in"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.zoomOut",
+    "chord": "numpad-",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "zoom-out"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.persp",
+    "chord": "5",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "persp"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.numpad.persp",
+    "chord": "numpad5",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "persp"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.view.roll-left",
+    "chord": "shift+numpad4",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "roll-left"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.view.roll-right",
+    "chord": "shift+numpad6",
+    "command": "studio.view",
+    "args": [
+      "nav",
+      "roll-right"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
   }
 ]

@@ -2390,8 +2390,11 @@ impl crate::gizmo::Host for ControllerDelegate {
                             .collect(),
                     ),
                 ];
+                // Then the whole composition, then the view (viewer.ts).
+                let tail = canvas_menu_tail(!v.layers().is_empty());
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
-                if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
+                if let Some(entries) = v.extension_menu_with_tail(locations, entries, tail, at, cx)
+                {
                     v.host.borrow().context_menu(&entries, at.0, at.1);
                 }
             });
@@ -2923,6 +2926,57 @@ mod follow_selection_tests {
         let next = last_frame.unwrap() + tick;
         assert!(follow_due(last_frame, last_at, seek, now));
         assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}
+
+/// The viewer canvas menu's closing rows (viewer.ts): the composition's
+/// Paste and Select All Layers, then its view and settings.
+pub(crate) fn canvas_menu_tail(has_layers: bool) -> Vec<pm_shell::MenuEntry> {
+    let mut select = pm_shell::MenuEntry::item("Select All Layers", "selectAll");
+    select.enabled = has_layers;
+    vec![
+        pm_shell::MenuEntry::item("Paste", "pasteLayers"),
+        select,
+        pm_shell::MenuEntry::separator(),
+        pm_shell::MenuEntry::item("Fit Composition in View", "fitComposition"),
+        pm_shell::MenuEntry::item("Composition Settings…", "compositionSettings"),
+    ]
+}
+
+#[cfg(test)]
+mod canvas_menu_tests {
+    /// Right-clicking empty canvas ends as viewer.ts does: Paste, Select All
+    /// Layers (off in an empty composition), then Fit Composition in View
+    /// and Composition Settings…, each a command the app routes.
+    #[test]
+    fn the_canvas_menu_closes_with_the_composition_rows_in_electrons_order() {
+        let rows = super::canvas_menu_tail(true);
+        let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Paste",
+                "Select All Layers",
+                "",
+                "Fit Composition in View",
+                "Composition Settings…"
+            ]
+        );
+        let commands: Vec<_> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            [
+                "pasteLayers",
+                "selectAll",
+                "",
+                "fitComposition",
+                "compositionSettings"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.enabled || r.label.is_empty()));
+        let empty = super::canvas_menu_tail(false);
+        assert!(!empty[1].enabled, "nothing to select");
+        assert!(empty[0].enabled && empty[3].enabled && empty[4].enabled);
     }
 }
 
