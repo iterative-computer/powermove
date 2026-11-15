@@ -5544,6 +5544,7 @@ dependencies = [
 name = "pm-scene3d"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "image",
  "pm-geom3d",
  "pm-import-fbx",

@@ -37,13 +37,20 @@ const VIDEO: &[&str] = &[
 ];
 /// What Import Media says of a file it cannot read (a drop of one says
 /// why in the status line: "notes.txt · Not a video, …").
-const UNSUPPORTED: &str = "Not a video, audio or image file Powermove can read";
+const UNSUPPORTED: &str = "Not a video, audio, image or 3D model file Powermove can read";
 /// What Import Media says of a camera raw file.
 const RAW: &str =
     "Camera raw files can't be imported yet · export TIFF or EXR from your raw developer";
 /// Every extension Import Media accepts, for the open panel's filter.
 pub fn extensions() -> Vec<&'static str> {
-    [IMAGES, AUDIO, VIDEO].concat()
+    [
+        IMAGES,
+        AUDIO,
+        VIDEO,
+        pm_scene3d::import::path::EXTENSIONS,
+        pm_scene3d::import::path::UNSUPPORTED,
+    ]
+    .concat()
 }
 
 /// An HTML `accept` list (`image/*`, `.png`, `video/mp4`) as open-panel
@@ -90,13 +97,21 @@ fn extension(path: &Path) -> String {
 fn kind(path: &Path) -> Option<&'static str> {
     let extension = extension(path);
     let has = |list: &[&str]| list.contains(&extension.as_str());
-    [(IMAGES, "image"), (VIDEO, "video"), (AUDIO, "audio")]
-        .into_iter()
-        .find_map(|(list, kind)| has(list).then_some(kind))
+    [
+        (IMAGES, "image"),
+        (VIDEO, "video"),
+        (AUDIO, "audio"),
+        (pm_scene3d::import::path::EXTENSIONS, "model"),
+        (pm_scene3d::import::path::UNSUPPORTED, "model"),
+    ]
+    .into_iter()
+    .find_map(|(list, kind)| has(list).then_some(kind))
 }
 fn mime(path: &Path, kind: &str) -> String {
     let extension = extension(path);
     match (kind, extension.as_str()) {
+        ("model", "glb") => "model/gltf-binary".into(),
+        ("model", "gltf") => "model/gltf+json".into(),
         ("image", "jpg" | "jpeg") => "image/jpeg".into(),
         ("image", "svg") => "image/svg+xml".into(),
         ("image", "tif") => "image/tiff".into(),
@@ -566,6 +581,8 @@ fn model_mime(path: &Path) -> Option<&'static str> {
         "gltf" => Some("model/gltf+json"),
         "obj" => Some("model/obj"),
         "fbx" => Some("model/fbx"),
+        "ply" => Some("model/ply"),
+        "splat" => Some("model/splat"),
         _ => None,
     }
 }
@@ -693,7 +710,34 @@ impl Builtins {
             let name = path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            let model = request.models.then(|| model_mime(&path)).flatten();
+            if let Some(error) = pm_scene3d::import::path::unsupported(&path) {
+                outcome.failed.push((name, error));
+                continue;
+            }
+            let prepared = if kind(&path) == Some("model") {
+                match pm_scene3d::import::path::prepare(&path) {
+                    Ok(model) => Some(model),
+                    Err(error) => {
+                        outcome.failed.push((name, error.to_string()));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let staged_model = prepared
+                .as_ref()
+                .map(|model| {
+                    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+                    let file = dir.path().join(&model.name);
+                    std::fs::write(&file, &model.bytes).map_err(|e| e.to_string())?;
+                    Ok::<_, String>((dir, file))
+                })
+                .transpose()?;
+            let retained_path = staged_model
+                .as_ref()
+                .map_or(path.as_path(), |(_, p)| p.as_path());
+            let model = model_mime(retained_path);
             let kind = match &sequence {
                 Some(_) => Some("video"),
                 None => kind(&path).or(model.map(|_| "model")),
@@ -724,7 +768,7 @@ impl Builtins {
                     match model {
                         // A model has no media facts; the scene system reads its bytes.
                         Some(_) => (
-                            json!({"name":name,"kind":"model","size":size,"persisted":true,
+                            json!({"name":name,"kind":"model","format":extension(retained_path),"size":size,"persisted":true,
                             "sourcePath":path.to_string_lossy()}),
                             vec![],
                         ),
@@ -759,7 +803,7 @@ impl Builtins {
             })
             .and_then(|(mut asset, streams)| {
                 let original = archive
-                    .retain_path(&path, &type_, cancel)
+                    .retain_path(retained_path, &type_, cancel)
                     .map_err(|e| e.to_string())?;
                 if request.replace.is_some() {
                     relink_streams(
@@ -820,10 +864,21 @@ impl Builtins {
             let stamp = pm_panel_media::Catalog::published(&published)
                 .map_err(|_| "The project's media could not be read")?
                 .stamp;
-            let (layers, place) = match request.place_at.filter(|_| request.replace.is_none()) {
+            let model_only = request.place_at.is_none() && !request.models && !request.add_3d;
+            let (layers, place) = match request
+                .place_at
+                .or_else(|| model_only.then_some(0.))
+                .filter(|_| request.replace.is_none())
+            {
                 Some(at) => {
-                    let items: Vec<(&str, &Value)> =
-                        items.iter().map(|i| (i.id.as_str(), &i.metadata)).collect();
+                    let items: Vec<(&str, &Value)> = items
+                        .iter()
+                        .filter(|i| {
+                            !model_only
+                                || i.metadata.get("kind").and_then(Value::as_str) == Some("model")
+                        })
+                        .map(|i| (i.id.as_str(), &i.metadata))
+                        .collect();
                     placement(
                         &published,
                         &items,
@@ -1001,6 +1056,48 @@ fn placement(
     for (n, &(id, asset)) in items.iter().enumerate() {
         let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
         let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
+        if kind == "model" {
+            let layer = pm_kernel::commands::new_id("L");
+            let name = asset
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("3D Model");
+            commands.push(
+                pm_kernel::Scene3dCommand::Apply {
+                    selection: vec![],
+                    autokey: false,
+                    comp: open.clone(),
+                    time: at,
+                    args: crate::data::model(
+                        &json!({"operation":"add_object","id":layer,"name":name,
+                    "object":{"source":{"assetId":id},"useSourceMaterials":asset.get("format").and_then(Value::as_str) != Some("obj")}}),
+                    )
+                    .ok()?,
+                }
+                .into(),
+            );
+            if !items[..n]
+                .iter()
+                .any(|(_, a)| a.get("kind").and_then(Value::as_str) == Some("model"))
+            {
+                let wire = crate::data::wire(&composition.to_value());
+                let existing = wire["layers"].as_array().cloned().unwrap_or_default();
+                for args in pm_panel_studio3d::view::starter(&existing, &layer) {
+                    commands.push(
+                        pm_kernel::Scene3dCommand::Apply {
+                            comp: open.clone(),
+                            args: crate::data::model(&args).ok()?,
+                            selection: vec![],
+                            time: at,
+                            autokey: false,
+                        }
+                        .into(),
+                    );
+                }
+            }
+            layers.push(layer);
+            continue;
+        }
         let mut content = Map::new();
         content.insert("asset", Value::from(id));
         match kind {
@@ -1068,6 +1165,148 @@ fn placement(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn models_use_the_shared_import_and_scene_placement() {
+        let f = fixture();
+        assert!(
+            std::process::Command::new("python3")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/model-import/generate.py"
+                ))
+                .arg(&f.root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let glb_path = f.root.join("cube.glb");
+        let gltf = f.root.join("cube.gltf");
+        let obj = f.root.join("cube.obj");
+        let fbx = write(
+            &f.root,
+            "cube.fbx",
+            include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx"),
+        );
+        for path in [
+            glb_path,
+            gltf,
+            obj,
+            fbx,
+            f.root.join("points.ply"),
+            f.root.join("points.splat"),
+        ] {
+            assert_eq!(classify(&path).unwrap().0, "model");
+            let result = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path],
+                        place_at: Some(1.),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(result.failed.is_empty(), "{:?}", result.failed);
+            assert_eq!(result.assets.len(), 1);
+            let published = f.actor.handle().published("p").unwrap();
+            let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+            assert_eq!(root["assets"][&result.assets[0]]["kind"], "model");
+            assert!(
+                root["layers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l["d"]["data"]["object"]["source"]["assetId"] == result.assets[0])
+            );
+        }
+    }
+    #[test]
+    fn linked_folders_discover_models_and_report_unsupported_new_files() {
+        let f = fixture();
+        let root = f.root.join("Models");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("cube.glb"),
+            pm_scene3d::import::triangle_glb(
+                &[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+                &[0, 1, 2],
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("legacy.usdz"), b"unsupported").unwrap();
+        let (_, failed) = f
+            .runtime
+            .link_folders(document(&f), &[root.clone()], None, &AtomicBool::new(false))
+            .unwrap();
+        assert!(failed[0].1.contains("Export as glTF (.glb)"));
+        let published = f.actor.handle().published("p").unwrap();
+        let wire = crate::data::wire(&published.snapshot.root().unwrap().to_value());
+        assert!(
+            wire["assets"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|a| a["kind"] == "model")
+        );
+        let folder = wire["assetFolders"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap();
+        std::fs::write(root.join("new.stl"), b"unsupported").unwrap();
+        let tree = crate::linked_folders::Tree::scan(&root).unwrap();
+        let done = f
+            .runtime
+            .sync_linked(document(&f), folder, &tree, &AtomicBool::new(false))
+            .unwrap();
+        assert!(
+            done.failed
+                .iter()
+                .any(|(file, error)| file == "new.stl" && error.contains("Export as glTF (.glb)"))
+        );
+    }
+    #[test]
+    fn model_filters_and_missing_companions_are_explicit() {
+        for ext in pm_scene3d::import::path::EXTENSIONS
+            .iter()
+            .chain(pm_scene3d::import::path::UNSUPPORTED)
+        {
+            assert!(extensions().contains(ext));
+            assert_eq!(
+                classify(Path::new(&format!("model.{ext}"))).unwrap().0,
+                "model"
+            );
+        }
+        let f = fixture();
+        let path = write(
+            &f.root,
+            "bad.gltf",
+            br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":12,"uri":"missing.bin"}]}"#,
+        );
+        let message = pm_scene3d::import::path::prepare(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("missing.bin"), "{message}");
+        let unsupported = write(&f.root, "model.usdz", b"unsupported");
+        let result = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![unsupported],
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(result.failed[0].1.contains("Export as glTF (.glb)"));
+    }
+
     use super::*;
     use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::*};
 
@@ -2717,6 +2956,13 @@ mod tests {
 pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
     let (kind, _) = classify(path).ok_or("Unsupported media")?;
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if kind == "model" {
+        let prepared = pm_scene3d::import::path::prepare(path).map_err(|e| e.to_string())?;
+        return Ok(
+            json!({"name":path.file_name().unwrap_or_default().to_string_lossy(),
+            "kind":"model","format":extension(Path::new(&prepared.name)),"size":size,"sourcePath":path,"persisted":true}),
+        );
+    }
     let (record, _) = metadata(path, kind, size, Default::default())?;
     Ok(crate::data::wire(&record))
 }
