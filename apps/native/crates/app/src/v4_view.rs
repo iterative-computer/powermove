@@ -93,6 +93,14 @@ impl Outline {
         }
     }
 }
+/// A virtual list's `rangechange` as last sent.
+#[derive(Clone, Copy, PartialEq)]
+struct RangeSent {
+    range: (usize, usize),
+    width: u32,
+    count: usize,
+    published: (usize, usize),
+}
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
@@ -208,6 +216,10 @@ pub struct SurfaceView {
     dragging: Option<Id>,
     /// Each virtual list's width last told to its panel.
     list_widths: HashMap<Id, f32>,
+    /// Each virtual list's last `rangechange` (range, width, its geometry):
+    /// a wheel step within the same rows sends nothing, so the panel doesn't
+    /// commit and draw again (PM-311).
+    sent_ranges: HashMap<Id, RangeSent>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -293,6 +305,7 @@ impl SurfaceView {
             scrub_ops: VecDeque::new(),
             dragging: None,
             list_widths: HashMap::new(),
+            sent_ranges: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -480,6 +493,7 @@ impl SurfaceView {
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
         self.disclosures.clear();
+        self.sent_ranges.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -1407,13 +1421,33 @@ impl SurfaceView {
             }
         }
     }
-    /// Re-stage AppKit slots whose cached paint did not run this frame.
-    pub fn keep_native_slots(&self, cx: &App) {
+    /// Whether a native view draws anywhere in the panel.
+    pub(crate) fn has_native(&self) -> bool {
+        self.prepared.nodes.values().any(|n| n.native.is_some())
+    }
+    /// Whether a native view (the timeline, the viewer's gizmos) draws
+    /// inside this node: its content is not drawn by the panel's scene.
+    fn holds_native(&self, id: Id) -> bool {
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            let Some(node) = self.prepared.node(at) else {
+                continue;
+            };
+            if node.native.is_some() {
+                return true;
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        false
+    }
+    /// Re-stage AppKit slots whose cached paint did not run this frame (a
+    /// slot inside a scroll layer follows the layer's offset).
+    pub fn keep_native_slots(&self, window: &Window, cx: &App) {
         for control in self.controls.values() {
-            control.read(cx).keep();
+            control.read(cx).keep(window);
         }
         for field in self.fields.values() {
-            field.read(cx).keep();
+            field.read(cx).keep(window);
         }
     }
     fn run(
@@ -2164,6 +2198,11 @@ impl SurfaceView {
             }
             if node.scroll_y {
                 element = element.overflow_y_scroll();
+            }
+            // A wheel step only moves the content (a native view inside
+            // draws on its own and keeps the full redraw).
+            if !self.holds_native(id) {
+                element = element.scroll_layer();
             }
             if follows {
                 // `metadata.scrollToken`: a new value goes back to the end
@@ -3300,16 +3339,30 @@ impl SurfaceView {
         let Some(scroll) = self.scrolls.get(&id) else {
             return;
         };
-        let offset = -f32::from(scroll.offset().y) as f64;
         let bounds = scroll.bounds();
         let height = f32::from(bounds.size.height) as f64;
+        // A wheel step can leave the offset past the end until the next
+        // frame clamps it: read it within the list, or the range is empty
+        // and the list shows no rows.
+        let end = (geometry.count as f64 * geometry.item_size - height).max(0.);
+        let offset = (-f32::from(scroll.offset().y) as f64).clamp(0., end);
         if let Ok(range) = geometry.visible(offset, height) {
+            let width = f32::from(bounds.size.width);
+            let sent = RangeSent {
+                range,
+                width: width.to_bits(),
+                count: geometry.count,
+                published: geometry.range,
+            };
+            if self.sent_ranges.insert(id, sent) == Some(sent) {
+                return;
+            }
             self.send(
                 id,
                 "rangechange",
                 EventDetail {
                     range: Some(range),
-                    width: Some(f32::from(bounds.size.width) as f64),
+                    width: Some(width as f64),
                     ..Default::default()
                 },
                 cx,
@@ -3818,9 +3871,14 @@ impl SurfaceView {
     /// The style of a scrolling body's content (`panel_body`): the panel at
     /// least `body` tall, and as tall as it last measured.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
-        self.fit.set(body);
         gpui::StyleRefinement::default()
             .w_full()
-            .h(px(body.max(self.natural.get())))
+            .h(px(self.body_height(body)))
+    }
+    /// The panel's height in a body that scrolls: its content, at least
+    /// the body's slot.
+    pub(crate) fn body_height(&self, body: f32) -> f32 {
+        self.fit.set(body);
+        body.max(self.natural.get())
     }
 }

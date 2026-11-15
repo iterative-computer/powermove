@@ -972,17 +972,26 @@ export function ProjectView(props: ProjectViewProps) {
                 (to - from) * layout.columns > 4096
               )
                 return;
-              // The rows shown. A range that reaches the last row asks for a
-              // first page's worth more: the host's range stops at the rows
-              // there are now, and media imported later joins the end, which
-              // the next publication then brings without a scroll (the native
-              // model clamps to what exists).
-              const room = to >= count ? FIRST_PAGE : 0;
-              const offset = from * layout.columns;
-              const limit = Math.min(4096, (to - from) * layout.columns + room);
-              // Every wheel event reports the range; a page is asked for only
-              // when it moves (each one republishes and redraws the panel).
-              const key = `${offset}:${limit}:${view.page.stamp.document}`;
+              // The rows shown, with as many again on each side: scrolling
+              // inside the page loaded asks for nothing (each page republishes
+              // and redraws the panel), and the host scrolls the rows it has.
+              // A page that reaches the last row asks for a first page's worth
+              // more: media imported later joins the end, which the next
+              // publication then brings without a scroll (the native model
+              // clamps to what exists).
+              const loadedRoom = askedPage.current.endsWith(":room");
+              if (from >= start && to <= end && (to < count || loadedRoom))
+                return;
+              const span = Math.max(1, to - from);
+              const first = Math.max(0, from - span);
+              const last = Math.min(count, to + span);
+              const room = last >= count ? FIRST_PAGE : 0;
+              const offset = first * layout.columns;
+              const limit = Math.min(
+                4096,
+                (last - first) * layout.columns + room,
+              );
+              const key = `${offset}:${limit}:${view.page.stamp.document}${room ? ":room" : ""}`;
               if (key === askedPage.current) return;
               askedPage.current = key;
               props.page(offset, limit);

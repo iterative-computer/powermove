@@ -1857,6 +1857,15 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// The content of this scrolling element draws the same at any offset
+    /// (no sticky children, nothing that reads the offset while drawing): a
+    /// wheel step that only moves the offset repaints without rendering or
+    /// laying out the view again.
+    fn scroll_layer(mut self) -> Self {
+        self.interactivity().scroll_layer = true;
+        self
+    }
+
     /// Set the overflow x and y to scroll.
     fn overflow_scroll(mut self) -> Self {
         self.interactivity().base_style.overflow.x = Some(Overflow::Scroll);
@@ -2626,6 +2635,7 @@ impl Element for Div {
             scroll_handle.scroll_to_active_item();
         }
 
+        let layer_cell = self.interactivity.scroll_layer_cell();
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2669,7 +2679,11 @@ impl Element for Div {
                             None
                         };
 
+                        let layer = scroll_layer_reach(layer_cell, style, bounds);
                         window.with_element_offset(scroll_offset, |window| {
+                            let layer = layer.and_then(|(offset, reach)| {
+                                window.begin_scroll_layer(&offset, reach)
+                            });
                             if let Some(inline) = request_layout.standalone_inline_mut() {
                                 inline.record_paragraph_origins(window);
                                 prepaint_children(
@@ -2684,6 +2698,9 @@ impl Element for Div {
                                     .as_ref()
                                     .map(|order_fn| order_fn(window, cx));
                                 prepaint_children(&mut self.children, order.as_deref(), window, cx);
+                            }
+                            if let Some(key) = layer {
+                                window.end_scroll_layer_prepaint(key);
                             }
                         });
 
@@ -2724,6 +2741,7 @@ impl Element for Div {
             .map(|provider| provider.provide(window, cx));
 
         window.with_image_cache(image_cache, |window| {
+            let layer_cell = self.interactivity.scroll_layer_cell();
             self.interactivity.paint(
                 global_id,
                 inspector_id,
@@ -2737,6 +2755,10 @@ impl Element for Div {
                         return;
                     }
 
+                    let layer = scroll_layer_reach(layer_cell, style, bounds)
+                        .map(|(offset, _)| crate::scroll_layer::key(&offset))
+                        .and_then(|key| Some((key, window.begin_scroll_layer_paint(key)?)));
+
                     for child in &mut self.children {
                         child.paint(window, cx);
                     }
@@ -2744,9 +2766,46 @@ impl Element for Div {
                     if let Some(inline) = request_layout.standalone_inline() {
                         inline.paint_paragraphs(window, cx);
                     }
+
+                    if let Some((key, outer)) = layer {
+                        window.end_scroll_layer_paint(key, outer);
+                    }
                 },
             )
         });
+    }
+}
+
+impl Interactivity {
+    /// The offset cell of a div that is a scroll layer (read before its
+    /// prepaint and paint, which borrow it).
+    fn scroll_layer_cell(&self) -> Option<Rc<RefCell<Point<Pixels>>>> {
+        (self.scroll_layer && crate::scroll_layer::enabled())
+            .then(|| self.scroll_offset.clone())
+            .flatten()
+    }
+}
+
+/// A scroll layer's offset cell and how far past its edges it records, when
+/// the div scrolls.
+fn scroll_layer_reach(
+    cell: Option<Rc<RefCell<Point<Pixels>>>>,
+    style: &Style,
+    bounds: Bounds<Pixels>,
+) -> Option<(Rc<RefCell<Point<Pixels>>>, Point<Pixels>)> {
+    {
+        let offset = cell?;
+        let reach = |scrolls: bool, size: Pixels| {
+            if scrolls { size * crate::scroll_layer::REACH } else { px(0.) }
+        };
+        let x = style.overflow.x == Overflow::Scroll;
+        let y = style.overflow.y == Overflow::Scroll;
+        (x || y).then(|| {
+            (
+                offset,
+                Point::new(reach(x, bounds.size.width), reach(y, bounds.size.height)),
+            )
+        })
     }
 }
 
@@ -2807,6 +2866,10 @@ pub struct Interactivity {
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
+    /// Powermove P-SCROLL-LAYER: the content's drawing doesn't depend on the
+    /// offset, so a step that only moves it replays the recorded content
+    /// shifted (`crate::scroll_layer`).
+    pub(crate) scroll_layer: bool,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
@@ -3198,6 +3261,7 @@ impl Interactivity {
                 scroll_handle_state.max_offset = scroll_max;
                 scroll_handle_state.bounds = bounds;
             }
+            window.last_scroll_max = scroll_max;
 
             *scroll_offset
         } else {
@@ -4120,6 +4184,8 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let layer = (self.scroll_layer && crate::scroll_layer::enabled())
+                .then(|| crate::scroll_layer::key(&scroll_offset));
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -4163,7 +4229,13 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
-                        cx.notify(current_view);
+                        drop(scroll_offset);
+                        let moved = layer.is_some_and(|key| {
+                            window.scroll_layer_step(key, current_view, cx)
+                        });
+                        if !moved {
+                            cx.notify(current_view);
+                        }
                     }
                 }
             });
