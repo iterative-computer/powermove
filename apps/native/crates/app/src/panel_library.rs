@@ -1822,6 +1822,7 @@ mod scrolling_tests {
                 v.preview_cancel.clone()
             })
         };
+        cx.update(|_| {});
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
         assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));

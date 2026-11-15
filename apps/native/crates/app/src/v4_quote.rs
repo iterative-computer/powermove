@@ -315,9 +315,11 @@ mod shaped_tests {
             let selected = selection.borrow();
             let first = &selected.blocks[&1];
             let second = &selected.blocks[&2];
-            let point = first.layout.position_for_index(6).unwrap();
+            let mut point = first.layout.position_for_index(6).unwrap();
+            point.x += px(0.5);
             assert_eq!(selected.hit(10, point), Some(6));
-            let point = second.layout.position_for_index(3).unwrap();
+            let mut point = second.layout.position_for_index(3).unwrap();
+            point.x += px(0.5);
             assert_eq!(selected.hit(10, point), Some(35));
             assert!(first.layout.bounds().size.height > first.layout.line_height());
             let unbroken = &selected.blocks[&3];

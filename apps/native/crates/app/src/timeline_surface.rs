@@ -2470,7 +2470,7 @@ impl TimelineSurface {
                         s.sample_scheduled = false;
                         s.pump(cx);
                     });
-                    window.request_animation_frame();
+                    // on_next_frame already wakes the platform; pointer input is outside paint.
                 }
             }
             Gesture::Scrub(scrub) => {
