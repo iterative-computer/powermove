@@ -106,6 +106,9 @@ pub trait Delegate: 'static {
     fn view_moved(&self, _cx: &mut App) {}
     /// The skimmer moved to `seconds` (`None`: it left the timeline).
     fn skim(&self, _seconds: Option<f64>, _cx: &mut App) {}
+    /// A ruler scrub starts (`true`) or ends: during it the app publishes
+    /// only what follows the time frame by frame.
+    fn scrubbing(&self, _on: bool, _cx: &mut App) {}
     /// Whether skimming is on (View ▸ Skimming).
     fn skimming(&self, _cx: &App) -> bool {
         false
@@ -622,6 +625,7 @@ impl TimelineSurface {
             Gesture::Marquee { session, .. } => {
                 self.queue.push_back(Job::Apply(session.cancel()));
             }
+            Gesture::Scrub(_) => self.delegate.scrubbing(false, cx),
             _ => {}
         }
         cx.notify();
@@ -1593,6 +1597,7 @@ impl TimelineSurface {
                 && let Ok(HostEffect::Seek(time)) =
                     scrub.update(time, event.modifiers.shift, self.snap_radius())
             {
+                self.delegate.scrubbing(true, cx);
                 self.delegate.seek(frame_time(&self.model, time), cx);
                 self.gesture = Gesture::Scrub(scrub);
             }
@@ -2278,6 +2283,7 @@ impl TimelineSurface {
                 }
             }
             Gesture::Dragging { .. } => self.queue.push_back(Job::Finish(true)),
+            Gesture::Scrub(_) => self.delegate.scrubbing(false, cx),
             Gesture::Marquee {
                 session,
                 origin,
@@ -2303,7 +2309,6 @@ impl TimelineSurface {
                 self.lit = None;
                 self.changed(true, cx)
             }
-            Gesture::Scrub(_) => {}
         }
         cx.notify();
         self.pump(cx);

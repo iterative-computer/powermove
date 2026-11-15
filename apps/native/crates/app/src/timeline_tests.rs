@@ -21,6 +21,8 @@ pub(crate) struct Recorder {
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
+    /// Ruler scrubs starting (`true`) and ending, as the app hears them.
+    pub scrubs: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -46,6 +48,9 @@ impl Delegate for Recording {
     }
     fn skim(&self, seconds: Option<f64>, _: &mut App) {
         self.0.skims.borrow_mut().push(seconds);
+    }
+    fn scrubbing(&self, on: bool, _: &mut App) {
+        self.0.scrubs.borrow_mut().push(on);
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
@@ -1427,6 +1432,9 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
         s.rig.kernel.published(PROJECT).unwrap().revision(),
         revision
     );
+    // The app hears the scrub start before its first seek and end on
+    // release (PM-310: only Properties follows each frame meanwhile).
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
