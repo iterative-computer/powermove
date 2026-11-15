@@ -164,6 +164,7 @@ pub struct Automation {
     sessions: HashMap<String, SessionHandle>,
     pending_opens: crate::recovery::PendingOpens,
     subscribers: Vec<mpsc::Sender<AutomationEvent>>,
+    presence: Vec<mpsc::SyncSender<crate::presence::Presence>>,
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     /// Resolves a provider run's grant token (`--agent-run`) to its run id and
@@ -229,6 +230,7 @@ impl Automation {
             sessions: HashMap::new(),
             pending_opens: Default::default(),
             subscribers: Vec::new(),
+            presence: Vec::new(),
             engine: None,
             surfaces: None,
             agent_grants: None,
@@ -320,6 +322,17 @@ impl Automation {
             Backend::Owned(kernel) => kernel.shell(call).map_err(Error::kernel),
             Backend::App(host) => host.shell(call),
         }
+    }
+    /// Bounded and nonblocking: a hidden/slow surface never stalls editing.
+    pub fn subscribe_presence(&mut self) -> mpsc::Receiver<crate::presence::Presence> {
+        let (tx, rx) = mpsc::sync_channel(6);
+        self.presence.push(tx);
+        rx
+    }
+    pub(crate) fn presence(&mut self, project: &str, run: &str, kind: crate::presence::Kind, layer: Option<String>) {
+        if self.presence.is_empty() { return; }
+        let event = crate::presence::Presence { project: project.into(), run: run.into(), kind, layer };
+        self.presence.retain(|tx| !matches!(tx.try_send(event.clone()), Err(mpsc::TrySendError::Disconnected(_))));
     }
     pub fn subscribe(&mut self) -> mpsc::Receiver<AutomationEvent> {
         let (tx, rx) = mpsc::channel();

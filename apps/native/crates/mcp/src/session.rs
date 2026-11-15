@@ -86,6 +86,9 @@ struct Active {
     /// Panel controls ran during this run (main's `panelActions`): their own
     /// editor Undo applies, so the run never snapshot-restores over them.
     panel_actions: bool,
+    /// Private agent focus; never publish this into Interface selection.
+    focus: Vec<String>,
+    time: f64,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -540,10 +543,7 @@ impl McpSession {
             return outcome.map(|(value, _)| value);
         }
         let prepared_selection = if name == "select_layers" {
-            let project = host
-                .active_project()
-                .map(|id| host.read_document(&id))
-                .transpose()?;
+            let project = session.project.as_deref().map(|id| host.read_document(id)).transpose()?;
             let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
                 id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
             })).ok_or_else(|| Error::invalid("Select existing layer IDs from get_project_state. No selection was changed."))?;
@@ -753,7 +753,12 @@ impl McpSession {
             "select_layers" => {
                 let ids = prepared_selection.unwrap();
                 Ok(
-                    json!({"selection":host.select_layers(&id,&ids,args["add"]==true, self.writer)?}),
+                    {
+                        if args["add"] != true { session.focus.clear(); }
+                        for id in ids { if !session.focus.contains(&id) { session.focus.push(id); } }
+                        host.presence(&id, &session.run, crate::presence::Kind::Focus, session.focus.last().cloned());
+                        json!({"selection":{"layers":session.focus},"scope":"agent"})
+                    },
                 )
             }
             "save_project" => host.save_project(&id),
@@ -789,14 +794,9 @@ impl McpSession {
                 } else {
                     host.read_document(&id)?
                 };
-                let selection = host.selection(&id)?["layers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>();
+                let selection = session.focus.clone();
                 let strips = if name == "edit_layer_strips" {
-                    Some(crate::strips::plan(&p, args, host.playhead(&id))?)
+                    Some(crate::strips::plan(&p, args, session.time)?)
                 } else {
                     None
                 };
@@ -818,7 +818,7 @@ impl McpSession {
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
-                        host.playhead(&id),
+                        session.time,
                         scene_assets.as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
@@ -827,7 +827,7 @@ impl McpSession {
                         &view.snapshot,
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
-                        host.playhead(&id),
+                        session.time,
                         Some(&host.state()),
                     )?)
                 } else {
@@ -871,7 +871,18 @@ impl McpSession {
                         expected,
                         self.writer,
                     )?;
-                    host.select_layers(&id, &batch.selection, false, self.writer)?;
+                    session.focus = batch.selection;
+                    if ack.revision != revision {
+                        for result in &batch.results {
+                            let kind = match result["command"]["type"].as_str().unwrap_or("") {
+                                "add_layer" | "add_text" | "add_shape" | "add_captions" => crate::presence::Kind::Create,
+                                "replace_keyframes" => crate::presence::Kind::Key,
+                                "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
+                                _ => crate::presence::Kind::Set,
+                            };
+                            host.presence(&id, &session.run, kind, result["data"]["id"].as_str().map(str::to_owned));
+                        }
+                    }
                     (ack, batch.descriptions, batch.results, None)
                 };
                 let tx = session.transaction.as_mut().unwrap();
@@ -893,7 +904,7 @@ impl McpSession {
                     let after = host.read_document(&id)?;
                     let target = crate::scene3d::result_id(&p, &after, args, &selection);
                     if let Some(ref target) = target {
-                        host.select_layers(&id, std::slice::from_ref(target), false, self.writer)?;
+                        session.focus = vec![target.clone()];
                     }
                     result["result"] = json!({"id":target,"layerId":target});
                 }
@@ -1047,6 +1058,7 @@ impl McpSession {
             }
             _ => None,
         };
+        let time = project.as_deref().map_or(0., |id| host.playhead(id));
         self.active = Some(Active {
             project,
             document,
@@ -1061,6 +1073,8 @@ impl McpSession {
             committed: false,
             external_actions: false,
             panel_actions: false,
+            time,
+            focus: Vec::new(),
         });
         Ok(result)
     }
@@ -1074,6 +1088,7 @@ impl McpSession {
                 return Ok(json!({"changed":session.committed}));
             };
             assert_project(&session, &host, &id)?;
+            host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };
@@ -1248,11 +1263,10 @@ impl Drop for McpSession {
     }
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
-    if host.active_project().as_deref() != Some(id)
-        || host.view(id).ok().map(|view| view.document) != session.document
+    if host.view(id).ok().map(|view| view.document) != session.document
     {
         return Err(Error::conflict(
-            "The active project changed or reopened. All work was preserved. Start a new agent run in this project.",
+            "The bound project closed or reopened. All work was preserved. Start a new agent run in this project.",
         ));
     }
     Ok(())
