@@ -1095,7 +1095,7 @@ impl Engine {
                 let v = try_js!(scope.ev.ev(&comp, Some(l), &key, t));
                 out.js(&v);
             }
-            "evP" => {
+            "evP" | "expressionRuntimeDiagnostic" => {
                 let l = layer!();
                 let key = get(request, "key")
                     .map(Value::to_js_string)
@@ -1114,7 +1114,13 @@ impl Engine {
                     at_path(l, &path)
                 };
                 let v = try_js!(scope.ev.ev_p(&comp, Some(l), prop, t, &key));
-                out.js(&v);
+                if op == "expressionRuntimeDiagnostic" {
+                    let layer_id = l.get("id").map(Node::to_value).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    match scope.ev.expression_error(&comp.id().to_string_lossy(), &layer_id, &key.to_string_lossy()) {
+                        Some(error) => out.str(error),
+                        None => out.raw("null"),
+                    }
+                } else { out.js(&v); }
             }
             "active" => {
                 let l = layer!();

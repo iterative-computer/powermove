@@ -342,7 +342,8 @@ fn property_menu_easing_applies_to_all_keys() {
     f.action(&handle, V4Action::AddKey, 0.);
     f.action(&handle, V4Action::AddKey, 2.);
     f.action(&handle, V4Action::Ease("linear".into()), 1.);
-    let prop = f.model.property(&PropertyId::new("a", "opacity")).unwrap().unwrap();
+    let layer = f.model.layer("a").unwrap();
+    let prop = layer.get("p").unwrap().get("opacity").unwrap();
     let keys = prop.get("kf").and_then(Value::as_array).unwrap();
     assert_eq!(keys.len(), 2);
     for key in keys {
