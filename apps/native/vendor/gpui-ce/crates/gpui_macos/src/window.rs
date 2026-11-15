@@ -3139,27 +3139,14 @@ unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
-            // Powermove: AppKit's own where it has one, else an SF Symbol.
-            CursorStyle::Move => extra_cursor(
-                &MOVE_CURSOR,
-                &[sel!(_moveCursor)],
-                "arrow.up.and.down.and.arrow.left.and.right",
-            ),
-            CursorStyle::Rotate => extra_cursor(
-                &ROTATE_CURSOR,
-                &[],
-                "arrow.trianglehead.clockwise.rotate.90",
-            ),
-            CursorStyle::ZoomIn => extra_cursor(
-                &ZOOM_IN_CURSOR,
-                &[sel!(zoomInCursor), sel!(_zoomInCursor)],
-                "plus.magnifyingglass",
-            ),
-            CursorStyle::ZoomOut => extra_cursor(
-                &ZOOM_OUT_CURSOR,
-                &[sel!(zoomOutCursor), sel!(_zoomOutCursor)],
-                "minus.magnifyingglass",
-            ),
+            // Powermove hotfix 9.1: the private/SF Symbol cursor path aborted the app
+            // inside resetCursorRects (panic across the Objective-C boundary). Use
+            // stock AppKit cursors only until that path is rebuilt and tested.
+            CursorStyle::Move => msg_send![class!(NSCursor), openHandCursor],
+            CursorStyle::Rotate => msg_send![class!(NSCursor), crosshairCursor],
+            CursorStyle::ZoomIn | CursorStyle::ZoomOut => {
+                msg_send![class!(NSCursor), arrowCursor]
+            }
         };
 
         let bounds: Objc2NSRect = msg_send![this as *const Objc2Object as ObjcId, bounds];
@@ -3207,6 +3194,7 @@ static ZOOM_OUT_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 /// Powermove: a cursor AppKit offers under one of `selectors`, or one drawn
 /// from the SF Symbol `symbol` (black on a heavier white outline, centred hot
 /// spot), made once and kept. Arrow when neither exists.
+#[allow(dead_code)]
 unsafe fn extra_cursor(
     cache: &std::sync::OnceLock<usize>,
     selectors: &[Sel],
@@ -3233,6 +3221,7 @@ unsafe fn extra_cursor(
     }
 }
 
+#[allow(dead_code)]
 unsafe fn symbol_cursor(symbol: &str) -> ObjcId {
     unsafe {
         let tinted = |weight: f64, white: bool| -> ObjcId {
