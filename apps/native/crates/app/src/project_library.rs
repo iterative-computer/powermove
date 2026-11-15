@@ -131,6 +131,10 @@ pub struct ProjectLibrary {
     column: bool,
     /// The grid/list switch: the system's segmented control.
     view_switch: Option<Entity<NativeControl>>,
+    /// The order the cards had when an open began: while it runs (a v1
+    /// project is migrated, and so edited, as it opens) nothing moves under
+    /// the pointer, so a double-click lands on the card it was aimed at.
+    held_order: Option<Vec<String>>,
     search: Option<Entity<pm_shell::text::TextField>>,
     /// New Project, the system's glass button: the header's one raised
     /// action. The rest of the header is drawn.
@@ -219,6 +223,7 @@ impl ProjectLibrary {
             variant,
             column,
             view_switch: None,
+            held_order: None,
             search: None,
             new_project: None,
             active: None,
@@ -1249,9 +1254,11 @@ impl ProjectLibrary {
                 // empty viewer shows it. Its size is in the facts below.
                 None => {
                     let dark = t.scheme == pm_design::Scheme::Dark;
+                    // A quiet step under the page: an outline of the
+                    // picture to come, not a black hole.
                     let canvas = div()
                         .rounded(px(t.radius.sm))
-                        .bg(rgb(c.viewer))
+                        .bg(rgb(c.panel))
                         .shadow(vec![BoxShadow {
                             color: ink(if dark { 0xffffff } else { 0x000000 }, 0.08).into(),
                             offset: point(px(0.), px(0.)),
@@ -2022,7 +2029,16 @@ impl Render for ProjectLibrary {
                 })
                 .into_any_element(),
             Content::Projects => {
-                let rows = self.controller.rows.clone();
+                let mut rows = self.controller.rows.clone();
+                if self.controller.opening().is_some() {
+                    let held = self
+                        .held_order
+                        .get_or_insert_with(|| rows.iter().map(|r| r.id.clone()).collect());
+                    // Cards keep their places; a new one goes at the end.
+                    rows.sort_by_key(|r| held.iter().position(|id| *id == r.id).unwrap_or(usize::MAX));
+                } else {
+                    self.held_order = None;
+                }
                 let list = div()
                     .id("home-projects")
                     .flex_1()
