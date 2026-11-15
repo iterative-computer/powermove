@@ -20,6 +20,7 @@ use std::{
 
 #[derive(Default)]
 struct Recorder {
+    canvas_focuses: Cell<usize>,
     lines: RefCell<Vec<OverlayLine>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
@@ -112,6 +113,9 @@ impl TextInput for FakeInput {
 }
 struct Recording(Rc<Recorder>);
 impl Host for Recording {
+    fn focus_canvas(&self, _: &mut gpui::Window, _: &mut App) {
+        self.0.canvas_focuses.set(self.0.canvas_focuses.get() + 1);
+    }
     fn time(&self, _: &App) -> f64 {
         0.5
     }
@@ -2841,4 +2845,15 @@ fn toggling_to_2d_during_fly_uses_the_view_on_screen(cx: &mut TestAppContext) {
     s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+}
+
+#[gpui::test]
+fn selecting_in_viewer_claims_canvas_keyboard_focus(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    select(&s, &[]);
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    assert_eq!(s.recorder.canvas_focuses.get(), 0);
+    click(&mut s, cx, [210., 160.], Modifiers::none(), 1);
+    assert_eq!(selected(&s), ["l0"]);
+    assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }

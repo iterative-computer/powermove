@@ -2782,6 +2782,13 @@ impl Host {
         });
         out
     }
+    /// Leave native fields and WebKit when the composition canvas is pressed.
+    pub fn focus_canvas(&mut self) {
+        self.window.makeFirstResponder(Some(&self.gpui));
+        self.keyboard_control_focus.set(false);
+        self.splitter_focus = false;
+        self.canvas_focus.set(true);
+    }
     pub fn focus_toolbar(&self, reverse: bool) -> bool {
         let controls = self.toolbar_controls();
         let control = if reverse {
