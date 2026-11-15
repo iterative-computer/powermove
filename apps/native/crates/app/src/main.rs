@@ -128,7 +128,6 @@ mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
-mod v4_quote;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;

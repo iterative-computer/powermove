@@ -93,8 +93,6 @@ test("focus order follows the thread bar, conversation and composer as the origi
     "agent-new",
     "agent-presentation",
     "agent-conversation",
-    "quote-source-history:message-0",
-    "quote-source-live:text-1",
     "agent-composer-text",
     "agent-attach",
     "agent-send",

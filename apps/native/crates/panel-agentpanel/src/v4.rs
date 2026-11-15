@@ -99,7 +99,7 @@ impl Window {
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
         let selection = session.draft.text_selection();
-        value["draft"] = json!({"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         let mut threads = panel.summaries();
         value["threadTitle"] = json!(
@@ -274,11 +274,8 @@ fn retry_turn(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let mut request_draft = crate::composer::Draft::from_legacy(&text, &files)
+    let request_draft = crate::composer::Draft::from_legacy(&text, &files)
         .or_else(|_| crate::composer::Draft::from_legacy(&text, &[]))?;
-    if let Some(citations) = user.value["citations"].as_array() {
-        request_draft.set_citations(citations.clone())?;
-    }
     let saved = std::mem::replace(panel.draft_mut(thread)?, request_draft);
     let effect = panel.submit(thread, run, request, now);
     *panel.draft_mut(thread)? = saved;
@@ -316,14 +313,6 @@ pub fn dispatch(
             draft.set_text(text, now)?;
             draft.select_text(range)?;
             *panel.draft_mut(thread)? = draft;
-            None
-        }
-        "citations" => {
-            let citations = action["citations"]
-                .as_array()
-                .ok_or(Error::Invalid("citations"))?
-                .clone();
-            panel.draft_mut(thread)?.set_citations(citations)?;
             None
         }
         "focus" => {

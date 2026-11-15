@@ -1,4 +1,3 @@
-import { isCitation } from "./citations";
 import type { Json } from "../../src/protocol";
 import type { Publication } from "./contract";
 const record = (v: unknown): v is Record<string, unknown> =>
@@ -70,8 +69,6 @@ export function publication(
       r.items.length ||
     !record(d) ||
     typeof d.text !== "string" ||
-    (d.citations !== undefined &&
-      (!Array.isArray(d.citations) || !d.citations.every(isCitation))) ||
     !nullableString(d.armed) ||
     !Array.isArray(d.selection) ||
     d.selection.length !== 2 ||
