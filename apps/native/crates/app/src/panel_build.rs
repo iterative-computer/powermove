@@ -131,3 +131,46 @@ mod brush_tests {
         assert!((afterglow(1. / 30.) - afterglow(1. / 60.).powi(2)).abs() < 0.0001);
     }
 }
+
+/// Renderer-independent primitives; coordinates are local to the reserved slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dot { pub center: [f32; 2], pub radius: f32, pub alpha: f32, pub orange: bool }
+
+/// Stable dot field shared by native painting and headless frame assertions.
+/// Reduced motion lights the whole planned track without moving a brush.
+pub fn draw_dots(size: [f32; 2], age: f32, row: Option<f32>, light: bool, reduced: bool, playing: bool) -> Vec<Dot> {
+    let mut dots = Vec::new();
+    if size.iter().any(|v| !v.is_finite() || *v <= 0.) { return dots; }
+    let dim = playback(playing).0;
+    let wake = fade(age, 0.24);
+    for y in (3..size[1].min(4096.) as usize).step_by(6) {
+        for x in (3..size[0].min(4096.) as usize).step_by(6) {
+            let center = [x as f32, y as f32];
+            if !inside_slot(center, size, 8.) { continue; }
+            let pencil = row.is_some_and(|r| (center[1] - r).abs() < 3.4);
+            let strength = if reduced { fade(age, 0.12) } else { wake };
+            dots.push(Dot { center, radius: if pencil { 1.45 } else { 0.9 },
+                alpha: dim * if pencil { 0.38 * strength } else { if light { 0.06 } else { 0.08 } * wake },
+                orange: pencil });
+        }
+    }
+    dots
+}
+
+#[cfg(test)]
+mod draw_tests {
+    use super::*;
+    #[test]
+    fn deterministic_clipped_field() {
+        let dots = draw_dots([120., 80.], 0.24, Some(39.), false, false, false);
+        assert_eq!(dots, draw_dots([120., 80.], 0.24, Some(39.), false, false, false));
+        assert!(dots.iter().all(|d| inside_slot(d.center, [120., 80.], 8.)));
+        assert!(dots.iter().any(|d| d.orange && d.alpha == 0.38));
+    }
+    #[test]
+    fn light_and_playback_field_budget() {
+        let dots = draw_dots([120., 80.], 1., None, true, true, true);
+        assert!(dots.iter().all(|d| (d.alpha - 0.024).abs() < 0.00001));
+        assert!(draw_dots([f32::NAN, 80.], 1., None, false, false, false).is_empty());
+    }
+}
