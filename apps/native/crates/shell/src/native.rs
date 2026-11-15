@@ -6518,8 +6518,9 @@ fn load_palette_recents() -> Vec<String> {
 fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     crate::transient::remember_command(recents, command);
     let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
-    objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
+    // NSString is a property-list value accepted by NSUserDefaults.
+    unsafe { objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents")); }
 }
 
 /// Viewer preferences share the shell's native application settings store.
