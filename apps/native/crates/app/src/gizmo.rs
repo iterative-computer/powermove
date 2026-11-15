@@ -1382,6 +1382,8 @@ impl GizmoSurface {
             };
             let by = point(px(by.x as f32), px(by.y as f32));
             self.host.navigate(Navigate::Pan(by), cx);
+            // The outline is drawn over the picture: it moves with the view.
+            self.draw(cx);
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -1401,6 +1403,9 @@ impl GizmoSurface {
                 self.space_panned |= self.space_hand;
             }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
+            // The outline is drawn over the picture: it moves with the view
+            // while held, not on release.
+            self.draw(cx);
             return;
         }
         if self.sketch.is_some() || self.text_sketch.is_some() {

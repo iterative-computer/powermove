@@ -41,6 +41,8 @@ struct Recorder {
     lease: RefCell<Option<Entity<u8>>>,
     /// Files dropped on the viewer.
     files: RefCell<Vec<std::path::PathBuf>>,
+    /// Where each outline was placed over the viewer.
+    placements: RefCell<Vec<Option<crate::gizmo_layer::Placement>>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -122,8 +124,15 @@ impl Host for Recording {
         if let Some(lease) = self.0.lease.borrow().as_ref() {
             let _ = lease.read(cx);
         }
+        // The view moves with the pans asked for, as the app's does.
+        let pan = self.0.navigation.borrow().iter().fold(point(px(0.), px(0.)), |sum, n| {
+            match n {
+                Navigate::Pan(by) => sum + *by,
+                _ => sum,
+            }
+        });
         Some(ViewFrame {
-            origin: bounds.origin + point(px(20.), px(20.)),
+            origin: bounds.origin + point(px(20.), px(20.)) + pan,
             scale: 1.,
             size: self.0.size.get().unwrap_or([640., 360.]),
         })
@@ -134,10 +143,11 @@ impl Host for Recording {
     fn overlay(
         &self,
         lines: Vec<OverlayLine>,
-        _: Option<crate::gizmo_layer::Placement>,
+        at: Option<crate::gizmo_layer::Placement>,
         _: &mut App,
     ) {
         *self.0.lines.borrow_mut() = lines;
+        self.0.placements.borrow_mut().push(at);
     }
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
@@ -642,6 +652,40 @@ fn the_hand_tool_drags_the_view_without_editing(cx: &mut TestAppContext) {
         });
     assert_eq!(total, point(px(30.), px(-12.)));
     assert_eq!(s.pose().position, before.position);
+}
+/// The selection's outline moves with the view while the Hand drags it, not
+/// on release.
+#[gpui::test]
+fn the_outline_follows_a_hand_pan_while_held(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Hand));
+    let origin = |s: &Stage| {
+        s.recorder
+            .placements
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|p| *p)
+            .expect("an outline placed")
+            .origin
+    };
+    let before = origin(&s);
+    let at = s.point_of([210., 160.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(30.), px(-12.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    // Still held: the outline is where the view now is.
+    let held = origin(&s);
+    assert_eq!([held[0] - before[0], held[1] - before[1]], [30., -12.]);
+    s.vcx.simulate_mouse_up(
+        at + point(px(30.), px(-12.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
 }
 #[gpui::test]
 fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {
