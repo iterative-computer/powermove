@@ -1198,7 +1198,7 @@ impl Controller {
     }
     fn sync_agent_launcher(&self, cx: &App) {
         let Some(runtime) = &self.builtins.runtime else { return; };
-        let (tasks, revision) = runtime.agent_launcher_tasks();
+        let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
         let panel_open =
             self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
         self.host
@@ -1219,6 +1219,7 @@ impl Controller {
                     .collect(),
                 panel_open,
                 revision,
+                active_thread,
             });
     }
     /// Whether the Agent popover is showing (or on its way).

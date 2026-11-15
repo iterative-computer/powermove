@@ -959,9 +959,9 @@ impl Builtins {
         )
     }
     /// Live facts across every thread, independent of panel visibility.
-    pub fn agent_launcher_tasks(&self) -> (Vec<(String, String, String, u64, bool, bool)>, u64) {
+    pub fn agent_launcher_tasks(&self) -> (Vec<(String, String, String, u64, bool, bool)>, u64, String) {
         let Ok((agent, _)) = self.agent_state() else {
-            return (vec![], 0);
+            return (vec![], 0, String::new());
         };
         let state = agent.shared();
         let panel = &state.panel;
@@ -980,7 +980,7 @@ impl Builtins {
                 Some((t.id, t.title, s.activity.clone(), started, attention, s.run.is_some()))
             })
             .collect();
-        (tasks, revision)
+        (tasks, revision, panel.active_id().into())
     }
     pub fn agent_launcher_switch(&self, id: &str) -> std::result::Result<(), String> {
         let (agent, link) = self.agent_state()?;

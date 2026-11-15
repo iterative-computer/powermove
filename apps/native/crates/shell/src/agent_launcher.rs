@@ -13,6 +13,7 @@ pub struct Snapshot {
     pub tasks: Vec<Task>,
     pub panel_open: bool,
     pub revision: u64,
+    pub active_thread: String,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tone {
@@ -33,16 +34,19 @@ pub struct Launcher {
 }
 impl Launcher {
     pub fn update(&mut self, next: Snapshot, now: u64) {
-        if self
-            .snapshot
-            .tasks
-            .iter()
-            .any(|old| old.running && !next.tasks.iter().any(|t| t.id == old.id && t.running))
-        {
+        if self.snapshot.active_thread != next.active_thread {
+            self.unseen = false;
+            self.done_at = None;
+        } else if self.snapshot.tasks.iter().any(|old| {
+            old.running
+                && (next.active_thread.is_empty() || old.id == next.active_thread)
+                && !next.tasks.iter().any(|t| t.id == old.id && t.running)
+        }) {
             self.done_at = Some(now);
             self.unseen = !next.panel_open;
         }
         if ((next.revision != self.snapshot.revision
+            && next.active_thread == self.snapshot.active_thread
             && (self.initialized || next.tasks.iter().any(|t| t.running)))
             || (self.snapshot.panel_open && !next.tasks.is_empty()))
             && !next.panel_open
@@ -66,10 +70,10 @@ impl Launcher {
     pub fn tone(&self) -> Tone {
         if self.snapshot.tasks.iter().any(|t| t.attention) {
             Tone::Attention
-        } else if self.running_count() > 0 {
-            Tone::Working
         } else if self.unseen {
             Tone::Done
+        } else if self.running_count() > 0 {
+            Tone::Working
         } else {
             Tone::Idle
         }
@@ -217,6 +221,79 @@ mod tests {
         );
         assert_eq!(l.tone(), Tone::Idle);
         assert!(!l.requests_frames(2200, false));
+    }
+    #[test]
+    fn current_completion_is_news_while_background_work_continues() {
+        let mut l = Launcher::default();
+        l.update(
+            Snapshot {
+                active_thread: "a".into(),
+                tasks: vec![task("a"), task("b")],
+                ..Default::default()
+            },
+            1000,
+        );
+        l.update(
+            Snapshot {
+                active_thread: "a".into(),
+                tasks: vec![task("b")],
+                ..Default::default()
+            },
+            2000,
+        );
+        assert_eq!(l.tone(), Tone::Done);
+        assert!(l.unseen);
+        assert_eq!(l.running_count(), 1);
+        assert_eq!(l.popover_rows(81000)[0].0, "b");
+        assert!(!l.requests_frames(2360, false));
+    }
+    #[test]
+    fn background_completion_keeps_current_progress_visible() {
+        let mut l = Launcher::default();
+        l.update(
+            Snapshot {
+                active_thread: "a".into(),
+                tasks: vec![task("a"), task("b")],
+                ..Default::default()
+            },
+            1000,
+        );
+        l.update(
+            Snapshot {
+                active_thread: "a".into(),
+                tasks: vec![task("a")],
+                ..Default::default()
+            },
+            2000,
+        );
+        assert_eq!(l.tone(), Tone::Working);
+        assert!(!l.unseen);
+        assert!(l.requests_frames(3000, false));
+    }
+    #[test]
+    fn switching_threads_does_not_invent_completion_news() {
+        let mut l = Launcher::default();
+        l.update(
+            Snapshot {
+                active_thread: "a".into(),
+                tasks: vec![task("a")],
+                ..Default::default()
+            },
+            1000,
+        );
+        l.update(
+            Snapshot {
+                active_thread: "b".into(),
+                tasks: vec![task("b")],
+                revision: 1,
+                ..Default::default()
+            },
+            2000,
+        );
+        assert_eq!(l.tone(), Tone::Working);
+        assert!(!l.unseen);
+        assert_eq!(l.done_at, None);
+        assert_eq!(l.receiving_at, None);
     }
     #[test]
     fn attention_pulse_stops_when_seen() {
