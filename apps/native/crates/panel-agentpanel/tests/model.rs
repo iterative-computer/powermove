@@ -1377,3 +1377,15 @@ fn invalid_citation_does_not_replace_existing_draft_context() {
     );
     assert_eq!(draft.citations(), valid);
 }
+
+#[test]
+fn undoing_composer_typing_keeps_reference_chips() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    draft.insert_text("before", 1, false);
+    let quote = vec![json!({"messageId":"m","text":"quote","start":0,"end":5,"comment":"Explain"})];
+    draft.set_citations(quote.clone()).unwrap();
+    draft.insert_text(" after", 100, false);
+    assert!(draft.undo(false));
+    assert_eq!(draft.request_text(), "before");
+    assert_eq!(draft.citations(), quote);
+}

@@ -70,12 +70,12 @@ pub struct Clipboard {
 #[derive(Clone, Debug, PartialEq)]
 struct State {
     units: Vec<Unit>,
-    citations: Vec<Value>,
     selection: Range<usize>,
 }
 #[derive(Clone, Debug)]
 pub struct Draft {
     state: State,
+    citations: Vec<Value>,
     catalog: HashMap<String, Attachment>,
     history: Vec<State>,
     cursor: usize,
@@ -86,11 +86,11 @@ impl Default for Draft {
     fn default() -> Self {
         let state = State {
             units: vec![],
-            citations: vec![],
             selection: 0..0,
         };
         Self {
             state: state.clone(),
+            citations: vec![],
             catalog: HashMap::new(),
             history: vec![state],
             cursor: 0,
@@ -181,7 +181,7 @@ impl Draft {
         (text, files)
     }
     pub fn citations(&self) -> &[Value] {
-        &self.state.citations
+        &self.citations
     }
     pub fn set_citations(&mut self, citations: Vec<Value>) -> Result<()> {
         for c in &citations {
@@ -198,7 +198,7 @@ impl Draft {
                 return Err(Error::Invalid("citation"));
             }
         }
-        self.state.citations = citations;
+        self.citations = citations;
         Ok(())
     }
     pub fn request_text(&self) -> String {
@@ -212,7 +212,7 @@ impl Draft {
             .collect()
     }
     pub fn sendable(&self) -> bool {
-        !self.state.citations.is_empty()
+        !self.citations.is_empty()
             || self.state.units.iter().any(|u| match u {
                 Unit::File(_) => true,
                 Unit::Char(c) => !c.is_whitespace(),
@@ -574,9 +574,7 @@ impl Draft {
             );
         }
         let next = Self::from_legacy(text, &files)?;
-        let citations = std::mem::take(&mut self.state.citations);
         self.state = next.state;
-        self.state.citations = citations;
         self.commit(now, false);
         Ok(())
     }
