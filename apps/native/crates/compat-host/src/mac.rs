@@ -226,7 +226,7 @@ impl Shared {
                     }
                 }
             }
-            return Ok(());
+            return Ok(Value::Null);
         }
         if kind == "panel_layout_applied" {
             let payload = &m["payload"];
