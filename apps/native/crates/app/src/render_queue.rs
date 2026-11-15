@@ -199,6 +199,21 @@ mod tests {
         assert_eq!(q.take_pending().unwrap().unwrap().0, id);
     }
     #[test]
+    fn cancelling_a_running_job_waits_for_settlement_before_the_next_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut q = Queue::load(dir.path().join("queue.json"));
+        let first = q.add(json!({"name":"First"})).unwrap();
+        let second = q.add(json!({"name":"Second"})).unwrap();
+        q.take_pending().unwrap();
+        assert!(q.action(first, "remove").is_err());
+        assert!(q.action(first, "retry").is_err());
+        q.action(first, "cancel").unwrap();
+        assert!(q.cancelled(first));
+        assert!(q.take_pending().unwrap().is_none());
+        q.finish(first, "Cancelled", String::new()).unwrap();
+        assert_eq!(q.take_pending().unwrap().unwrap().0, second);
+    }
+    #[test]
     fn broken_store_is_preserved_and_write_failure_rolls_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");

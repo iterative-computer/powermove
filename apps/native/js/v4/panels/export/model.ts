@@ -686,7 +686,13 @@ export class ExportModel {
     this.busy = true;
     this.changed();
     try {
-      await this.command("export.queue.add", { options: json(this.options) });
+      this.accept(
+        (
+          await this.command("export.queue.add", {
+            options: json(this.options),
+          })
+        ).value,
+      );
     } finally {
       this.busy = false;
       this.changed();
