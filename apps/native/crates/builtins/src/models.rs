@@ -2050,6 +2050,10 @@ impl Backend {
                 self.native.platform.push((command.into(), json!({"path":path})));
                 self.export_snapshot()?
             }
+            "export.queue.add" | "export.queue.list" | "export.queue.render" | "export.queue.action" | "export.queue.finder" => {
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
             "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?

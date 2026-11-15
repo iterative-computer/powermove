@@ -3414,6 +3414,7 @@ impl Controller {
                 }
             }
             "saveAs" => self.save_dialog(cx),
+            "renderPending" => self.render_pending(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
                 for call in undo_calls(self.edit_left_open(cx)) {

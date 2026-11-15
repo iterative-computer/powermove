@@ -1707,6 +1707,26 @@ impl Controller {
                     );
                     Ok(Value::Null)
                 }
+                "export.queue.add" => {
+                    self.begin_export_mode(request.input["options"].clone(), false, false, true, cx);
+                    Ok(Value::Null)
+                }
+                "export.queue.list" => { self.publish_render_queue(); Ok(Value::Null) }
+                "export.queue.render" => { self.render_pending(cx); Ok(Value::Null) }
+                "export.queue.action" => {
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let action = request.input["action"].as_str().unwrap_or("");
+                    let result = crate::render_queue::store(&self.profile).lock().unwrap().action(id, action);
+                    self.publish_render_queue();
+                    result.map(|_|Value::Null)
+                }
+                "export.queue.finder" => {
+                    let rows = crate::render_queue::store(&self.profile).lock().unwrap().projection();
+                    if let Some(path) = rows.as_array().and_then(|rows| rows.iter().find(|r|r["id"] == request.input["id"] && r["status"] == "Done")).and_then(|r|r["path"].as_str()) {
+                        crate::platform::reveal(std::path::Path::new(path));
+                    }
+                    Ok(Value::Null)
+                }
                 "export.cancel" => {
                     if let Some(job) = &self.builtins.export_job {
                         // Worker observes the flag and publishes terminal state

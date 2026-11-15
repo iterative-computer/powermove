@@ -352,6 +352,7 @@ enum ParentMessage {
         #[serde(default)]
         deferred_us: u64,
     },
+    QueueQos { foreground: bool },
     Cancel,
     /// Whether the app's registry answers the questions of
     /// [`ChildMessage::Faces`] `id` with the same faces, or why not.
@@ -696,6 +697,12 @@ pub struct ExportHandle {
     frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>>,
 }
 impl ExportHandle {
+    /// Only queue callers opt into live app foreground QoS; ordinary exports
+    /// retain their scheduling and quality settings.
+    pub fn queue_foreground(&self, foreground: bool) {
+        let _ = send(&mut *self.control.input.lock().unwrap(), &ParentMessage::QueueQos { foreground });
+    }
+
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
     pub fn start(executable: &Path, session: impl Into<JobSession>) -> Result<Self> {
@@ -960,6 +967,8 @@ pub fn run_child() -> Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
+    let queue_qos = Arc::new(AtomicU64::new(0));
+    let received_qos = queue_qos.clone();
     let stopped = cancel.clone();
     let rasters = Arc::new(JobRasters {
         stop: cancel.clone(),
@@ -998,6 +1007,10 @@ pub fn run_child() -> Result<()> {
                     }
                     _ => format!("an answer to a face check never asked ({id})"),
                 },
+                Ok(ParentMessage::QueueQos { foreground }) => {
+                    received_qos.store(if foreground { 1 } else { 2 }, Ordering::Release);
+                    continue;
+                }
                 Ok(ParentMessage::Cancel) => break,
                 Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
                 Err(e) => e.to_string(),
@@ -1109,7 +1122,8 @@ pub fn run_child() -> Result<()> {
     let worker = std::thread::spawn(move || -> Result<(PathBuf, Vec<String>)> {
         let _done = done;
         let cancel = worker_cancel;
-        let gate = ChildGate::new(permits);
+        let mut gate = ChildGate::new(permits);
+        gate.queue_qos = queue_qos;
         let fill = request.cache;
         let JobSpec::Export {
             composition,
@@ -2491,6 +2505,7 @@ impl Sample {
 /// (the viewer has been quiet for [`QUIET`]), any other a submission bounded
 /// by [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
 struct ChildGate {
+    queue_qos: Arc<AtomicU64>,
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
     /// Microseconds measured since [`ChildGate::take_measured`] last ran,
@@ -2503,6 +2518,7 @@ struct ChildGate {
 impl ChildGate {
     fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
         Self {
+            queue_qos: Arc::new(AtomicU64::new(0)),
             permits: Mutex::new(permits),
             costs: Mutex::default(),
             measured: Mutex::default(),
@@ -2522,6 +2538,11 @@ impl ChildGate {
 }
 impl pm_export::render::GpuGate for ChildGate {
     fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        match self.queue_qos.load(Ordering::Acquire) {
+            1 => { let _ = crate::qos::set_job_qos(crate::qos::JobQos::Default); }
+            2 => { let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility); }
+            _ => {}
+        }
         {
             let mut costs = self.costs.lock().unwrap();
             costs.frame_units = costs.frame_units.max(units);

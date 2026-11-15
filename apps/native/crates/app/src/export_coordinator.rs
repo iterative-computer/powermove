@@ -21,6 +21,7 @@ use std::{
 #[derive(Clone)]
 pub struct Frozen {
     publication: Arc<pm_kernel::Published>,
+    queue: Option<u64>,
     options: Options,
     media: pm_engine_service::MediaCatalog,
     resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
@@ -143,6 +144,9 @@ impl Controller {
         without: bool,
         cx: &mut Context<Self>,
     ) {
+        self.begin_export_mode(options, retry, without, false, cx);
+    }
+    pub fn begin_export_mode(&mut self, options: Value, retry: bool, without: bool, enqueue: bool, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -158,6 +162,8 @@ impl Controller {
         } else {
             None
         };
+        let queue_id = saved.as_ref().and_then(|f| f.queue);
+        let queue_store = crate::render_queue::store(&self.profile);
         let without_offline = saved.as_ref().is_some_and(|f| f.without_offline);
         let (p, typed, media, playhead) = if let Some(frozen) = &saved {
             (
@@ -289,6 +295,7 @@ impl Controller {
                 });
             }
             let frozen = Frozen {
+                queue: queue_id,
                 publication: p,
                 options: typed,
                 media,
@@ -298,6 +305,17 @@ impl Controller {
                 replace,
                 without_offline,
             };
+            if enqueue {
+                let added = queue_store.lock().unwrap().add(frozen.record());
+                let _ = this.update(cx, |v, cx| {
+                    v.builtins.export_job = None;
+                    if let Err(error) = added { v.message = error; }
+                    v.publish_render_queue();
+                    cx.notify();
+                });
+                observe(&runtime, json!({"phase":"idle"})).await;
+                return;
+            }
             // The window's extensions as the job starts answer its overrides.
             let (current, overrides) = this
                 .update(cx, |v, _| {
@@ -315,7 +333,15 @@ impl Controller {
             if !current {
                 job.cancel.store(true, Ordering::Release);
             }
+            let history_id = if let Some(id) = queue_id { Some(id) } else {
+                let mut queue = queue_store.lock().unwrap();
+                match queue.add(frozen.record()).and_then(|id| queue.finish(id, "Rendering", String::new()).map(|_|id)) {
+                    Ok(id) => Some(id),
+                    Err(error) => { let _ = this.update(cx, |v,_|v.message = error); None }
+                }
+            };
             let worker_job = job.clone();
+            let worker_queue = queue_store.clone();
             let executor = cx.background_executor().clone();
             let began = std::time::Instant::now();
             let result = cx.background_executor().spawn(async move {
@@ -329,6 +355,7 @@ impl Controller {
                     runtime.clone(),
                     executor,
                     tasks,
+                    queue_id.map(|id| (worker_queue, id)),
                 )
                 .await
             });
@@ -368,6 +395,14 @@ impl Controller {
                         Err(_) => v.close_export_sheet(cx),
                     }
                 }
+                if let Some(id) = history_id {
+                    let outcome = if job.cancel.load(Ordering::Acquire) { "Cancelled" }
+                        else if result.is_ok() { "Done" } else { "Failed" };
+                    let error = result.as_ref().err().cloned().unwrap_or_default();
+                    if let Err(e) = queue_store.lock().unwrap().finish(id, outcome, error) { v.message = e; }
+                    v.publish_render_queue();
+                    if queue_id.is_some() { v.render_pending(cx); }
+                }
                 cx.notify();
             });
         })
@@ -386,6 +421,7 @@ async fn execute(
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
+    queue: Option<(crate::render_queue::Store, u64)>,
 ) -> Result<Finished, String> {
     let planned = pm_builtins::delivery::plan(
         &frozen.publication.snapshot,
@@ -443,6 +479,7 @@ async fn execute(
                             ticket: started,
                         },
                         &planned,
+                        queue.as_ref(),
                     )
                     .await
                 }
@@ -690,6 +727,7 @@ async fn execute_inner(
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
+    queue: Option<&(crate::render_queue::Store, u64)>,
 ) -> Result<Finished, Failure> {
     let TaskAdmission { tasks, ticket } = task;
     if job.cancel.load(Ordering::Acquire) {
@@ -761,7 +799,16 @@ async fn execute_inner(
     let started = std::time::Instant::now();
     let mut pace = Pace::default();
     let mut cancellation_sent = false;
+    let mut queue_foreground = None;
     loop {
+        if queue.is_some() {
+            let foreground = objc2_app_kit::NSRunningApplication::currentApplication().isActive();
+            if queue_foreground != Some(foreground) {
+                if let Some(handle) = job.handle.lock().unwrap().as_ref() { handle.queue_foreground(foreground); }
+                queue_foreground = Some(foreground);
+            }
+        }
+        if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
             cancellation_sent = true;
             job.handle
@@ -849,6 +896,14 @@ async fn execute_inner(
         } else {
             json!({"phase":"preparing"})
         };
+        if let Some((store, id)) = queue {
+            let projection = {
+                let mut queue = store.lock().unwrap();
+                queue.progress(*id, status.progress);
+                queue.projection()
+            };
+            let _ = runtime.observe_render_queue(projection);
+        }
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
     }
@@ -1085,4 +1140,56 @@ fn plain_failure(message: &str) -> String {
             .into();
     }
     message.into()
+}
+
+impl Frozen {
+    fn record(&self) -> Value {
+        json!({"name":self.publication.snapshot.root().and_then(|r|r.get("name")).and_then(crate::node_string).unwrap_or("Untitled"),
+            "project": self.publication.project, "document": pm_model::json::to_canonical_string(&self.publication.snapshot.document.to_value().unwrap()),
+            "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
+            "resources":self.resources, "playhead":self.playhead, "destination":self.destination,
+            "replace": self.replace, "withoutOffline":self.without_offline})
+    }
+    fn restore(record: &Value, template: &pm_kernel::Published, id: u64) -> Result<Self, String> {
+        let mut publication = template.clone();
+        let document = pm_model::json::parse(record["document"].as_str().ok_or("Missing queued composition")?).map_err(|e|e.to_string())?;
+        publication.snapshot.document = Arc::new(pm_model::Document::from_root(Some(pm_model::Node::from_value(document, 0)), 0));
+        publication.snapshot.revision = 0;
+        publication.project = record["project"].as_str().unwrap_or_default().into();
+        Ok(Self { publication: Arc::new(publication), queue:Some(id),
+            options:serde_json::from_value(record["options"].clone()).map_err(|e|e.to_string())?,
+            media:pm_engine_service::MediaCatalog { originals:serde_json::from_value(record["originals"].clone()).map_err(|e|e.to_string())?,
+                proxies:serde_json::from_value(record["proxies"].clone()).map_err(|e|e.to_string())?, ..Default::default() },
+            resources: Arc::new(serde_json::from_value(record["resources"].clone()).map_err(|e|e.to_string())?),
+            playhead: record["playhead"].as_f64().unwrap_or(0.), destination:serde_json::from_value(record["destination"].clone()).map_err(|e|e.to_string())?,
+            replace:record["replace"] == true, without_offline:record["withoutOffline"] == true })
+    }
+}
+impl Controller {
+    pub fn publish_render_queue(&self) {
+        if let Some(runtime) = &self.builtins.runtime {
+            let _ = runtime.observe_render_queue(crate::render_queue::store(&self.profile).lock().unwrap().projection());
+        }
+    }
+    pub fn render_pending(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.export_job.is_some() { return; }
+        let Some(template) = self.published.clone() else { return; };
+        let store = crate::render_queue::store(&self.profile);
+        let taken = store.lock().unwrap().take_pending();
+        match taken {
+            Ok(Some((id, record))) => match Frozen::restore(&record, &template, id) {
+                Ok(frozen) => {
+                    self.builtins.export_retry = Some(frozen);
+                    self.begin_builtin_export(Value::Null, true, false, cx);
+                }
+                Err(error) => {
+                    let _ = store.lock().unwrap().finish(id, "Failed", error.clone());
+                    self.message = error;
+                }
+            },
+            Err(error) => self.message = error,
+            _ => {}
+        }
+        self.publish_render_queue();
+    }
 }
