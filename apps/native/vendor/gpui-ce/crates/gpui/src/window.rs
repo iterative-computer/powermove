@@ -1348,6 +1348,10 @@ pub struct Window {
     pub(crate) scroll_layer_depth: usize,
     /// The frame being drawn, for the layers it draws.
     pub(crate) scroll_layer_frame: u64,
+    /// A scroll layer moved by steps since the view last drew in full: hover
+    /// waits until the steps stop (as AppKit's tracking areas do), or every
+    /// row passing under a still pointer would draw its view again.
+    pub(crate) scroll_layer_moving: bool,
     /// The extent the last scrolling div computed (a layer reads it for its own).
     pub(crate) last_scroll_max: Point<Pixels>,
     scroll_layer_pending_deferred: Vec<usize>,
@@ -2137,6 +2141,7 @@ impl Window {
             scroll_layers: FxHashMap::default(),
             scroll_layer_depth: 0,
             scroll_layer_frame: 0,
+            scroll_layer_moving: false,
             last_scroll_max: Point::default(),
             scroll_layer_pending_deferred: Vec::new(),
             scroll_layer_painting: Vec::new(),
@@ -3414,7 +3419,9 @@ impl Window {
         self.reset_cursor_style(cx);
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
-        self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        if !self.scroll_layer_moving {
+            self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        }
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -4123,32 +4130,44 @@ impl Window {
         view: EntityId,
         cx: &mut App,
     ) -> bool {
-        let Some(layer) = self.scroll_layers.get_mut(&key) else {
-            return false;
+        let refused = |why: &str| {
+            if crate::view::draw_trace_enabled() {
+                eprintln!("PM_LAYER {{\"refused\":\"{why}\"}}");
+            }
+            false
         };
-        if !layer.shiftable || layer.view != view || self.dirty_views.contains(&view) {
-            return false;
+        let Some(layer) = self.scroll_layers.get_mut(&key) else {
+            return refused("unrecorded");
+        };
+        if !layer.shiftable {
+            return refused("unshiftable");
+        }
+        if layer.view != view || self.dirty_views.contains(&view) {
+            return refused("view");
         }
         let mut offset = layer.current();
         offset.x = offset.x.clamp(-layer.max.x, px(0.));
         offset.y = offset.y.clamp(-layer.max.y, px(0.));
         if !layer.covers(offset) {
-            return false;
+            return refused("reach");
         }
         *layer.offset.borrow_mut() = offset;
         layer.generation += 1;
         let generation = layer.generation;
+        self.scroll_layer_moving = true;
         self.invalidator.set_dirty(true);
         self.spawn(cx, async move |cx| {
             cx.background_executor()
                 .timer(crate::scroll_layer::SETTLE)
                 .await;
             cx.update(|window, cx| {
+                // Gone (drawn again since): the steps stopped too.
                 let settled = window
                     .scroll_layers
                     .get(&key)
-                    .is_some_and(|l| l.generation == generation);
+                    .is_none_or(|l| l.generation == generation);
                 if settled {
+                    window.scroll_layer_moving = false;
                     cx.notify(view);
                 }
             })
