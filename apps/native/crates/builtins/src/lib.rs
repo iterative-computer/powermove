@@ -168,11 +168,14 @@ pub struct PlatformRequest {
     pub operation: String,
     pub input: Value,
 }
+mod surface_transfer;
+
 struct Entry {
     generation: u64,
     backend: Arc<Mutex<Backend>>,
     router: HostRouter<HostDataService<data::Data>>,
     surface: Surface,
+    transfer: surface_transfer::Transfer,
     interaction: Interaction,
     /// A v4 extension's viewer overlay (`overlays.viewer`), display only.
     overlay: Surface,
@@ -2135,6 +2138,7 @@ impl EngineProxy for Broker {
                     backend,
                     router,
                     surface: Surface::default(),
+                    transfer: Default::default(),
                     overlay: Surface::default(),
                     interaction: Interaction::default(),
                 })),
@@ -2147,6 +2151,18 @@ impl EngineProxy for Broker {
             return Err(Error::StaleGeneration);
         }
         let entry = &mut *entry;
+        let assembled;
+        let input = if operation == "surface.chunk" {
+            match entry.transfer.push(input, entry.surface.limits.bytes).map_err(Error::Host)? {
+                Some(value) => {
+                    assembled = value;
+                    &assembled
+                }
+                None => return Ok(json!({"accepted":true,"staged":true,"revision":entry.surface.revision()})),
+            }
+        } else {
+            input
+        };
         match operation {
             "tokens.row" => Ok(json!(
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
@@ -2277,7 +2293,8 @@ impl EngineProxy for Broker {
                 (self.wake)();
                 Ok(Value::Null)
             }
-            "surface.commit" => {
+            "surface.commit" | "surface.chunk" => {
+                entry.transfer.clear();
                 let started = std::time::Instant::now();
                 let commit = serde_json::from_value(input.clone())
                     .map_err(|e| Error::Host(e.to_string()))?;

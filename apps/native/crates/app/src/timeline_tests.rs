@@ -2839,3 +2839,19 @@ fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppCont
     s.undo(cx);
     assert_eq!(s.start_of("l0"), 0.);
 }
+
+#[gpui::test]
+fn timeline_scroll_above_retained_limit_mounts_and_pages(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1600);
+    let at = s.origin() + point(px(600.), px(100.));
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-4000.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.scene().unwrap().total(), 1600);
+        assert_eq!(t.scroll_y(), 4000.);
+    });
+}
