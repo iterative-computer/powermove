@@ -613,6 +613,16 @@ impl Automation {
         )?;
         self.selection(id)
     }
+    pub fn agent_turn(&mut self, id: &str, writer: u32, active: bool) -> Result<()> {
+        self.call(
+            id,
+            Request::new(
+                Caller::realm(writer, 1, Origin::Mcp),
+                pm_kernel::HistoryCall::AgentTurn { active },
+            ),
+        )?;
+        Ok(())
+    }
     pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
         match self
             .call(

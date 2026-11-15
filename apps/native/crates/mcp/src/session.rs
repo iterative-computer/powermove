@@ -103,14 +103,17 @@ pub struct McpSession {
     writer: u32,
     closed: bool,
 }
+fn next_writer() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1000);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 impl McpSession {
     pub fn new(host: Arc<Mutex<Automation>>) -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(1000);
         Self {
             host,
             active: None,
             agent_token: None,
-            writer: NEXT.fetch_add(1, Ordering::Relaxed),
+            writer: next_writer(),
             closed: false,
         }
     }
@@ -1161,6 +1164,10 @@ impl McpSession {
             .iter()
             .filter_map(|l| l["id"].as_str().map(str::to_owned))
             .collect();
+        self.writer = next_writer();
+        if let Some(id) = project.as_deref() {
+            host.agent_turn(id, self.writer, true)?;
+        }
         self.active = Some(Active {
             project,
             document,
@@ -1192,6 +1199,7 @@ impl McpSession {
             };
             assert_project(&session, &host, &id)?;
             host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
+            host.agent_turn(&id, self.writer, false)?;
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };

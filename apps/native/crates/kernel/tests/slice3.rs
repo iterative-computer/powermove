@@ -1056,3 +1056,38 @@ fn coedit_undo_turn_confirms_and_keeps_user_values() {
     );
     assert_eq!(k.project("p").unwrap().store().revision(), revision);
 }
+
+#[test]
+fn coedit_command_z_during_a_run_skips_agent_steps() {
+    let root = common::TempDir::new("coedit-user-undo");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    call(&mut k, agent, HistoryCall::AgentTurn { active: true });
+    call(
+        &mut k,
+        Caller::native(),
+        Call::Transact {
+            label: Some("Rename".into()),
+            body: vec![Command::SetLayerName {
+                layer_id: "l".into(),
+                name: "Mine".into(),
+            }]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, agent, 70.);
+    let reply = call(&mut k, Caller::native(), HistoryCall::Undo).reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = k.project("p").unwrap().store().root().unwrap().to_value();
+    let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
+    assert_eq!(layer.get("name"), Some(&Value::from("Layer")));
+    assert_eq!(
+        layer.get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(70.))
+    );
+}

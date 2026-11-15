@@ -243,6 +243,10 @@ pub enum HistoryCall {
         after: Selection,
     },
     Mark,
+    /// MCP run lifecycle; no document mutation.
+    AgentTurn {
+        active: bool,
+    },
     Squash {
         mark: ActorHistoryMark,
         label: String,
@@ -684,6 +688,7 @@ pub struct Project {
     mutation_serial: u64,
     mutations: VecDeque<(u64, Writer)>,
     record_writers: HashMap<u64, Writer>,
+    agent_turns: HashSet<Writer>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
@@ -716,6 +721,7 @@ impl Project {
             mutation_serial: 0,
             mutations: VecDeque::new(),
             record_writers: HashMap::new(),
+            agent_turns: HashSet::new(),
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -1422,6 +1428,14 @@ impl Project {
             } else {
                 None
             }),
+            HistoryCall::AgentTurn { active } => {
+                if active {
+                    self.agent_turns.insert(writer);
+                } else {
+                    self.agent_turns.remove(&writer);
+                }
+                Reply::Unit
+            }
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,
@@ -1456,7 +1470,7 @@ impl Project {
                 writer: target,
                 keep_mine,
                 label,
-            } => self.undo_writer(caller, target, keep_mine, &label),
+            } => self.undo_writer(caller, target, keep_mine, &label, None),
             HistoryCall::SquashSegments {
                 mark,
                 label,
@@ -1550,6 +1564,28 @@ impl Project {
                     bytes,
                 )))
             }
+            HistoryCall::Undo if !self.agent_turns.is_empty() => {
+                let record = self.store.history().records()[..self.store.history().applied()]
+                    .iter()
+                    .rev()
+                    .find(|r| {
+                        r.origin == Origin::Interface
+                            && !r.label.starts_with("Undo ")
+                            && self.record_writers.contains_key(&r.id)
+                    });
+                if let Some(record) = record {
+                    let id = record.id;
+                    let label = format!("Undo {}", record.label);
+                    let owner = self
+                        .record_writers
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(caller.writer);
+                    self.undo_writer(caller, owner, false, &label, Some(id))
+                } else {
+                    Reply::Bool(false)
+                }
+            }
             HistoryCall::Undo => return self.step(caller, txid, Direction::Undo),
             HistoryCall::Redo => return self.step(caller, txid, Direction::Redo),
             HistoryCall::UndoIfTop { entry } => {
@@ -1573,6 +1609,7 @@ impl Project {
         target: Writer,
         keep_mine: bool,
         label: &str,
+        only_entry: Option<u64>,
     ) -> Reply {
         if self.entry.is_some() {
             return Reply::Throw(KernelError::Guard(
@@ -1596,7 +1633,9 @@ impl Project {
                         .map_err(|e| e.to_string())?
                         .0;
                 }
-                if self.record_writers.get(&record.id) != Some(&target) {
+                if self.record_writers.get(&record.id) != Some(&target)
+                    || only_entry.is_some_and(|id| id != record.id)
+                {
                     continue;
                 }
                 let forward = record.forward.to_vec();
@@ -1634,6 +1673,11 @@ impl Project {
             return Reply::Throw(KernelError::Guard(error));
         }
         if conflicts > 0 && !keep_mine {
+            if only_entry.is_some() {
+                return Reply::Throw(KernelError::Guard(format!(
+                    "Can't {label} — the agent changed this value since. Stop the agent first."
+                )));
+            }
             return Reply::Workspace(Value::Object(
                 [
                     ("status".into(), Value::from("confirmation_required")),
@@ -1652,7 +1696,11 @@ impl Project {
             true,
         ) {
             Ok((changed, _)) => {
-                self.record_writers.retain(|_, owner| *owner != target);
+                if let Some(id) = only_entry {
+                    self.record_writers.remove(&id);
+                } else {
+                    self.record_writers.retain(|_, owner| *owner != target);
+                }
                 Reply::Applied {
                     revision: self.revision(),
                     changed,
