@@ -10,3 +10,23 @@ test('viewer declarations reject unknown keys, fields and kinds', () => {
     expect(() => validateViewerHandles(def([h]))).toThrow();
   }
 });
+
+import { gradientDeclarations, validateGradientStops } from '../src/viewer-handles';
+import { toLegacyFx } from '../src/frozen/host/glsl';
+import { definitionSnapshots } from '../src/definitions';
+const stops=[{position:0,color:[0,0,0,1]},{position:1,color:[1,1,1,1]}];
+test('gradient stops validate bounds, cardinality and RGBA',()=>{
+ expect(()=>validateGradientStops(stops)).not.toThrow();
+ for(const value of [[],[stops[0]],Array(17).fill(stops[0]),[{position:NaN,color:[0,0,0,1]},stops[1]],[{position:0,color:[0,0,2,1]},stops[1]]]) expect(()=>validateGradientStops(value)).toThrow();
+});
+test('agent shader effects receive named stop uniforms and sampler',()=>{
+ const definition={id:'agentRamp',label:'Agent ramp',group:'Test',params:[{k:'ramp',label:'Ramp',type:'gradientStops',def:stops}],frag:'o=pm_ramp(v_uv.x);'};
+ const shader=toLegacyFx(definition,'#version 300 es\nprecision highp float;\nout vec4 o;\nin vec2 v_uv;').frag;
+ expect(shader).toContain('uniform vec4 u_rampC15;');expect(shader).toContain('vec4 pm_ramp(float t)');
+ expect(shader).toContain('u_rampCount>15.5');expect(shader).not.toContain('uniform float u_ramp;');
+ expect(gradientDeclarations('ramp')).toContain('uniform float u_rampP15');
+ const registry={entries:()=>[{id:'agentRamp',ownerId:'agent',item:definition}]};
+ const empty={entries:()=>[]};
+ const snapshot=definitionSnapshots({effects:registry,transitions:empty,layerTypes:empty});
+ expect(snapshot[0].params).toEqual([{type:'gradientStops',key:'ramp',default:stops}]);
+});

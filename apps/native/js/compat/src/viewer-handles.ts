@@ -1,6 +1,7 @@
 /** Registration-time checks mirror pm-fx-defs::handles. UI declarations stay
  * on the definition; render snapshots do not need them. */
 export function validateViewerHandles(def: any): void {
+  for(const p of def?.params??[]) if(p.type==='gradientStops') validateGradientStops(p.def);
   const handles = def?.viewerHandles;
   if (handles === undefined) return;
   if (!Array.isArray(handles) || handles.length > 32)
@@ -27,4 +28,16 @@ export function validateViewerHandles(def: any): void {
     }
     if (Object.keys(h).some(k => !fields.includes(k))) throw new Error('viewerHandles: unknown field');
   }
+}
+
+export const MAX_GRADIENT_STOPS=16;
+export function gradientDeclarations(key:string):string {
+  let out=`uniform float u_${key}Count;\n`;
+  for(let i=0;i<16;i++) out+=`uniform float u_${key}P${i}; uniform vec4 u_${key}C${i};\n`;
+  out+=`vec4 pm_${key}(float t){vec4 c=u_${key}C0; float p=u_${key}P0;\n`;
+  for(let i=1;i<16;i++) out+=`if(u_${key}Count>${i}.5){if(t<=u_${key}P${i}) return mix(c,u_${key}C${i},clamp((t-p)/max(u_${key}P${i}-p,1e-8),0.,1.));c=u_${key}C${i};p=u_${key}P${i};}\n`;
+  return out+'return c;}\n';
+}
+export function validateGradientStops(stops:any):void {
+  if(!Array.isArray(stops)||stops.length<2||stops.length>16||stops.some(s=>!s||!Number.isFinite(s.position)||s.position<0||s.position>1||!Array.isArray(s.color)||s.color.length!==4||s.color.some((v:any)=>!Number.isFinite(v)||v<0||v>1))) throw new Error('gradientStops: expected 2..16 finite positions and RGBA channels in 0..1');
 }

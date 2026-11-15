@@ -222,3 +222,19 @@ mod tests {
         }
     }
 }
+
+pub const MAX_STOPS:usize=16;
+pub fn validate_stops(raw:&Value)->Result<Vec<Stop>,String> {
+    let stops:Vec<Stop>=serde_json::from_value(raw.clone()).map_err(|e|format!("gradientStops: {e}"))?;
+    if !(2..=MAX_STOPS).contains(&stops.len()) || stops.iter().any(|s| !s.position.is_finite() || !(0. ..=1.).contains(&s.position) || s.color.iter().any(|v| !v.is_finite() || !(0. ..=1.).contains(v))) {
+        return Err("gradientStops: expected 2..16 finite positions and RGBA channels in 0..1".into());
+    } Ok(stops)
+}
+/// Portable scalar uniforms avoid backend-specific uniform-array packing.
+pub fn gradient_glsl(key:&str)->String {
+    let mut out=format!("uniform float u_{key}Count;\n");
+    for i in 0..MAX_STOPS {out+=&format!("uniform float u_{key}P{i}; uniform vec4 u_{key}C{i};\n");}
+    out+=&format!("vec4 pm_{key}(float t) {{ vec4 c=u_{key}C0; float p=u_{key}P0;\n");
+    for i in 1..MAX_STOPS {out+=&format!("if(u_{key}Count>{}.5){{if(t<=u_{key}P{i}) return mix(c,u_{key}C{i},clamp((t-p)/max(u_{key}P{i}-p,1e-8),0.,1.)); c=u_{key}C{i};p=u_{key}P{i};}}\n",i);}
+    out+"return c; }\n"
+}

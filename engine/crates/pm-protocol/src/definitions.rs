@@ -81,6 +81,7 @@ pub enum Layer3dRole {
     tag = "type"
 )]
 pub enum ParamSpec {
+    GradientStops { key: String, default: Vec<GradientStop> },
     Number {
         key: String,
         default: f64,
@@ -99,10 +100,15 @@ pub enum ParamSpec {
     },
 }
 
+/// Straight RGBA, normalized to 0..1, at a normalized ramp position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop { pub position: f64, pub color: [f64;4] }
+
 impl ParamSpec {
     pub fn key(&self) -> &str {
         match self {
-            ParamSpec::Number { key, .. }
+            ParamSpec::GradientStops { key, .. }
+            | ParamSpec::Number { key, .. }
             | ParamSpec::Color { key, .. }
             | ParamSpec::Toggle { key, .. } => key,
         }
@@ -228,6 +234,9 @@ impl Validate for DefinitionSnapshot {
                 ParamSpec::Color { default, .. } => ensure(valid_hex_color(default), C, || {
                     format!("parameter {:?} default must be #rrggbb", param.key())
                 })?,
+                ParamSpec::GradientStops { default, .. } => ensure(
+                    (2..=16).contains(&default.len()) && default.iter().all(|s| s.position.is_finite() && (0. ..=1.).contains(&s.position) && s.color.iter().all(|v| v.is_finite() && (0. ..=1.).contains(v))), C,
+                    || format!("parameter {:?} requires 2..16 finite RGBA stops",param.key()))?,
                 ParamSpec::Toggle { .. } => {}
             }
         }

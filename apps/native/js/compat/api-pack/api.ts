@@ -186,7 +186,9 @@ export type ParameterWidget =
   | { kind: 'ramp'; start: string; end: string; midpoint?: string; mode?: string }
   | { kind: 'point'; x: string; y: string; label?: string; advanced?: boolean };
 
+export interface GradientStop { position: number; color: [number, number, number, number] }
 export type EffectParamDefinition = ParameterPresentation & (
+  | { k: string; label: string; def: GradientStop[]; type: 'gradientStops' }
   | { k: string; label: string; def: number; min: number; max: number; step?: number; unit?: string; type?: 'number' }
   | { k: string; label: string; def: string; type: 'color' }
   | { k: string; label: string; def: boolean; type: 'toggle' });

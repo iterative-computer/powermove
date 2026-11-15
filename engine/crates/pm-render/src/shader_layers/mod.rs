@@ -136,6 +136,7 @@ pub fn mesh_definitions(
                         .iter()
                         .map(|p| {
                             let v = match p {
+                                ParamSpec::GradientStops { default, .. } => pm_model::json::parse(&serde_json::to_string(default).expect("stop defaults")).expect("stop defaults"),
                                 ParamSpec::Number { default, .. } => Value::Number(*default),
                                 ParamSpec::Color { default, .. } => {
                                     Value::String(default.as_str().into())
