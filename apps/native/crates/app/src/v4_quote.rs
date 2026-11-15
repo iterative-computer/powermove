@@ -273,7 +273,7 @@ mod shaped_tests {
                                 ..Default::default()
                             },
                         )]);
-                        Selectable {
+                        div().w_full().min_w(px(0.)).child(Selectable {
                             block: Block {
                                 owner: 10,
                                 offset,
@@ -284,7 +284,7 @@ mod shaped_tests {
                             id,
                             selection: self.selection.clone(),
                             color: gpui::rgb_to_hsla(rgb(0x6699ff)),
-                        }
+                        })
                     }),
                 )
         }
