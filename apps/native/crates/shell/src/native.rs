@@ -1921,14 +1921,6 @@ mod launcher_native;
 use launcher_native::AgentButton;
 impl Host {
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
         let Some(view) = item.view() else {
             return;
         };
@@ -2111,7 +2103,7 @@ impl Host {
                 .position(|i| i.itemIdentifier().to_string() == "agent")
                 .unwrap_or(0);
             self._toolbar
-                .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index as isize);
+                .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index);
         }
         if status.working && !was_working {
             self.agent_presence_generation
@@ -2169,7 +2161,7 @@ impl Host {
                         .iter()
                         .position(|i| i.itemIdentifier().to_string() == "agentPresence")
                     {
-                        toolbar.removeItemAtIndex(index as isize);
+                        toolbar.removeItemAtIndex(index);
                     }
                 });
             let timer = unsafe {

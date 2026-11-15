@@ -583,7 +583,7 @@ impl SurfaceView {
             if !live(id) {
                 pm_mcp::coedit::touch_field(
                     self.runtime.project_id(),
-                    &format!("{}/{}", self.publication.panel, id),
+                    &format!("{}/{}", self.publication.panel, id.0),
                     false,
                 );
             }
@@ -1125,7 +1125,7 @@ impl SurfaceView {
                             if lease.is_some() {
                                 pm_mcp::coedit::touch_field(
                                     this.runtime.project_id(),
-                                    &format!("{}/{}", this.publication.panel, id),
+                                    &format!("{}/{}", this.publication.panel, id.0),
                                     true,
                                 );
                             }
@@ -1149,7 +1149,7 @@ impl SurfaceView {
                         TextEvent::Committed(value) => {
                             pm_mcp::coedit::touch_field(
                                 this.runtime.project_id(),
-                                &format!("{}/{}", this.publication.panel, id),
+                                &format!("{}/{}", this.publication.panel, id.0),
                                 false,
                             );
                             let value = if number {
@@ -1194,7 +1194,7 @@ impl SurfaceView {
                         TextEvent::Cancelled => {
                             pm_mcp::coedit::touch_field(
                                 this.runtime.project_id(),
-                                &format!("{}/{}", this.publication.panel, id),
+                                &format!("{}/{}", this.publication.panel, id.0),
                                 false,
                             );
                             if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
@@ -1244,7 +1244,7 @@ impl SurfaceView {
                 if v.prepared.node(id).is_some_and(|n| n.binding.is_some()) {
                     pm_mcp::coedit::touch_field(
                         v.runtime.project_id(),
-                        &format!("{}/{}", v.publication.panel, id),
+                        &format!("{}/{}", v.publication.panel, id.0),
                         true,
                     );
                 }
@@ -1256,7 +1256,7 @@ impl SurfaceView {
             let subscription = cx.on_blur(focus, window, move |v, _, _| {
                 pm_mcp::coedit::touch_field(
                     v.runtime.project_id(),
-                    &format!("{}/{}", v.publication.panel, id),
+                    &format!("{}/{}", v.publication.panel, id.0),
                     false,
                 );
             });
@@ -4807,7 +4807,7 @@ impl Drop for SurfaceView {
         for id in self.fields.keys() {
             pm_mcp::coedit::touch_field(
                 self.runtime.project_id(),
-                &format!("{}/{}", self.publication.panel, id),
+                &format!("{}/{}", self.publication.panel, id.0),
                 false,
             );
         }

@@ -46,7 +46,7 @@ pub use macos::{
     run_with_device, smoke, tokens,
 };
 #[cfg(target_os = "macos")]
-pub use native::{AgentStatus,
+pub use native::{
     ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     check_view3d, document_subtitle, native_color, one_project_per_window, opens_in_place,
     popover_frame, project_menu_entries, request_close, resize_from_top, send_menu_command,

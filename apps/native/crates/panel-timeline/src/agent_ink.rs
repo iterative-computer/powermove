@@ -214,7 +214,7 @@ impl AgentInk {
                         continue;
                     };
                     let layer = match key_row {
-                        RowId::Layer(id) | RowId::Property { layer_id: id, .. } | RowId::Effect { layer_id: id, .. } => id,
+                        RowId::Layer(id) | RowId::Property { layer_id: id, .. } => id,
                     };
                     if layer != active.event.layer {
                         continue;
