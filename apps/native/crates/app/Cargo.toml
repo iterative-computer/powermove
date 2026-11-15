@@ -127,3 +127,6 @@ gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/
 [[test]]
 name = "composer_keyboard"
 path = "../../vendor/gpui-ce/crates/gpui_macos/src/native_text_keyboard.rs"
+
+[dev-dependencies.pm-panel-inspector]
+path = "../panel-inspector"
