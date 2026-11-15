@@ -1610,7 +1610,7 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
         for publication in rig.runtime.take_publications() {
             let surface = &publication.surface;
             if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.retry.4")) {
-                if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_u64) == Some(1) { revealed.set(true); }
+                if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_f64) == Some(1.0) { revealed.set(true); }
             }
             view.update(cx, |v,cx|v.publish(publication,cx));
         }
