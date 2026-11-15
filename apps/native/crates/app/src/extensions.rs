@@ -1996,11 +1996,13 @@ impl Controller {
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
                 });
-                let _ = host.place_panels(
-                    mine.iter()
-                        .map(|(id, rect)| ((*id).clone(), *rect))
-                        .collect(),
-                );
+                if !(cfg!(debug_assertions)
+                    && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
+                {
+                    let _ = host.place_panels(
+                        mine.iter().map(|(id, rect)| ((*id).clone(), *rect)).collect(),
+                    );
+                }
                 let _ = host.set_regions(regions);
                 let _ = host.set_content_regions(content);
                 host.set_fill(Some(fill));

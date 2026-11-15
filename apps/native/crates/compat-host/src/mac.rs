@@ -1,7 +1,7 @@
 use crate::{contract::Panels, transport, *};
 use block2::DynBlock;
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
     runtime::{Bool, ProtocolObject},
     sel,
@@ -74,6 +74,17 @@ impl StoreDataStores {
         }
     }
 }
+fn snapshot_geometry(source: Rect, target: Rect, height: f64) -> (Rect, Rect) {
+    (
+        Rect::new(target.x, height - target.y - target.h, target.w, target.h),
+        Rect::new(0., target.h - source.h, source.w, source.h),
+    )
+}
+#[derive(Default)]
+struct PanelSnapshot {
+    requested: u64,
+    image: Option<(Rect, Retained<NSImage>)>,
+}
 struct Shared {
     trust: Trust,
     handler: Rc<dyn SyncHandler>,
@@ -86,6 +97,7 @@ struct Shared {
     closed: Cell<bool>,
     layouts: RefCell<BTreeMap<String, (u64, Rect, bool)>>,
     layout_sequence: Cell<u64>,
+    snapshots: RefCell<BTreeMap<String, PanelSnapshot>>,
     canvases: RefCell<crate::canvas::CanvasResources>,
     /// Faces the page may load by key (`font` route).
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
@@ -125,6 +137,7 @@ impl Shared {
             }
             self.ready.set(true);
             self.layouts.borrow_mut().clear();
+            self.snapshots.borrow_mut().clear();
             // Rebuild roots before asking the bridge for a fresh node snapshot.
             let definitions: Vec<_> = self
                 .panels
@@ -153,6 +166,20 @@ impl Shared {
                 .ok_or(Error::InvalidRequest)?;
             if let Some(layout) = self.layouts.borrow_mut().get_mut(id) {
                 if layout.0 == generation {
+                    let painted: Rect = serde_json::from_value(payload["rect"].clone())
+                        .map_err(|_| Error::InvalidGeometry)?;
+                    if !painted.valid()
+                        || [
+                            painted.x - layout.1.x,
+                            painted.y - layout.1.y,
+                            painted.w - layout.1.w,
+                            painted.h - layout.1.h,
+                        ]
+                        .iter()
+                        .any(|d| d.abs() > 0.5)
+                    {
+                        return Ok(Value::Null);
+                    }
                     layout.2 = true;
                     self.geometry_dirty.set(true);
                     self.handler.event(HostEvent::GeometryChanged);
@@ -543,6 +570,18 @@ impl PageView {
     }
 }
 
+// Snapshot overlays never intercept the page's input.
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind=MainThreadOnly]
+    #[name="PMCompatSnapshotView"]
+    #[ivars=()]
+    struct SnapshotView;
+    impl SnapshotView {
+        #[unsafe(method_id(hitTest:))]
+        fn hit(&self, _point: NSPoint) -> Option<Retained<NSView>> { None }
+    }
+);
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
     #[unsafe(super(NSView))]
@@ -627,6 +666,7 @@ pub struct MacDomHost {
     /// The panels' colour under the page (sRGB, 0–1), shown where the
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
+    overlays: BTreeMap<String, (Retained<SnapshotView>, Retained<NSImageView>)>,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -703,6 +743,7 @@ impl MacDomHost {
             closed: Cell::new(false),
             layouts: RefCell::default(),
             layout_sequence: Cell::new(0),
+            snapshots: RefCell::default(),
             canvases: RefCell::new(crate::canvas::CanvasResources::default()),
             fonts: RefCell::default(),
         });
@@ -756,6 +797,7 @@ impl MacDomHost {
             job_count: 0,
             content: None,
             fill: None,
+            overlays: BTreeMap::new(),
         };
         host.load();
         Ok(host)
@@ -1039,9 +1081,119 @@ impl MacDomHost {
         if !changed.is_empty() {
             self.shared
                 .send(json!({"kind":"panel_layout","panel":0,"placements":changed}))?;
-            *self.shared.layouts.borrow_mut() = layouts;
         }
+        *self.shared.layouts.borrow_mut() = layouts;
         Ok(())
+    }
+    /// Cache settled panel pixels. Pending layouts use these pixels at their
+    /// original scale, pinned to the new top-left and clipped by a native layer.
+    fn present_snapshots(&mut self, viewport: Rect) {
+        let layouts = self.shared.layouts.borrow().clone();
+        self.overlays.retain(|id, (view, _)| {
+            let keep = layouts.contains_key(id);
+            if !keep {
+                view.removeFromSuperview();
+            }
+            keep
+        });
+        self.shared
+            .snapshots
+            .borrow_mut()
+            .retain(|id, _| layouts.contains_key(id));
+        for (id, (generation, rect, applied)) in layouts {
+            if applied {
+                if let Some((view, _)) = self.overlays.get(&id) {
+                    view.setHidden(true);
+                }
+                let mut snapshots = self.shared.snapshots.borrow_mut();
+                let snapshot = snapshots.entry(id.clone()).or_default();
+                if snapshot.requested == generation {
+                    continue;
+                }
+                snapshot.requested = generation;
+                drop(snapshots);
+                let shared = self.shared.clone();
+                let configuration =
+                    unsafe { WKSnapshotConfiguration::new(MainThreadMarker::from(&*self.web)) };
+                unsafe {
+                    configuration.setRect(NSRect::new(
+                        NSPoint::new(rect.x, rect.y),
+                        NSSize::new(rect.w, rect.h),
+                    ));
+                }
+                let callback =
+                    block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                        if shared.closed.get() || !error.is_null() {
+                            return;
+                        }
+                        let valid = shared
+                            .layouts
+                            .borrow()
+                            .get(&id)
+                            .is_some_and(|(g, _, applied)| *g == generation && *applied);
+                        if !valid {
+                            return;
+                        }
+                        if let Some(image) = unsafe { image.as_ref() } {
+                            shared
+                                .snapshots
+                                .borrow_mut()
+                                .entry(id.clone())
+                                .or_default()
+                                .image = Some((rect, image.retain()));
+                            shared.geometry_dirty.set(true);
+                            shared.handler.event(HostEvent::GeometryChanged);
+                        }
+                    });
+                unsafe {
+                    self.web.takeSnapshotWithConfiguration_completionHandler(
+                        Some(&configuration),
+                        &callback,
+                    );
+                }
+            } else {
+                let snapshots = self.shared.snapshots.borrow();
+                let Some((source, image)) = snapshots.get(&id).and_then(|s| s.image.as_ref())
+                else {
+                    if let Some((view, _)) = self.overlays.get(&id) {
+                        view.setHidden(true);
+                    }
+                    continue;
+                };
+                let mtm = MainThreadMarker::from(&*self.web);
+                let (view, picture) = self.overlays.entry(id).or_insert_with(|| {
+                    let view: Retained<SnapshotView> =
+                        unsafe { msg_send![super(SnapshotView::alloc(mtm).set_ivars(())), init] };
+                    view.setWantsLayer(true);
+                    if let Some(layer) = view.layer() {
+                        layer.setMasksToBounds(true);
+                    }
+                    let picture = NSImageView::initWithFrame(NSImageView::alloc(mtm), NSRect::ZERO);
+                    picture.setImageScaling(NSImageScaling::ScaleNone);
+                    picture.setImageAlignment(NSImageAlignment::AlignTopLeft);
+                    view.addSubview(&picture);
+                    self.slot.addSubview(&view);
+                    (view, picture)
+                });
+                let (outer, inner) = snapshot_geometry(*source, rect, viewport.h);
+                view.setFrame(NSRect::new(
+                    NSPoint::new(outer.x, outer.y),
+                    NSSize::new(outer.w, outer.h),
+                ));
+                picture.setFrame(NSRect::new(
+                    NSPoint::new(inner.x, inner.y),
+                    NSSize::new(inner.w, inner.h),
+                ));
+                picture.setImage(Some(image));
+                if let Some(layer) = view.layer() {
+                    let [r, g, b, _] = self.fill.unwrap_or([0., 0., 0., 1.]);
+                    layer.setBackgroundColor(Some(
+                        &NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.).CGColor(),
+                    ));
+                }
+                view.setHidden(false);
+            }
+        }
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
@@ -1095,6 +1247,7 @@ impl MacDomHost {
                 None => unsafe { layer.setMask(None) },
             }
         }
+        self.present_snapshots(viewport);
         refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
@@ -1394,9 +1547,26 @@ mod admission_tests {
                 closed: Cell::new(false),
                 layouts: RefCell::default(),
                 layout_sequence: Cell::new(0),
+                snapshots: RefCell::default(),
             },
             handler,
         )
+    }
+    #[test]
+    fn snapshot_moves_and_resizes_pin_text_to_top_left_without_scaling() {
+        let source = Rect::new(50., 100., 300., 200.);
+        for target in [
+            Rect::new(80., 150., 300., 200.),
+            Rect::new(50., 100., 180., 90.),
+            Rect::new(50., 100., 400., 300.),
+        ] {
+            let (outer, inner) = snapshot_geometry(source, target, 900.);
+            assert_eq!(outer.x, target.x);
+            assert_eq!(outer.y + outer.h, 900. - target.y);
+            assert_eq!((outer.w, outer.h), (target.w, target.h));
+            assert_eq!((inner.w, inner.h), (source.w, source.h));
+            assert_eq!(inner.y + inner.h, target.h);
+        }
     }
     #[test]
     fn panel_layout_acknowledgements_ignore_stale_generations() {
@@ -1415,7 +1585,14 @@ mod admission_tests {
         }
         s.handle(
             &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
-            "payload":{"id":"logos","generation":2}})
+            "payload":{"id":"logos","generation":2,"rect":{"x":0,"y":0,"w":200,"h":80}}})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!s.layouts.borrow()["logos"].2);
+        s.handle(
+            &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
+            "payload":{"id":"logos","generation":2,"rect":{"x":0,"y":0,"w":100,"h":80}}})
             .to_string(),
         )
         .unwrap();

@@ -807,6 +807,34 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        // Resolve a review drag from the actual divider, never screen constants.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = cmd.name.strip_prefix("reviewSplitter:") {
+            let parts: Vec<_> = rest.split(':').collect();
+            if let [panel, action, offset] = parts.as_slice()
+                && let Ok(offset) = offset.parse::<f32>()
+                && let Some(placed) = self
+                    .geometry
+                    .panels
+                    .iter()
+                    .find(|p| self.layout.docks[p.dock].groups[p.group].active() == *panel)
+                && let Some(divider) = self
+                    .geometry
+                    .dividers
+                    .iter()
+                    .find(|d| d.dock == placed.dock && d.group == Some(placed.group))
+            {
+                let (x, y) = (
+                    divider.rect.x + divider.rect.w / 2.,
+                    divider.rect.y + divider.rect.h / 2.,
+                );
+                let action = action.to_string();
+                window.defer(cx, move |window, cx| {
+                    crate::macos::review_splitter(&action, x, y, offset, window, cx);
+                });
+            }
+            return;
+        }
         self.slides.armed = true;
         // Development builds: `--open reviewViews` with `--save-dir` writes
         // the window's AppKit view tree there.

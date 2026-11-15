@@ -35,6 +35,7 @@ async function page(events: unknown[]) {
   const calls: any[] = [],
     draws: any[] = [],
     resources: string[] = [];
+  let deliver: ((events: any[]) => void) | undefined;
   let polls = 0,
     decode: (() => void) | undefined;
   const decoded = new Promise<void>((resolve) => {
@@ -75,13 +76,15 @@ async function page(events: unknown[]) {
       return {
         json: async () => ({ generation: 1, seq: events.length, events }),
       };
-    return new Promise(() => {});
+    return new Promise((resolve) => {
+      deliver = (events) => resolve({json: async () => ({generation:1,seq:events.length,events})});
+    });
   };
   dom.window.eval(
     `const PM_HOST_CONFIG={base:'pmcompat://host/synthetic/',generation:1};${built.stdout.toString()}\n${shell}`,
   );
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { dom, calls, draws, resources, decode: decode!, polls: () => polls };
+  return { dom, calls, draws, resources, decode: decode!, deliver: (events: any[]) => deliver!(events), polls: () => polls };
 }
 test("native canvas resource is decoded before release or the next poll", async () => {
   const p = await page([
@@ -105,7 +108,7 @@ test("native canvas resource is decoded before release or the next poll", async 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(p.draws).toEqual([[2, 3, 0, 0]]);
     const release = p.calls.find((c) => c.kind === "canvas_applied");
-    expect(release.payload).toEqual({ resource: 17 });
+    expect(release.payload).toEqual({ resource: 17, failed: false });
     expect(p.calls.findIndex((c) => c.kind === "bitmap-closed")).toBeLessThan(
       p.calls.indexOf(release),
     );
@@ -114,7 +117,7 @@ test("native canvas resource is decoded before release or the next poll", async 
     p.dom.window.close();
   }
 });
-test("a canvas preceding its DOM sequence fails visibly without a false acknowledgement", async () => {
+test("a canvas preceding its DOM sequence waits and releases only after the matching DOM paints", async () => {
   const p = await page([
     { kind: "create", panel: 1 },
     { kind: "batch", panel: 1, batch },
@@ -130,9 +133,17 @@ test("a canvas preceding its DOM sequence fails visibly without a false acknowle
   ]);
   try {
     expect(p.resources).toEqual([]);
-    expect(p.calls.some((c) => c.kind === "failure")).toBe(true);
+    expect(p.calls.some((c) => c.kind === "failure")).toBe(false);
     expect(p.calls.some((c) => c.kind === "canvas_applied")).toBe(false);
     expect(p.draws).toEqual([]);
+    p.deliver([{kind:"batch",panel:1,batch:{...batch,seq:2,ops:[]}}]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(p.resources).toEqual(["pmcompat://host/synthetic/canvas?q=17"]);
+    expect(p.calls.some((c) => c.kind === "canvas_applied")).toBe(false);
+    p.decode();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(p.draws).toEqual([[2,3,0,0]]);
+    expect(p.calls.find((c) => c.kind === "canvas_applied").payload).toEqual({resource:17,failed:false});
   } finally {
     p.dom.window.close();
   }
