@@ -2231,3 +2231,88 @@ fn choosing_another_listed_model_sends_it() {
     assert_eq!(model.requests()[0]["body"]["model"], "other-model");
     panel.panels.close();
 }
+
+#[test]
+fn send_latency_status_never_waits_for_provider_or_storage_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Go");
+    let agent = panel.agent();
+    let cached = panel.panels.agent_status();
+    // Reproduce the old UI stack: drain_builtins -> agent_status ->
+    // agent_state/backend lock -> AgentState lock. Worker I/O owns this lock.
+    let hold = |probe: &dyn Fn()| {
+        let (ready, received) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = agent.lock().unwrap();
+                ready.send(()).unwrap();
+                thread::sleep(Duration::from_millis(24));
+            });
+            received.recv().unwrap();
+            let start = Instant::now();
+            probe();
+            start.elapsed()
+        })
+    };
+    let before = hold(&|| {
+        drop(agent.lock().unwrap());
+    });
+    let after = hold(&|| {
+        assert_eq!(panel.panels.agent_status(), cached);
+    });
+    eprintln!(
+        "send_latency blocking_status_before_ms={:.3} cached_status_after_ms={:.3} stack=drain_builtins/agent_status/AgentState::lock",
+        before.as_secs_f64() * 1000.,
+        after.as_secs_f64() * 1000.
+    );
+    assert!(before >= Duration::from_millis(8));
+    assert!(after < Duration::from_millis(8));
+    // Backend is also held during prompt assembly/admission, before AgentState.
+    let backend = panel
+        .panels
+        .broker
+        .entry("agent")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    {
+        let _held = backend.lock().unwrap();
+        let start = Instant::now();
+        assert_eq!(panel.panels.agent_status(), cached);
+        assert!(start.elapsed() < Duration::from_millis(8));
+    }
+    let mut worst = Duration::ZERO;
+    for _ in 0..12 {
+        let start = Instant::now();
+        panel.panels.agent_status();
+        worst = worst.max(start.elapsed());
+        thread::sleep(Duration::from_millis(16));
+    }
+    // Composer input still reaches the controller during the token stream.
+    panel.type_text("Next idea");
+    let thread = thread_id(&agent);
+    assert_eq!(
+        agent
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .draft
+            .text(),
+        "Next idea"
+    );
+    eprintln!(
+        "send_latency streaming_frames=12 worst_status_ms={:.3}",
+        worst.as_secs_f64() * 1000.
+    );
+    assert!(worst < Duration::from_millis(8));
+    panel.click("agent-stop");
+    panel.wait(idle);
+    panel.panels.close();
+}
