@@ -10,7 +10,7 @@
 //!   on pointer-down; a gliding selection keeps its velocity when retargeted.
 //! - The cursor stays an arrow. Focus rings are neutral and keyboard-only.
 use crate::{
-    motion::{Glide, Motion, animate},
+    motion::{Motion, animate},
     symbol::{Weight, rasterize},
     text::TextField,
 };
@@ -94,7 +94,6 @@ pub enum Item<'a> {
     Symbol(&'a str, &'a str),
     Title(&'a str),
 }
-type Select = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Reports a control (by key) hovered or left.
 type Hover = Rc<dyn Fn(u64, bool, &mut App)>;
 
@@ -103,7 +102,6 @@ pub struct Kit {
     pub t: Tokens,
     scale: f32,
     washes: HashMap<u64, f32>,
-    glides: Rc<RefCell<HashMap<u64, Glide>>>,
     values: Rc<RefCell<HashMap<u64, Animated<1>>>>,
     hover: Hover,
 }
@@ -122,7 +120,6 @@ impl Kit {
             t: t.clone(),
             scale: window.scale_factor(),
             washes: motion.washes(),
-            glides: motion.glides.clone(),
             values: motion.values.clone(),
             hover: Rc::new(move |key, hovered, cx| {
                 let _ = weak.update(cx, |view, cx| {
@@ -299,148 +296,6 @@ impl Kit {
             self.wash(d, k, m.control_radius)
         };
         self.focusable(d)
-    }
-    /// Segments in a soft pill track; the raised selection glides between
-    /// them. `flat` draws quiet text tabs instead: no track, a neutral fill.
-    pub fn segmented(
-        &self,
-        group: &str,
-        items: &[Item],
-        selected: usize,
-        flat: bool,
-        select: impl Fn(usize, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
-        let t = &self.t;
-        let (c, m, tr) = (&t.colors, &t.metrics, t.translucency);
-        let (group_key, select): (u64, Select) = (key(group), Rc::new(select));
-        let item_key = |i: usize| key(&format!("{group}:{i}"));
-        let travelling = self
-            .glides
-            .borrow()
-            .get(&group_key)
-            .is_some_and(|g| g.travelling(item_key(selected)));
-        let (inset, radius, height) = if flat {
-            (0., m.control_radius, m.tab)
-        } else {
-            (
-                m.pill_inset,
-                m.segment_radius,
-                m.control - 2. * m.pill_inset,
-            )
-        };
-        let on_fill = if flat {
-            ink(c.text, tr.selected)
-        } else {
-            rgb(c.raised)
-        };
-        let on_shadow = if flat {
-            vec![]
-        } else {
-            shadows(t, Elevation::Raised)
-        };
-        // The glider: drawn under the labels while the selection travels.
-        let glider = {
-            let (glides, shadow) = (self.glides.clone(), on_shadow.clone());
-            canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    let Some(bounds) = glides.borrow().get(&group_key).and_then(Glide::bounds)
-                    else {
-                        return;
-                    };
-                    if travelling {
-                        let corners = Corners::all(px(radius));
-                        window.paint_drop_shadows(bounds, corners, 0., &shadow);
-                        window.paint_quad(
-                            PaintQuad::new(bounds)
-                                .background(on_fill)
-                                .corner_radii(corners),
-                        );
-                        window.request_animation_frame();
-                    }
-                },
-            )
-            .absolute()
-            .size_full()
-        };
-        let mut track = div()
-            .id(SharedString::from(group.to_string()))
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(if flat { t.space.hair } else { inset }))
-            .role(Role::RadioGroup)
-            .when(!flat, |d| {
-                d.h(px(m.control))
-                    .p(px(inset))
-                    .rounded(px(m.pill_radius))
-                    .bg(ink(c.text, tr.hover))
-            })
-            .child(glider);
-        for (i, item) in items.iter().enumerate() {
-            let on = i == selected;
-            let k = item_key(i);
-            let fg = if on { c.text } else { c.muted };
-            let (label, content): (SharedString, AnyElement) = match *item {
-                Item::Symbol(symbol, label) => (
-                    label.to_string().into(),
-                    self.symbol(symbol, m.symbol_panel, Weight::Regular, fg),
-                ),
-                Item::Title(title) => (
-                    title.to_string().into(),
-                    div().child(title.to_string()).into_any_element(),
-                ),
-            };
-            let select = select.clone();
-            let mut seg = div()
-                .id(SharedString::from(format!("{group}:{i}")))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .h(px(height))
-                .rounded(px(radius))
-                .text_role(t, Text::Label)
-                .text_color(rgb(fg))
-                .role(Role::RadioButton)
-                .aria_label(label.clone())
-                .aria_selected(on)
-                .when(matches!(item, Item::Symbol(..)), |d| {
-                    d.w(px(height + t.space.xs)).tooltip(tooltip(t, label))
-                })
-                .when(matches!(item, Item::Title(_)), |d| {
-                    d.px(px(t.space.md + 2.))
-                })
-                .when(on && !travelling, |d| {
-                    d.bg(on_fill).shadow(on_shadow.clone())
-                })
-                .child(content)
-                .on_click(move |_, window, cx| select(i, window, cx));
-            if on {
-                // The selected item reports where the glider rests or is going.
-                let (glides, tokens) = (self.glides.clone(), t.clone());
-                seg = seg.relative().child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            let mut glides = glides.borrow_mut();
-                            let glide = glides.entry(group_key).or_default();
-                            glide.to(k, bounds, &tokens);
-                            if glide.travelling(k) {
-                                window.request_animation_frame();
-                            }
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
-                );
-            } else {
-                seg = self.wash(seg, k, radius);
-            }
-            track = track.child(self.focusable(seg));
-        }
-        track
     }
     /// A search field: a soft fill with no edge, a magnifier, the native
     /// field, and a right-aligned shortcut hint.
