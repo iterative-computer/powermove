@@ -37,6 +37,7 @@ impl Gesture {
 pub struct Editor {
     pub integration: Option<Rc<dyn crate::integration::Integration>>,
     pub layout: Layout,
+    agent_build_slots: HashMap<String, (serde_json::Value, f32)>,
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
@@ -120,6 +121,7 @@ impl Editor {
         let layout = workspace::layout(&record);
         let project = "shell-untitled".to_string();
         Self {
+            agent_build_slots: HashMap::new(),
             integration: None,
             layout,
             tokens,
@@ -1472,6 +1474,21 @@ impl Editor {
         let name = workspace::record_name(&self.record);
         serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
     }
+    pub fn reserve_agent_panel(&mut self, id: &str, placement: &serde_json::Value, height: f32) -> serde_json::Value {
+        let used = layout::reserve_build(&mut self.layout, id, placement, height);
+        self.agent_build_slots.insert(id.into(), (used.clone(), height));
+        used
+    }
+    pub fn release_agent_panel(&mut self, id: &str) {
+        self.agent_build_slots.remove(id);
+        layout::remove_build(&mut self.layout, id);
+    }
+    /// Persist the final id in exactly the pre-reserved build geometry.
+    pub fn commit_agent_panel_layout(&mut self, cx: &mut Context<Self>) {
+        let record = workspace::write(&self.layout, &self.record);
+        self.commit(record);
+        cx.notify();
+    }
     /// set_panel_layout: `docks` become a new workspace (a copy of this one,
     /// named `name`, or `name 2`… when taken) that this window shows and new
     /// projects start with. Returns its id and name.
@@ -1851,6 +1868,11 @@ impl Render for Editor {
             self.bind_project(id);
         }
         self.sync_workspaces(cx);
+        for (id, (placement, height)) in &self.agent_build_slots {
+            if !self.layout.open_panels().contains(&id.as_str()) {
+                layout::reserve_build(&mut self.layout, id, placement, *height);
+            }
+        }
         let t = self.tokens.clone();
         let m = t.metrics;
         let c = t.colors.clone();
