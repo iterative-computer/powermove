@@ -37,6 +37,12 @@ pub fn register(key: &str, path: PathBuf) {
 pub fn resolve(key: &str) -> Option<PathBuf> {
     registry().lock().ok()?.get(key).cloned()
 }
+/// Drops a key [`register`] made (its picture is gone).
+pub fn forget(key: &str) {
+    if let Ok(mut keys) = registry().lock() {
+        keys.remove(key);
+    }
+}
 
 /// What a thumbnail is made from.
 #[derive(Clone, Debug, PartialEq)]

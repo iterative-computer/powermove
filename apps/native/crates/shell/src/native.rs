@@ -426,8 +426,11 @@ pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
 /// frame is set on a later turn of the run loop, because a view asks for
 /// this while its window is being drawn and resizing calls back into it.
 pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
-    else {
+    // A window with no AppKit view (a headless test's) has no frame to set.
+    let Ok(handle) = HasWindowHandle::window_handle(w) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         return;
     };
     let view: Retained<NSView> =
