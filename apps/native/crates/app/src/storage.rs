@@ -208,6 +208,16 @@ pub(crate) struct Original {
     /// Its extensions: new or changed since they were brought in, and all
     /// it has. `None` when its extension folder couldn't be read.
     pub extensions: Option<(usize, usize)>,
+    /// Work it has that this library hasn't brought in. `None` when its
+    /// library never came in here.
+    pub recent: Option<RecentWork>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RecentWork {
+    pub newer: bool,
+    /// Set for the next launch.
+    pub requested: bool,
+    pub failure: Option<pm_first_launch::later::Failure>,
 }
 pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
     let library = sum(&children(
@@ -256,6 +266,19 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
             .ok()
             .filter(|scan| scan.source_issue.is_none())
             .map(|scan| (scan.new + scan.changed, scan.found)),
+            // Metadata only: the original app's stamp, never a copy.
+            recent: pm_first_launch::later::migrated(native).then(|| {
+                use pm_first_launch::later;
+                RecentWork {
+                    newer: later::newer_work(&pm_first_launch::Config {
+                        electron_profile: root.to_owned(),
+                        native_profile: native.to_owned(),
+                    })
+                    .unwrap_or(false),
+                    requested: later::requested(native),
+                    failure: later::last_failure(native),
+                }
+            }),
         }
     });
     Report {
@@ -363,6 +386,9 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
             "detail":"Every extension from the original app is here. New ones you add there show up here to bring in."})),
         _ => {}
     }
+    if let Some(recent) = &original.recent {
+        rows.push(recent_row(recent));
+    }
     let adopting = *ADOPTING.lock().unwrap();
     if original.linked_items > 0 || adopting.is_some() {
         let (value, detail) = match adopting {
@@ -420,6 +446,32 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
     rows
 }
 
+/// Bring In Recent Work…: what the original app changed after its library
+/// came in here. Never automatic: Powermove restarts to bring it in.
+fn recent_row(recent: &RecentWork) -> Value {
+    let value = if recent.requested {
+        "At next launch"
+    } else if recent.newer {
+        "Newer work there"
+    } else {
+        "Up to date"
+    };
+    let mut detail = "Projects and settings you changed in the original app after they came in here. Powermove restarts to bring them in. The original app stays unchanged.".to_owned();
+    if let Some(failure) = &recent.failure {
+        detail.push_str(&match failure.low_disk {
+            Some(l) => format!(
+                " The last try stopped: it needs {} free on this Mac, and there was {}.",
+                bytes(l.needed),
+                bytes(l.available)
+            ),
+            None => format!(" The last try stopped: {}", failure.reason),
+        });
+    }
+    json!({"id":"storage.original.recent","section":"storage","group":"Original App",
+        "label":"Recent Work","control":"action","action":"storage.recent_work",
+        "actionLabel":"Bring In Recent Work…","value":value,"detail":detail,
+        "disabled":!recent.newer || recent.requested})
+}
 impl crate::session::Controller {
     /// Measures both folders again off the main thread; Settings redraws.
     pub(crate) fn refresh_storage(&self, cx: &mut gpui::Context<Self>) {
@@ -462,6 +514,10 @@ impl crate::session::Controller {
             }
             "storage.adopt" => self.confirm_adopt(cx),
             "storage.extensions" => self.bring_in_extensions(cx),
+            "storage.recent_work" => {
+                let window = self.settings_window(cx);
+                self.bring_in_recent_work(window, cx);
+            }
             _ => {
                 if let Some(id) = action.strip_prefix("storage.delete.") {
                     self.confirm_storage_delete(id, cx);
@@ -642,6 +698,7 @@ mod tests {
                 linked_items: 1161,
                 linked_bytes: 20_028_248_489,
                 extensions: Some((45, 46)),
+                recent: None,
             }),
             ..Report::default()
         });
@@ -695,6 +752,47 @@ mod tests {
         }
         *ADOPTING.lock().unwrap() = None;
         *LATEST.lock().unwrap() = None;
+    }
+    #[test]
+    fn recent_work_is_offered_only_when_there_is_some_and_says_why_it_stopped() {
+        let row = recent_row(&RecentWork {
+            newer: true,
+            ..Default::default()
+        });
+        assert_eq!(row["action"], "storage.recent_work");
+        assert_eq!(row["actionLabel"], "Bring In Recent Work…");
+        assert_eq!(row["value"], "Newer work there");
+        assert_eq!(row["disabled"], false);
+        let up_to_date = recent_row(&RecentWork::default());
+        assert_eq!(up_to_date["value"], "Up to date");
+        assert_eq!(up_to_date["disabled"], true);
+        let stopped = recent_row(&RecentWork {
+            newer: true,
+            failure: Some(pm_first_launch::later::Failure {
+                at_ms: 1,
+                reason: "There wasn’t enough free space on this Mac.".into(),
+                low_disk: Some(pm_first_launch::later::LowDiskRecord {
+                    needed: 8_000_000_000,
+                    available: 6_000_000_000,
+                }),
+                capture: None,
+            }),
+            ..Default::default()
+        });
+        assert!(
+            stopped["detail"]
+                .as_str()
+                .unwrap()
+                .contains("it needs 8.0 GB free on this Mac, and there was 6.0 GB")
+        );
+        assert_eq!(stopped["disabled"], false);
+        let asked = recent_row(&RecentWork {
+            newer: true,
+            requested: true,
+            failure: None,
+        });
+        assert_eq!(asked["value"], "At next launch");
+        assert_eq!(asked["disabled"], true);
     }
     #[test]
     fn leftover_media_is_only_what_no_index_record_names() {

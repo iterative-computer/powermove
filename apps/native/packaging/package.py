@@ -175,6 +175,17 @@ def bundle(executable, destination, channel, version, build, update_config,
         if not source.is_file():
             raise ValueError(f"{helper} is missing at {source}")
         shutil.copy2(native_file(source), contents / "MacOS" / helper)
+    # The media service resolves these beside the main executable. Their
+    # build-tree rpath points at ../lib; distribution dylibs live in Frameworks.
+    ffmpeg_dir = Path(os.environ.get("PM_FFMPEG_DIR",
+        Path.home() / "Library/Caches/powermove-engine/ffmpeg/out"))
+    for tool in ("ffmpeg", "ffprobe"):
+        target = contents / "MacOS" / tool
+        shutil.copy2(native_file(ffmpeg_dir / "bin" / tool), target)
+        if compile_assets:
+            run(["install_name_tool", "-rpath", "@executable_path/../lib",
+                 "@executable_path/../Frameworks", target])
+    # sign() discovers both Mach-O tools and signs them with the other helpers.
     # The layout provider discovery reads: <name>/bin/<name> under Resources.
     if claude_runtime:
         (resources / "claude" / "bin").mkdir(parents=True)

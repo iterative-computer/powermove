@@ -5,7 +5,7 @@
 //! the app is inactive waits for activation instead of ordering its window
 //! front. Runs on the main thread with activation prohibited; the only
 //! windows it orders in stand far off screen.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn main() {
     use gpui_macos::child_window::{
         apply, attach, follows_policy, forget, forget_sheet, forget_sheets_on,
@@ -403,5 +403,7 @@ fn main() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
-fn main() {}
+#[cfg(not(all(target_os = "macos", debug_assertions)))]
+fn main() {
+    println!("child_windows: skipped; development-lane sheet controls require debug assertions");
+}

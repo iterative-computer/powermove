@@ -3,6 +3,7 @@ use crate::{Result, fields, invalid};
 use pm_kernel::{Command, Published, QueryMirror, Scene3dCommand};
 use pm_scene3d::{
     from_model,
+    navigation::{Vec3, sub},
     schema::{self, Role},
     to_model,
 };
@@ -185,6 +186,177 @@ pub(crate) fn screen_options(p: &Published, target: &str) -> Result<Vec<Value>> 
         out.push(json!({"v":id,"label":comp["name"].as_str().unwrap_or(""),"disabled":disabled,"detail":if disabled {Some("A composition can’t play inside itself.")}else{None}}));
     }
     Ok(out)
+}
+/// The camera's channels at `time`, in its parent's space: position and
+/// rotation (x, y, z) from the layer, its point of interest from its data.
+fn camera_channels(p: &Published, time: f64, l: &Value) -> Result<(Vec3, Vec3, Vec3)> {
+    let comp = composition(p)?;
+    let index = comp["layers"]
+        .as_array()
+        .and_then(|ls| ls.iter().position(|x| x["id"] == l["id"]))
+        .ok_or_else(|| invalid("Camera not in the composition"))?;
+    let open = p.snapshot.open_comp();
+    let id = l["id"].as_str().unwrap_or_default();
+    let mut mirror = QueryMirror::new(p);
+    let mut layer = |key: &str| -> Result<f64> {
+        mirror
+            .queries()
+            .evaluate(None, id, key, time)
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| invalid("Unreadable camera channel"))
+    };
+    let position = [
+        layer("position.x")?,
+        layer("position.y")?,
+        layer("position.z")?,
+    ];
+    let rotation = [
+        layer("rotation.x")?,
+        layer("rotation.y")?,
+        layer("rotation")?,
+    ];
+    let mut mirror = QueryMirror::new(p);
+    let mut data = |key: &str| -> Result<f64> {
+        let q = json!({"op":"evP","comp":open,"open":open,"layer":index,"t":time,
+            "key":format!("camera.{key}"),"prop":l["d"]["data"]["camera"]["p"][key]});
+        mirror
+            .queries()
+            .query(&to_model(&q))
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| invalid("Unreadable point of interest"))
+    };
+    let target = [data("targetX")?, data("targetY")?, data("targetZ")?];
+    Ok((position, rotation, target))
+}
+/// The camera's view direction for rotation (x, y) in degrees: −Z turned by
+/// Rx then Ry, the order the evaluator composes them (Rz rolls only).
+pub(crate) fn camera_forward(rotation: Vec3) -> Vec3 {
+    let (a, b) = (rotation[0].to_radians(), rotation[1].to_radians());
+    [-a.cos() * b.sin(), a.sin(), -a.cos() * b.cos()]
+}
+/// The rotation (x, y, 0) whose view direction is `forward`.
+pub(crate) fn camera_rotation(forward: Vec3) -> Vec3 {
+    let l = (forward[0].powi(2) + forward[1].powi(2) + forward[2].powi(2)).sqrt();
+    let f = forward.map(|v| v / l.max(1e-12));
+    [
+        f[1].clamp(-1., 1.).asin().to_degrees(),
+        (-f[0]).atan2(-f[2]).to_degrees(),
+        0.,
+    ]
+}
+/// Switches a camera between aiming at its point of interest (two-node) and
+/// Auto-Orient Off (one-node), keeping the view exactly where it is: Off
+/// writes the rotation that looks where the point of interest was; back on
+/// puts the point of interest straight ahead at the same distance and clears
+/// the rotation. Channels are set at `time`, as any Properties edit.
+fn auto_orient(p: &Published, time: f64, l: &Value, id: &str, off: bool) -> Result<Vec<Command>> {
+    let was_off = l["d"]["data"]["camera"]["autoOrient"] == "off";
+    let mut commands = vec![];
+    if off != was_off {
+        let (position, rotation, target) = camera_channels(p, time, l)?;
+        let d = (0..3)
+            .map(|i| (target[i] - position[i]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let set = |path: &str, v: f64| -> Command {
+            let mut set = pm_kernel::commands::properties::SetProperty::new(
+                id,
+                path,
+                to_model(&json!(v)),
+                time,
+            );
+            // A deliberate overwrite (as a gizmo drag is): the conversion
+            // replaces values the person set by hand.
+            set.preserve_hand_edits = false;
+            set.mark_intent = true;
+            pm_kernel::PropertyCommand::Set(set).into()
+        };
+        if off {
+            let r = camera_rotation(sub(target, position));
+            for (path, v) in [
+                ("rotation.x", r[0]),
+                ("rotation.y", r[1]),
+                ("rotation", rotation[2]),
+            ] {
+                commands.push(set(path, v));
+            }
+        } else {
+            let f = camera_forward(rotation);
+            let d = if d > 1e-6 { d } else { 10. };
+            for (i, key) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
+                commands.push(set(&format!("camera.{key}"), position[i] + f[i] * d));
+            }
+            for path in ["rotation.x", "rotation.y"] {
+                commands.push(set(path, 0.));
+            }
+        }
+    }
+    commands.push(scene(
+        p,
+        time,
+        json!({"operation":"set_camera","target":id,"patch":{"autoOrient":if off {"off"} else {"target"}}}),
+    ));
+    Ok(commands)
+}
+/// The commands that store a flight (Fly navigation through the shot camera)
+/// on the active camera, as one Undo: the camera moves by the flight, and
+/// with Auto-Orient Off its rotation takes the flown heading and pitch (its
+/// roll stays); aiming at a point of interest, that point moves so the
+/// camera looks where the flight ended. `from` and `to` are world poses;
+/// the camera's channels change by the same amounts, as a gizmo drag does.
+pub fn fly_camera(
+    p: &Published,
+    time: f64,
+    from: pm_scene3d::navigation::Pose,
+    to: pm_scene3d::navigation::Pose,
+) -> Result<(String, Vec<Command>)> {
+    let comp = composition(p)?;
+    let l = comp["layers"]
+        .as_array()
+        .and_then(|ls| {
+            ls.iter()
+                .find(|l| schema::role(l) == Some(Role::Camera) && l["on"] != false)
+        })
+        .cloned()
+        .ok_or_else(|| invalid("This composition has no camera"))?;
+    if l["lock"] == true {
+        return Err(invalid("The camera is locked"));
+    }
+    let id = l["id"]
+        .as_str()
+        .ok_or_else(|| invalid("Missing camera ID"))?;
+    let (position, rotation, target) = camera_channels(p, time, &l)?;
+    let set = |path: &str, v: f64| -> Command {
+        let mut set =
+            pm_kernel::commands::properties::SetProperty::new(id, path, to_model(&json!(v)), time);
+        set.preserve_hand_edits = false;
+        set.mark_intent = true;
+        pm_kernel::PropertyCommand::Set(set).into()
+    };
+    let moved = sub(to.position, from.position);
+    let mut commands = vec![];
+    for (i, path) in ["position.x", "position.y", "position.z"]
+        .iter()
+        .enumerate()
+    {
+        commands.push(set(path, position[i] + moved[i]));
+    }
+    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
+        let r = camera_rotation(sub(to.target, to.position));
+        commands.push(set("rotation.x", r[0]));
+        commands.push(set("rotation.y", r[1]));
+        let _ = rotation;
+    } else {
+        let aimed = sub(to.target, from.target);
+        for (i, key) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
+            commands.push(set(&format!("camera.{key}"), target[i] + aimed[i]));
+        }
+    }
+    Ok(("Fly Camera".into(), commands))
 }
 fn scene(p: &Published, time: f64, args: Value) -> Command {
     Scene3dCommand::Apply {
@@ -490,6 +662,14 @@ pub(crate) fn commands(
             }
             patch["castShadow"] = arg;
             ("update_light", "Cast Shadows")
+        }
+        (Role::Camera, "autoOrient") => {
+            let off = match arg.as_str() {
+                Some("off") => true,
+                Some("target") => false,
+                _ => return Err(invalid("Invalid Auto-Orient")),
+            };
+            return Ok(("Auto-Orient".into(), auto_orient(p, time, &l, target, off)?));
         }
         (Role::Camera, "projection") => {
             if !["perspective", "orthographic"].iter().any(|k| arg == *k) {

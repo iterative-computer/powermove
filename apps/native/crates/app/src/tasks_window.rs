@@ -6,17 +6,22 @@
 use crate::pro_media::{ProMedia, TaskAction};
 use gpui::{prelude::*, *};
 use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, Task, TaskProgress, TaskState};
-use pm_shell::tokens;
+use pm_shell::{
+    kit::{Kit, Recipes},
+    motion::Motion,
+    tokens,
+};
 use std::sync::{Arc, Mutex};
 
 pub struct TasksWindow {
+    motion: Motion<u64>,
     pro: Arc<ProMedia>,
     exports: Arc<Mutex<BackgroundTasks>>,
 }
 
 pub const TITLE: &str = "Background Tasks";
 const EMPTY_TITLE: &str = "No Background Tasks";
-const EMPTY_LINE: &str = "Exports, renders and proxy media appear here.";
+const EMPTY_LINE: &str = "Exports and media optimisation appear here.";
 /// Priority choices on a task's context menu.
 const PRIORITIES: [(&str, i32); 3] = [("High", 10), ("Normal", 0), ("Low", -10)];
 
@@ -68,6 +73,9 @@ pub fn detail(task: &Task) -> String {
 }
 
 impl TasksWindow {
+    fn motion(&mut self) -> &mut Motion<u64> {
+        &mut self.motion
+    }
     /// Media tasks act through the service. Every other row is cancelled by
     /// kind and task id, never "whichever job this window has": a Render
     /// Selection row asks its task to stop (its follower stops the child); an
@@ -97,6 +105,7 @@ impl TasksWindow {
     fn row(
         &self,
         task: &Task,
+        kit: &Kit,
         media: bool,
         window_rows: &mut Vec<AnyElement>,
         cx: &mut Context<Self>,
@@ -114,17 +123,23 @@ impl TasksWindow {
         };
         let button =
             |label: &'static str, enabled: bool, action: TaskAction, cx: &mut Context<Self>| {
-                div()
-                    .id(SharedString::from(format!("{label}-{}-{}", media, id.0)))
-                    .px(px(m.gap))
-                    .text_color(rgb(if enabled { c.accent_text } else { c.muted }))
-                    .when(enabled, |d| {
-                        d.on_click(cx.listener(move |v, _, _, cx| {
-                            v.act(media, id, action);
-                            cx.notify();
-                        }))
-                    })
-                    .child(label)
+                kit.icon_button(
+                    format!("{label}-{}-{}", media, id.0),
+                    match action {
+                        TaskAction::Resume => "play.circle",
+                        TaskAction::Pause => "pause.circle",
+                        _ => "xmark.circle.fill",
+                    },
+                    label,
+                    false,
+                )
+                .when(!enabled, |d| kit.disabled(d))
+                .when(enabled, |d| {
+                    d.on_click(cx.listener(move |v, _, _, cx| {
+                        v.act(media, id, action);
+                        cx.notify();
+                    }))
+                })
             };
         let mut trailing = div().flex().flex_none().gap(px(m.gap));
         if media && let Some(label) = p.pause_resume_label {
@@ -166,6 +181,19 @@ impl TasksWindow {
                     }),
                 )
             })
+            .child(kit.symbol(
+                if matches!(
+                    task.kind,
+                    pm_promedia::tasks::TaskKind::Export | pm_promedia::tasks::TaskKind::Render
+                ) {
+                    "film"
+                } else {
+                    "bolt.horizontal"
+                },
+                m.symbol_panel,
+                pm_shell::symbol::Weight::Regular,
+                c.secondary,
+            ))
             .child(
                 div()
                     .flex()
@@ -176,33 +204,17 @@ impl TasksWindow {
                     .child(div().truncate().child(if p.title.is_empty() {
                         p.kind_label.to_owned()
                     } else {
-                        format!("{} · {}", p.kind_label, p.title)
+                        p.title.to_owned()
                     }))
-                    .when_some(share, |d, share| {
-                        d.child(
-                            div()
-                                .h(px(m.border * 3.))
-                                .w_full()
-                                .rounded(px(m.border * 1.5))
-                                .bg(rgb(c.separator))
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(share.clamp(0., 1.)))
-                                        .rounded(px(m.border * 1.5))
-                                        .bg(rgb(c.accent)),
-                                ),
-                        )
-                    })
+                    .when(!task.state.terminal(), |d| d.child(kit.progress(share)))
                     .child(
                         div()
-                            .text_size(px(t.typography.minimum))
+                            .text_role(&t, pm_design::Text::Caption)
                             .text_color(rgb(if failed { c.danger } else { c.secondary }))
                             .child(
                                 media
                                     .then(|| self.pro.waiting(id))
                                     .flatten()
-                                    .map(str::to_owned)
                                     .unwrap_or_else(|| detail(task)),
                             ),
                     ),
@@ -213,41 +225,34 @@ impl TasksWindow {
 }
 
 impl Render for TasksWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
         let t = tokens();
-        let (c, m) = (&t.colors, &t.metrics);
-        let mut body = div()
+        let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
+        let exports = self.exports.lock().unwrap().all();
+        let media = self.pro.snapshot();
+        let mut rows = Vec::new();
+        for task in &exports {
+            self.row(task, &kit, false, &mut rows, cx);
+        }
+        for task in &media {
+            self.row(task, &kit, true, &mut rows, cx);
+        }
+        let body = div()
             .id("background-tasks")
             .size_full()
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .p(px(m.inset))
-            .bg(rgb(c.panel))
-            .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
-            .font_family(pm_design::TEXT_FONT);
-        let exports = self.exports.lock().unwrap().all();
-        let media = self.pro.snapshot();
-        let mut rows = Vec::new();
-        for task in &exports {
-            self.row(task, false, &mut rows, cx);
-        }
-        for task in &media {
-            self.row(task, true, &mut rows, cx);
-        }
-        if rows.is_empty() {
-            return body
-                .items_center()
-                .justify_center()
-                .gap(px(m.gap))
-                .child(div().text_size(px(t.typography.title)).child(EMPTY_TITLE))
-                .child(div().text_color(rgb(c.secondary)).child(EMPTY_LINE));
-        }
-        for row in rows {
-            body = body.child(row);
-        }
-        body
+            .when(rows.is_empty(), |d| {
+                d.items_center().justify_center().child(kit.empty_state(
+                    "checkmark.circle",
+                    EMPTY_TITLE,
+                    EMPTY_LINE,
+                ))
+            })
+            .children(rows);
+        kit.utility_window(TITLE, None, vec![], body.into_any_element(), vec![])
     }
 }
 
@@ -297,7 +302,11 @@ impl crate::session::Controller {
                         }
                     })
                     .detach();
-                    TasksWindow { pro, exports }
+                    TasksWindow {
+                        motion: Motion::default(),
+                        pro,
+                        exports,
+                    }
                 });
                 entity = Some(view.clone());
                 view
@@ -341,5 +350,46 @@ mod tests {
         let ticket = q.start_next().unwrap();
         q.finish(ticket, Ok(())).unwrap();
         assert_eq!(detail(q.get(id).unwrap()), "Created");
+    }
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_tasks() {
+    for empty in [false, true] {
+        let profile = tempfile::tempdir().unwrap();
+        let pro = Arc::new(ProMedia::new(
+            profile.path().into(),
+            profile.path().join("objects"),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        let mut exports = BackgroundTasks::default();
+        if !empty {
+            let _id = exports
+                .enqueue(
+                    "main".into(),
+                    "synthetic".into(),
+                    pm_promedia::tasks::TaskSpec {
+                        title: "Opening Sequence".into(),
+                        kind: pm_promedia::tasks::TaskKind::Export,
+                        unit: ProgressUnit::Frames,
+                        priority: 0,
+                        total: 300,
+                    },
+                )
+                .unwrap();
+            let ticket = exports.start_next().unwrap();
+            exports.progress(ticket, 128, 300).unwrap();
+        }
+        crate::utility_capture_tests::capture(
+            if empty { "tasks-empty" } else { "tasks" },
+            |_, cx| {
+                cx.new(|_| TasksWindow {
+                    motion: Motion::default(),
+                    pro,
+                    exports: Arc::new(Mutex::new(exports)),
+                })
+            },
+        );
     }
 }
