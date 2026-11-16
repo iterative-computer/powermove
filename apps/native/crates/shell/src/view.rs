@@ -355,6 +355,7 @@ impl Editor {
     }
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
+        let after = workspace::persistent_record(after);
         let before = self
             .pending
             .last()
@@ -631,6 +632,18 @@ impl Editor {
             return true;
         }
         let panels = self.panels(cx);
+        if kind == "panel"
+            && (verb == "close" || (verb == "toggle" && self.layout.find(rest).is_some()))
+            && self.agent_build_slots.contains_key(rest)
+        {
+            self.release_agent_panel(rest);
+            if let Some(integration) = self.integration.clone() {
+                integration.panel_closed(rest, cx);
+            }
+            self.save();
+            cx.notify();
+            return true;
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
@@ -2708,10 +2721,18 @@ impl Render for Editor {
                 // A panel still on its way (its extension starting): the
                 // loading state under its own title, never an empty body.
                 if coming {
-                    static SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-                    let turns = SINCE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+                    static SINCE: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    let turns = SINCE
+                        .get_or_init(std::time::Instant::now)
+                        .elapsed()
+                        .as_secs_f64();
                     empty = empty.child(crate::welcome_view::spinner(
-                        if t.accessibility.reduce_motion { 0. } else { turns },
+                        if t.accessibility.reduce_motion {
+                            0.
+                        } else {
+                            turns
+                        },
                         &t,
                     ));
                     w.request_animation_frame();
@@ -3235,6 +3256,81 @@ mod keyboard_tests {
                 assert_eq!(v.layout.docks[d].groups[g].size, before.size);
                 assert!(v.record.to_string().contains("test-final"));
                 assert!(!v.record.to_string().contains("test-build"));
+            })
+            .unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn p4_explicit_close_releases_build_slot() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-close",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(v.shell_command("panel:close:panel-build-close", cx));
+                assert!(!v.agent_build_slots.contains_key("panel-build-close"));
+                assert!(v.layout.find("panel-build-close").is_none());
+            })
+            .unwrap();
+    }
+    #[::core::prelude::v1::test]
+    fn p5_save_agent_layout_never_persists_build_ids() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-save",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                v.save_agent_layout("Synthetic slots", v.layout.docks.clone(), cx)
+                    .unwrap();
+                assert!(!v.record.to_string().contains("panel-build-save"));
+                // Every other persistent writer uses this same serialization boundary.
+                v.reserve_agent_panel(
+                    "panel-build-copy",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(
+                    !workspace::write(&v.layout, &v.record)
+                        .to_string()
+                        .contains("panel-build-copy")
+                );
+                v.shell_command("layout:save:Synthetic copy", cx);
+                assert!(!v.record.to_string().contains("panel-build-copy"));
+                let mut raw = v.record.clone();
+                raw["layout"]["docks"][0]["panels"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"id":"panel-build-injected"}));
+                v.commit(raw);
+                assert!(!v.record.to_string().contains("panel-build-injected"));
             })
             .unwrap();
     }

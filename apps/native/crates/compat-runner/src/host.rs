@@ -334,6 +334,10 @@ pub struct Publication {
 }
 
 struct Shared {
+    /// Set by `ExtensionHost::close` itself: an owner still waiting for
+    /// isolate admission (its boot or the Svelte compiler) stops waiting
+    /// at once, before it could read the queued close.
+    closing: AtomicBool,
     published: Mutex<Published>,
     changed: Condvar,
     /// What the confined helpers registered, in contribution-list form.
@@ -851,6 +855,7 @@ impl ExtensionHost {
         let shared = Arc::new(Shared {
             published: Mutex::default(),
             changed: Condvar::new(),
+            closing: AtomicBool::new(false),
             store: Mutex::new(json!({})),
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
@@ -1191,6 +1196,9 @@ impl ExtensionHost {
         }
     }
     pub fn close(&mut self) {
+        // Read at once by a boot still waiting for admission (it cannot read
+        // the inbox until its boot returns).
+        self.shared.closing.store(true, Ordering::Release);
         let _ = self.inbox.send(Input::Close);
         if let Some(worker) = self.worker.take() {
             // The owner stops V8 and exits; joined off the main thread.
@@ -2183,7 +2191,8 @@ impl Owner {
         let live = self.realm.take().expect("a live realm to compile in");
         self.confined.clear();
         let records = {
-            let compiler = compile::LazySvelte::new(&live.pool);
+            let shared = self.shared.clone();
+            let compiler = compile::LazySvelte::new(&live.pool).stopped_by(&shared.closing);
             found
                 .iter()
                 .map(|f| {
@@ -2433,6 +2442,12 @@ impl Owner {
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         trace(json!({"realm": "pool"}));
+        // Its turn in the heap account; a window closed meanwhile withdraws it.
+        crate::admitted(&realm, &|| {
+            if self.shared.closing.load(Ordering::Acquire) {
+                realm.close();
+            }
+        })?;
         crate::boot_realm(&realm, &host, "")?;
         *self.transport.lock().unwrap() = Some(host.clone());
         self.router = Some(
@@ -3836,6 +3851,34 @@ mod tests {
     /// A value that has been taken away (its entry removed, its declaration
     /// gone) is gone from the extension's next load: each load replaces what
     /// the realm holds with what the host chose for it, nothing is kept.
+    /// A window closed while its extensions' realm waits its turn for heap
+    /// leaves the queue at once: nothing behind it waits for a dead window.
+    #[test]
+    fn closing_a_window_withdraws_its_start_from_the_admission_queue() {
+        let cage = pm_runtime_v8::Admission::cage();
+        // Less than a window realm's slice left.
+        let held = cage.hold(cage.budget() - cage.used() - 16 * 1024 * 1024).unwrap();
+        let waiting = cage.waiting();
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "waits",
+            &[("index.ts", "export default function(_api: any): void {}")],
+        );
+        let mut fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cage.waiting() <= waiting {
+            assert!(Instant::now() < deadline, "its start waits its turn");
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.host.close();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cage.waiting() > waiting {
+            assert!(Instant::now() < deadline, "closing withdrew it");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(held);
+    }
     #[test]
     fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
         const SECRET: &str = "sk-removed-later";

@@ -117,6 +117,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) agent_panel_sweep: bool,
     pub(crate) agent_panel_builds:
         std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds:
@@ -537,6 +538,12 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
         crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
+    fn panel_closed(&self, id: &str, cx: &mut App) {
+        self.0.update(cx, |v, cx| {
+            v.forget_agent_build(id);
+            cx.notify();
+        });
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
@@ -964,6 +971,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            agent_panel_sweep: false,
             agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
             generated_switches: Default::default(),
@@ -1293,7 +1301,10 @@ impl Controller {
                             cx,
                         );
                         // It could not start: the ghost gives way to Home.
-                        if !v.opening && v.session.is_none() && v.opening_name.as_deref() == Some(&name) {
+                        if !v.opening
+                            && v.session.is_none()
+                            && v.opening_name.as_deref() == Some(&name)
+                        {
                             v.end_ghost(cx);
                         }
                     }
