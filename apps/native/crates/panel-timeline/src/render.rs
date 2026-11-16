@@ -1657,7 +1657,8 @@ fn paint_clip(
             t.typography.body
         } as f64;
         o.opacity = strength * if c.media == Media::Loading { 0.7 } else { 1. };
-        o.detail = json!({"truncate":"tail","offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
+        // Names are semibold (pm-design: large-bold text against the slab).
+        o.detail = json!({"truncate":"tail","weight":600,"offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
         ops.push(o);
     }
     if let Some(effect) = badge {
