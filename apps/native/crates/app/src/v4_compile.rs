@@ -185,6 +185,10 @@ pub struct NodeView {
     pub style: StyleRefinement,
     pub hidden: bool,
     pub scroll_y: bool,
+    /// `metadata.scrollEdge` (a colour token, the ground under the
+    /// scroller): content past an edge fades into that ground there, so a
+    /// region with no scroller still says there is more (a sheet body).
+    pub scroll_edge: Option<u32>,
     pub scroll_x: bool,
     pub semantic: Option<SharedString>,
     pub text: Option<SharedString>,
@@ -193,6 +197,9 @@ pub struct NodeView {
     /// An `img`'s resource: an opaque key the host resolves (a Project
     /// panel thumbnail, `media_thumbs`), never a path.
     pub resource: Option<SharedString>,
+    /// `metadata.fit: "contain"`: the picture shows whole, letterboxed;
+    /// otherwise it covers the node.
+    pub contain: bool,
     pub disabled: bool,
     pub events: Events,
     pub ax: Option<Ax>,
@@ -209,6 +216,9 @@ pub struct NodeView {
     /// (`metadata.fixedItems`), so an item may fill its height.
     pub fixed_items: bool,
     pub is_plain_text: bool,
+    /// A line of text led by a symbol (a warning's triangle): the glyph
+    /// stands before the words, not over them.
+    pub symbol_leads: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
     pub local_change: bool,
@@ -796,6 +806,9 @@ fn compile(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| SharedString::from(s.to_owned()));
+    let symbol_leads = node.r#type == "text"
+        && symbol.is_some()
+        && (!node.text.is_empty() || !node.children.is_empty());
     let virtual_window = (node.r#type == "virtual-list")
         .then(|| {
             let count = node.props.get("count")?.as_u64()?;
@@ -887,6 +900,9 @@ fn compile(
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
+        scroll_edge: meta
+            .and_then(|m| m.get("scrollEdge"))
+            .and_then(|edge| table.color(&serde_json::json!({ "token": edge }))),
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
@@ -897,6 +913,12 @@ fn compile(
             .then(|| node.props.get("resource").and_then(Value::as_str))
             .flatten()
             .map(|r| SharedString::from(r.to_owned())),
+        contain: node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("fit"))
+            .and_then(Value::as_str)
+            == Some("contain"),
         disabled,
         events: Events::of(node),
         ax,
@@ -924,6 +946,7 @@ fn compile(
         kit: kit(node, component, panel, table),
         virtual_window,
         is_plain_text: node.r#type == "text" && node.props.is_empty() && node.children.is_empty(),
+        symbol_leads,
         binding: node
             .props
             .get("binding")

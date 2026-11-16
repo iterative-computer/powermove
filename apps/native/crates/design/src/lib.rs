@@ -376,6 +376,9 @@ pub struct Metrics {
     /// Tallest a sheet's option body grows before it scrolls, so the sheet
     /// and its footer stay on screen.
     pub sheet_body_max: f32,
+    /// Height of the Export progress sheet's picture of the frame last
+    /// encoded: a 16:9 frame across the wide sheet's content.
+    pub export_preview: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// The agent composer's tray around its field (v1's 4 pt).
@@ -893,6 +896,7 @@ impl Tokens {
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
+                export_preview: 315.,
                 composer_max_lines: 10.,
                 composer_tray: space.xs,
                 group_radius: radius.lg,

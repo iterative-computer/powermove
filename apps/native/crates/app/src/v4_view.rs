@@ -325,6 +325,45 @@ pub struct SurfaceView {
     pub log: Vec<(Id, String, EventDetail)>,
     pub error: Option<String>,
 }
+/// Fades over a scroller's viewport where content runs past its top or
+/// bottom edge, into `ground` (the colour under it), a row tall: a region
+/// that draws no scroller still shows there is more. Drawn over the content
+/// in the viewport's own place, whatever the scroll.
+fn scroll_edges(scroll: ScrollHandle, ground: u32, t: &pm_design::Tokens) -> AnyElement {
+    let depth = px(t.metrics.form_row);
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let view = scroll.bounds();
+            let (offset, max) = (-scroll.offset().y, scroll.max_offset().y);
+            if max <= px(0.) || view.size.height <= depth * 2. {
+                return;
+            }
+            let fade = |top: bool| {
+                let (from, to) = if top { (1., 0.) } else { (0., 1.) };
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, from), 0.),
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, to), 1.),
+                )
+            };
+            if offset > px(1.) {
+                let band = Bounds::new(view.origin, size(view.size.width, depth));
+                window.paint_quad(gpui::fill(band, fade(true)));
+            }
+            if offset < max - px(1.) {
+                let band = Bounds::new(
+                    point(view.origin.x, view.bottom() - depth),
+                    size(view.size.width, depth),
+                );
+                window.paint_quad(gpui::fill(band, fade(false)));
+            }
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
 impl SurfaceView {
     pub fn new(
         runtime: Arc<Builtins>,
@@ -2724,6 +2763,12 @@ impl SurfaceView {
             );
         }
         let mut element = element.children(children).children(self.probe(node.id));
+        // Over the content, last: where it runs past the scroller's edges.
+        if let Some(ground) = node.scroll_edge.filter(|_| node.scroll_y)
+            && let Some(scroll) = self.scrolls.get(&id)
+        {
+            element = element.child(scroll_edges(scroll.clone(), ground, &self.table.tokens));
+        }
         if self.fitted_sheet(node, window) {
             // The sheet is its window's height: its actions stay on the bottom
             // edge while the body between gives way.
@@ -3541,6 +3586,12 @@ impl SurfaceView {
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
+        if node.symbol_leads {
+            element = element
+                .flex_row()
+                .items_center()
+                .gap(px(t.metrics.gap / 2.));
+        }
         if let Some(symbol) = &node.symbol {
             // The glyph takes the colour the panel declared (an active toggle's
             // accent, a keyframe state); disabled is always `muted`.
@@ -3573,7 +3624,11 @@ impl SurfaceView {
                     .absolute()
                     .inset_0()
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(if node.contain {
+                        ObjectFit::Contain
+                    } else {
+                        ObjectFit::Cover
+                    }),
             );
         }
         if let Some(text) = &node.text {
