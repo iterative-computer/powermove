@@ -638,6 +638,10 @@ fn separate_dimensions_is_undoable_and_groups_only_exact_legacy_key_times() {
     assert_eq!(c.model.selection.keys(), &["x", "y"]);
     assert_eq!(c.model.index.key("subframe").unwrap().2.time, 0.125001);
     block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    // The key click is its own selection-history step; undo it before the edit.
+    assert!(c.model.selection.keys().is_empty());
+    assert!(!c.model.index.layer("p").unwrap().separate_dimensions);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
     assert!(c.model.index.layer("p").unwrap().separate_dimensions);
     assert!(
         c.model
