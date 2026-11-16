@@ -31,9 +31,31 @@ pub(crate) fn files(dir: &Path, id: &str) -> (PathBuf, PathBuf) {
         dir.join(format!("{stem}.stamp")),
     )
 }
+/// The last frame `id` showed while it was open, when one is stored, as its
+/// poster (written beside the others, stamped `stamp`): Home shows what the
+/// person last saw rather than drawing it again. Blocking.
+pub(crate) fn adopt_last_frame(profile: &Path, dir: &Path, id: &str, stamp: i64) -> Option<Vec<u8>> {
+    let (last, last_stamp) = last_frame_files(profile, id);
+    let png = std::fs::read(&last).ok()?;
+    let time: f64 = std::fs::read_to_string(&last_stamp)
+        .ok()
+        .and_then(|s| s.lines().nth(1).and_then(|t| t.trim().parse().ok()))
+        .unwrap_or(0.);
+    let (file, stamp_file) = files(dir, id);
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&file, &png).ok()?;
+    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    let _ = std::fs::remove_file(missing_file(dir, id));
+    Some(png)
+}
+/// Marks a poster that left offline media out (Home's card says so).
+pub(crate) fn missing_file(dir: &Path, id: &str) -> PathBuf {
+    files(dir, id).0.with_extension("missing")
+}
 /// A trashed project's poster is removed; Put Back draws it again when needed.
 pub(crate) fn forget(dir: &Path, id: &str) {
     let (image, stamp) = files(dir, id);
+    let _ = std::fs::remove_file(missing_file(dir, id));
     let _ = std::fs::remove_file(image);
     let _ = std::fs::remove_file(stamp);
 }
@@ -81,7 +103,9 @@ fn identity() -> String {
         .and_then(|v| v.downcast::<objc2_foundation::NSString>().ok())
         .map(|v| v.to_string())
         .unwrap_or_default();
-    format!("{} ({build})", crate::updates::current_version())
+    // The poster's own format: posters drawn before offline media was left
+    // out (the Media Offline card) are drawn again.
+    format!("{} ({build}) posters 2", crate::updates::current_version())
 }
 /// A stored poster's stamp and the time in the composition it shows. The
 /// stamp is [`STALE`] when another build drew it.
@@ -144,15 +168,19 @@ pub(crate) fn write(
     let mut first = None;
     let mut chosen = None;
     for time in times(duration, kept) {
-        let Ok(png) = renderer(&FrameRequest {
+        let png = match renderer(&FrameRequest {
             time,
             width: WIDTH,
             height: height.clamp(90, 2 * WIDTH),
             motion_blur: false,
             stop: &never,
             published: published.clone(),
-        }) else {
-            continue;
+        }) {
+            Ok(png) => png,
+            Err(error) => {
+                crate::diag::line(serde_json::json!({"poster": id, "time": time, "render": error.to_string()}));
+                continue;
+            }
         };
         if has_content(&png) {
             chosen = Some((time, png));
@@ -166,6 +194,12 @@ pub(crate) fn write(
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&file, &png).ok()?;
     std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    let missing = missing_file(dir, id);
+    if crate::mcp_services::poster_missed_media(id) {
+        let _ = std::fs::write(&missing, "");
+    } else {
+        let _ = std::fs::remove_file(&missing);
+    }
     Some(png)
 }
 

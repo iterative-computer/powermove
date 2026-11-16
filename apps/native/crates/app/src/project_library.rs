@@ -100,6 +100,13 @@ pub struct ProjectLibrary {
     /// tried again and again).
     idle_posters: std::collections::VecDeque<(String, (u32, u32), Option<f64>)>,
     idle_tried: std::collections::HashSet<String>,
+    /// Projects whose poster could not be drawn: their card says so.
+    idle_failed: std::collections::HashSet<String>,
+    /// Projects whose poster left offline media out: their card says so.
+    missing_media: std::collections::HashSet<String>,
+    /// Cards whose name and second line would read the same as an earlier
+    /// card's: the copy they are ("Copy 2"), so each tells itself apart.
+    copy_marks: std::collections::HashMap<String, usize>,
     idle_running: bool,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
@@ -205,6 +212,9 @@ impl ProjectLibrary {
             posters_started: Default::default(),
             idle_posters: Default::default(),
             idle_tried: Default::default(),
+            idle_failed: Default::default(),
+            missing_media: Default::default(),
+            copy_marks: Default::default(),
             idle_running: false,
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
@@ -688,7 +698,7 @@ mod fit_title_tests {
     fn titles_a_cut_makes_alike_keep_their_ends() {
         let titles: Vec<String> = [
             "Accept — Recovered — Native",
-            "Accept — Recovered — Native — Native",
+            "Accept — Recovered — Native — Native 3",
             "Accept — Recovered — Native 2",
             "Paper",
         ]
@@ -697,7 +707,7 @@ mod fit_title_tests {
         let a = super::fit_title(&titles[1], &titles, 20);
         let b = super::fit_title(&titles[2], &titles, 20);
         assert_ne!(a, b);
-        assert!(a.ends_with("Native — Native") && a.contains('…'), "{a}");
+        assert!(a.ends_with("Native 3") && a.contains('…'), "{a}");
         assert!(b.ends_with("Native 2"), "{b}");
         // Short or alone: as it is (the card cuts its end if it must).
         assert_eq!(super::fit_title("Paper", &titles, 20), "Paper");
@@ -987,11 +997,16 @@ impl ProjectLibrary {
                         .background_executor()
                         .spawn(async move {
                             let (stamp, _) = crate::poster::stamp(&stamp_file)?;
-                            Some((stamp, std::fs::read(file).ok()?))
+                            let missing = file.with_extension("missing").exists();
+                            Some((stamp, std::fs::read(file).ok()?, missing))
                         })
                         .await;
                     let _ = this.update(cx, |v, cx| {
                         v.posters_read.insert(id.clone());
+                        if let Some((_, _, missing)) = &read {
+                            v.mark_missing(&id, *missing);
+                        }
+                        let read = read.map(|(stamp, png, _)| (stamp, png));
                         // The one already shown stays as it is.
                         let shown = v.thumbs.get(&id).map(|(at, _)| *at as i64);
                         if let Some((stamp, png)) = read
@@ -1008,7 +1023,11 @@ impl ProjectLibrary {
         }
         // None at all, and the project is not open anywhere: drawn at idle
         // from its stored version (PM-285).
-        if cached.as_ref().is_none_or(|(_, image)| image.is_none())
+        // A poster another build drew is drawn again too (it may show what
+        // an older build drew, the Media Offline card).
+        if cached.as_ref().is_none_or(|(at, image)| {
+            image.is_none() || *at as i64 == crate::poster::STALE
+        })
             && self.active.as_deref() != Some(id.as_str())
             && !row.open
             && !row.trashed
@@ -1073,6 +1092,7 @@ impl ProjectLibrary {
                 .timer(std::time::Duration::from_millis(1200))
                 .await;
             let Some(renderer) = this.update(cx, |_, _| factory(&id)).ok().flatten() else {
+                crate::diag::line(serde_json::json!({"poster": id, "renderer": "none"}));
                 let _ = this.update(cx, |v, cx| {
                     v.idle_running = false;
                     v.next_idle_poster(cx);
@@ -1084,14 +1104,29 @@ impl ProjectLibrary {
             let png = cx
                 .background_executor()
                 .spawn(async move {
-                    let stored = pm_kernel::LibraryStore::open(&profile).load(&poster).ok()??;
+                    // What the person last saw of it, when it was open, first.
+                    if let Some(png) = crate::poster::adopt_last_frame(&profile, &dir, &poster, taken) {
+                        return Some(png);
+                    }
+                    let stored = match pm_kernel::LibraryStore::open(&profile).load(&poster) {
+                        Ok(Some(stored)) => stored,
+                        other => {
+                            crate::diag::line(serde_json::json!({"poster": poster, "load": format!("{other:?}").chars().take(300).collect::<String>()}));
+                            return None;
+                        }
+                    };
                     let published = Arc::new(pm_kernel::detached_publication(&poster, stored.project));
                     crate::poster::write(&renderer, Some(published), &dir, &poster, taken, size, duration)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.idle_running = false;
+                if png.is_none() {
+                    v.idle_failed.insert(id.clone());
+                    cx.notify();
+                }
                 if let Some(png) = png {
+                    v.mark_missing(&id, crate::mcp_services::poster_missed_media(&id));
                     v.thumbs.insert(
                         id.clone(),
                         (taken as usize, Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))),
@@ -1133,7 +1168,28 @@ impl ProjectLibrary {
     /// edit (or, in the Trash, the deletion) is the exact day and time
     /// ("Edited Nov 14, 11:12 PM") instead of "15 h ago", and the length
     /// follows when it is known.
+    fn mark_missing(&mut self, id: &str, missing: bool) {
+        if missing {
+            self.missing_media.insert(id.to_owned());
+        } else {
+            self.missing_media.remove(id);
+        }
+    }
+    /// The card's second line: when and what, that media is missing (quietly,
+    /// as the Project grid says it), and which copy it is when its name and
+    /// the rest would read the same as another card's.
     fn facts(&self, row: &Row, now: i64) -> String {
+        let mut facts = self.told_apart(row, now);
+        if self.missing_media.contains(&row.id) {
+            facts.push_str(" · Media missing");
+        }
+        // First, so a narrow card never cuts the part that tells it apart.
+        match self.copy_marks.get(&row.id) {
+            Some(copy) => format!("Copy {copy} · {facts}"),
+            None => facts,
+        }
+    }
+    fn told_apart(&self, row: &Row, now: i64) -> String {
         let facts = row.facts(now);
         if !self.repeated.contains(&row.title()) {
             return facts;
@@ -1355,12 +1411,13 @@ impl ProjectLibrary {
                         .when(fills, |picture| picture.rounded(px(inner)))
                         .opacity(fade.clamp(0., 1.)),
                 ),
+                // No picture: while its poster is on its way, the empty
+                // frame; once none could be drawn, say so.
                 None => page.bg(rgb(c.panel)).child(
                     div()
                         .text_role(t, Text::Caption)
-                        .font_features(kit::tabular())
                         .text_color(ink(c.text, tr.faint))
-                        .children(row.dimensions().map(|(w, h)| format!("{w} × {h}"))),
+                        .when(self.idle_failed.contains(&row.id), |d| d.child("No Preview")),
                 ),
             });
         // Under the pointer: a round "more" button at the page's top
@@ -2027,6 +2084,20 @@ impl Render for ProjectLibrary {
                     .map(Row::title)
                     .filter(|title| !seen.insert(title.clone()))
                     .collect();
+                // Same name and same second line: the later ones are copies.
+                let now = crate::poster::now_ms();
+                let mut firsts = std::collections::HashMap::new();
+                self.copy_marks.clear();
+                let mut by_age: Vec<&Row> = rows.iter().collect();
+                by_age.sort_by_key(|r| (r.modified_ms, r.id.clone()));
+                for row in by_age {
+                    let key = (row.title(), self.told_apart(row, now));
+                    let n = firsts.entry(key).or_insert(0usize);
+                    *n += 1;
+                    if *n > 1 {
+                        self.copy_marks.insert(row.id.clone(), *n);
+                    }
+                }
                 if self.controller.opening().is_some() {
                     let held = self
                         .held_order

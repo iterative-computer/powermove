@@ -158,6 +158,9 @@ pub struct Host {
     /// The media inputs behind `media_runtime`, and the worker observing them.
     media_probed: Option<MediaProbeInputs>,
     media_probe_serial: u64,
+    /// Bumped whenever `media_runtime` is replaced: what the status line's
+    /// offline count is kept by (`FrameFacts::offline`).
+    pub media_observed: u64,
     updating: bool,
     again: bool,
     /// The status line asked for the missing files; the next update hands it
@@ -492,6 +495,7 @@ impl Controller {
             .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
         {
             self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+            self.builtins.media_observed += 1;
             return;
         }
         self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
@@ -521,6 +525,7 @@ impl Controller {
                             Some(p) => observed.rebound(media_stamp(p)),
                             None => observed,
                         };
+                        v.builtins.media_observed += 1;
                         v.update_builtins(cx);
                     }
                     Err(error) => {
@@ -1974,7 +1979,22 @@ impl Controller {
                 // the popover comes back either way.
                 "agent.pickRegion" => {
                     let editor = self.host.borrow().window.clone();
-                    let handle = window.window_handle();
+                    // The answer goes to the editor's window: the popover that
+                    // asked closes now, and its handle with it.
+                    let handle = cx
+                        .windows()
+                        .into_iter()
+                        .find(|h| {
+                            h.update(cx, |_, w, _| {
+                                crate::platform::ns_window(w)
+                                    .is_some_and(|n| {
+                                        objc2::rc::Retained::as_ptr(&n)
+                                            == objc2::rc::Retained::as_ptr(&editor)
+                                    })
+                            })
+                            .unwrap_or(false)
+                        })
+                        .unwrap_or_else(|| window.window_handle());
                     self.close_agent(cx);
                     let picked = pm_shell::region_pick::pick(&editor);
                     cx.spawn(async move |this, cx| {

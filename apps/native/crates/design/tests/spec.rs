@@ -68,6 +68,10 @@ const ROLES: &[(&str, &str)] = &[
         "colors.accent_wash",
         "Opaque accent tint: drop targets, active guide bed",
     ),
+    (
+        "colors.verified",
+        "A verified publisher's seal (Store), the system blue",
+    ),
     ("colors.danger", "Destructive and error text, offline media"),
     (
         "colors.viewer_guide",

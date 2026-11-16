@@ -103,9 +103,10 @@ impl MenuEntry {
 pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
-    /// Active composition layers offered by the command palette.
-    pub palette_layers: Vec<(String, String)>,
-    pub palette_effects: Vec<(String, String)>,
+    /// Active composition layers offered by the command palette (shared:
+    /// equal lists compare by pointer, every frame).
+    pub palette_layers: crate::integration::Names,
+    pub palette_effects: crate::integration::Names,
     pub open: Vec<String>,
     /// Window ▸ Workspace: id, name, built-in (built-ins first).
     pub workspaces: Vec<(String, String, bool)>,
@@ -138,12 +139,57 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
-/// Whether the window menu commands go to has a sheet up.
-fn editor_has_sheet() -> bool {
+/// Whether a sheet is up where the menu's commands would act: the key
+/// window is a sheet or has one (New Project over Home), the main window
+/// has one, or the window commands go to has one.
+fn sheet_up() -> bool {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-    editor_window_number()
-        .and_then(|n| app.windowWithWindowNumber(n))
-        .is_some_and(|w| w.attachedSheet().is_some())
+    app.keyWindow()
+        .is_some_and(|k| k.isSheet() || k.attachedSheet().is_some())
+        || app.mainWindow().is_some_and(|m| m.attachedSheet().is_some())
+        || editor_window_number()
+            .and_then(|n| app.windowWithWindowNumber(n))
+            .is_some_and(|w| w.attachedSheet().is_some())
+}
+/// Menu-bar menus whose rows dim when their command cannot run now
+/// (`MenuState::disabled`); every menu dims for a sheet.
+const STATEFUL_MENUS: [&str; 4] = ["Edit", "Composition", "Playback", "View"];
+thread_local! {
+    /// The project's Undo/Redo titles ("Undo New Solid"), kept while a sheet's
+    /// field owns the items, which then read as the field's plain verb.
+    static PROJECT_TITLES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+fn undo_title_for_field(item: &NSMenuItem, name: &str, sheet: bool) {
+    let verb = match name {
+        "contextUndo" => "Undo",
+        "contextRedo" => "Redo",
+        _ => return,
+    };
+    PROJECT_TITLES.with(|t| {
+        let mut t = t.borrow_mut();
+        if sheet {
+            let title = item.title().to_string();
+            if title != verb {
+                t.insert(name.to_owned(), title);
+            }
+            item.setTitle(&NSString::from_str(verb));
+        } else if let Some(title) = t.remove(name) {
+            item.setTitle(&NSString::from_str(&title));
+        }
+    });
+}
+/// Whether a text field in the key window is being edited (a sheet's name
+/// field): its own Undo, Cut, Copy and Paste then have something to act on.
+fn key_field_editing() -> bool {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    app.keyWindow()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| {
+            menu::owns_text_edit(
+                unsafe { msg_send![&*r, isKindOfClass: NSTextView::class()] },
+                &r.class().name().to_string_lossy(),
+            )
+        })
 }
 fn active_send(command: Command) {
     if let Some(n) = editor_window_number() {
@@ -683,11 +729,27 @@ define_class!(
                     n => item.setState(if state.checked.contains(n) {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
-                // A sheet on the editor window holds its commands (HIG).
-                !state.disabled.contains(name)
-                    && (menu::runs_beside_sheet(name) || !editor_has_sheet())
+                // A sheet holds every command that acts on the window under it
+                // (HIG); the app's own and its fields' Edit commands stay.
+                let sheet = sheet_up();
+                undo_title_for_field(item, name, sheet);
+                let beside = !sheet || menu::runs_beside_sheet(name, key_field_editing());
+                // Menus that dim by state (`STATEFUL_MENUS`); the others only
+                // for a sheet.
+                // SAFETY: the item's own menu, read on the main thread.
+                let stateful = unsafe { item.menu() }.is_some_and(|m| {
+                    let title = m.title().to_string();
+                    STATEFUL_MENUS.contains(&title.as_str())
+                        || menu::DISPLAY_ONLY.contains(&title.as_str())
+                });
+                beside && !(stateful && state.disabled.contains(name))
             } else {
-                true
+                // A row built when its menu opens (a panel, a workspace, a
+                // layer kind) names its command; a sheet holds it too.
+                let command = item
+                    .representedObject()
+                    .and_then(|o| o.downcast_ref::<NSString>().map(|s| s.to_string()));
+                command.is_none_or(|c| !sheet_up() || menu::runs_beside_sheet(&c, false))
             }
         }
 
@@ -922,6 +984,16 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
 /// above the app's own front editor window, or behind, as `present` puts an
 /// inactive app's window.
 fn select_in_background(window: &NSWindow) {
+    // Picking a tab orders its window in, which unhides a hidden app.
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_in_background(&window);
+            }
+        });
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -1103,6 +1175,26 @@ const SHAPE_SEGMENT: isize = 5;
 /// A tool segment's width, and the room AppKit's menu indicator takes in one.
 const TOOL_SEGMENT: f64 = 34.;
 const TOOL_MENU_INDICATOR: f64 = 12.;
+/// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
+/// item's tag), symbol, label.
+const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
+    ("agent", "sparkles", "Agent"),
+    ("export", "square.and.arrow.up", "Export"),
+    ("panelLibrary", "square.grid.2x2", "Panels"),
+    ("settings", "gearshape", "Settings"),
+];
+#[cfg(test)]
+mod toolbar_tag_tests {
+    /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
+    /// one without would stop the window from opening.
+    #[test]
+    fn every_toolbar_button_has_a_slot() {
+        assert!(super::TOOLBAR.contains(&"home"));
+        for (name, ..) in super::TOOLBAR_BUTTONS {
+            assert!(super::TOOLBAR.contains(&name), "{name}");
+        }
+    }
+}
 const TOOLBAR: [&str; 8] = [
     "home",
     "title",
@@ -1756,6 +1848,15 @@ const TAB_SHOWN: &str = "PMShellTabShown";
 /// this way while the app is inactive gets no activation, so nothing else
 /// makes it hide AppKit's tab row or draw its own strip for the new state.
 fn show_in_tab_group(window: &NSWindow) {
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                show_in_tab_group(&window);
+            }
+        });
+        return;
+    }
     unsafe {
         let group: *mut AnyObject = msg_send![window, tabGroup];
         if group.is_null() {
@@ -1819,6 +1920,9 @@ fn select_tab(window: &NSWindow, by: isize) {
         return;
     }
     let next = &group[((at as isize + by).rem_euclid(count)) as usize];
+    if gpui_macos::child_window::app_hidden() {
+        return;
+    }
     unsafe {
         let tab_group: *mut AnyObject = msg_send![window, tabGroup];
         if !tab_group.is_null() {
@@ -1897,12 +2001,18 @@ pub fn bring_session_window(id: u64) {
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {
-    unsafe {
-        let group: *mut AnyObject = msg_send![window, tabGroup];
-        if !group.is_null() {
-            let _: () = msg_send![group, setSelectedWindow: window];
-        }
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_window_tab(&window);
+            }
+        });
+        return;
     }
+    // Through the group's selection that tells the window it is shown, so its
+    // strip highlights the tab its title names (PM-427).
+    show_in_tab_group(window);
     gpui_macos::child_window::present(window, true);
 }
 /// Whether another tab's different title starts and ends as `title` does, so
@@ -2316,13 +2426,9 @@ impl ToolbarDelegate {
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
-        let (sym, label) = match name.as_str() {
-            "agent" => ("sparkles", "Agent"),
-            "export" => ("square.and.arrow.up", "Export"),
-            "panelLibrary" => ("square.grid.2x2", "Panels"),
-            "settings" => ("gearshape", "Settings"),
-            _ => return None,
-        };
+        let &(_, sym, label) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|(n, ..)| *n == name.as_str())?;
         item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
@@ -2929,6 +3035,14 @@ impl Host {
                             .collect();
                         h.up_early.extend(pending);
                     }
+                    // Escape ends a Select part of the screen before anything
+                    // else hears it (the editor keeps the keyboard meanwhile).
+                    if e.r#type() == NSEventType::KeyDown
+                        && e.keyCode() == 53
+                        && crate::region_pick::cancel()
+                    {
+                        return std::ptr::null_mut();
+                    }
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
                         if let Some(sheet) = host.borrow().sheet.borrow().as_ref()
@@ -3085,6 +3199,33 @@ impl Host {
                     let control = responder.as_ref().is_some_and(|r| unsafe {
                         msg_send![&**r,isKindOfClass:NSControl::class()]
                     });
+                    // A field the person just opened (PM-402): its letters
+                    // wait for it rather than firing shortcuts.
+                    if e.r#type() == NSEventType::KeyDown {
+                        crate::typing::drop_expired();
+                        let flags = e.modifierFlags();
+                        let text = crate::typing::is_text(
+                            &e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default(),
+                            flags.intersects(
+                                NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+                            ),
+                        );
+                        let retained = || unsafe { Retained::retain(event.as_ptr()).unwrap() };
+                        match crate::typing::decide(text, field, crate::typing::held()) {
+                            crate::typing::Hold::Held => {
+                                crate::typing::hold(retained());
+                                return std::ptr::null_mut();
+                            }
+                            crate::typing::Hold::Release => {
+                                if crate::typing::held() {
+                                    crate::typing::release(Some(retained()));
+                                    return std::ptr::null_mut();
+                                }
+                                crate::typing::release(None);
+                            }
+                            crate::typing::Hold::Pass => {}
+                        }
+                    }
                     if passes_straight(
                         &chord,
                         field,
@@ -6914,13 +7055,10 @@ pub fn install_menus() {
     for (title, items) in menus {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
         // These menus dim a row whose command cannot run now (`validateMenuItem`).
-        submenu.setAutoenablesItems(
-            title == "Edit"
-                || title == "Composition"
-                || title == "Playback"
-                || menu::DISPLAY_ONLY.contains(&title)
-                || title == "View",
-        );
+        // Every menu validates its rows (`validateMenuItem`): those in
+        // `STATEFUL_MENUS` dim a command that cannot run now, and all of
+        // them dim what a sheet holds.
+        submenu.setAutoenablesItems(true);
         if menu::DISPLAY_ONLY.contains(&title) {
             delegate(&submenu, MenuKind::DisplayOnly);
         }
@@ -7047,9 +7185,10 @@ pub fn install_menus() {
                         item.setAction(Some(sel!(submenuAction:)));
                     }
                 }
-            } else if menu::SUBMENUS.contains(&spec.command.as_str()) {
-                unsafe { item.setAction(None) };
             }
+            // Panels, Workspace and Open Recent keep `act:`: an item with no
+            // action is disabled in an auto-enabling menu, and through the
+            // shell's `validateMenuItem` the parent dims only for a sheet.
             submenu.addItem(&item);
             index += 1;
         }

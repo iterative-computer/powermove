@@ -162,6 +162,9 @@ pub struct Controller {
     pub message: String,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
+    /// What the shell reads from the project on every frame, kept per
+    /// revision (`crate::frame_facts`).
+    pub(crate) frame_facts: crate::frame_facts::FrameFacts,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
     /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
     pub home: bool,
@@ -387,16 +390,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
-    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
-        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    fn palette_effects(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_effects(&c.kernel.state())
     }
-    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
-        self.0
-            .read(cx)
-            .published
-            .as_deref()
-            .map(crate::layer_commands::palette_layers)
-            .unwrap_or_default()
+    fn palette_layers(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_layers(c.published.as_ref())
     }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
@@ -525,6 +525,9 @@ impl pm_shell::integration::Integration for Bridge {
         );
         panels
     }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
@@ -635,7 +638,12 @@ impl pm_shell::integration::Integration for Bridge {
         panels::format_facts(c.dimensions, c.rate.to_f64())
     }
     fn status_alert(&self, cx: &App) -> String {
-        panels::offline_summary(self.0.read(cx).offline_count())
+        let c = self.0.read(cx);
+        panels::offline_summary(c.frame_facts.offline(
+            c.published.as_ref(),
+            c.builtins.media_observed,
+            || c.offline_count(),
+        ))
     }
     fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
         self.0.update(cx, |v, cx| v.show_offline_media(cx));
@@ -976,6 +984,7 @@ impl Controller {
             message: "No project".into(),
             path: None,
             recent: vec![],
+            frame_facts: Default::default(),
             library: None,
             home: false,
             home_visible: false,
