@@ -983,14 +983,18 @@ impl Controller {
             }
             _ => {}
         }
-        let Some(operation) = self.mcp.try_operation() else {
+        let operation = self.mcp.try_operation();
+        // A quit signal goes on without the operation lock: it saves nothing,
+        // and the holder may be another window's open waiting on a recovery
+        // answer nobody can give.
+        if operation.is_none() && !cx.global::<QuitCoordinator>().terminating {
             self.message =
                 "A project operation is in progress. Try closing again when it finishes.".into();
             cancel_quit(cx);
             cx.notify();
             return;
-        };
-        self.close_operation = Some(operation);
+        }
+        self.close_operation = operation;
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
