@@ -11,6 +11,10 @@ pub type Names = std::sync::Arc<[(String, String)]>;
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
     fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
+    /// Last measured natural body plus header height, before column clipping.
+    fn natural_panel_height(&self, _id: &str, _cx: &App) -> Option<f32> {
+        None
+    }
     fn panel(
         &self,
         id: &str,
@@ -66,6 +70,9 @@ pub trait Integration {
     }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String {
+        id.to_owned()
+    }
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }
@@ -99,6 +106,8 @@ pub trait Integration {
     fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Explicit dismissal of a build, independent of workspace refreshes.
+    fn panel_closed(&self, _id: &str, _cx: &mut App) {}
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The panels on screen this frame (each tab group's front panel, or the

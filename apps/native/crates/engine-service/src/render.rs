@@ -29,7 +29,9 @@ pub struct Scene {
 }
 /// The viewer's rendered-frame cache (RGBA16F surfaces).
 const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
-/// The most output surfaces the engine keeps, of every size together.
+/// The most output surfaces the engine keeps, of every size together. A
+/// frame finding all of them held by frames on screen or in flight takes one
+/// past it (the pool comes back as they land); twice it held is a leak.
 const POOL_BOUND: usize = 11;
 /// The most a paused composition-size surface may take: half the frame
 /// cache, so it always holds two.
@@ -2192,6 +2194,13 @@ impl Engine {
         }
         self.pool
             .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        // Back to the bound once frames that took surfaces past it land.
+        while self.pool.len() > POOL_BOUND {
+            let Some(free) = self.pool.iter().position(|s| Arc::strong_count(s) == 1) else {
+                break;
+            };
+            self.pool.remove(free);
+        }
         // Reclaim free surplus when a paused cache becomes a playing pool.
         // In-flight references are kept and return on subsequent frames.
         while self.pool.iter().filter(|s| s.size == size).count() > capacity {
@@ -2234,19 +2243,37 @@ impl Engine {
             self.pool
                 .retain(|s| s.size == size || Arc::strong_count(s) > 1);
         }
-        let free = self
-            .pool
-            .iter()
-            .find(|s| s.size == size && Arc::strong_count(s) == 1)
-            .cloned();
-        Ok(match free {
+        let free_of = |pool: &[Arc<ExportedSurface>]| {
+            pool.iter()
+                .find(|s| s.size == size && Arc::strong_count(s) == 1)
+                .cloned()
+        };
+        // Still none: what is not on screen goes too, the frame read ahead
+        // from disk and a settled picture not yet shown (both are made
+        // again when wanted), and free surfaces of other sizes.
+        if free_of(&self.pool).is_none() && self.pool.len() >= POOL_BOUND {
+            self.disk_next = None;
+            self.settled = None;
+            self.pool
+                .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        }
+        Ok(match free_of(&self.pool) {
             Some(s) => s,
             None => {
+                // Every surface is held by frames on screen or in flight.
+                // The frame still gets one, past the bound: a viewer that
+                // stops while the playhead runs is worse than a surface more
+                // for a moment, and the pool comes back to the bound as those
+                // frames land (free ones above it go first, above).
+                // Twice the bound held is a leak, not frames in flight.
                 anyhow::ensure!(
-                    self.pool.len() < POOL_BOUND,
+                    self.pool.len() < 2 * POOL_BOUND,
                     "bounded source pool exhausted ({})",
                     self.pool_holders()
                 );
+                if self.pool.len() >= POOL_BOUND {
+                    eprintln!("viewer surfaces past their bound ({})", self.pool_holders());
+                }
                 let s = Arc::new(ExportedSurface::create(
                     &self.gpu.device,
                     &SurfaceRequest {
@@ -2259,7 +2286,8 @@ impl Engine {
             }
         })
     }
-    /// Who holds the pool's surfaces, for the error that says it is full:
+    /// Who holds the pool's surfaces, for the line that says it went past
+    /// its bound:
     /// cached, shown, settled, read ahead, and elsewhere (frames in flight,
     /// a viewer's report of the frame it presented).
     fn pool_holders(&self) -> String {
@@ -3471,19 +3499,33 @@ mod playback_pool_tests {
         assert!(reported.is_some());
         assert!(engine.pool.len() <= POOL_BOUND);
         drop((held, flights, reported));
-        // A pool full of frames in flight, none cached, is full: the error
-        // says what holds it.
+        // A pool full of frames in flight, none cached, still gives the next
+        // frame a surface, past the bound, and comes back to the bound once
+        // they land; twice the bound held is a leak, and the error says what
+        // holds it.
         engine.cache.clear();
-        let flying: Vec<_> = (0..POOL_BOUND).map(|_| engine.cache_surface(small).unwrap()).collect();
-        let Err(error) = engine.cache_surface(large) else {
-            panic!("a full pool gave a surface")
+        let flying: Vec<_> = (0..POOL_BOUND)
+            .map(|_| engine.cache_surface(small).unwrap())
+            .collect();
+        let past = engine
+            .cache_surface(large)
+            .expect("a frame past a full pool");
+        assert_eq!(engine.pool.len(), POOL_BOUND + 1);
+        drop((flying, past));
+        engine.cache_surface(small).unwrap();
+        assert!(engine.pool.len() <= POOL_BOUND, "{}", engine.pool.len());
+        let leaked: Vec<_> = (0..2 * POOL_BOUND)
+            .map_while(|_| engine.cache_surface(small).ok())
+            .collect();
+        assert_eq!(leaked.len(), 2 * POOL_BOUND);
+        let Err(error) = engine.cache_surface(small) else {
+            panic!("twice the bound held gave a surface")
         };
         let error = error.to_string();
         assert!(
-            error.contains("0 cached") && error.contains(&format!("{POOL_BOUND} elsewhere")),
+            error.contains("0 cached") && error.contains(&format!("{} elsewhere", 2 * POOL_BOUND)),
             "{error}"
         );
-        drop(flying);
     }
 
     #[test]
@@ -4674,6 +4716,76 @@ mod frame_cache_tests {
         }
         assert_eq!(from(0.5), 1, "a half-resolution paused frame is drawn");
         assert_eq!(from(1.), 2, "at Full the frame on disk is the picture");
+    }
+    /// PM-444: Play pressed the moment a project shows. Frames are read
+    /// ahead from disk while the background render writes more of them, and
+    /// every surface of the pool is held elsewhere (the paused viewer's
+    /// large pictures on screen and in flight). Every playing frame is drawn,
+    /// none stops on the pool, and the pool comes back to its bound once
+    /// those land.
+    #[test]
+    fn play_from_a_cold_open_never_stops_on_a_full_pool() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let times: Vec<Ticks> = (0..4).map(|n| disk.test_put(n, 0.25)).collect();
+        let step = times[1].get() - times[0].get();
+        let mut engine = Engine::new(Gpu::new("cold-play").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        let held: Vec<_> = (0..POOL_BOUND)
+            .map(|_| engine.cache_surface(Size::new(640, 360)).unwrap())
+            .collect();
+        let mut flights = VecDeque::new();
+        for n in 0..36i64 {
+            // The background render writes ahead of the playhead.
+            if n % 6 == 0 {
+                disk.test_put(4 + n / 6, 0.5);
+            }
+            let time = Ticks::new(times[0].get() + n * step).unwrap();
+            engine.upload_ahead(&scene, Ticks::new(time.get() + step).unwrap());
+            let spec = FrameSpec {
+                moment: Moment::Playing,
+                exact: false,
+                scale: 0.5,
+                ..FrameSpec::exact(
+                    time,
+                    Output {
+                        width: 128,
+                        height: 72,
+                        display: 0,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                )
+            };
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let sub = loop {
+                let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+                match engine.frame(&scene, spec, None, &Default::default(), true, trace) {
+                    Ok(sub) => break sub.unwrap(),
+                    Err(e) => assert!(e.is::<DiskFramePending>(), "frame {n}: {e:#}"),
+                }
+                assert!(Instant::now() < deadline, "frame {n} never came");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            sub.commit();
+            // Three frames in flight, as the display holds them.
+            flights.push_back(sub);
+            if flights.len() > 3 {
+                flights.pop_front().unwrap().complete().unwrap();
+            }
+        }
+        for sub in flights {
+            sub.complete().unwrap();
+        }
+        drop(held);
+        engine.cache_surface(Size::new(64, 36)).unwrap();
+        assert!(engine.pool.len() <= POOL_BOUND, "{}", engine.pool.len());
     }
     /// An image sequence read in place, its frames rendered again on disk
     /// (the everyday case: a 3D app writes them again) while the project is

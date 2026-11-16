@@ -95,6 +95,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
 | `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
 | `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
+| `metrics.export_preview` | Export progress sheet's picture of the frame last encoded | 315 | 315 | 315 | 315 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
@@ -103,8 +104,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
-| `metrics.grade_field` | A colour wheel's master field under the wheel | 72 | 72 | 72 | 72 |
+| `metrics.grade_field` | Room for a colour wheel master's number beside its strip | 72 | 72 | 72 | 72 |
 | `metrics.grade_pair` | Least width of two colour wheels side by side on their plates | 254 | 254 | 254 | 254 |
+| `metrics.grade_pair_max` | Most width of two colour wheel plates side by side | 446 | 446 | 446 | 446 |
 | `metrics.grade_wheel` | A colour wheel's least diameter | 112 | 112 | 112 | 112 |
 | `metrics.grade_wheel_max` | A colour wheel's greatest diameter in a wide panel | 220 | 220 | 220 | 220 |
 | `metrics.group_radius` | Settings grouped-form card corner | 12 | 12 | 12 | 12 |

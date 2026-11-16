@@ -1417,7 +1417,7 @@ impl Backend {
                 "hasAudio":kept("hasAudio", json!(false)),"captionLayers":kept("captionLayers", json!(0)),
                 "hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),
                 "duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),
-                "summary":kept("summary", json!(""))});
+                "summary":kept("summary", json!("")),"note":kept("note", json!(""))});
             let studio = kept("studio", Value::Null);
             self.native.export["project"] = project;
             if !studio.is_null() {
@@ -1442,7 +1442,7 @@ impl Backend {
         let work_area = comp
             .get("work")
             .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary,"note":plan.note});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         let comp_key = format!(

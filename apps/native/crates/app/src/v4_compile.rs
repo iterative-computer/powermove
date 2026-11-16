@@ -156,6 +156,9 @@ pub enum Kit {
         /// Its master's push from neutral, -1 to 1 of the master's range
         /// (shown on the wheel's bezel).
         master: Option<f64>,
+        /// The master as its strip under the wheel sets it: its value and
+        /// range, and the binding a drag there writes.
+        master_strip: Option<(f64, [f64; 2], SharedString)>,
     },
     /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
     Curve {
@@ -185,6 +188,10 @@ pub struct NodeView {
     pub style: StyleRefinement,
     pub hidden: bool,
     pub scroll_y: bool,
+    /// `metadata.scrollEdge` (a colour token, the ground under the
+    /// scroller): content past an edge fades into that ground there, so a
+    /// region with no scroller still says there is more (a sheet body).
+    pub scroll_edge: Option<u32>,
     pub scroll_x: bool,
     pub semantic: Option<SharedString>,
     pub text: Option<SharedString>,
@@ -193,6 +200,9 @@ pub struct NodeView {
     /// An `img`'s resource: an opaque key the host resolves (a Project
     /// panel thumbnail, `media_thumbs`), never a path.
     pub resource: Option<SharedString>,
+    /// `metadata.fit: "contain"`: the picture shows whole, letterboxed;
+    /// otherwise it covers the node.
+    pub contain: bool,
     pub disabled: bool,
     pub events: Events,
     pub ax: Option<Ax>,
@@ -209,6 +219,9 @@ pub struct NodeView {
     /// (`metadata.fixedItems`), so an item may fill its height.
     pub fixed_items: bool,
     pub is_plain_text: bool,
+    /// A line of text led by a symbol (a warning's triangle): the glyph
+    /// stands before the words, not over them.
+    pub symbol_leads: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
     pub local_change: bool,
@@ -796,6 +809,9 @@ fn compile(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| SharedString::from(s.to_owned()));
+    let symbol_leads = node.r#type == "text"
+        && symbol.is_some()
+        && (!node.text.is_empty() || !node.children.is_empty());
     let virtual_window = (node.r#type == "virtual-list")
         .then(|| {
             let count = node.props.get("count")?.as_u64()?;
@@ -891,6 +907,9 @@ fn compile(
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
+        scroll_edge: meta
+            .and_then(|m| m.get("scrollEdge"))
+            .and_then(|edge| table.color(&serde_json::json!({ "token": edge }))),
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
@@ -901,6 +920,12 @@ fn compile(
             .then(|| node.props.get("resource").and_then(Value::as_str))
             .flatten()
             .map(|r| SharedString::from(r.to_owned())),
+        contain: node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("fit"))
+            .and_then(Value::as_str)
+            == Some("contain"),
         disabled,
         events: Events::of(node),
         ax,
@@ -928,6 +953,7 @@ fn compile(
         kit: kit(node, component, panel, table),
         virtual_window,
         is_plain_text: node.r#type == "text" && node.props.is_empty() && node.children.is_empty(),
+        symbol_leads,
         binding: node
             .props
             .get("binding")
@@ -1078,11 +1104,29 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 };
                 ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
             });
+            let master_strip = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("masterBinding"))
+                .and_then(Value::as_str)
+                .zip(option("master"))
+                .map(|(binding, value)| {
+                    (
+                        value,
+                        [
+                            option("masterMin").unwrap_or(neutral - 1.),
+                            option("masterMax").unwrap_or(neutral + 1.),
+                        ],
+                        SharedString::from(binding.to_owned()),
+                    )
+                });
             Kit::Wheel {
                 rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
                 neutral,
                 range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
                 master,
+                master_strip,
             }
         }
         Some(Component::CurveEditor) => Kit::Curve {
