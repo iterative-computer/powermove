@@ -158,9 +158,7 @@ impl Picker {
                         }
                         TextEvent::Key("escape") | TextEvent::Cancelled => {
                             if p.sampling {
-                                p.sampling = false;
-                                p.generation += 1;
-                                cx.notify();
+                                p.cancel_sample(cx);
                             } else {
                                 p.finish(false, cx);
                             }
@@ -208,6 +206,53 @@ impl Picker {
         }
         p
     }
+    fn focus_value(&mut self, cx: &mut Context<Self>) {
+        self.focus_index = 21;
+        let handle = self.stops[21].clone();
+        let field = self.fields.get(9).cloned();
+        let window = self.window;
+        let generation = self.generation;
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            if !weak
+                .read_with(cx, |p, _| p.generation == generation && p.focus_index == 21)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let _ = window.update(cx, |_, w, cx| {
+                handle.focus(w, cx);
+                if let Some(field) = field {
+                    field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
+                }
+            });
+        });
+    }
+    fn cancel_sample(&mut self, cx: &mut Context<Self>) {
+        self.sampling = false;
+        self.status.clear();
+        self.generation += 1;
+        self.focus_value(cx);
+        cx.notify();
+    }
+    fn request_sample(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let result = self
+            .sample_source
+            .as_ref()
+            .ok_or_else(|| "Composition viewer unavailable".to_owned())
+            .and_then(|source| source(at, cx));
+        let generation = self.generation;
+        match result {
+            Ok(rx) => {
+                cx.spawn(async move |this, cx| {
+                    let result = rx.recv().await;
+                    let _ = this.update(cx, |p, cx| p.resolve_sample(generation, result, cx));
+                })
+                .detach();
+            }
+            Err(error) => self.resolve_sample(generation, Ok(Err(error)), cx),
+        }
+    }
     fn resolve_sample(
         &mut self,
         generation: u64,
@@ -227,9 +272,7 @@ impl Picker {
             Ok(Err(e)) => self.status = e,
             Err(_) => self.status = "Could not sample that color".into(),
         }
-        if let Some(f) = self.fields.get(9) {
-            f.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
-        }
+        self.focus_value(cx);
         cx.notify();
     }
     fn copy_row(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -833,27 +876,7 @@ impl Render for Picker {
                             return;
                         }
                         cx.stop_propagation();
-                        let Some(source) = &p.sample_source else {
-                            p.status = "Composition viewer unavailable".into();
-                            cx.notify();
-                            return;
-                        };
-                        match source(e.position, cx) {
-                            Ok(rx) => {
-                                let generation = p.generation;
-                                cx.spawn(async move |this, cx| {
-                                    let result = rx.recv().await;
-                                    let _ = this.update(cx, |p, cx| {
-                                        p.resolve_sample(generation, result, cx);
-                                    });
-                                })
-                                .detach();
-                            }
-                            Err(e) => {
-                                p.status = e;
-                                cx.notify();
-                            }
-                        }
+                        p.request_sample(e.position, cx);
                     });
                 });
                 let moved = weak.clone();
@@ -1055,10 +1078,7 @@ impl Render for Picker {
                         if p.menu.take().is_some() {
                             cx.notify();
                         } else if p.sampling {
-                            p.sampling = false;
-                            p.status.clear();
-                            p.generation += 1;
-                            cx.notify();
+                            p.cancel_sample(cx);
                         } else {
                             p.finish(false, cx);
                         }
@@ -1155,6 +1175,26 @@ impl Render for Picker {
                     )
                     .child(
                         kit.icon_button(
+                            "sample-comp",
+                            "eyedropper",
+                            "Sample composition color",
+                            self.sampling,
+                        )
+                        .track_focus(&self.stops[2])
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.apply_active(cx);
+                            p.sampling = true;
+                            p.generation += 1;
+                            p.status.clear();
+                            cx.emit(Edit::Sample);
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        kit.icon_button(
                             "color-hue-settings",
                             "line.3.horizontal",
                             "Picker settings",
@@ -1171,26 +1211,6 @@ impl Render for Picker {
                             } else {
                                 Some(true)
                             };
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        kit.icon_button(
-                            "sample-comp",
-                            "eyedropper",
-                            "Sample composition color",
-                            self.sampling,
-                        )
-                        .track_focus(&self.stops[2])
-                        .focus_visible_style(move |s| {
-                            s.border(px(focus_width)).border_color(rgb(focus_color))
-                        })
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            p.apply_active(cx);
-                            p.sampling = true;
-                            p.generation += 1;
-                            p.status.clear();
-                            cx.emit(Edit::Sample);
                             cx.notify();
                         })),
                     )
@@ -1346,7 +1366,30 @@ mod tests {
                 })
             });
             vcx.run_until_parked();
+            assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
         }
+        for source in [
+            None,
+            Some(std::rc::Rc::new(|_, _: &App| Err("No viewer pixel".into())) as SampleSource),
+        ] {
+            picker.update(&mut vcx, |p, cx| {
+                p.sample_source = source;
+                p.sampling = true;
+                p.request_sample(point(px(0.), px(0.)), cx);
+                assert!(!p.sampling);
+                assert!(!p.status.is_empty());
+            });
+            vcx.run_until_parked();
+            assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
+        }
+        picker.update(&mut vcx, |p, cx| {
+            p.sampling = true;
+            p.cancel_sample(cx);
+            assert!(!p.sampling);
+            assert!(p.status.is_empty());
+        });
+        vcx.run_until_parked();
+        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
         vcx.update(|_, cx| {
             picker.update(cx, |p, cx| {
                 p.sampling = true;
