@@ -2201,6 +2201,9 @@ fn fill_cache(
         // background class (efficiency cores, and only when nothing the
         // person does needs them); its helper threads take it too.
         let _ = crate::qos::set_job_qos(crate::qos::JobQos::Background);
+        // Every thread of this job process, not only this one (its render
+        // and helper threads start at the default class).
+        crate::qos::background_process();
     }
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {

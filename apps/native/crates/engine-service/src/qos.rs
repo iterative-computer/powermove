@@ -87,6 +87,17 @@ where
     })
 }
 
+/// Puts the whole process in the background (every thread, those it starts
+/// later too, and its disk reads and writes): for a process that only does
+/// work nobody waits for (a background render's job).
+pub fn background_process() {
+    #[cfg(target_vendor = "apple")]
+    // SAFETY: changes this process's own scheduling band; no pointers.
+    unsafe {
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG);
+    }
+}
+
 /// The calling thread's class, to start helper threads in: macOS gives a new
 /// thread the default class whatever its creator runs at, so a worker
 /// applies this first ([`apply_class`]).
