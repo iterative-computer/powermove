@@ -2690,7 +2690,7 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
 
 #[cfg(test)]
 mod recovered_runtime_tests {
-    use super::*;
+    use super::Extensions;
     #[test]
     fn recovery_replays_discovery_when_the_panel_runtime_arrives_or_restarts() {
         let mut extensions = Extensions::default();
