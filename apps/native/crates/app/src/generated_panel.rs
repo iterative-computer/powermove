@@ -153,6 +153,22 @@ fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u3
     t.colors.panel
 }
 
+fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
+    let resolve=build.map_or(1.,|b|b.resolve(std::time::Instant::now()));
+    if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().bg(rgb(t.colors.panel));}
+    let color=t.colors.panel;
+    div().absolute().inset_0().child(canvas(|_,_,_|(),move |bounds,_,window,_| {
+        window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}),|window| {
+            if resolve>0. {window.paint_quad(PaintQuad::new(bounds).background(pm_shell::kit::ink(color,resolve)));}
+            for dot in pm_design::dots::matrix([f32::from(bounds.size.width),f32::from(bounds.size.height)],4.,|_|[1.;4]) {
+                let p=bounds.origin+point(px(dot.center[0]-dot.radius),px(dot.center[1]-dot.radius));
+                window.paint_quad(PaintQuad::new(Bounds::new(p,size(px(dot.radius*2.),px(dot.radius*2.))))
+                    .corner_radii(px(dot.radius)).background(pm_shell::kit::ink(color,1.-resolve)));
+            }
+        });
+    }).size_full())
+}
+
 fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
     div().h(px(BUILD_HEADER)).flex_none().px(px(BUILD_INSET)).flex().items_center()
         .text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.colors.text))
@@ -194,7 +210,7 @@ fn dot_filter(build: Option<&panel_build::State>, index: Option<usize>, t: &pm_d
     let Some(build)=build else {return vec![];};
     if t.accessibility.reduce_motion {return vec![];}
     let now=std::time::Instant::now();
-    let detail=index.and_then(|i|build.committed.get(&i)).map_or(4.,|at|pm_design::dots::detail(now.saturating_duration_since(*at).as_secs_f32()));
+    let detail=index.or(Some(0)).and_then(|i|build.committed.get(&i)).map_or(0.6,|at|pm_design::dots::detail(now.saturating_duration_since(*at).as_secs_f32()));
     vec![Filter::DotMatrix{detail,resolve:build.resolve(now),accent:t.colors.accent}]
 }
 
@@ -805,11 +821,12 @@ fn render(
         .id(SharedString::from(format!("generated-{id}")))
         .flex()
         .flex_col()
-        .relative().bg(rgb(slot_surface(&t, build.as_ref()))).rounded(px(t.radius.lg))
+        .relative().rounded(px(t.radius.lg))
         .w_full()
         .h(px((rect.h - m.header).max(0.)))
         .overflow_y_scroll()
         .text_size(px(ty.body))
+        .child(ground(&t,build.as_ref()))
         .children(under)
         .child(panel_title(def, &t).filter(dot_filter(build.as_ref(),None,&t)));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
@@ -1353,7 +1370,7 @@ mod panel_build_capture {
     struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32, definition: serde_json::Value }
     impl Render for Frame {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            let mut body = gpui::div().relative().opacity(if self.state.stage == panel_build::Stage::Erase { 1.-panel_build::fade(self.elapsed,0.36) } else { 1. }).w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).bg(gpui::rgb(super::slot_surface(&self.tokens, Some(&self.state))))
+            let mut body = gpui::div().relative().opacity(if self.state.stage == panel_build::Stage::Erase { 1.-panel_build::fade(self.elapsed,0.36) } else { 1. }).w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).child(super::ground(&self.tokens,Some(&self.state)))
                 .font_family(pm_design::TEXT_FONT);
             let rect = pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header };
             let fraction = super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"]);
@@ -1474,7 +1491,9 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     let mut generated = false;
     if let Some(target) = &build.target {
         content = v.extension_panel(target, rect, cx);
-        let rendered = if content.is_some() { v.extension_build_rendered(target) }
+        if content.is_none() { content=v.builtin_panel(target,rect,window,cx); }
+        let rendered = if v.extensions.owns_panel(target) { v.extension_build_rendered(target) }
+            else if content.is_some() { true }
             else { section(v, target).is_some() };
         if rendered && build.finishing {
             if let Some(state) = v.panel_builds.get_mut(id) { state.complete = true; }

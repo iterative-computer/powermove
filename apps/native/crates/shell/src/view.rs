@@ -1476,6 +1476,7 @@ impl Editor {
         serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
     }
     pub fn reserve_agent_panel(&mut self, id: &str, placement: &serde_json::Value, height: f32) -> serde_json::Value {
+        self.slides.armed = true;
         self.maximized_panel = None;
         let used = layout::reserve_build(&mut self.layout, id, placement, height);
         self.agent_build_slots.insert(id.into(), (used.clone(), height));

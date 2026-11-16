@@ -119,7 +119,7 @@ impl State {
         let age = self.changed.elapsed().as_secs_f32();
         if self.explicit {
             if self.stage == Stage::Erase || self.stage == Stage::Ready { return; }
-            if (self.stage == Stage::Wake && age >= 0.24) || (self.stage == Stage::Ink && age >= 0.58) || self.stage == Stage::Rest || self.stage == Stage::Sketch {
+            if (self.stage == Stage::Wake && age >= 0.24) || (self.stage == Stage::Ink && age >= 0.82) || self.stage == Stage::Rest || self.stage == Stage::Sketch {
                 if let Some(row) = self.pending.pop_front() { self.event("commit", row); return; }
                 else if self.complete { self.event("ready", self.row); return; }
                 else if !self.planned.is_empty() && self.stage == Stage::Wake { self.event("plan", *self.planned.first().unwrap()); }
@@ -210,7 +210,7 @@ mod explicit_build_tests {
     #[test] fn extension_handoff_waits_for_first_render_and_queued_ink() {
         let mut s = State::default(); s.explicit = true; s.pending.extend([0,1]);
         elapsed(&mut s,241); assert_eq!(s.row,0);
-        elapsed(&mut s,581); assert_eq!(s.row,1);
+        elapsed(&mut s,821); assert_eq!(s.row,1);
         elapsed(&mut s,2100); assert_eq!(s.stage,Stage::Rest);
         s.complete = true; s.tick(); assert_eq!(s.stage,Stage::Ready);
     }

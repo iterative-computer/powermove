@@ -425,7 +425,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                     }).await?;
                     if !rendered { return Err(Error::invalid("Panel has not committed its first render. Build slot remains; inspect the extension or cancel.")); }
                 }
-                cx.background_executor().timer(Duration::from_millis(360)).await;
+                cx.background_executor().timer(Duration::from_millis(if event == "ready" {700} else {360})).await;
                 target.with(cx, |c, editor, _, cx| {
                     editor.update(cx, |e, cx| {
                         if event == "ready" {
