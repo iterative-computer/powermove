@@ -438,7 +438,7 @@ fn the_top_edge_docks_a_band_above_the_columns() {
         for (zone, x, y) in spots(target.rect, &t) {
             if let Some(p) = top.drop_target_for(&g, bounds, (x, y), &t, "inspector", false) {
                 let mut next = top.clone();
-                next.move_panel_to("inspector", p.target).unwrap();
+                next.apply_drop("inspector", &p, false).unwrap();
                 sound(&next, bounds, zone);
                 assert!(close(rect_of(&next, bounds, "inspector"), p.rect), "{zone}");
             }
