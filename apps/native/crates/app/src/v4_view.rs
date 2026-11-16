@@ -2410,14 +2410,66 @@ impl SurfaceView {
         cx: &mut Context<Self>,
         skip: Option<Id>,
     ) -> AnyElement {
-        if skip == Some(id) {
-            return div().into_any_element();
-        }
+        // The render recurses here once per level of the tree: this frame
+        // holds only the children loop. What a node is before and after its
+        // children is built in frames of their own (`element_open`,
+        // `element_close`): in one frame, a debug build gave each level
+        // 180 KB, and ten levels with a symbol drawn under them overflowed a
+        // 2 MB thread.
+        let (element, mut children, shown) = match self.element_open(id, window, cx, skip) {
+            Ok(open) => open,
+            Err(done) => return done,
+        };
         let Some(node) = self.prepared.node(id) else {
             return div().into_any_element();
         };
+        for child in node.children.iter().take(shown) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
+            match self.prepared.node(*child) {
+                Some(c) if c.is_plain_text => {
+                    if let Some(text) = &c.text {
+                        children.push(text.clone().into_any_element());
+                    }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
+                }
+                _ => children.push(self.element(*child, window, cx, skip)),
+            }
+        }
+        self.element_close(id, element, children, window, cx)
+    }
+    /// A node's element up to its children, and the children that come
+    /// before them; `Err` when the node is all there is (a control, a field,
+    /// nothing).
+    #[inline(never)]
+    fn element_open(
+        &self,
+        id: Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        skip: Option<Id>,
+    ) -> Result<(Box<Stateful<Div>>, Vec<AnyElement>, usize), AnyElement> {
+        if skip == Some(id) {
+            return Err(div().into_any_element());
+        }
+        let Some(node) = self.prepared.node(id) else {
+            return Err(div().into_any_element());
+        };
         if node.hidden {
-            return div().into_any_element();
+            return Err(div().into_any_element());
         }
         if let Some(control) = self.controls.get(&id) {
             // A control whose node may shrink gives way (and truncates)
@@ -2489,13 +2541,13 @@ impl SurfaceView {
             } else {
                 control.clone().into_any_element()
             };
-            return slot
+            return Err(slot
                 .child(child)
                 .children(self.probe(id))
-                .into_any_element();
+                .into_any_element());
         }
         if let Some(field) = self.fields.get(&id) {
-            return self.field_element(node, field, cx);
+            return Err(self.field_element(node, field, cx));
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
@@ -2808,32 +2860,22 @@ impl SurfaceView {
         } else {
             usize::MAX
         };
-        for child in node.children.iter().take(shown) {
-            if let Some(stand_in) = self.cull.stand_in(*child) {
-                children.push(stand_in);
-                continue;
-            }
-            match self.prepared.node(*child) {
-                Some(c) if c.is_plain_text => {
-                    if let Some(text) = &c.text {
-                        children.push(text.clone().into_any_element());
-                    }
-                }
-                _ if node.fixed_items => {
-                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
-                    children.push(
-                        div()
-                            .flex_none()
-                            .h(px(size))
-                            .flex()
-                            .flex_col()
-                            .child(self.element(*child, window, cx, skip))
-                            .into_any_element(),
-                    );
-                }
-                _ => children.push(self.element(*child, window, cx, skip)),
-            }
-        }
+        Ok((Box::new(element), children, shown))
+    }
+    /// A node's element with its children: the edges, the probe, the sheet
+    /// and its place in the panel.
+    #[inline(never)]
+    fn element_close(
+        &self,
+        id: Id,
+        element: Box<Stateful<Div>>,
+        mut children: Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(node) = self.prepared.node(id) else {
+            return element.into_any_element();
+        };
         if let Some(geometry) = node.virtual_window {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
@@ -2848,7 +2890,7 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let mut element = element.children(children).children(self.probe(node.id));
+        let mut element = (*element).children(children).children(self.probe(node.id));
         // Over the content, last: where it runs past the scroller's edges.
         if let Some(ground) = node.scroll_edge.filter(|_| node.scroll_y)
             && let Some(scroll) = self.scrolls.get(&id)
@@ -3644,7 +3686,11 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
+            Kit::Wheel { .. }
+            | Kit::Curve { .. }
+            | Kit::Ease { .. }
+            | Kit::Pad { .. }
+            | Kit::Ramp { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures

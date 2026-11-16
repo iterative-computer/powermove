@@ -378,7 +378,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 36);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -410,6 +410,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             }
             "ease-curve" | "ease-thumbnail" => {
                 props["value"] = json!([0.42, 0., 0.58, 1.]);
+            }
+            "point-pad" => {
+                props["value"] = json!([10., -20.]);
+                props["binding"] = json!("x+y");
+                props["metadata"] = json!({"pmKit":{"minX":-100.,"maxX":100.,"minY":-100.,"maxY":100.}});
+            }
+            "gradient-bar" => {
+                props["value"] = json!(40.);
+                props["binding"] = json!("midpoint");
+                props["metadata"] = json!({"pmKit":{"start":"#000000","end":"#ffffff","min":1.,"max":99.}});
             }
             _ => {}
         }
@@ -1888,4 +1898,27 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
             assert_eq!(after, first, "timeline paint should remain reusable");
         }
     }
+}
+/// A deep panel tree renders on a test thread's 2 MB stack: each level of
+/// the recursive render keeps a small frame (what a node is before and after
+/// its children is built in frames of its own). One frame per level was
+/// 180 KB in a debug build, and ten levels with a symbol drawn under them
+/// overflowed.
+#[gpui::test]
+fn a_deep_panel_tree_renders_within_a_small_stack(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    const DEPTH: u64 = 40;
+    let mut ops = vec![];
+    for level in 1..=DEPTH {
+        let props = if level == DEPTH {
+            json!({"id":"deepest","style":{"width":20,"height":20}})
+        } else {
+            json!({"style":{"display":"flex","padding":1}})
+        };
+        ops.extend(node_ops(level, level - 1, "div", props, &["click"]));
+    }
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    assert!(bounds(&mut vcx, "deepest").size.width > px(0.));
 }

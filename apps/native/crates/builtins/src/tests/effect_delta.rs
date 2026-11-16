@@ -1125,6 +1125,7 @@ fn effect_controls_lays_out_points_the_gradient_bar_and_more_as_v1() {
                 "parameter" => r["parameter"]["key"].as_str().unwrap().to_owned(),
                 "effect" => format!("[{}]", r["label"].as_str().unwrap()),
                 "more" => format!("more {} {}", r["count"], r["changed"]),
+                "spacer" => "pad".to_owned(),
                 "action" => format!("action {}", r["label"].as_str().unwrap()),
                 kind => {
                     let keys: Vec<&str> = r["parameters"]
@@ -1145,7 +1146,9 @@ fn effect_controls_lays_out_points_the_gradient_bar_and_more_as_v1() {
             "[Gradient Ramp]",
             "action Swap Colors",
             "point Start Of Ramp startX+startY",
+            "pad",
             "point End Of Ramp endX+endY",
+            "pad",
             "ramp Gradient startColor+endColor",
             "startColor",
             "endColor",
@@ -1187,7 +1190,7 @@ fn effect_controls_lays_out_points_the_gradient_bar_and_more_as_v1() {
     );
     let opened = projection(&panels);
     assert_eq!(
-        shape(&opened)[11..],
+        shape(&opened)[13..],
         ["radius", "intensity", "more 1 true", "threshold"]
     );
 }

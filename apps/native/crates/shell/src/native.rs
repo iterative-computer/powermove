@@ -72,6 +72,10 @@ pub struct MenuEntry {
     pub checked: bool,
     pub enabled: bool,
     pub children: Vec<MenuEntry>,
+    /// A section's title (the keyframe menu's "Keyframe"): no action.
+    pub header: bool,
+    /// The key the menu bar shows for the row's command (`menu::chord_for`).
+    pub shortcut: Option<String>,
 }
 impl MenuEntry {
     pub fn item(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -81,6 +85,16 @@ impl MenuEntry {
             checked: false,
             enabled: true,
             children: vec![],
+            header: false,
+            shortcut: None,
+        }
+    }
+    /// A section's title row.
+    pub fn header(label: impl Into<String>) -> Self {
+        Self {
+            header: true,
+            enabled: false,
+            ..Self::item(label, "")
         }
     }
     pub fn submenu(label: impl Into<String>, children: Vec<MenuEntry>) -> Self {
@@ -7823,7 +7837,19 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             continue;
         }
+        if entry.header {
+            let title = NSString::from_str(&entry.label);
+            let item: Retained<NSMenuItem> =
+                unsafe { msg_send![objc2::class!(NSMenuItem), sectionHeaderWithTitle: &*title] };
+            menu.addItem(&item);
+            continue;
+        }
         let item = named_item(mtm, &entry.label, &entry.command);
+        if let Some(chord) = &entry.shortcut {
+            let (key, flags) = menu::accelerator(chord);
+            item.setKeyEquivalent(&NSString::from_str(&key));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
+        }
         unsafe { item.setTarget(Some(target)) };
         item.setState(if entry.checked {
             NSControlStateValueOn

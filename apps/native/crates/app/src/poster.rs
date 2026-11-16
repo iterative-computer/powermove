@@ -14,10 +14,10 @@ use std::{
 
 /// Width of a stored poster frame; its height follows the composition.
 const WIDTH: u32 = 640;
-/// Where a poster is looked for, as shares of the composition's length: a
-/// third in first (past titles fading up, before the end card), then either
-/// side of it. The first frame that shows something is kept.
-const PLACES: [f64; 6] = [1. / 3., 1. / 2., 1. / 6., 2. / 3., 5. / 6., 1. / 12.];
+/// Where a poster is looked for when the viewer kept no picture with
+/// something in it, as shares of the composition's length, from the start
+/// on: the first frame that shows something is kept (PM-285).
+const PLACES: [f64; 7] = [0., 1. / 12., 1. / 6., 1. / 3., 1. / 2., 2. / 3., 5. / 6.];
 /// Channel values a frame must span before it counts as showing something.
 const CONTENT_SPAN: u8 = 24;
 
@@ -31,12 +31,14 @@ pub(crate) fn files(dir: &Path, id: &str) -> (PathBuf, PathBuf) {
         dir.join(format!("{stem}.stamp")),
     )
 }
-/// The last frame `id` showed while it was open, when one is stored, as its
-/// poster (written beside the others, stamped `stamp`): Home shows what the
-/// person last saw rather than drawing it again. Blocking.
+/// The last frame `id` showed while it was open, when one is stored and
+/// shows something, as its poster (written beside the others, stamped
+/// `stamp`): Home shows what the person last saw rather than drawing it
+/// again. A flat one (the viewer's ground while the project loaded) is
+/// never taken. Blocking.
 pub(crate) fn adopt_last_frame(profile: &Path, dir: &Path, id: &str, stamp: i64) -> Option<Vec<u8>> {
     let (last, last_stamp) = last_frame_files(profile, id);
-    let png = std::fs::read(&last).ok()?;
+    let png = std::fs::read(&last).ok().filter(|png| has_content(png))?;
     let time: f64 = std::fs::read_to_string(&last_stamp)
         .ok()
         .and_then(|s| s.lines().nth(1).and_then(|t| t.trim().parse().ok()))
@@ -44,9 +46,47 @@ pub(crate) fn adopt_last_frame(profile: &Path, dir: &Path, id: &str, stamp: i64)
     let (file, stamp_file) = files(dir, id);
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&file, &png).ok()?;
-    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}\n{LAYERS}", identity())).ok()?;
     let _ = std::fs::remove_file(missing_file(dir, id));
     Some(png)
+}
+/// A poster's fourth stamp line: whether the project has a layer that can
+/// show (`layers`) or none at all (`blank`). Only `blank` lets Home's card
+/// say Blank: a project with any visible layer never does, whatever its
+/// picture looks like.
+const LAYERS: &str = "layers";
+const BLANK: &str = "blank";
+/// Whether `published` has any layer that can show: switched on and not
+/// sound, a null, a camera, a light or an adjustment, in any composition.
+pub(crate) fn shows_layers(published: &pm_kernel::Published) -> bool {
+    let Some(root) = published.snapshot.root() else {
+        return false;
+    };
+    let shows = |layer: &pm_model::Node| {
+        let on = !matches!(layer.get("on").map(pm_model::Node::kind), Some(pm_model::NodeKind::Bool(false)));
+        let kind = match layer.get("type").map(pm_model::Node::kind) {
+            Some(pm_model::NodeKind::String(s)) => s.as_str(),
+            _ => None,
+        };
+        on && !matches!(kind, Some("audio" | "null" | "camera" | "light" | "adjustment"))
+    };
+    let comps: Vec<&pm_model::Node> = match root.get("comps").map(pm_model::Node::kind) {
+        Some(pm_model::NodeKind::Object(comps)) => comps.iter().map(|(_, comp)| comp).collect(),
+        _ => vec![],
+    };
+    std::iter::once(root)
+        .chain(comps)
+        .any(|comp| pm_kernel::model::layers_of(comp).any(shows))
+}
+/// Whether the poster stamped in `stamp_file` is of a project with no layer
+/// that can show; `None` when the stamp does not say.
+pub(crate) fn blank(stamp_file: &Path) -> Option<bool> {
+    let text = std::fs::read_to_string(stamp_file).ok()?;
+    match text.lines().nth(3).map(str::trim) {
+        Some(BLANK) => Some(true),
+        Some(LAYERS) => Some(false),
+        _ => None,
+    }
 }
 /// Marks a poster that left offline media out (Home's card says so).
 pub(crate) fn missing_file(dir: &Path, id: &str) -> PathBuf {
@@ -84,7 +124,7 @@ pub(crate) fn frame_of(published: &pm_kernel::Published) -> ((u32, u32), Option<
 /// saved again costs one frame, not a search.
 fn times(duration: Option<f64>, kept: Option<f64>) -> Vec<f64> {
     let Some(d) = duration.filter(|d| d.is_finite() && *d > 0.) else {
-        return vec![1.];
+        return vec![0., 1.];
     };
     let kept = kept.filter(|at| at.is_finite() && *at >= 0. && *at < d);
     kept.into_iter()
@@ -107,8 +147,10 @@ fn identity() -> String {
     // out (the Media Offline card) are drawn again.
     format!("{} ({build}) {FORMAT}", crate::updates::current_version())
 }
-/// The poster format this build draws: offline media left out.
-const FORMAT: &str = "posters 2";
+/// The poster format this build draws: offline media left out, the
+/// viewer's last picture or the first frame with something in it, and
+/// whether the project has a layer that can show (PM-285).
+const FORMAT: &str = "posters 3";
 /// Whether a stored poster is in this build's format: one in an older
 /// format may show the Media Offline card, so it is never shown, only
 /// drawn again.
@@ -190,6 +232,15 @@ pub(crate) fn write(
     fn never() -> bool {
         false
     }
+    // What the person last saw of it, when the viewer kept a picture with
+    // something in it, before any frame is drawn.
+    if let Some(profile) = dir.parent().and_then(Path::parent)
+        && let Some(png) = adopt_last_frame(profile, dir, id, stamp)
+    {
+        return Some(png);
+    }
+    let shows = published.as_deref().map(shows_layers);
+    let duration = duration.or_else(|| published.as_deref().and_then(|p| frame_of(p).1));
     let height = (WIDTH as f64 * h as f64 / w.max(1) as f64).round() as u32;
     let (file, stamp_file) = files(dir, id);
     let kept = self::stamp(&stamp_file).and_then(|(_, at)| at);
@@ -221,7 +272,12 @@ pub(crate) fn write(
     let (time, png) = chosen.or(first)?;
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&file, &png).ok()?;
-    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    let what = match shows {
+        Some(false) => BLANK,
+        Some(true) => LAYERS,
+        None => "",
+    };
+    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}\n{what}", identity())).ok()?;
     let missing = missing_file(dir, id);
     if crate::mcp_services::poster_missed_media(id) {
         let _ = std::fs::write(&missing, "");
@@ -446,21 +502,83 @@ mod tests {
         // Older posters (no format, or the first) may hold Media Offline.
         assert!(!at("a.stamp", "12\n1"));
         assert!(!at("b.stamp", "12\n1\n0.1.0 (1)"));
-        assert!(at("c.stamp", "12\n1\n0.1.0 (1) posters 2"));
-        assert!(at("d.stamp", "12\n1\n0.2.0 (7) posters 2"), "another build's, same format");
+        // A poster from before the viewer's picture came first may be a
+        // flat frame of a project with layers (PM-285): drawn again.
+        assert!(!at("c.stamp", "12\n1\n0.1.0 (1) posters 2"));
+        assert!(at("c3.stamp", "12\n1\n0.1.0 (1) posters 3\nlayers"));
+        assert!(at("d.stamp", "12\n1\n0.2.0 (7) posters 3"), "another build's, same format");
         assert!(!super::current_format(&dir.path().join("none.stamp")));
     }
     #[test]
-    fn a_poster_is_looked_for_a_third_in_first() {
+    fn a_poster_is_looked_for_from_the_start_on() {
         let at = times(Some(60.), None);
-        assert_eq!(at[0], 20.);
-        assert_eq!(at.len(), PLACES.len());
-        assert!(at.iter().all(|t| *t > 0. && *t < 60.));
-        assert_eq!(times(None, None), [1.]);
-        assert_eq!(times(Some(0.), Some(3.)), [1.]);
+        assert_eq!(at, [0., 5., 10., 20., 30., 40., 50.]);
+        // Its length unknown: the start, then a second in.
+        assert_eq!(times(None, None), [0., 1.]);
+        assert_eq!(times(Some(0.), Some(3.)), [0., 1.]);
         // Where the last poster was found comes first, while it still exists.
-        assert_eq!(times(Some(60.), Some(5.))[..2], [5., 20.]);
-        assert_eq!(times(Some(4.), Some(5.))[0], 4. / 3.);
+        assert_eq!(times(Some(60.), Some(25.))[..2], [25., 0.]);
+        assert_eq!(times(Some(4.), Some(5.))[0], 0.);
+    }
+
+    fn published(layers: serde_json::Value) -> pm_kernel::Published {
+        let project = serde_json::json!({"id": "P1", "name": "P", "w": 1920, "h": 1080, "fps": 24, "dur": 60,
+            "bg": "#232323", "layers": layers, "comps": {}, "assets": {}, "markers": [], "params": {}});
+        pm_kernel::detached_publication("P1", pm_model::json::parse(&project.to_string()).unwrap())
+    }
+
+    /// Blank is what the project holds, not what a frame looks like: a
+    /// project with a layer that can show is never blank (PM-285).
+    #[test]
+    fn a_project_with_a_layer_that_shows_is_never_blank() {
+        let layer = |kind: &str, on: bool| {
+            serde_json::json!({"id": format!("L{kind}"), "name": kind, "type": kind, "on": on,
+                "from": 0, "dur": 10, "parent": null})
+        };
+        assert!(!shows_layers(&published(serde_json::json!([]))), "no layers");
+        assert!(!shows_layers(&published(serde_json::json!([layer("audio", true)]))), "sound only");
+        assert!(!shows_layers(&published(serde_json::json!([layer("text", false)]))), "switched off");
+        assert!(shows_layers(&published(serde_json::json!([layer("audio", true), layer("text", true)]))));
+        assert!(shows_layers(&published(serde_json::json!([layer("video", true)]))), "even offline media shows");
+    }
+
+    /// The viewer's last picture is the poster when it shows something; a
+    /// flat one (the ground while the project loaded) is passed over for
+    /// the first frame with content, and the stamp says what the project
+    /// holds.
+    #[test]
+    fn the_viewers_last_picture_comes_first_unless_it_is_flat() {
+        let profile = tempfile::tempdir().unwrap();
+        let dir = profile.path().join("caches/thumbnails");
+        let picture = frame(|x, _| [x as u8 * 12, 0, 0, 255]);
+        let drawn = Arc::new(std::sync::Mutex::new(0));
+        let count = drawn.clone();
+        let renderer: FrameRenderer = Arc::new(move |_: &FrameRequest| {
+            *count.lock().unwrap() += 1;
+            Ok(frame(|_, y| [0, y as u8 * 20, 0, 255]))
+        });
+        let (last, last_stamp) = last_frame_files(profile.path(), "P1");
+        std::fs::create_dir_all(last.parent().unwrap()).unwrap();
+        // Flat: drawn instead.
+        std::fs::write(&last, frame(|_, _| [35, 35, 35, 255])).unwrap();
+        std::fs::write(&last_stamp, last_frame_mark(3, 12.)).unwrap();
+        let text = serde_json::json!([{"id": "L1", "name": "Twenty", "type": "text", "on": true,
+            "from": 0, "dur": 10, "parent": null}]);
+        let png = write(&renderer, Some(Arc::new(published(text.clone()))), &dir, "P1", 9, (1920, 1080), None);
+        assert!(has_content(&png.unwrap()));
+        assert_eq!(*drawn.lock().unwrap(), 1, "the start, from the project's own length");
+        assert_eq!(blank(&files(&dir, "P1").1), Some(false));
+        // A picture: taken as it is, nothing drawn.
+        std::fs::write(&last, &picture).unwrap();
+        let png = write(&renderer, Some(Arc::new(published(text))), &dir, "P1", 10, (1920, 1080), None);
+        assert_eq!(png.unwrap(), picture);
+        assert_eq!(*drawn.lock().unwrap(), 1);
+        assert_eq!(self::stamp(&files(&dir, "P1").1), Some((10, Some(12.))));
+        // An empty project's flat frame is its poster, and it is blank.
+        std::fs::remove_file(&last).unwrap();
+        let flat: FrameRenderer = Arc::new(|_| Ok(frame(|_, _| [35, 35, 35, 255])));
+        assert!(write(&flat, Some(Arc::new(published(serde_json::json!([])))), &dir, "P2", 1, (1920, 1080), None).is_some());
+        assert_eq!(blank(&files(&dir, "P2").1), Some(true));
     }
 
     #[test]
@@ -489,7 +607,7 @@ mod tests {
         assert!(has_content(&png.unwrap()));
         assert_eq!(
             *asked.lock().unwrap(),
-            [20., 30.],
+            [0., 5., 10., 20., 30.],
             "it stops at the first picture"
         );
         let (file, stamp) = files(dir.path(), "file-1/a");

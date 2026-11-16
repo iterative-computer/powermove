@@ -72,14 +72,15 @@ export interface SummaryRow {
   enabled: boolean;
 }
 /** v1's gradient bar over an effect's start and end colours (which stay
- * rows of their own below it). */
+ * rows of their own below it), and its midpoint when it has one (the
+ * diamond on the bar; its own row is under More). */
 export interface RampRow {
   kind: "ramp";
   id: string;
   effect: string;
   group: string;
   label: string;
-  /** The start and end colours. */
+  /** The start and end colours, then the midpoint when there is one. */
   parameters: Parameter[];
   effectLabel: string;
   enabled: boolean;
@@ -108,7 +109,14 @@ export interface MoreRow {
   effectLabel: string;
   enabled: boolean;
 }
+/** Room under a point row for its pad (two rows tall): nothing in it. */
+export interface SpacerRow {
+  kind: "spacer";
+  id: string;
+  effect: string;
+}
 export type Row =
+  | SpacerRow
   | EffectHeader
   | ParameterRow
   | ActionRow
@@ -274,6 +282,9 @@ export function projection(value: Json): Projection {
         row.index >= 16
       )
         throw new TypeError("Invalid action row");
+    } else if (row.kind === "spacer") {
+      if (typeof row.effect !== "string")
+        throw new TypeError("Invalid spacer row");
     } else if (row.kind === "more") {
       if (
         typeof row.effect !== "string" ||
@@ -291,7 +302,9 @@ export function projection(value: Json): Projection {
       row.kind === "point"
     ) {
       if (
-        (row.kind !== "summary" && row.parameters?.length !== 2) ||
+        (row.kind === "point" && row.parameters?.length !== 2) ||
+        (row.kind === "ramp" &&
+          ![2, 3].includes(row.parameters?.length ?? 0)) ||
         (row.kind === "point" &&
           row.parameters.some(
             (r) => typeof r?.value !== "number" || !Number.isFinite(r.value),
