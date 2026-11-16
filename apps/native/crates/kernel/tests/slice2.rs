@@ -7219,8 +7219,39 @@ fn the_same_source_cannot_have_two_live_sessions() {
         Err(KernelFailure::AlreadyOpen(_))
     ));
 }
+fn ask_library(k: &mut Kernel, profile: &Path, id: &str) -> String {
+    match k
+        .shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source: SessionSource::Library {
+                profile: profile.to_path_buf(),
+                project: id.into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::RecoveryRequired { ticket, .. } => ticket,
+        other => panic!("not asked: {other:?}"),
+    }
+}
+fn recover(k: &mut Kernel, ticket: String) -> SessionHandle {
+    match k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("not opened: {other:?}"),
+    }
+}
+/// Compaction folds in nothing the person did not choose: work a forced
+/// quit left in a library project no window has open stays in its journal,
+/// its slot as saved, and the next open asks; Recover brings it back.
 #[test]
-fn compact_all_publishes_unopened_library_journals_for_rollback() {
+fn compact_all_leaves_unopened_library_journals_for_the_recover_question() {
     let dir = common::TempDir::new("compact-library");
     {
         let mut k = kernel(&dir.0);
@@ -7228,21 +7259,24 @@ fn compact_all_publishes_unopened_library_journals_for_rollback() {
         edit(&mut k, "P", 12.0);
         k.sync_all();
     }
+    let slot = fs::read(dir.path("store/project.P.json")).unwrap();
     let mut k = kernel(&dir.0);
     let ShellReply::Compacted { projects, .. } = k.shell(ShellCall::CompactAll).unwrap() else {
         panic!()
     };
-    assert_eq!(projects, 1);
-    let p = LibraryStore::open(&dir.0).load("P").unwrap().unwrap();
-    let mut rollback = Kernel::new(Default::default());
-    rollback.open("P", OpenSource::Library(p)).unwrap();
+    assert_eq!(projects, 0);
+    assert_eq!(fs::read(dir.path("store/project.P.json")).unwrap(), slot);
+    let ticket = ask_library(&mut k, &dir.0, "P");
+    let session = recover(&mut k, ticket);
     assert_eq!(
-        common::opacity_of(rollback.project("P").unwrap().store(), "layer0"),
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
         Some(12.0)
     );
 }
+/// The same for a project kept in its own file: compaction leaves the file
+/// and the work, and the next open of the file asks.
 #[test]
-fn compact_all_publishes_unopened_external_file_journals() {
+fn compact_all_leaves_an_unopened_files_journal_for_the_recover_question() {
     let dir = common::TempDir::new("compact-file");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7253,10 +7287,16 @@ fn compact_all_publishes_unopened_external_file_journals() {
         edit(&mut k, "P", 18.0);
         k.sync_all();
     }
+    let before = fs::read(&path).unwrap();
     let mut k = kernel(&profile);
     k.shell(ShellCall::CompactAll).unwrap();
-    let store = common::open_store(&path);
-    assert_eq!(common::opacity_of(&store, "layer0"), Some(18.0));
+    assert_eq!(fs::read(&path).unwrap(), before, "the file as saved");
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(18.0)
+    );
 }
 #[test]
 fn duplicate_includes_unsaved_live_edits() {
@@ -7299,8 +7339,11 @@ fn live_lock_refreshes_heartbeat_and_keeps_its_inode() {
     );
     assert_eq!(fs::metadata(path).unwrap().ino(), inode);
 }
+/// A project kept in its own file, which is gone: compaction makes nothing
+/// of its work on its own. The next open asks; Recover opens the work as a
+/// recovered copy in the library, and the entry stays, naming its file.
 #[test]
-fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
+fn an_offline_external_projects_work_waits_for_the_recover_question() {
     let dir = common::TempDir::new("offline");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7312,6 +7355,8 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
         k.sync_all();
     }
     fs::remove_file(&path).unwrap();
+    let rows = || LibraryStore::open(&profile).projects().unwrap().len();
+    let before = rows();
     let mut k = kernel(&profile);
     let ShellReply::Compacted {
         recovery_copies, ..
@@ -7319,7 +7364,15 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
     else {
         panic!()
     };
-    assert_eq!(recovery_copies.len(), 1);
+    assert!(recovery_copies.is_empty(), "no copy made on its own");
+    assert_eq!(rows(), before);
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(17.0)
+    );
+    assert_eq!(rows(), before + 1, "the one recovered copy, chosen");
     let reader = LibraryStore::open(&profile);
     // The entry stays, naming its file; the file was its only body.
     assert!(reader.load("P").unwrap().is_none());
@@ -7332,23 +7385,6 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
             .and_then(|f| f.get("path"))
             .and_then(|p| p.as_str())
             .is_some_and(|p| p.ends_with("source.pmv"))
-    );
-    assert!(
-        reader
-            .read("projects")
-            .unwrap()
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r.get("id").and_then(|id| id.as_str()) == Some("P"))
-    );
-    let p = reader.load(&recovery_copies[0]).unwrap().unwrap();
-    let mut copy = Kernel::new(Default::default());
-    copy.open("copy", OpenSource::Library(p)).unwrap();
-    assert_eq!(
-        common::opacity_of(copy.project("copy").unwrap().store(), "layer0"),
-        Some(17.0)
     );
 }
 #[test]
@@ -7707,8 +7743,10 @@ fn a_session_killed_after_only_layout_changes_reopens_without_asking() {
     };
     let _ = ticket;
 }
+/// Opening the entry of a deleted file asks before its unsaved work is
+/// recovered; Recover opens it as a library project, and the entry stays.
 #[test]
-fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
+fn opening_the_entry_of_a_deleted_file_asks_then_recovers_its_unsaved_work() {
     let dir = common::TempDir::new("deleted-file-open");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7721,19 +7759,8 @@ fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
     }
     fs::remove_file(&path).unwrap();
     let mut k = kernel(&profile);
-    let reply = k
-        .shell(ShellCall::PrepareOpen {
-            id: "P".into(),
-            source: SessionSource::Library {
-                profile: profile.clone(),
-                project: "P".into(),
-            },
-            electron_profile: None,
-        })
-        .unwrap();
-    let ShellReply::Opened { session, .. } = reply else {
-        panic!("{reply:?}")
-    };
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
     assert_eq!(
         common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
         Some(17.0)
