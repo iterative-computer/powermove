@@ -3179,13 +3179,32 @@ fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
     assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
     assert_eq!(focused(&s), Some(true));
 }
+/// The first key on a property row (opacity revealed), in window space.
+fn property_key(s: &mut Stage, cx: &mut TestAppContext) -> Point<Pixels> {
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:t", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let origin = s.origin();
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let op = frame
+        .ops
+        .iter()
+        .find(|o| o.id.starts_with("key:") && o.id.contains("property"))
+        .expect("a key on the opacity row");
+    origin
+        + point(
+            px((op.bounds.x + op.bounds.width / 2.) as f32),
+            px((op.bounds.y + op.bounds.height / 2.) as f32),
+        )
+}
 /// v1's reach for a key (keyDown: 6 points across): a press 9 points
 /// beside it starts a marquee and moves no key; one within reach takes it.
 #[gpui::test]
 fn a_press_beside_a_key_starts_a_marquee_and_moves_no_key(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
     let ids = keyed(&mut s, cx, &[0.5, 3.]);
-    let key = op_center(&mut s, "key:");
+    let key = property_key(&mut s, cx);
     let before: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
     s.drag(cx, key + point(px(9.), px(0.)), key + point(px(49.), px(0.)), Modifiers::none());
     let after: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
@@ -3199,9 +3218,15 @@ fn a_press_beside_a_key_starts_a_marquee_and_moves_no_key(cx: &mut TestAppContex
 fn a_hold_key_draws_as_a_square(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
     let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    property_key(&mut s, cx);
     let shapes = |s: &Stage| -> Vec<&'static str> {
         let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
-        frame.ops.iter().filter(|o| o.id.starts_with("key:")).map(|o| o.shape).collect()
+        frame
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.id.contains("property"))
+            .map(|o| o.shape)
+            .collect()
     };
     assert!(!shapes(&s).contains(&"square"), "{:?}", shapes(&s));
     s.rig
@@ -3222,6 +3247,7 @@ fn a_hold_key_draws_as_a_square(cx: &mut TestAppContext) {
         .wait()
         .unwrap()
         .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
     s.idle(cx);
     assert!(shapes(&s).contains(&"square"), "{:?}", shapes(&s));
 }
@@ -3245,5 +3271,5 @@ fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
     s.idle(cx);
     let tip = s.surface.read_with(&s.vcx, |t, _| t.marker_tip_for_test(marker));
     let tip = tip.expect("a tooltip over the marker");
-    assert!(tip.starts_with("Marker · 00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
+    assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
 }
