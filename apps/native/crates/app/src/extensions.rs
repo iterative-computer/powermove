@@ -1981,10 +1981,9 @@ impl Controller {
                 // panels' ground ...
                 let panel_regions = mine.iter().map(|(_, r)| *r).collect();
                 let overlay_regions = stage.as_ref().map(to_rect).into_iter().collect();
-                // ... and its content only within that panel's body and every
-                // place recently sent to the page: a page that has not yet
-                // moved a panel's content (a splitter drag) never shows it
-                // through a neighbour's body; the panel's ground shows there.
+                // Reveal content only after the page acknowledges this panel's
+                // current placement. A timer cannot prove a recovering page
+                // has moved its content; until then show the panel ground.
                 let content = (!(cfg!(debug_assertions)
                     && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
                 .then(|| {
@@ -1993,7 +1992,7 @@ impl Controller {
                             if host.panel_layout_applied(id, *r) {
                                 *r
                             } else {
-                                sent.mask(id, *r)
+                                Rect::new(0., 0., 0., 0.)
                             }
                         })
                         .chain(stage.as_ref().map(to_rect))

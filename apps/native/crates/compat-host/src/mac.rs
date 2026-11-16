@@ -1156,6 +1156,8 @@ impl MacDomHost {
         }
         let mut layouts = self.shared.layouts.borrow().clone();
         let mut changed = vec![];
+        let active: Vec<String> = panels.iter().map(|(id, _)| id.clone()).collect();
+        let retired = layouts.keys().any(|id| !active.contains(id));
         layouts.retain(|id, _| panels.iter().any(|(active, _)| active == id));
         for (id, rect) in panels {
             if !rect.valid() {
@@ -1170,9 +1172,9 @@ impl MacDomHost {
             layouts.insert(id.clone(), (generation, rect, false));
             changed.push(json!({"id":id,"generation":generation,"rect":rect}));
         }
-        if !changed.is_empty() {
+        if retired || !changed.is_empty() {
             self.shared
-                .send(json!({"kind":"panel_layout","panel":0,"placements":changed}))?;
+                .send(json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}))?;
         }
         *self.shared.layouts.borrow_mut() = layouts;
         Ok(())

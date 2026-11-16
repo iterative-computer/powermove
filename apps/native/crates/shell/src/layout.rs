@@ -1674,7 +1674,7 @@ fn builtin_title(id: &str) -> &str {
         "mixer" => "Mixer",
         "captions" => "Captions",
         "workspaces" => "Workspaces",
-        _ => id,
+        _ => "Loading…",
     }
 }
 /// The viewer is the one panel always open; it keeps its stack to itself.
@@ -1858,5 +1858,17 @@ mod view_tile_tests {
         assert_eq!((t[0].w, t[0].h), (200., 100.));
         assert_eq!((t[3].x, t[3].y), (212., 122.));
         assert_eq!(view_tiles(r, 1, 2.), vec![r]);
+    }
+}
+
+#[cfg(test)]
+mod restored_panel_title_tests {
+    use super::Panels;
+    #[test]
+    fn restored_extension_tabs_wait_for_their_registered_title() {
+        assert_eq!(Panels::new(vec![]).title("pexels"), "Loading…");
+        let panels = Panels::new(vec![("pexels".into(), "Pexels".into()), ("bird".into(), "Flappy Bird".into())]);
+        assert_eq!(panels.title("pexels"), "Pexels");
+        assert_eq!(panels.title("bird"), "Flappy Bird");
     }
 }

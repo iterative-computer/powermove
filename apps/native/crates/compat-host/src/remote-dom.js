@@ -214,7 +214,7 @@
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
       .find((node) => node.getAttribute('data-pm-contribution') === id);
     if (!root) return false;
-    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px'}))
+    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px', 'clip-path':'inset(0)'}))
       root.style.setProperty(key, value, 'important');
   }, (placement) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
@@ -223,6 +223,9 @@
     const box = root.getBoundingClientRect();
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
+  }, (active) => {
+    for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])'))
+      root.style.setProperty('visibility', active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden', 'important');
   });
   document.addEventListener('scroll', (event) => {
     if (event.target.closest?.('[data-pm-overscan]')) return;
@@ -259,7 +262,7 @@
       });
       requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_ready',panel:0,payload:{id:event.id,generation:event.generation}})));
     } else if (event.kind === "panel_layout") {
-      panelLayouts.enqueue(event.placements);
+      panelLayouts.enqueue(event.placements, event.active);
     } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
     } else if (event.kind === "theme") {
