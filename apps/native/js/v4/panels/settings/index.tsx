@@ -975,13 +975,20 @@ function Shortcuts({
   const [shown, setShown] = useState({ key, limit: SHORTCUT_CHUNK });
   const limit = shown.key === key ? shown.limit : SHORTCUT_CHUNK;
   useLayoutEffect(() => {
+    // A new search starts from the first chunk, and is remembered even when
+    // it fits in one (else its end found the old search's count and sent
+    // every row at once).
+    if (shown.key !== key) {
+      setShown({ key, limit: SHORTCUT_CHUNK });
+      return;
+    }
     if (limit >= all.length) return;
     const timer = setTimeout(
       () => setShown({ key, limit: limit + SHORTCUT_CHUNK }),
       0,
     );
     return () => clearTimeout(timer);
-  }, [key, limit, all.length]);
+  }, [key, limit, all.length, shown.key]);
   if (!page) return null;
   const rows = all.slice(0, limit);
   const menus = [...new Set(rows.map((row) => row.menu))];

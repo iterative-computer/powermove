@@ -692,8 +692,18 @@ test("every command on Shortcuts arrives in commits the host's 1 MiB argument qu
   model.show("shortcuts");
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={model} bindings={bindings} />);
-  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
-  await root.flush();
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    await root.render(<SettingsPanel model={model} bindings={bindings} />);
+    await root.flush();
+  };
+  await settle();
+  // Searching and clearing the search brings every command back the same
+  // way (each re-render had re-sent every row's style).
+  await model.search("Command 1");
+  await settle();
+  await model.search("");
+  await settle();
   const sizes = commits.map((c) => JSON.stringify(c).length);
   expect(Math.max(...sizes)).toBeLessThan(1024 * 1024);
   const groups = root
