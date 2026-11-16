@@ -88,6 +88,21 @@ enum WriteMsg {
     Flush(FlushReply),
     Stop,
 }
+/// A body was saved (or its file names the project): its row, in `projects`
+/// or kept in the trash, takes the body's name and loses a rename's mark,
+/// which would otherwise put an older name back over it at the next open.
+fn named_by_body(id: &str, project: &Value, rows: &mut [Value], trash: &mut [Value]) {
+    for row in rows.iter_mut().chain(trash.iter_mut()) {
+        if let Value::Object(row) = row
+            && row.get("id").and_then(Value::as_str) == Some(id)
+        {
+            row.remove(RENAMED);
+            if let Some(name) = project.get("name") {
+                row.insert("name", name.clone());
+            }
+        }
+    }
+}
 /// A Home row's mark: its name is newer than its project's body (a rename
 /// while no window had it open), and an open names the project from it.
 pub const RENAMED: &str = "renamed";
@@ -253,14 +268,8 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
-        let (mut rows, trash) = self.entry_rows(id, &project, preserve_trash)?;
-        // The body has the name now.
-        if let Some(Value::Object(row)) = rows
-            .iter_mut()
-            .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
-        {
-            row.remove(RENAMED);
-        }
+        let (mut rows, mut trash) = self.entry_rows(id, &project, preserve_trash)?;
+        named_by_body(id, &project, &mut rows, &mut trash);
         let mut envelope = Map::new();
         envelope.insert("v", Value::from("1.2.0"));
         envelope.insert("proj", project);
@@ -305,7 +314,8 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
-        let (rows, trash) = self.entry_rows(id, summary, preserve_trash)?;
+        let (mut rows, mut trash) = self.entry_rows(id, summary, preserve_trash)?;
+        named_by_body(id, summary, &mut rows, &mut trash);
         self.batch(vec![
             (format!("projectMeta.{id}"), Some(meta)),
             ("projects".into(), Some(Value::Array(rows))),

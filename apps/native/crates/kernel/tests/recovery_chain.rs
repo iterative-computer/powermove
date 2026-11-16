@@ -1212,6 +1212,9 @@ fn a_rename_keeps_the_projects_place_and_date() {
     };
     let before = rows();
     assert_eq!(before[0].0, "reel");
+    let store = || pm_kernel::library::LibraryStore::open(&root.0);
+    let body = || std::fs::read(store().dir().join("project.film.json")).unwrap();
+    let saved = body();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let mut k = kernel(&root.0);
     assert!(matches!(
@@ -1226,6 +1229,111 @@ fn a_rename_keeps_the_projects_place_and_date() {
     let after = rows();
     assert_eq!(after[0], before[0]);
     assert_eq!(after[1], ("film".into(), "Renamed".into(), before[1].2));
+    assert_eq!(body(), saved, "a rename leaves the body as it was");
+    let prepare = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "film".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "film".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+        panic!("not opened");
+    };
+    assert_eq!(name(&k, &session.project), "Renamed");
+    // An edit, then a crash: the mark stays; Don't Save writes the saved
+    // project again, under the name, and the mark comes off.
+    widen(&mut k, &session.project, 640.);
+    k.durability_barrier().unwrap();
+    drop(k);
+    assert_eq!(store().renamed("film").unwrap().as_deref(), Some("Renamed"));
+    assert_eq!(body(), saved, "a crash leaves the body as it was");
+    let mut k = kernel(&root.0);
+    let ShellReply::RecoveryRequired { ticket, .. } = prepare(&mut k) else {
+        panic!("the unsaved work was not offered");
+    };
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Discard,
+        })
+        .unwrap()
+    else {
+        panic!("not opened");
+    };
+    assert_eq!(name(&k, &session.project), "Renamed");
+    k.shell(ShellCall::Close(session)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(store().renamed("film").unwrap(), None);
+    let p = store().load("film").unwrap().unwrap();
+    assert_eq!(p.project.get("name").and_then(Value::as_str), Some("Renamed"));
+    // Renamed again while closed: marked, the body untouched; a save writes
+    // the name into the body, and the mark comes off.
+    let saved = body();
+    k.shell(ShellCall::Rename {
+        project: "film".into(),
+        name: "Again".into(),
+    })
+    .unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(store().renamed("film").unwrap().as_deref(), Some("Again"));
+    assert_eq!(body(), saved);
+    let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+        panic!("not opened");
+    };
+    widen(&mut k, &session.project, 480.);
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(store().renamed("film").unwrap(), None);
+    let p = store().load("film").unwrap().unwrap();
+    assert_eq!(p.project.get("name").and_then(Value::as_str), Some("Again"));
+    assert!(rows().iter().any(|(id, name, _)| id == "film" && name == "Again"));
+}
+
+/// A body saved while its project is in the Trash (quit compaction of
+/// recovered work) names its row there and takes off a rename's mark: Put
+/// Back then opens the saved name, not the older rename (Sol review, PM-385).
+#[test]
+fn a_body_saved_in_the_trash_names_its_row_and_takes_off_a_renames_mark() {
+    let root = TempDir::new("rename-trash");
+    let writer = || {
+        pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap()
+    };
+    let named = |name: &str| {
+        let mut project = value();
+        let m = project.as_object_mut().unwrap();
+        m.insert("id", Value::from("film"));
+        m.insert("name", Value::from(name));
+        project
+    };
+    writer()
+        .save_project("film", named("A"), Value::Null, Value::Null, Value::Null)
+        .unwrap();
+    {
+        let mut k = kernel(&root.0);
+        k.shell(ShellCall::Rename {
+            project: "film".into(),
+            name: "B".into(),
+        })
+        .unwrap();
+        k.durability_barrier().unwrap();
+    }
+    {
+        let w = writer();
+        assert!(w.trash("film").unwrap());
+        w.compact_project("film", named("C"), Value::Null, Value::Null, Value::Null)
+            .unwrap();
+        let store = w.store();
+        let row = store.trash().unwrap().into_iter().find(|r| r.id == "film").unwrap();
+        assert_eq!(row.name, "C", "the trashed row says what the body says");
+        assert_eq!(store.renamed("film").unwrap(), None);
+        assert!(w.restore("film").unwrap());
+    }
+    let mut k = kernel(&root.0);
     let ShellReply::Opened { session, .. } = k
         .shell(ShellCall::PrepareOpen {
             id: "film".into(),
@@ -1239,5 +1347,5 @@ fn a_rename_keeps_the_projects_place_and_date() {
     else {
         panic!("not opened");
     };
-    assert_eq!(name(&k, &session.project), "Renamed");
+    assert_eq!(name(&k, &session.project), "C");
 }
