@@ -105,6 +105,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) agent_panel_builds: std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
@@ -399,6 +400,9 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
+            if let Some(slot) = crate::generated_panel::agent_slot(v, id, bounds, w, cx) {
+                return Some(slot);
+            }
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
@@ -452,8 +456,11 @@ impl pm_shell::integration::Integration for Bridge {
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
     }
+    fn native_panel_id(&self, id: &str, cx: &App) -> String {
+        self.0.read(cx).agent_panel_builds.get(id).and_then(|b| b.target.clone()).unwrap_or_else(|| id.to_owned())
+    }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
-        self.0.read(cx).extensions.owns_panel(id)
+        self.0.read(cx).extensions.owns_panel(&self.native_panel_id(id, cx))
     }
     fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
         if id != "timeline" {
@@ -489,14 +496,20 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
-        self.0.read(cx).extensions.contributed.clone()
+        let v = self.0.read(cx);
+        let mut panels = v.extensions.contributed.clone();
+        panels.extend(v.agent_panel_builds.iter().map(|(id, b)| (id.clone(), b.title.clone())));
+        panels
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
-            v.sync_extension_panels(open);
+            let mut effective: Vec<&str> = open.to_vec();
+            for id in open { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.as_deref()) { effective.push(target); } }
+            let effective: Vec<String> = effective.into_iter().map(str::to_owned).collect();
+            v.sync_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             v.sync_parking(open, cx);
             let was_docked = v.builtins.agent_docked;
             v.builtins.agent_docked = open.contains(&"agent");
@@ -517,7 +530,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
-            v.hide_extension_panels(shown);
+            let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
+            for id in shown { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) { effective.push(target); } }
+            v.hide_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.
             let timeline = shown.contains(&"timeline");
@@ -892,6 +907,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),

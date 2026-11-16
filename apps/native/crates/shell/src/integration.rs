@@ -59,6 +59,7 @@ pub trait Integration {
     }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String { id.to_owned() }
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }

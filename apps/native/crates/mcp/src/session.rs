@@ -12,6 +12,7 @@ use std::{
 
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
+    "panel_begin", "panel_build",
     "open_panel",
     "get_panel_state",
     "interact_panel",
@@ -1036,7 +1037,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             let extensions = if host.extensions.is_some() {
-                " To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+                " Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
             } else {
                 " Extension staging is inert: nothing here activates."
             };

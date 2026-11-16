@@ -64,9 +64,10 @@ pub(crate) fn publication(
     after: &Value,
 ) {
     let sections = after["custom"].as_array().cloned().unwrap_or_default();
-    builds.retain(|id, _| sections.iter().any(|s| s["id"].as_str() == Some(id)));
+    builds.retain(|id, state| state.explicit || sections.iter().any(|s| s["id"].as_str() == Some(id)));
     for section in &sections {
         let Some(id) = section["id"].as_str() else { continue; };
+        if builds.get(id).is_some_and(|state| state.explicit) { continue; }
         let previous = before["custom"].as_array().and_then(|sections| sections.iter().find(|s| s["id"] == id));
         let controls = section["controls"].as_array().cloned().unwrap_or_default();
         let changed: Vec<_> = controls.iter().enumerate().filter_map(|(index, control)| {
@@ -184,6 +185,7 @@ fn build_frame(
                     if !ready && state.stage != panel_build::Stage::Wake {
                         let mut rows = vec![state.row];
                         rows.extend(state.pending.iter().copied().filter(|row| *row > state.row).take(2));
+                        if state.explicit { rows.extend(state.planned.iter().copied().filter(|row| *row <= state.row + 2)); rows.sort_unstable(); rows.dedup(); }
                         rows.retain(|row| !state.committed.contains_key(row) || (state.stage == panel_build::Stage::Ink && *row == state.row));
                         for row in rows {
                             let row_y = BUILD_HEADER + (row as f32+0.5)*BUILD_ROW;
@@ -1410,7 +1412,7 @@ mod tests {
 
 #[cfg(test)]
 mod panel_build_capture {
-    use super::{build_frame, panel_build, publication, panel_title, slider_control, control_opacity};
+    use super::{build_frame, panel_build, panel_title, slider_control, control_opacity};
     use gpui::{AppContext, HeadlessAppContext, IntoElement, ParentElement, Render, Styled, px, size};
     use pm_design::{Accessibility, Scheme, Tokens};
     use serde_json::json;
@@ -1419,7 +1421,7 @@ mod panel_build_capture {
     struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32, definition: serde_json::Value }
     impl Render for Frame {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            let mut body = gpui::div().relative().w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).bg(gpui::rgb(super::slot_surface(&self.tokens, Some(&self.state))))
+            let mut body = gpui::div().relative().opacity(if self.state.stage == panel_build::Stage::Erase { 1.-panel_build::fade(self.elapsed,0.36) } else { 1. }).w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).bg(gpui::rgb(super::slot_surface(&self.tokens, Some(&self.state))))
                 .font_family(pm_design::TEXT_FONT);
             let rect = pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header };
             let fraction = super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"]);
@@ -1446,6 +1448,7 @@ mod panel_build_capture {
             ("ink", panel_build::Stage::Ink, 0, 0.14, Scheme::Dark, false),
             ("cool", panel_build::Stage::Ink, 1, 0.48, Scheme::Dark, false),
             ("rest", panel_build::Stage::Rest, 2, 2.4, Scheme::Dark, false),
+            ("cancel", panel_build::Stage::Erase, 2, 0.18, Scheme::Dark, false),
             ("ready", panel_build::Stage::Ready, 4, 0.4, Scheme::Dark, false),
             ("light-theme", panel_build::Stage::Ink, 0, 0.14, Scheme::Light, false),
             ("reduced-motion", panel_build::Stage::Ink, 1, 0.2, Scheme::Dark, true),
@@ -1455,13 +1458,13 @@ mod panel_build_capture {
                     Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
                     Arc::new(()), || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
                 );
-                // Pump the authored publication before opening/drawing the slot.
-                let mut builds = std::collections::HashMap::new();
-                publication(&mut builds, &json!({"custom":[]}), &json!({"custom":[{"id":"capture", "controls":[{"type":"slider"},{"type":"slider"},{"type":"slider"}]}]}));
-                let mut state = builds.remove("capture").unwrap();
+                let mut state = panel_build::State::default();
+                state.explicit = true;
+                state.planned.extend(0..5);
+                state.pending.push_back(0);
                 state.changed -= std::time::Duration::from_millis(241);
                 state.tick();
-                assert_eq!(state.stage, panel_build::Stage::Sketch);
+                assert_eq!(state.stage, panel_build::Stage::Ink);
                 state.stage = stage;
                 state.row = row;
                 state.changed = std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed);
@@ -1489,4 +1492,56 @@ mod panel_build_capture {
             });
         }
     }
+}
+
+/// A pre-authoring slot; the target can be either a generated or compat panel.
+#[derive(Clone)]
+pub(crate) struct AgentBuild {
+    pub title: String,
+    pub planned: Vec<Value>,
+    pub target: Option<String>,
+    pub finishing: bool,
+}
+
+pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
+    let build = v.agent_panel_builds.get(id)?.clone();
+    let mut content = None;
+    let mut generated = false;
+    if let Some(target) = &build.target {
+        content = v.extension_panel(target, rect, cx);
+        let rendered = if content.is_some() { v.extension_build_rendered(target) }
+            else { section(v, target).is_some() };
+        if rendered && build.finishing {
+            if let Some(state) = v.panel_builds.get_mut(id) { state.complete = true; }
+        }
+        if content.is_none() {
+            if let Some((_, _, def)) = section(v, target) {
+                generated = true;
+                if let Some(state) = v.panel_builds.get(id).cloned() { v.panel_builds.insert(target.clone(), state); }
+                content = Some(render(v, target, &def, rect, window, cx));
+            }
+        }
+    }
+    let state = v.panel_builds.get_mut(id)?;
+    state.tick();
+    let state = state.clone();
+    if generated && state.stage != panel_build::Stage::Erase { return content; }
+    if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.36 { return content; }
+    let tokens = v.host.borrow().tokens.clone();
+    let alpha = if state.stage == panel_build::Stage::Erase { 1. - panel_build::fade(state.changed.elapsed().as_secs_f32(), 0.36) } else { 1. };
+    let alpha = if state.stage == panel_build::Stage::Ready { 1. - panel_build::fade(state.changed.elapsed().as_secs_f32(), 0.16) } else { alpha };
+    let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
+    let root_alpha = if state.stage == panel_build::Stage::Erase { alpha } else { 1. };
+    let alpha = if state.stage == panel_build::Stage::Erase { 1. } else { alpha };
+    Some(div().relative().size_full().overflow_hidden().opacity(root_alpha)
+        .children(content)
+        .child(div().absolute().inset_0().opacity(alpha).bg(rgb(slot_surface(&tokens,Some(&state)))).child(overlay))
+        .child(div().absolute().inset_0().opacity(alpha).child(build_frame(state.clone(), rect, &tokens, v.running(), state.started.elapsed().as_secs_f32(), state.changed.elapsed().as_secs_f32(), 0.5, true)))
+        .child(div().absolute().inset_0().opacity(alpha)
+            .child(div().h(px(BUILD_HEADER)).px(px(16.)).child(build.title.clone()))
+            .children(build.planned.iter().enumerate().map(|(row, control)| {
+                let reveal = state.committed.get(&row).map_or(0., |at| panel_build::reveal(at.elapsed().as_secs_f32(), tokens.accessibility.reduce_motion));
+                div().h(px(BUILD_ROW)).px(px(16.)).opacity(reveal).child(control["label"].as_str().unwrap_or_default().to_owned())
+            })))
+        .into_any_element())
 }
