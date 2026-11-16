@@ -4,6 +4,7 @@ globalThis.PMPanelLayout = class {
     this.frame = frame;
     this.visibility = visibility;
     this.active = new Set();
+    this.explicitActive = false;
     this.apply = apply;
     this.acknowledge = acknowledge;
     this.latest = new Map();
@@ -13,6 +14,7 @@ globalThis.PMPanelLayout = class {
   }
   enqueue(placements, active) {
     if (active) {
+      this.explicitActive = true;
       this.active = new Set(active);
       for (const id of this.placements.keys()) {
         if (!this.active.has(id)) {
@@ -29,11 +31,11 @@ globalThis.PMPanelLayout = class {
       this.pending.set(placement.id, placement);
       this.placements.set(placement.id, placement);
     }
-    this.visibility(this.active);
+    if (this.explicitActive) this.visibility(this.active);
     this.schedule();
   }
   refresh() {
-    this.visibility(this.active);
+    if (this.explicitActive) this.visibility(this.active);
     for (const [id, placement] of this.placements) this.pending.set(id, placement);
     this.schedule();
   }

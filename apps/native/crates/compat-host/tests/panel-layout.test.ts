@@ -83,10 +83,16 @@ test("the shared page keeps recovered panel bodies and late roots in their own s
   const queue = dom.window.layouts;
   const tick = () => frames.splice(0).forEach(f => f());
   try {
+    const logosBeforeLayout = dom.window.document.querySelector('section');
+    queue.refresh(); tick(); tick();
+    expect(logosBeforeLayout.style.visibility).toBe('');
     const rect = {x:20,y:30,w:320,h:240};
-    queue.enqueue([{id:'logos',generation:1,rect}], ['logos']);
+    queue.enqueue([{id:'logos',generation:1,rect}]);
+    tick(); tick();
+    expect(logosBeforeLayout.style.visibility).toBe('');
+    queue.enqueue([{id:'logos',generation:2,rect}], ['logos']);
     tick();
-    queue.enqueue([{id:'bird',generation:2,rect}], ['bird']);
+    queue.enqueue([{id:'bird',generation:3,rect}], ['bird']);
     tick(); tick();
     const logos = dom.window.document.querySelector('[data-pm-contribution="logos"]');
     expect(logos.style.visibility).toBe('hidden');
@@ -101,5 +107,22 @@ test("the shared page keeps recovered panel bodies and late roots in their own s
     expect(bird.style.width).toBe('320px');
     expect(bird.style.clipPath).toBe('inset(0)');
     expect([...dom.window.document.querySelectorAll('section')].filter((r: any) => r.style.visibility === 'visible').map((r: any) => r.textContent)).toEqual(['Flappy Bird']);
+  } finally { dom.window.close(); }
+});
+
+test("agent panel reads include hidden text and control labels", async () => {
+  const { createRequire } = await import("node:module");
+  const require = createRequire(new URL("../../../js/remote-dom/package.json", import.meta.url));
+  const { JSDOM } = require("jsdom");
+  const dom = new JSDOM('<section data-pm-contribution="logos" style="visibility:hidden">Commons   Logos <button>Read me</button></section>', {runScripts:'outside-only'});
+  try {
+    const root = dom.window.document.querySelector('section');
+    root.querySelector('button').getBoundingClientRect = () => ({left:0,top:0,width:20,height:20});
+    const rust = readFileSync(new URL('../src/mac.rs', import.meta.url), 'utf8');
+    const script = rust.split('const READ_CONTRIBUTION: &str = r#"')[1].split('"#;')[0];
+    const reply = JSON.parse(dom.window.eval(script.replace('$ID', JSON.stringify('logos'))));
+    expect(reply.text).toBe('Commons Logos Read me');
+    expect(reply.controls[0].label).toBe('Read me');
+    expect(root.style.visibility).toBe('hidden');
   } finally { dom.window.close(); }
 });
