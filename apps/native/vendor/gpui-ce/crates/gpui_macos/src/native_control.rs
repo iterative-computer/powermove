@@ -91,6 +91,8 @@ impl NativeControlSlot {
         let wrapper = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
         wrapper.setWantsLayer(true);
         wrapper.setHidden(true);
+        // Its control keeps its size when the clip changes (`present`).
+        wrapper.setAutoresizesSubviews(false);
         // GPUI lays out from the top: between a change of the window's
         // height and the next paint, a control keeps its distance from the
         // top edge, not from the bottom one.
@@ -172,10 +174,16 @@ pub(crate) fn pending(key: usize) -> bool {
             None => !state.wrapper.isHidden(),
             Some((frame, local, hidden)) => {
                 state.wrapper.frame() != frame
-                    || state.control.frame() != local
+                    || state.wrapper.bounds().origin != shift(local)
+                    || state.control.frame().size != local.size
                     || state.wrapper.isHidden() != hidden
             }
         })
+}
+/// The wrapper's bounds origin that shows its control (at the origin) where
+/// `local` puts it.
+fn shift(local: NSRect) -> NSPoint {
+    NSPoint::new(-local.origin.x, -local.origin.y)
 }
 pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
@@ -194,8 +202,18 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             state.wrapper.setFrame(frame);
             moved = true;
         }
-        if state.control.frame() != local {
-            state.control.setFrame(local);
+        // The control keeps its frame while its wrapper clips it: the clip
+        // moves the wrapper's bounds (as a clip view scrolls), so a control
+        // cut by a page's edge as it scrolls is not resized or moved inside
+        // the wrapper each frame, which on macOS 27 laid out its SwiftUI
+        // graph again (Settings › Shortcuts on a fast wheel).
+        let full = NSRect::new(NSPoint::new(0., 0.), local.size);
+        if state.control.frame() != full {
+            state.control.setFrame(full);
+            moved = true;
+        }
+        if state.wrapper.bounds().origin != shift(local) {
+            state.wrapper.setBoundsOrigin(shift(local));
             moved = true;
         }
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {
