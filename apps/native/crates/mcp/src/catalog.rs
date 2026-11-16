@@ -51,6 +51,11 @@ pub fn catalog() -> &'static Value {
                 });
             }
         }
+        // Native build tools extend the app subset beside the pinned contract.
+        value["app"].as_array_mut().unwrap().extend([
+            Value::String("panel_begin".into()),
+            Value::String("panel_build".into()),
+        ]);
         value
     })
 }
