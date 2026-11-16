@@ -1851,6 +1851,7 @@ impl GizmoSurface {
     /// release does, so no edit stays open.
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let held = self.drag.is_some()
+            || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
             || self.pen_drag.is_some()
             || self.panning.is_some()
             || self.rulers.dragging.is_some();

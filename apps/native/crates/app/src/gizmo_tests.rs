@@ -3463,3 +3463,22 @@ fn gradient_handles_read_stops_before_editing_and_map_drag_through_comp_zoom(
         );
     }
 }
+
+#[gpui::test]
+fn gradient_handle_unheard_release_closes_the_kernel_gesture(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &gradient_handle_project(false));
+    let before = s.surface.read_with(&s.vcx, |g,_| g.effect_points());
+    let at = s.point_of(before[0]);
+    s.vcx.simulate_mouse_down(at,MouseButton::Left,Modifiers::none());
+    s.vcx.simulate_mouse_move(at+point(px(10.),px(5.)),MouseButton::Left,Modifiers::none());
+    let surface=s.surface.clone();settle(cx,move|cx|surface.read_with(cx,|g,_|g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_some());
+    let surface=s.surface.clone();
+    s.vcx.update(|window,cx|surface.update(cx,|g,cx|assert!(g.release_unheard(window,cx))));
+    let surface=s.surface.clone();settle(cx,move|cx|surface.read_with(cx,|g,_|g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+    s.refresh(cx);
+    assert_eq!(s.surface.read_with(&s.vcx,|g,_|g.effect_points())[0],[before[0][0]+10.,before[0][1]+5.]);
+    s.undo(cx);
+    assert_eq!(s.surface.read_with(&s.vcx,|g,_|g.effect_points()),before);
+}
