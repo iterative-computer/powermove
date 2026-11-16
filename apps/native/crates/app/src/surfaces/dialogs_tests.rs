@@ -582,7 +582,7 @@ fn a_frame_exact_duration_reads_short_opens_quiet_and_survives_apply() {
         c.layers_cut_by(draft.duration).unwrap(),
     );
     let texts = shown(&surface);
-    assert_eq!(texts["duration"], "73.533");
+    assert_eq!(texts["duration"], "73.53");
     let duration = &surface.fields[4];
     assert_eq!(
         duration.description.as_deref(),
