@@ -2287,14 +2287,18 @@ define_class!(
 /// The toolbar's items in order. Home and the tabs lead; the tools and Add
 /// stand in the middle between two flexible spaces; the task pill (only
 /// while a task runs), Agent, Export, a space, then Panels and Settings
-/// trail. Home is the strip's first cell, not an item of its own.
-const TOOLBAR_ORDER: [&str; 11] = [
+/// trail. Home is the strip's first cell, not an item of its own. A space
+/// keeps the pill its own capsule (side by side, the system joins two
+/// items' glass into one); while the pill is hidden the flexible space
+/// before it takes that room, so nothing else moves.
+const TOOLBAR_ORDER: [&str; 12] = [
     "title",
     FLEXIBLE,
     "tools",
     "add",
     FLEXIBLE,
     "tasks",
+    SPACE,
     "agent",
     "export",
     SPACE,
