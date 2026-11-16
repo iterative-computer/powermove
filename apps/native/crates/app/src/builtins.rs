@@ -1995,8 +1995,28 @@ impl Controller {
                             .unwrap_or(false)
                         })
                         .unwrap_or_else(|| window.window_handle());
-                    self.close_agent(cx);
+                    // The popover steps aside, kept as it is: back, it shows
+                    // the new chip at once instead of rebuilding first.
+                    let popover = self
+                        .builtins
+                        .windows
+                        .get("agent")
+                        .copied()
+                        .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+                        .flatten();
+                    if let Some(popover) = &popover {
+                        if let Some(parent) = popover.parentWindow() {
+                            parent.removeChildWindow(popover);
+                        }
+                        popover.orderOut(None);
+                    }
                     let picked = pm_shell::region_pick::pick(&editor);
+                    // The overlay takes the pointer from here: no layer stays
+                    // outlined under it, nor after.
+                    // Deferred: the viewer's redraw reads this controller.
+                    if let Some(gizmos) = self.builtins.gizmos.clone() {
+                        cx.defer(move |cx| gizmos.update(cx, |g, cx| g.clear_hover(cx)));
+                    }
                     cx.spawn(async move |this, cx| {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
@@ -2004,7 +2024,14 @@ impl Controller {
                                 if let Some(rect) = picked {
                                     v.attach_region(rect, window, cx);
                                 }
-                                v.show_builtin("agent", window, cx);
+                                match &popover {
+                                    Some(popover) if v.builtins.windows.contains_key("agent") => {
+                                        let editor = v.host.borrow().window.clone();
+                                        gpui_macos::child_window::attach(popover, &editor);
+                                        gpui_macos::child_window::show(popover, true);
+                                    }
+                                    _ => v.show_builtin("agent", window, cx),
+                                }
                             });
                         });
                     })

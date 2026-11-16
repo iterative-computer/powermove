@@ -1137,6 +1137,12 @@ impl GizmoSurface {
             self.hover(at, cx);
         }
     }
+    /// Drops the hover outline: the pointer went where the viewer cannot
+    /// follow it (a pick overlay over the editor takes every move).
+    pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_at = None;
+        self.unhover(cx);
+    }
     fn unhover(&mut self, cx: &mut Context<Self>) {
         self.hover_next = None;
         if self.hover_box.take().is_some() {

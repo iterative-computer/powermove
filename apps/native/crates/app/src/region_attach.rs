@@ -75,6 +75,19 @@ fn clock(seconds: f64) -> String {
 }
 
 impl Controller {
+    /// The picture the viewer presented of this project at `time`, settled
+    /// and with every effect in it; `None` otherwise (a render is needed).
+    fn shown_picture(&self, time: f64) -> Option<pm_engine_service::Picture> {
+        if self.settling.is_some() || self.awaiting_extension_effects() {
+            return None;
+        }
+        let doc = self.published.as_ref()?.snapshot.doc_id;
+        let frame = self.viewer.as_ref()?.status().frame?;
+        let at = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        (frame.settled && frame.stamp.doc_id == doc && (at - time).abs() < 1e-3)
+            .then_some(frame.picture)
+            .flatten()
+    }
     /// Where the composition is drawn in the window, at what scale (the
     /// viewer's frame; `None` while it shows nothing).
     pub(crate) fn composition_frame(&self) -> Option<crate::gizmo::ViewFrame> {
@@ -115,11 +128,17 @@ impl Controller {
                     return;
                 };
                 let (time, size) = (self.time(), self.dimensions);
+                let shown = self.shown_picture(time);
                 Box::new(move || {
-                    // The agent's own still, at most 1280 wide; the region
-                    // scales with it.
+                    // At most 1280 wide; the region scales with it. The
+                    // picture the viewer shows at the playhead when it has
+                    // settled (read back, no render: the chip is there at
+                    // once), else the agent's own still, rendered.
                     let width = size[0].round().clamp(160., 1280.) as u32;
-                    let (w, h, rgba) = decode_png(&crate::mcp::still(&project, time, width)?)?;
+                    let (w, h, rgba) = match shown.and_then(|p| p.srgb8(width)) {
+                        Some(read) => read,
+                        None => decode_png(&crate::mcp::still(&project, time, width)?)?,
+                    };
                     let k = w as f64 / size[0];
                     let at = |v: u32| (v as f64 * k).round() as u32;
                     let whole = region == (0, 0, size[0].round() as u32, size[1].round() as u32);
