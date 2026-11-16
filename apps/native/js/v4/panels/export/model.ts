@@ -731,7 +731,11 @@ export class ExportModel {
       await this.closeFailure();
       return true;
     }
-    if (meta && key === "." && isProgress(this.current.run)) {
+    // A running export's sheet: Escape is its Cancel, as Command-period is.
+    if (
+      (key === "Escape" || (meta && key === ".")) &&
+      isProgress(this.current.run)
+    ) {
       await this.cancel();
       return true;
     }

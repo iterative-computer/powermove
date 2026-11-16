@@ -5,14 +5,12 @@
 use pm_transcribe::store::{Store, format_bytes};
 use serde_json::{Value, json};
 use std::sync::{
-    Arc, Mutex, OnceLock, Weak,
+    OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
 static STORE: OnceLock<Store> = OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(0);
-type Wake = dyn Fn() + Send + Sync;
-static WAKERS: Mutex<Vec<Weak<Wake>>> = Mutex::new(Vec::new());
 
 /// The app's store (profile `models/transcription`), set once at launch.
 pub fn install(store: Store) {
@@ -25,17 +23,7 @@ pub fn store() -> Option<&'static Store> {
 /// The store's change callback: every Settings host publishes again.
 pub fn changed() {
     REVISION.fetch_add(1, Ordering::AcqRel);
-    let mut wakers = WAKERS.lock().unwrap_or_else(|e| e.into_inner());
-    wakers.retain(|w| w.strong_count() > 0);
-    for wake in wakers.iter().filter_map(Weak::upgrade) {
-        wake();
-    }
-}
-pub(crate) fn watch(wake: &Arc<Wake>) {
-    WAKERS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(Arc::downgrade(wake));
+    crate::wakers::wake_all();
 }
 pub(crate) fn revision() -> u64 {
     REVISION.load(Ordering::Acquire)

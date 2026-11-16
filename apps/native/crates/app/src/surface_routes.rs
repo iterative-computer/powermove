@@ -542,8 +542,24 @@ impl Controller {
         let active = self.session.as_ref().map(|s| s.project.clone());
         // Home's own thumbnails: the cache under this profile, and the frame
         // renderer of the project this window has open.
+        let factory: Rc<dyn Fn(&str) -> Option<pm_compat_runner::FrameRenderer>> = {
+            let (kernel, profile, overrides) =
+                (self.kernel.clone(), self.profile.clone(), self.job_overrides.clone());
+            Rc::new(move |project: &str| {
+                crate::mcp_services::frame_renderer(
+                    kernel.clone(),
+                    project.to_owned(),
+                    profile.clone(),
+                    overrides.clone(),
+                    crate::mcp_services::Capture::Poster,
+                )
+                .ok()
+            })
+        };
         let thumbnails = appeared.then(|| crate::project_library::ThumbnailSource {
             dir: self.profile.join("caches").join("thumbnails"),
+            profile: self.profile.clone(),
+            factory: Some(factory),
             renderer: active.clone().and_then(|project| {
                 crate::mcp_services::frame_renderer(
                     self.kernel.clone(),

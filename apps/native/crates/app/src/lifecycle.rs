@@ -107,6 +107,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    pm_shell::session::set_quitting(false);
     crate::diag::line(serde_json::json!({"quit":"cancelled"}));
     crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
@@ -260,7 +261,11 @@ fn start_quit(cx: &mut App) {
             &path,
             pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
         );
+        if let Some(front) = pm_shell::front_window_id() {
+            pm_shell::session::write(&path, pm_shell::session::Change::Front(front));
+        }
     }
+    pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
