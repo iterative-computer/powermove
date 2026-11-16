@@ -383,6 +383,8 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
                 ("Show Rulers", Action::Rulers),
                 ("Show Grid", Action::Grid),
                 ("Clear Guides", Action::ClearGuides),
+                GUIDE_TOGGLES[0],
+                GUIDE_TOGGLES[1],
                 ("Show Safe Areas", Action::SafeAreas),
                 ("Show Guides", Action::Guides),
                 ("Popout Viewer", Action::Popout),
@@ -556,7 +558,12 @@ pub fn update_checks(
                     Action::Channels(mode) => *mode == channels,
                     Action::Rulers => rulers,
                     Action::Grid => grid,
-                    Action::ClearGuides | Action::LockGuides | Action::Snapping => false,
+                    Action::ClearGuides => false,
+                    Action::LockGuides | Action::Snapping => guide_checked(
+                        *action,
+                        pm_shell::viewer_preference("PowermoveGuidesLocked", false),
+                        pm_shell::viewer_preference("PowermoveViewerSnapping", true),
+                    ),
                     Action::ToggleProxies => false,
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
@@ -1096,11 +1103,13 @@ impl Controller {
             Action::Snapping => {
                 if let Some(g) = self.builtins.gizmos.clone() {
                     g.update(cx, |g, cx| g.toggle_snapping(cx));
+                    self.apply_viewer_options();
                 }
             }
             Action::LockGuides => {
                 if let Some(g) = self.builtins.gizmos.clone() {
                     g.update(cx, |g, cx| g.toggle_guides_locked(cx));
+                    self.apply_viewer_options();
                 }
             }
             Action::ClearGuides => {
@@ -1363,5 +1372,38 @@ mod tests {
         }
         assert_eq!(Action::from_tag(-1), None);
         assert_eq!(Action::from_tag(99), None);
+    }
+}
+
+const GUIDE_TOGGLES: [(&str, Action); 2] = [
+    ("Lock Guides", Action::LockGuides),
+    ("Snapping", Action::Snapping),
+];
+fn guide_checked(action: Action, locked: bool, snapping: bool) -> bool {
+    match action {
+        Action::LockGuides => locked,
+        Action::Snapping => snapping,
+        _ => false,
+    }
+}
+#[cfg(test)]
+mod guide_menu_tests {
+    use super::*;
+    #[test]
+    fn guide_toggles_follow_their_independent_states() {
+        assert!(matches!(
+            GUIDE_TOGGLES[0],
+            ("Lock Guides", Action::LockGuides)
+        ));
+        assert!(matches!(GUIDE_TOGGLES[1], ("Snapping", Action::Snapping)));
+        for locked in [false, true] {
+            for snapping in [false, true] {
+                assert_eq!(guide_checked(GUIDE_TOGGLES[0].1, locked, snapping), locked);
+                assert_eq!(
+                    guide_checked(GUIDE_TOGGLES[1].1, locked, snapping),
+                    snapping
+                );
+            }
+        }
     }
 }

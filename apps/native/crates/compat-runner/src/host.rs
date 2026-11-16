@@ -403,9 +403,11 @@ impl Shared {
     }
 }
 
-/// The extensions a project draws with: the `<extension>` of every
-/// `type` named `<extension>.<name>` (an effect's, a layer's) in its
-/// compositions and layers.
+/// The extensions a project draws with, by every `type` (an effect's, a
+/// layer's) in its compositions and layers: an effect's type is often its
+/// extension's id itself (`progressive-blur`), else `<extension>.<name>`
+/// (`deep-glow.effect`). Reading only the second form left most of a real
+/// project's extensions loading in name order (PM-384).
 fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
     use pm_model::NodeKind;
     let mut used = std::collections::HashSet::new();
@@ -416,8 +418,9 @@ fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
                 for (key, value) in map.iter() {
                     if key.as_str() == Some("type")
                         && let NodeKind::String(ty) = value.kind()
-                        && let Some((extension, _)) = ty.as_str().and_then(|t| t.split_once('.'))
+                        && let Some(ty) = ty.as_str()
                     {
+                        let extension = ty.split_once('.').map_or(ty, |(extension, _)| extension);
                         used.insert(extension.to_owned());
                     }
                     // Keyframes and values hold no types: not walked.
@@ -2851,6 +2854,22 @@ mod tests {
                 .any(|command| command["id"] == id)
         })
     }
+    /// A project's extensions, by its effects' and layers' types in either
+    /// form (`progressive-blur`, `deep-glow.effect`), load first (PM-384).
+    #[test]
+    fn a_projects_extensions_are_named_by_its_types_in_either_form() {
+        let doc = pm_model::Document::new(
+            Some(pm_model::json::parse(r#"{"layers":[{"type":"solid","fx":[{"type":"progressive-blur","p":{"radius":{"v":3}}}]},
+                {"type":"deep-glow.effect","kf":[{"type":"ignored-in-keyframes"}]}],"comps":{"c":{"layers":[{"type":"ascii-magic-effects.characters"}]}}}"#).unwrap()),
+            1,
+        );
+        let used = extensions_used(doc.root().unwrap());
+        for id in ["progressive-blur", "deep-glow", "ascii-magic-effects"] {
+            assert!(used.contains(id), "{id} in {used:?}");
+        }
+        assert!(!used.contains("ignored-in-keyframes"));
+    }
+
     #[test]
     fn appkit_answers_reach_realm_closures_and_storage_outlives_the_realm() {
         let root = tempfile::tempdir().unwrap();

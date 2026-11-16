@@ -138,6 +138,48 @@ impl Drop for FrameOutline {
     }
 }
 
+/// The picture a project's viewer shows from when its viewer is bound until
+/// its first real frame (PM-384): the frame the viewer last showed for it
+/// (`crate::poster::last_frame_files`), drawn over the viewer's layer, as
+/// the viewer fits its picture. Gone with the first frame of the project.
+struct Placeholder {
+    layer: Retained<AnyObject>,
+    doc_id: u64,
+}
+impl Placeholder {
+    fn over(viewer: &metal::MetalLayer, poster: &std::path::Path, doc_id: u64) -> Option<Self> {
+        let path = objc2_foundation::NSString::from_str(&poster.to_string_lossy());
+        let image = objc2_app_kit::NSImage::initWithContentsOfFile(
+            <objc2_app_kit::NSImage as objc2::AnyThread>::alloc(),
+            &path,
+        )?;
+        unsafe {
+            let layer: Retained<AnyObject> =
+                Retained::from_raw(msg_send![objc2::class!(CALayer), new])?;
+            let parent = foreign_types::ForeignType::as_ptr(viewer) as *mut AnyObject;
+            let bounds: NSRect = msg_send![parent, bounds];
+            let _: () = msg_send![objc2::class!(CATransaction), begin];
+            let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
+            // A layer on macOS takes an NSImage as its contents.
+            let _: () = msg_send![&*layer, setContents: &*image];
+            let _: () = msg_send![&*layer, setContentsGravity: objc2_quartz_core::kCAGravityResizeAspect];
+            let _: () = msg_send![&*layer, setFrame: bounds];
+            // Width and height follow the viewer (kCALayerWidthSizable | kCALayerHeightSizable).
+            let _: () = msg_send![&*layer, setAutoresizingMask: 0x2u32 | 0x10u32];
+            let _: () = msg_send![parent, addSublayer: &*layer];
+            let _: () = msg_send![objc2::class!(CATransaction), commit];
+            Some(Self { layer, doc_id })
+        }
+    }
+}
+impl Drop for Placeholder {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![&*self.layer, removeFromSuperlayer];
+        }
+    }
+}
+
 pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let layers = PlaybackLayers::new(MainThreadMarker::new().unwrap());
     // The viewer bar's time while playing: the timeline's timecode, again.
@@ -145,6 +187,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         unsafe { Retained::from_raw(msg_send![objc2::class!(CATextLayer), new]).unwrap() };
     let host = entity.read(cx).host.clone();
     let mut playhead = None;
+    let mut skimmer = None;
     if let Some(parent) = host.borrow().gpui.layer() {
         unsafe {
             let _: () = msg_send![&*parent,addSublayer:&*layers.timecode];
@@ -165,6 +208,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 msg_send![&*viewer_time,setAlignmentMode:objc2_quartz_core::kCAAlignmentLeft];
             let _: () = msg_send![&*viewer_time,setFont:font_ref];
             let _: () = msg_send![&*viewer_time,setHidden:true];
+            skimmer = Some(crate::playhead::Skimmer::new(&parent, &t));
             playhead = Some(crate::playhead::Playhead::new(
                 &parent,
                 layers.playhead.clone(),
@@ -234,14 +278,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // The display link's next vsync (host seconds): where a playing playhead
     // and timecode will be seen, rather than where the last sample stood.
     let mut vsync = None::<f64>;
+    let mut placeholder = None::<Placeholder>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
             if weak.update(cx, |v,cx| {
                 let Some(viewer)=&v.viewer else{
-                    link.set_paused(true); *current.borrow_mut()=None; binding=None;
+                    link.set_paused(true); *current.borrow_mut()=None; binding=None; placeholder=None;
                     // A closed project (Home stays in the window) leaves no playhead.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];let _:()=msg_send![&*viewer_time,setHidden:true];}
+                    if let Some(s)=&mut skimmer { s.hide(); }
                     return
                 };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
@@ -253,6 +299,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         publish_output.clone(),
                     ));
                     binding.as_ref().unwrap().sync();
+                    // The opening project's last picture stands in until its first frame.
+                    placeholder = v.viewer_poster.take().zip(v.published.as_ref().map(|p| p.snapshot.doc_id))
+                        .and_then(|(poster, doc)| Placeholder::over(&host.borrow().viewer_layer(), &poster, doc));
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
@@ -268,6 +317,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     v.update_builtins(cx);
                 }
                 v.tell_presented(status.frame.as_ref());
+                if placeholder.as_ref().is_some_and(|p| status.frame.as_ref().is_some_and(|f| f.stamp.doc_id == p.doc_id)) {
+                    placeholder = None;
+                }
                 if !status.layer_failures.is_empty() {
                     let contributions = v.extensions.host.as_ref().and_then(|host| host.contributions());
                     record_layer_failures(&mut v.errors.borrow_mut(), &status.layer_failures, |failure| {
@@ -382,6 +434,15 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 else { p.hide(); }
                             }
                         }
+                        // The skimmer, as the head: outside GPUI, so a scroll under a
+                        // resting pointer moves the time under it with no panel draw.
+                        let skim=v.builtins.timeline.as_ref().and_then(|t|t.read(cx).skimmer_mark());
+                        if let Some(s)=&mut skimmer {
+                            match (geometry,skim) {
+                                (Some((r,y)),Some((x,code)))=>s.place(r.x as f64+x,(r.y+y) as f64,(r.y+r.h) as f64,&code,height,scale,&host.tokens),
+                                _=>s.hide(),
+                            }
+                        }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];
                     }
                 } else if v.builtins.timeline_place.is_none() {
@@ -389,10 +450,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // timeline that is not on screen.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];}
                     if let Some(p)=&mut playhead { p.hide(); }
+                    if let Some(s)=&mut skimmer { s.hide(); }
                 }
             }).is_err(){break;}
         }
         drop(playhead);
+        drop(skimmer);
         unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];let _:()=msg_send![&*viewer_time,removeFromSuperlayer];}
     }).detach();
 }
