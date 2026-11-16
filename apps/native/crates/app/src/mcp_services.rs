@@ -389,6 +389,7 @@ impl EngineJobs {
         replace: bool,
         look: bool,
         preview: bool,
+        offline_as_nothing: bool,
         studio_quality: Option<serde_json::Value>,
         studio_render_scale: Option<f32>,
         resources: Resources,
@@ -423,7 +424,7 @@ impl EngineJobs {
         // As the shipped app's agent exports: silent offline clips are left
         // out, not asked about; missing audio still fails by name. Captures
         // refuse offline media unless they draw the card (agent stills).
-        request.without_offline = !look;
+        request.without_offline = !look || offline_as_nothing;
         let mut session = JobSession::new(request);
         if let Some(overrides) = self.overrides.of(published.snapshot.doc_id) {
             // A look at the window's project now may ask its realm; a frame of
@@ -582,6 +583,7 @@ impl ExportChild for EngineJobs {
             settings,
             destination,
             replace,
+            false,
             false,
             false,
             request.options.studio_quality.clone(),
@@ -803,11 +805,11 @@ pub(crate) enum Capture {
     Poster,
 }
 impl Capture {
-    /// A look at the project (an agent's still, Home's poster) draws the
-    /// Media Offline card; a delivery refuses offline media, as an export
-    /// does.
+    /// An agent's still draws the Media Offline card; Home's poster draws
+    /// offline media as nothing (the card says what is missing, quietly); a
+    /// delivery refuses offline media, as an export does.
     pub(crate) fn draws_offline_cards(self) -> bool {
-        matches!(self, Capture::AgentStill | Capture::Poster)
+        matches!(self, Capture::AgentStill)
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -890,6 +892,7 @@ fn frame_with(
         false,
         true,
         capture.draws_offline_cards(),
+        capture == Capture::Poster,
         studio_quality,
         None,
         resources,
@@ -905,8 +908,32 @@ fn frame_with(
         }
         std::thread::sleep(Duration::from_millis(4));
     }
-    let directory = finish(handle)?;
+    let (directory, notes) = finished(handle)?;
+    if capture == Capture::Poster {
+        // What the poster left out, for Home's card to say quietly.
+        let left_out = notes.iter().any(|n| n.starts_with("Exported without"));
+        poster_left_out(&published.project, left_out);
+    }
     first_png(&directory)
+}
+/// Projects whose last poster left offline media out.
+static POSTER_LEFT_OUT: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+fn poster_left_out(project: &str, left_out: bool) {
+    let mut all = POSTER_LEFT_OUT.lock().unwrap();
+    let all = all.get_or_insert_with(Default::default);
+    if left_out {
+        all.insert(project.to_owned());
+    } else {
+        all.remove(project);
+    }
+}
+/// Whether `project`'s last poster left offline media out.
+pub(crate) fn poster_missed_media(project: &str) -> bool {
+    POSTER_LEFT_OUT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|all| all.contains(project))
 }
 fn first_png(directory: &Path) -> AnyResult<Vec<u8>> {
     let mut frames = std::fs::read_dir(directory)?

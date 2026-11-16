@@ -777,7 +777,7 @@ fn only_agent_stills_draw_offline_cards() {
     assert!(Capture::AgentStill.draws_offline_cards());
     assert!(!Capture::ExtensionSnapshot.draws_offline_cards());
     assert!(!Capture::Sheet.draws_offline_cards());
-    assert!(Capture::Poster.draws_offline_cards());
+    assert!(!Capture::Poster.draws_offline_cards(), "a poster draws offline media as nothing");
 }
 
 /// Each editor window owns its project. MCP acts in the key window, a project a
