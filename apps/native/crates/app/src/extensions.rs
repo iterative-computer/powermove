@@ -2013,6 +2013,7 @@ impl Controller {
                 });
                 let _ = host.set_regions(regions);
                 let _ = host.set_content_regions(content);
+                host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill));
                 // The ground is the panels': the viewer's stage shows the
                 // viewer through the page, never under a panel's tint.
