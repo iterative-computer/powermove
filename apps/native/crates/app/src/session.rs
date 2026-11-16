@@ -161,6 +161,10 @@ pub struct Controller {
     pub(crate) page_drawn: bool,
     /// A restored window is checking whether its project reopens.
     pub(crate) reopening: bool,
+    /// The open running is a window restored at launch: if it fails (the
+    /// project's file is gone, it can't be read) the project is left out of
+    /// the restore without a word, only in the Error Log (PM-392).
+    pub(crate) restoring: bool,
     /// Wakes the playback loop, which places the playhead layers.
     pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
@@ -855,6 +859,7 @@ impl Controller {
             store: None,
             page_drawn: false,
             reopening: false,
+            restoring: false,
             playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
@@ -1031,6 +1036,16 @@ impl Controller {
     /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
     /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        // The pages open in this window's strip at the last quit open again,
+        // behind the project.
+        let pages = std::mem::take(&mut self.host.borrow_mut().restored_pages);
+        if !pages.is_empty() {
+            for page in &pages {
+                self.pages.open(page);
+            }
+            self.pages.leave();
+            self.sync_pages();
+        }
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
@@ -1080,6 +1095,7 @@ impl Controller {
                 }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
+                        v.restoring = true;
                         v.open_named(
                             SessionSource::Library {
                                 profile: v.profile.clone(),
@@ -1936,6 +1952,7 @@ impl Controller {
                         info,
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
+                        v.restoring = false;
                         // Media resolves on a worker after the project shows.
                         let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
@@ -1950,9 +1967,18 @@ impl Controller {
                         }
                     }
                     // Already open in a window: that window comes forward.
+                    // A restored window whose project another restored
+                    // window holds goes, without taking the front.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
                         v.message = String::new();
-                        v.focus_project(&project, cx);
+                        if std::mem::take(&mut v.restoring) {
+                            if pm_shell::live_window_ids().len() > 1 {
+                                let window = v.host.borrow().window.clone();
+                                cx.defer(move |_| pm_shell::request_close(&window));
+                            }
+                        } else {
+                            v.focus_project(&project, cx);
+                        }
                     }
                     Some(Err(error)) => {
                         v.open_timer
@@ -1960,9 +1986,11 @@ impl Controller {
                         v.report_open_failure(&name, path, &error, cx)
                     }
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.restoring = false;
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
                     other => {
+                        v.restoring = false;
                         v.message = format!("“{name}” couldn’t be opened.");
                         v.errors.borrow_mut().push(
                             "Project",
@@ -2267,6 +2295,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         let Some(file) = path.clone() else {
             return self.report_open_error(name, path, error, cx);
         };
@@ -2396,6 +2427,20 @@ impl Controller {
         })
         .detach();
     }
+    /// A project restored at launch that did not open is left out without
+    /// an alert (its file was deleted or moved since): logged, and its
+    /// window goes when another window is open, else it stays on Home.
+    fn drop_restored(&mut self, name: &str, error: &KernelFailure, cx: &mut Context<Self>) {
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("“{name}” was not reopened: {error}"));
+        self.message = String::new();
+        if pm_shell::live_window_ids().len() > 1 {
+            let window = self.host.borrow().window.clone();
+            cx.defer(move |_| pm_shell::request_close(&window));
+        }
+        cx.notify();
+    }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_error(
         &mut self,
@@ -2404,6 +2449,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
         let failure = open_failure(error);
