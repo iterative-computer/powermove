@@ -1307,9 +1307,8 @@ impl Controller {
             let shell = self.host.borrow();
             for id in known.intersection(&self.extensions.suspended.clone()) {
                 self.extensions.suspended.remove(id);
-                if self.extensions.parked.remove(id) {
-                    shell.send_command(&format!("panel:show:{id}"), vec![]);
-                }
+                self.extensions.parked.remove(id);
+                shell.send_command(&format!("panel:registered:{id}"), vec![]);
             }
         }
         self.extensions.known_panels = known;

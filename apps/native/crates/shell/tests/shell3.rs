@@ -358,11 +358,11 @@ fn a_parked_panel_comes_back_where_it_was() {
         .unwrap();
     window
         .update(&mut cx, |v, _, cx| {
-            // An extension reloading takes its panel away for a moment.
+            // An extension reloading leaves its saved area as a placeholder.
             assert!(v.run_shell_command("panel:dock:inspector:left", cx));
             let place = v.layout.find("inspector").unwrap();
             assert!(v.run_shell_command("panel:park:inspector", cx));
-            assert!(v.layout.find("inspector").is_none());
+            assert_eq!(v.layout.find("inspector"), Some(place), "the placeholder keeps its group");
             assert!(v.run_shell_command("panel:show:inspector", cx));
             assert_eq!(v.layout.find("inspector"), Some(place));
             // A tab among others returns to its index in that stack.

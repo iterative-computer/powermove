@@ -204,7 +204,8 @@ fn close_and_show_panels_round_trip_to_their_home_dock() {
     // A panel that is not in this workspace's preset goes to the right dock.
     l.show_panel("notes", &panels).unwrap();
     let right = l.docks.iter().find(|d| d.id == "right").unwrap();
-    assert_eq!(right.groups[0].active(), "notes");
+    assert_eq!(right.groups[0].active(), "inspector", "Add preserves the existing area");
+    assert_eq!(right.groups.last().unwrap().tabs, ["notes"], "Add creates a separate area");
     // Showing an open panel only activates it.
     let before = l.open_panels().len();
     l.show_panel("assets", &panels).unwrap();

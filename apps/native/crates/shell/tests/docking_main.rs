@@ -224,18 +224,19 @@ fn overflow_keeps_active_and_never_loses_a_tab() {
     let widths: Vec<f32> = (0..12).map(|i| 40. + 6. * i as f32).collect();
     for width in [24., 144., 300., 1200.] {
         let track = group.tab_track(width, &widths, &t);
-        assert_eq!(track.visible, (0..12).collect::<Vec<_>>());
+        assert!(track.visible.contains(&group.active));
+        assert!((0..12).all(|i| track.visible.contains(&i) || track.overflow.contains(&i)));
         let room = (width - t.metrics.hit).max(0.);
         let shown: f32 = track
             .visible
             .iter()
             .map(|&i| widths[i].min(track.title_limit.unwrap_or(widths[i])))
             .sum();
-        assert!(shown <= room + 0.01);
+        assert!(shown <= room.max(widths[group.active].min(t.metrics.hit * 3.)) + 0.01);
         assert_eq!(
             track.overflow,
             (0..12)
-                .filter(|&i| track.title_limit.is_some_and(|limit| widths[i] > limit))
+                .filter(|&i| !track.visible.contains(&i) || track.title_limit.is_some_and(|limit| widths[i] > limit))
                 .collect::<Vec<_>>()
         );
     }

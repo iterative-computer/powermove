@@ -79,8 +79,8 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-/// Every panel has a tab. Long titles share the remaining space and truncate;
-/// the trailing More Panels menu lists the complete group.
+/// Tabs keep readable titles. Excess tabs and long titles are available in
+/// the trailing More Panels menu, which lists the complete group.
 /// The caller reserves space for header tools before asking for this track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabTrack {
@@ -95,28 +95,36 @@ impl Group {
     pub fn tab_track(&self, available: f32, widths: &[f32], tokens: &Tokens) -> TabTrack {
         let n = self.tabs.len();
         let width = |i: usize| widths.get(i).copied().unwrap_or(tokens.metrics.hit * 3.);
-        // Keep every member in the strip. Share the space between long titles,
-        // leaving short titles at their natural width, like Electron's flex tabs.
+        // Reserve readable labels; excess tabs remain in the chevron menu.
         let room = (available - if n > 1 { tokens.metrics.hit } else { 0. }).max(0.);
+        let minimum = tokens.metrics.hit * 3.;
         let mut remaining = room;
         let mut count = n;
-        let mut sorted: Vec<f32> = (0..n).map(width).collect();
-        sorted.sort_by(f32::total_cmp);
+        let mut widths_sorted: Vec<_> = (0..n).map(width).collect();
+        widths_sorted.sort_by(f32::total_cmp);
         let mut limit = room;
-        for w in sorted {
+        for w in widths_sorted {
             limit = remaining / count.max(1) as f32;
-            if w > limit {
-                break;
-            }
+            if w > limit { break; }
             remaining -= w;
             count -= 1;
         }
-        let overflow: Vec<_> = (0..n).filter(|&i| width(i) > limit).collect();
-        TabTrack {
-            visible: (0..n).collect(),
-            title_limit: (!overflow.is_empty()).then_some(limit),
-            overflow,
+        let limit = limit.max(minimum);
+        let active = self.active.min(n.saturating_sub(1));
+        let mut visible = Vec::new();
+        let mut used = 0.;
+        for i in std::iter::once(active).chain((0..n).filter(|&i| i != active)) {
+            let w = width(i).min(limit);
+            if i < n && (visible.is_empty() || used + w <= room) {
+                visible.push(i);
+                used += w;
+            }
         }
+        visible.sort_unstable();
+        let overflow: Vec<_> = (0..n)
+            .filter(|i| !visible.contains(i) || width(*i) > limit)
+            .collect();
+        TabTrack { visible, title_limit: (!overflow.is_empty()).then_some(limit), overflow }
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1441,13 +1449,16 @@ impl Layout {
     }
     /// Shows a panel: activates its tab and reopens its dock, or adds it back to
     /// the dock it occupies in this workspace's preset (else the right dock).
+    /// Plain Add creates its own area, like Electron. Only an explicit tab
+    /// placement (header +, tab drop, or agent tab_in) joins an existing group.
     pub fn show_panel(&mut self, id: &str, panels: &Panels) -> anyhow::Result<()> {
-        anyhow::ensure!(panels.contains(id), "Unknown panel");
         if let Some((di, gi, ti)) = self.find(id) {
             self.docks[di].groups[gi].active = ti;
             self.docks[di].collapsed = false;
             return Ok(());
         }
+        // A saved tab remains usable as a placeholder while its owner loads.
+        anyhow::ensure!(panels.contains(id), "Unknown panel");
         let preset = Layout::preset(&self.workspace);
         let home = preset
             .docks
@@ -1457,12 +1468,6 @@ impl Layout {
         let mut next = self.clone();
         let g = self::group(&[id], None);
         match next.docks.iter_mut().find(|d| d.id == home) {
-            Some(d) if !d.groups.is_empty() => {
-                d.collapsed = false;
-                let first = &mut d.groups[0];
-                first.tabs.push(id.into());
-                first.active = first.tabs.len() - 1;
-            }
             Some(d) => {
                 d.collapsed = false;
                 d.groups.push(g);
@@ -2092,7 +2097,7 @@ mod view_tile_tests {
 mod dock_tabs_tests {
     use super::*;
     #[test]
-    fn every_add_restore_close_and_active_change_keeps_all_tabs() {
+    fn add_restore_close_and_active_change_keep_readable_tabs() {
         let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
         let panels = Panels::new(vec![
             ("agent-created".into(), "Agent created".into()),
@@ -2103,13 +2108,8 @@ mod dock_tabs_tests {
             layout.show_panel(id, &panels).unwrap();
             layout.move_panel(id, 0, 0, true).unwrap();
             let group = &layout.docks[0].groups[0];
-            assert_eq!(
-                group
-                    .tab_track(180., &vec![90.; group.tabs.len()], &t)
-                    .visible
-                    .len(),
-                group.tabs.len()
-            );
+            assert!(group.tab_track(180., &vec![90.; group.tabs.len()], &t)
+                .visible.contains(&group.active));
         }
         let mut layout: Layout =
             serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
@@ -2117,19 +2117,70 @@ mod dock_tabs_tests {
         for active in 0..group.tabs.len() {
             group.active = active;
             let track = group.tab_track(180., &vec![90.; group.tabs.len()], &t);
-            assert_eq!(track.visible, (0..group.tabs.len()).collect::<Vec<_>>());
+            assert!(track.visible.contains(&active));
+            assert!(track.title_limit.unwrap() >= t.metrics.hit * 3.);
             assert!(!track.overflow.is_empty());
         }
         layout.close_panel("agent-created").unwrap();
         let group = &layout.docks[0].groups[0];
-        assert_eq!(
-            group
-                .tab_track(180., &vec![90.; group.tabs.len()], &t)
-                .visible
-                .len(),
-            group.tabs.len()
-        );
+        assert!(group.tab_track(180., &vec![90.; group.tabs.len()], &t)
+            .visible.contains(&group.active));
         assert!(!group.tabs.iter().any(|t| t == "agent-created"));
+    }
+    #[test]
+    fn plain_add_never_accumulates_panels_in_first_group() {
+        let mut layout = Layout::preset("design");
+        let panels = Panels::new((0..7).map(|i| (format!("extension-{i}"), format!("Extension {i}"))).collect());
+        let original = layout.docks.iter().find(|d| d.id == "right").unwrap().groups.clone();
+        for i in 0..7 { layout.show_panel(&format!("extension-{i}"), &panels).unwrap(); }
+        let right = layout.docks.iter().find(|d| d.id == "right").unwrap();
+        assert_eq!(&right.groups[..original.len()], original.as_slice());
+        assert_eq!(right.groups.len(), original.len() + 7);
+        assert!(right.groups[original.len()..].iter().all(|g| g.tabs.len() == 1));
+        let before = layout.clone();
+        layout.show_panel("extension-3", &panels).unwrap();
+        assert_eq!(layout, before, "Show does not relocate an open panel");
+        layout.place_relative("extension-3", "inspector", "group").unwrap();
+        let (d,g,_) = layout.find("inspector").unwrap();
+        assert_eq!(layout.docks[d].groups[g].tabs, ["inspector", "extension-3"]);
+        let saved = crate::workspace::write(&layout, &crate::workspace::preset("design").unwrap());
+        assert_eq!(crate::workspace::layout(&saved), layout);
+    }
+    #[test]
+    fn a_saved_unknown_tab_can_show_its_placeholder_before_registration() {
+        let record = serde_json::json!({"id":"late", "layout":{"docks":[
+            {"id":"center","panels":[{"id":"viewer","flex":true}]},
+            {"id":"right","size":320,"panels":[
+                {"id":"inspector","flex":true},
+                {"id":"late.panel","tabbed":true},
+                {"id":"notes","size":170}
+            ]}
+        ]}});
+        let mut layout = crate::workspace::layout(&record);
+        let place = layout.find("late.panel").unwrap();
+        let panels = Panels::default();
+        assert!(!panels.contains("late.panel"));
+        layout.show_panel("late.panel", &panels).unwrap();
+        assert_eq!(layout.find("late.panel"), Some(place));
+        assert_eq!(layout.docks[place.0].groups[place.1].active(), "late.panel");
+        assert_eq!(layout.docks[place.0].groups.len(), 2);
+        assert!(layout.show_panel("never-saved.panel", &panels).is_err());
+        let saved = crate::workspace::write(&layout, &record);
+        assert_eq!(crate::workspace::layout(&saved), layout);
+    }
+
+    #[test]
+    fn seven_tabs_keep_readable_labels_and_active_in_strip() {
+        let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+        let mut g = group(&["one", "two", "three", "four", "five", "six", "seven"], None);
+        for active in 0..7 {
+            g.active = active;
+            let track = g.tab_track(300., &[160.; 7], &t);
+            assert!(track.visible.contains(&active));
+            assert!(track.visible.len() < 7);
+            assert!(track.title_limit.unwrap() >= t.metrics.hit * 3.);
+            assert!((0..7).all(|i| track.visible.contains(&i) || track.overflow.contains(&i)));
+        }
     }
     #[test]
     fn exact_fit_and_empty_groups_have_no_phantom_tabs() {

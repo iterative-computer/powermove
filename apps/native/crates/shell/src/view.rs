@@ -338,6 +338,7 @@ impl Editor {
         }
     }
     pub fn bind_project(&mut self, project: String) {
+        self.parked.clear();
         self.project = project;
         // The project's own workspace arrives with the store; until then the
         // window keeps showing what it showed.
@@ -362,7 +363,9 @@ impl Editor {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
         let mut written = self.layout.clone();
-        for (id, (place, showing)) in &self.parked {
+        // Extension placeholders stay in the actual tree. Only the Agent
+        // popover is removed from this window while retaining a docked home.
+        for (id, (place, showing)) in self.parked.iter().filter(|(id, _)| id.as_str() == "agent") {
             written.insert_at(id, *place);
             // It was the stack's showing tab: the saved stack still shows it,
             // not the tab the window fell back to while it was away.
@@ -398,6 +401,7 @@ impl Editor {
     fn show_record(&mut self, record: serde_json::Value) {
         self.maximized_panel = None;
         self.layout = workspace::layout(&record);
+        self.parked.retain(|id, _| self.layout.find(id).is_some());
         self.record = record;
     }
     /// Shows workspace `record` in this window and makes it the active one.
@@ -434,6 +438,20 @@ impl Editor {
             self.workspaces = store;
         }
         let target = self.workspaces.active(self.preferred.as_deref());
+        // Freeze the inherited workspace even if no layout edit follows.
+        // Otherwise saving an old/new project writes a null workspace and
+        // opening it later inherits whichever global layout is current then.
+        if self.workspaces.project_id.is_some()
+            && !self.workspaces.project.as_ref().is_some_and(workspace::usable)
+        {
+            if self.pending.is_empty() {
+                self.show_record(target.clone());
+                self.commit(target);
+                self.persist_session();
+            }
+            // A stale null publication cannot acknowledge our pending write.
+            return;
+        }
         if self.seen.as_ref() == Some(&target) {
             return;
         }
@@ -670,7 +688,17 @@ impl Editor {
                 cx.notify();
                 return true;
             }
+            ("panel", "registered") => {
+                // A reconnect refreshes saved placeholders. It must not reopen
+                // something closed meanwhile, or add it to a different project.
+                if rest != "agent" { self.parked.remove(rest); }
+                cx.notify();
+                return true;
+            }
             ("panel", "show") => match self.parked.remove(rest) {
+                // Registration completes in place; it must not select or move
+                // the saved placeholder when extensions arrive out of order.
+                Some(_) if self.layout.find(rest).is_some() => Ok(()),
                 // Coming back (an extension's panels re-register at launch) puts
                 // it in its place without taking the stack's showing tab.
                 Some((place, showing)) if self.layout.find(rest).is_none() => {
@@ -711,7 +739,13 @@ impl Editor {
                         DropTarget::Tab { dock, group, index }
                     };
                     self.parked.insert(rest.to_owned(), (place, showing));
-                    self.layout.close_panel(rest)
+                    if rest == "agent" {
+                        self.layout.close_panel(rest)
+                    } else {
+                        // Keep the entire group, size, order and active tab.
+                        // The unavailable view is replaced when registration finishes.
+                        Ok(())
+                    }
                 }
                 None => Ok(()),
             },
@@ -1335,7 +1369,7 @@ impl Editor {
         let mut next = self.layout.clone();
         let docked = next
             .show_panel(id, &panels)
-            .and_then(|_| next.move_panel_to(id, preview.target).or(Ok(())));
+            .and_then(|_| next.move_panel_to(id, preview.target));
         if let Err(error) = docked {
             self.status = error.to_string();
             cx.notify();
@@ -2621,7 +2655,7 @@ impl Render for Editor {
                         .text_size(px(t.typography.title))
                         .font_weight(FontWeight(t.typography.medium_weight))
                         .whitespace_nowrap();
-                    // Long titles truncate; every panel retains its tab in the strip.
+                    // Long titles truncate at a readable width; excess tabs use the menu.
                     cell = match tab_track.title_limit.map(|limit| (limit - TAB_SPACING).max(0.)) {
                         Some(limit) => cell
                             .max_w(px(limit))
@@ -3435,9 +3469,51 @@ mod keyboard_tests {
             })
             .unwrap();
     }
+    #[::core::prelude::v1::test]
+    fn late_panels_keep_separate_groups_sizes_and_active_tabs() {
+        let mut cx = app();
+        let window = cx.open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx))
+        }).unwrap();
+        window.update(&mut cx, |v, _, cx| {
+            v.integration = Some(Rc::new(Contributions(vec![
+                ("ext.one".into(), "One".into()), ("ext.two".into(), "Two".into())
+            ])));
+            v.show_record(serde_json::json!({"id":"custom", "layout":{"docks":[
+                {"id":"center","panels":[{"id":"viewer","flex":true}]},
+                {"id":"right","size":340,"panels":[
+                    {"id":"ext.one","size":230}, {"id":"inspector","size":210},
+                    {"id":"ext.two","tabbed":true,"active":true}]}]}}));
+            let original = v.layout.clone();
+            for id in ["ext.one", "ext.two"] {
+                assert!(v.shell_command(&format!("panel:park:{id}"), cx));
+            }
+            assert_eq!(v.layout, original);
+            for id in ["ext.two", "ext.one"] {
+                assert!(v.shell_command(&format!("panel:registered:{id}"), cx));
+            }
+            assert_eq!(v.layout, original);
+            assert_eq!(workspace::layout(&v.record), original);
+            assert!(v.shell_command("panel:park:ext.one", cx));
+            assert!(v.shell_command("panel:close:ext.one", cx));
+            let closed = v.layout.clone();
+            assert!(v.shell_command("panel:registered:ext.one", cx));
+            assert_eq!(v.layout, closed, "registration does not reopen a closed panel");
+            assert!(v.shell_command("panel:park:ext.two", cx));
+            v.bind_project("another-project".into());
+            v.show_record(workspace::preset("review").unwrap());
+            v.save();
+            assert!(v.shell_command("panel:registered:ext.two", cx));
+            assert!(v.layout.find("ext.two").is_none());
+            assert!(v.layout.find("ext.one").is_none());
+            assert!(workspace::layout(&v.record).find("ext.one").is_none(),
+                "a suspended panel from another project cannot enter this workspace");
+        }).unwrap();
+    }
+
     /// A project whose saved stack shows an extension's panel that is not
-    /// there at open (uninstalled, or its realm still starting): the window
-    /// falls back to another tab, but the workspace keeps the saved choice.
+    /// there at open (uninstalled, or its realm still starting): the saved
+    /// choice remains visible as a placeholder until its owner is ready.
     #[::core::prelude::v1::test]
     fn a_parked_showing_tab_stays_the_saved_choice() {
         let mut cx = app();
@@ -3471,7 +3547,7 @@ mod keyboard_tests {
                 };
                 assert_eq!(showing(&workspace::layout(&saved)), "ext.voice");
                 assert!(v.shell_command("panel:park:ext.voice", cx));
-                assert_eq!(showing(&v.layout), "inspector", "the window falls back");
+                assert_eq!(showing(&v.layout), "ext.voice", "the placeholder keeps its saved tab");
                 v.save();
                 assert_eq!(
                     showing(&workspace::layout(&v.record)),
@@ -3678,6 +3754,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn inherited_workspace_is_written_without_a_layout_edit(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(&[]),
+            current: Some("review".into()),
+            project_id: Some("old-project".into()),
+            project: Some(serde_json::Value::Null),
+            ..Default::default()
+        });
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx);
+            e.preferred = Some("review".into());
+            e.integration = Some(Rc::new(Stub(stub)));
+            e
+        });
+        window.update(cx, |v, _, cx| {
+            v.sync_workspaces(cx);
+            assert_eq!(v.layout.workspace, "review");
+            v.sync_workspaces(cx);
+            v.sync_workspaces(cx);
+            let writes = kernel.writes.borrow();
+            assert!(matches!(&writes[..], [workspace::Write::Active { before, after }]
+                if before.is_null() && workspace::record_id(after) == Some("review")));
+            let workspace::Write::Active { after, .. } = writes[0].clone() else { panic!() };
+            drop(writes);
+            let old = (**kernel.store.borrow()).clone();
+            *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                project: Some(after), current: Some("design".into()), ..old
+            });
+            v.sync_workspaces(cx);
+            assert!(v.pending.is_empty(), "the actual project publication acknowledges the snapshot");
+            assert_eq!(v.layout.workspace, "review");
+        }).unwrap();
+    }
+
+    #[gpui::test]
     fn a_workspace_deleted_by_another_window_moves_this_one_to_the_fallback(
         cx: &mut TestAppContext,
     ) {
@@ -3725,6 +3838,29 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn invalid_outside_drop_does_not_save_a_fallback_group(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(
+            Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx));
+        view.update(cx, |v, cx| {
+            let before = v.layout.clone();
+            v.gesture = Some(super::Gesture::Panel(super::PanelDrag {
+                id: "agent".into(), stack: false,
+                start: gpui::point(gpui::px(0.), gpui::px(0.)),
+                at: gpui::point(gpui::px(0.), gpui::px(0.)),
+                original: before.clone(), moved: true,
+                preview: Some(crate::layout::DropPreview {
+                    target: crate::layout::DropTarget::Tab { dock: usize::MAX, group: 0, index: 0 },
+                    rect: crate::layout::Rect::default(),
+                    near: crate::layout::Near::Nothing,
+                }),
+            }));
+            assert!(!v.drop_from_outside("agent", cx));
+            assert_eq!(v.layout, before);
+            assert!(v.outbox.is_empty());
+        });
     }
 
     /// The Agent popover dragged over the workspace by its own header: as

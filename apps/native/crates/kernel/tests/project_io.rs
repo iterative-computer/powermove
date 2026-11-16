@@ -881,3 +881,32 @@ fn authored_media_order_survives_open_edit_undo_save_and_reopen() {
     .unwrap();
     assert!(open_store(&sorted).root().unwrap().get(member).is_none());
 }
+
+#[test]
+fn project_workspace_round_trips_independently_without_document_edits() {
+    let dir = TempDir::new("workspace-roundtrip");
+    let source = engine_fixture("containers/pmv4-no-media.pmv");
+    let mut snapshots = Vec::new();
+    let workspace_for = |id: &str, width: i32| parse(&format!(r#"{{"id":"{id}","custom":[{{"id":"late.panel","title":"Marker note"}}],"layout":{{"docks":[{{"id":"right","size":{width},"panels":[{{"id":"inspector","flex":true}},{{"id":"late.panel","size":220}},{{"id":"notes","tabbed":true,"active":true}}]}}]}}}}"#)).unwrap();
+    for (id, width) in [("first", 280), ("second", 430)] {
+        let opened = open_project(&source, OpenOptions::default()).unwrap();
+        let mut store = DocumentStore::open(opened);
+        let workspace = workspace_for(id, width);
+        assert!(!store.is_dirty());
+        store.set_workspace(Some(workspace.clone()));
+        assert!(!store.is_dirty(), "workspace changes follow Electron's dirty rule");
+        let path = dir.path(&format!("{id}.pmv"));
+        save_as(&mut store, &path).unwrap();
+        let reopened = open_project(&path, OpenOptions::default()).unwrap();
+        assert_eq!(reopened.file.envelope.workspace, Some(workspace.clone()));
+        let changed = workspace_for(id, width + 17);
+        store.set_workspace(Some(changed.clone()));
+        assert!(!store.is_dirty(), "layout-only changes keep a saved document clean");
+        save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
+        let reopened = open_project(&path, OpenOptions::default()).unwrap();
+        assert_eq!(reopened.file.envelope.workspace, Some(changed.clone()),
+            "ordinary Save must persist layout-only changes too");
+        snapshots.push(changed);
+    }
+    assert_ne!(snapshots[0], snapshots[1]);
+}
