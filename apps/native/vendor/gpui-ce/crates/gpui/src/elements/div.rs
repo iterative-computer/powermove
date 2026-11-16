@@ -6908,6 +6908,7 @@ mod tests {
                 );
                 window.dispatch_event(
                     ScrollWheelEvent {
+                        is_momentum: false,
                         position: point(px(25.), px(25.)),
                         delta: crate::ScrollDelta::Pixels(point(px(0.), px(-10.))),
                         modifiers: Default::default(),
