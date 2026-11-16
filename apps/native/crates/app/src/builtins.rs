@@ -1294,7 +1294,14 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        Some(div().w_full().child(header).into_any_element())
+        // Cached: drawn again only when its panel changes (it observes the
+        // panel), not with every frame the window draws.
+        Some(
+            div()
+                .w_full()
+                .child(header.cached(StyleRefinement::default().w_full()))
+                .into_any_element(),
+        )
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.

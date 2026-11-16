@@ -1725,8 +1725,19 @@ impl TimelineSurface {
         // press as it stands: the playhead stays where it is.
         let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
             || self.graph_point_at(x, y);
+        // A press on the ruler scrubs from the time under it, so the
+        // playhead goes there with the scrub (whose time is written once
+        // it ends): a seek first wrote the time now, and every panel took
+        // that write as the drag began.
+        let scrubs = y < self.tokens.metrics.ruler as f64
+            && x >= self.view.layer_column
+            && !self.frame.as_ref().is_some_and(|f| {
+                f.hit_op("work-area", x, y, 0.).is_some()
+                    && (event.modifiers.alt || y <= WORK_BAR_STRIP)
+            });
         if let Some(at) = self.skimmer
             && !grabs
+            && !scrubs
         {
             self.delegate.seek(at, cx);
         }
