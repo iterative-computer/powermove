@@ -679,7 +679,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 53] = [
+pub const PLANNED: [&str; 54] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
