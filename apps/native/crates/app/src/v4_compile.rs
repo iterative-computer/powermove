@@ -411,6 +411,11 @@ fn native_panel_root(style: &mut serde_json::Map<String, Value>, root: bool) {
             "backgroundColor",
             "border",
             "borderWidth",
+            "borderColor",
+            "borderTop",
+            "borderBottom",
+            "borderLeft",
+            "borderRight",
             "borderTopWidth",
             "borderBottomWidth",
             "borderLeftWidth",
@@ -1400,7 +1405,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn native_panel_frame_drops_only_root_decoration() {
-        let authored = json!({"background":"#121212", "borderWidth":1,
+        let authored = json!({"background":"#121212", "borderWidth":1, "borderLeft":2, "borderTop":1,
             "borderRadius":8, "margin":6, "padding":10, "gap":4});
         let mut root = authored.as_object().unwrap().clone();
         native_panel_root(&mut root, true);

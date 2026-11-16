@@ -11,7 +11,8 @@ test("native panel frame: page roots reveal the host surface, controls keep PM-2
     const theme = readFileSync(new URL(`../../themes/editions/v1/${scheme}.css`, import.meta.url), "utf8");
     const inset = [...theme.matchAll(/--panel-edge-inset:([^;]+);/g)].at(-1)![1].trim();
     const resolvedBase = base.replaceAll("var(--panel-edge-inset)", inset);
-    const dom = new JSDOM(`<style>${theme}\n${css}\n${resolvedBase}</style><section data-pm-contribution><div data-pm-panel-body><button>Apply</button></div></section>`);
+    const authored = "html,body,[data-pm-contribution],[data-pm-panel-body]{background:#424242;border:1px solid black;border-radius:8px;box-shadow:0 0 2px black;margin:9px}";
+    const dom = new JSDOM(`<style>${theme}\n${authored}\n${css}\n${resolvedBase}</style><section data-pm-contribution><div data-pm-panel-body><button>Apply</button></div></section>`);
     const frame = [...dom.window.document.querySelectorAll("[data-pm-contribution], [data-pm-panel-body]")].map(el => {
       const s = dom.window.getComputedStyle(el);
       expect(s.backgroundColor).toBe("rgba(0, 0, 0, 0)");
