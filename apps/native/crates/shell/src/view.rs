@@ -2212,15 +2212,37 @@ impl Render for Editor {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
-                native_bodies.push((
-                    id.to_string(),
-                    Rect {
-                        x: p.rect.x + edge,
-                        y: p.rect.y + m.header,
-                        w: (p.rect.w - edge * 2.).max(0.),
-                        h: (p.rect.h - m.header - edge).max(0.),
-                    },
-                ));
+                let body = Rect {
+                    x: p.rect.x + edge,
+                    y: p.rect.y + m.header,
+                    w: (p.rect.w - edge * 2.).max(0.),
+                    h: (p.rect.h - m.header - edge).max(0.),
+                };
+                native_bodies.push((id.to_string(), body));
+                // The panel's material everywhere around the page (its header
+                // and the edge it leaves the dividers), and in the corners the
+                // page rounds off: one surface, as every other panel.
+                let (whole, fill) = (p.rect, tint(c.panel, t.translucency.panel));
+                let radius = (m.panel_radius - edge).max(0.);
+                panel = panel.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            for r in layout::outside(whole, &[body]) {
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        point(px(r.x), px(r.y)),
+                                        gpui::size(px(r.w), px(r.h)),
+                                    ))
+                                    .background(fill),
+                                );
+                            }
+                            fill_rounded_off(window, body, radius, [true, true], fill);
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                );
             } else if self
                 .integration
                 .as_ref()

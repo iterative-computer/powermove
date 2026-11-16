@@ -109,3 +109,95 @@ fn rounded_overflow_clips_children_to_the_corner() {
         }
     });
 }
+
+/// Panel `inspector` is drawn by a native surface below the window (an
+/// extension's page) when `native`: the shell leaves only its body open.
+struct Native(bool);
+
+impl pm_shell::integration::Integration for Native {
+    fn observe(&self, _: &mut Context<pm_shell::view::Editor>) {}
+    fn command(&self, _: &pm_shell::Command, _: &mut Window, _: &mut gpui::App) -> bool {
+        false
+    }
+    fn panel(
+        &self,
+        _: &str,
+        _: pm_shell::layout::Rect,
+        _: &mut Window,
+        _: &mut gpui::App,
+    ) -> Option<gpui::AnyElement> {
+        None
+    }
+    fn native_panel(&self, id: &str, _: &gpui::App) -> bool {
+        self.0 && id == "inspector"
+    }
+    fn project_id(&self, _: &gpui::App) -> Option<String> {
+        None
+    }
+    fn status(&self, _: &gpui::App) -> String {
+        String::new()
+    }
+    fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut gpui::App) {}
+}
+
+fn editor(native: bool) -> (image::RgbaImage, f32, pm_shell::layout::Rect) {
+    let tokens = Tokens::new(Scheme::Light, Accessibility::default());
+    let m = tokens.metrics;
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)),
+        Arc::new(()),
+        || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+    );
+    let window = cx
+        .open_window(size(px(m.window_width), px(m.window_height)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(tokens, None, cx);
+                v.layout = pm_shell::layout::Layout::preset("design");
+                v.integration = Some(std::rc::Rc::new(Native(native)));
+                v
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let image = cx.capture_screenshot(window.into()).unwrap();
+    let rect = window
+        .update(&mut cx, |v, _, _| v.panel_rect("inspector"))
+        .unwrap()
+        .expect("the design workspace shows Properties");
+    let scale = image.width() as f32 / m.window_width;
+    (image, scale, rect)
+}
+
+#[test]
+fn a_panel_with_a_native_body_is_one_surface_around_it() {
+    objc2::rc::autoreleasepool(|_| {
+        let (drawn, scale, r) = editor(false);
+        let (native, _, same) = editor(true);
+        assert_eq!(r, same);
+        let m = Tokens::new(Scheme::Light, Accessibility::default()).metrics;
+        let edge = m.border.max(m.splitter_reach);
+        let at = |image: &image::RgbaImage, x: f32, y: f32| {
+            image.get_pixel((x * scale) as u32, (y * scale) as u32).0
+        };
+        // Around the body (the header's top, the side and bottom edges the
+        // page leaves the dividers, the corners it rounds off) the panel's
+        // own material, as a panel the shell draws whole.
+        let bottom = r.y + r.h - edge / 2.;
+        let body_bottom = r.y + r.h - edge - 0.5;
+        for (what, x, y) in [
+            ("header", r.x + r.w * 0.6, r.y + 3.),
+            ("left edge", r.x + edge / 2. + 0.5, r.y + r.h / 2.),
+            ("right edge", r.x + r.w - edge / 2. - 0.5, r.y + r.h / 2.),
+            ("bottom edge", r.x + r.w / 2., bottom),
+            ("rounded-off corner", r.x + edge + 0.5, body_bottom),
+            ("rounded-off corner", r.x + r.w - edge - 0.5, body_bottom),
+        ] {
+            // (A path's fill rounds a channel apart from a quad's.)
+            let (a, b) = (at(&native, x, y), at(&drawn, x, y));
+            assert!((0..4).all(|i| a[i].abs_diff(b[i]) <= 2), "{what} at {x},{y}: {a:?} vs {b:?}");
+        }
+        // The body itself is left open for the page.
+        let (x, y) = (r.x + r.w / 2., r.y + r.h / 2.);
+        assert_ne!(at(&native, x, y), at(&drawn, x, y), "the body is open");
+    });
+}
