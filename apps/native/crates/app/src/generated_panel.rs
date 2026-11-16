@@ -164,7 +164,7 @@ fn inside_ground(point: [f32;2], size: [f32;2], radius: f32) -> bool {
 
 fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
     let resolve=build.map_or(1.,|b|b.resolve(std::time::Instant::now()));
-    if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().bg(rgb(t.colors.panel));}
+    if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().rounded(px(t.radius.lg)).bg(rgb(t.colors.panel));}
     let color=t.colors.panel;
     let radius=t.radius.lg;
     div().absolute().inset_0().child(canvas(|_,_,_|(),move |bounds,_,window,_| {
