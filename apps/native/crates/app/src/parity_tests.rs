@@ -452,6 +452,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
             "Solo",
             "Shy",
             "Lock",
+            "3D Layer",
             "-",
             "Delete"
         ]
@@ -536,6 +537,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
             "(Solo)",
             "(Shy)",
             "Unlock",
+            "(3D Layer)",
             "-",
             "(Delete)"
         ]
@@ -611,6 +613,15 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     });
     step("a", &["Unsolo"], "Solo Layers", &|| {
         assert_ne!(flag("a", "solo"), Some(true))
+    });
+    step("a", &["3D Layer"], "3D Layer", &|| {
+        assert_eq!(flag("a", "threeD"), Some(true))
+    });
+    let three_d = menu(&desk, "a", 1.);
+    let row = three_d.iter().find(|r| r["label"] == "3D Layer").unwrap();
+    assert_eq!(row["checked"], true, "the row shows the layer is 3D");
+    step("a", &["3D Layer"], "3D Layer", &|| {
+        assert_eq!(flag("a", "threeD"), Some(false))
     });
     step("a", &["Lock"], "Lock Layers", &|| {
         assert_eq!(flag("a", "lock"), Some(true))
@@ -715,7 +726,8 @@ fn a_layer_in_a_locked_group_offers_unlock_group() {
     let desk = Desk::new(project);
     desk.select(&["c"]);
     let rows = menu(&desk, "c", 1.);
-    assert_eq!(labels(&rows)[labels(&rows).len() - 3], "Unlock Group");
+    // The lock row, then 3D Layer, a separator and Delete (v1's order).
+    assert_eq!(labels(&rows)[labels(&rows).len() - 4], "Unlock Group");
     choose(&desk, "c", 1., &["Unlock Group"]);
     assert_ne!(
         layer_of(&desk.published(), "g")
