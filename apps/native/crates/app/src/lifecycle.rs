@@ -135,6 +135,9 @@ fn running_exports(
 /// An export's worker removes its unfinished file before it reports that;
 /// quitting sooner killed the worker with that file still on disk.
 const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest a close waits to store the viewer's last picture
+/// (`Controller::store_last_frame`).
+const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Whether every export in `stopping` has ended (cancelled, failed or done).
 fn exports_ended(
     tasks: &[pm_promedia::tasks::Task],
@@ -960,8 +963,18 @@ impl Controller {
         // is still published here until the close finishes.
         let had_project = session.is_some() || self.published.is_some();
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
+        // The picture the viewer shows now is what the next launch shows
+        // until its first frame: stored before the project and its effects
+        // go, waited for at most `LAST_FRAME_WAIT`.
+        let last_frame = session
+            .is_some()
+            .then(|| self.store_last_frame(Some(LAST_FRAME_WAIT), cx))
+            .flatten();
         cx.spawn(async move |this, cx| {
             let result = async {
+                if let Some(stored) = last_frame {
+                    let _ = stored.recv().await;
+                }
                 if let Some(session) = session {
                     expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
                 }
