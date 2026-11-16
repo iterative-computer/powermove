@@ -622,6 +622,7 @@ impl Picker {
             self.color.clipped()
         };
         let hue = self.hue;
+        let p3 = self.p3;
         let t = self.tokens.clone();
         let focus_color = t.colors.focus;
         let focus_width = t.metrics.border;
@@ -684,9 +685,13 @@ impl Picker {
                     },
                     move |bounds, _, window, _| {
                         let opaque = |c: Color| {
-                            rgb(c.0[..3]
-                                .iter()
-                                .fold(0u32, |out, c| (out << 8) | (*c * 255.).round() as u32))
+                            let c = if p3 { Color::from_p3(c) } else { c };
+                            Rgba {
+                                r: c.0[0],
+                                g: c.0[1],
+                                b: c.0[2],
+                                a: 1.,
+                            }
                         };
                         let gradient = |angle, from: Rgba, to: Rgba| {
                             let mut bg = linear_gradient(

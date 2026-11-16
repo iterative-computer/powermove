@@ -180,18 +180,18 @@ impl Color {
         if lower == "transparent" {
             return Some(Self([0., 0., 0., 0.]));
         }
-        if lower.contains('(')
-            && (!lower.ends_with(')')
-                || lower.matches('(').count() != 1
-                || lower.matches(')').count() != 1)
-        {
-            return None;
-        }
         let (body, opacity) = lower
             .rsplit_once('/')
             .map_or((lower.as_str(), None), |(b, a)| {
                 (b, Some(a.trim().trim_end_matches(')').trim()))
             });
+        if lower.contains('(')
+            && (lower.matches('(').count() != 1
+                || lower.matches(')').count() != 1
+                || !lower.ends_with(')') && !body.trim().ends_with(')'))
+        {
+            return None;
+        }
         let a = if let Some(a) = opacity {
             let n = a.trim_end_matches('%').parse::<f32>().ok()?;
             if a.ends_with('%') { n / 100. } else { n }
@@ -240,7 +240,7 @@ impl Color {
                 n[i] /= 100.;
             }
         }
-        let a = if parts.len() == 4 {
+        let a = if parts.len() == 4 && opacity.is_none() {
             n[3].clamp(0., 1.)
         } else {
             a.clamp(0., 1.)
@@ -330,6 +330,12 @@ mod tests {
                 assert!((a - b).abs() < 0.025, "{mode}: {a} != {b}");
             }
         }
+        assert_eq!(
+            Color::parse_draft("rgb(255 0 0) / 50%", "Hex", 1.)
+                .unwrap()
+                .hex(),
+            "#FF000080"
+        );
         let p = Color::from_p3(Color([1., 0., 0., 1.]));
         assert!(p.outside());
         assert_eq!(p.hex(), "#FF0000");
