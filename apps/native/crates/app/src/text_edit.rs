@@ -685,6 +685,8 @@ impl GizmoSurface {
             })
             .detach();
             input.focus();
+            // Letters typed before it had the keyboard go to it now, first.
+            pm_shell::typing::field_ready();
         }
         let label = if fresh { None } else { Some("Edit Text") };
         let mut session = TextSession {
@@ -1394,6 +1396,10 @@ impl GizmoSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The text opens a turn or more from now (a point click first asks
+        // what is under it): letters typed meanwhile wait for it, not run as
+        // shortcuts on the canvas (PM-465).
+        pm_shell::typing::expect();
         let paragraph = sketch.shape.filter(|b| b.w() >= PARAGRAPH_MIN);
         if let Some(b) = paragraph {
             self.new_text([b.x0, b.y0], Some(b.w()), window, cx);
