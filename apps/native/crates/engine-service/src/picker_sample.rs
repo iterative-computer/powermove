@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub type Reply = Result<[f32; 4], String>;
 pub(crate) struct Pending {
     time: Ticks,
+    deadline: std::time::Instant,
     stamp: crate::Stamp,
     size: Size,
     pixel: [u32; 2],
@@ -27,6 +28,7 @@ impl Viewer {
             anyhow::ensure!(v.picker_samples.len() < 8, "color sampling queue full");
             v.picker_samples.push_back(Pending {
                 stamp: v.stamp,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
                 time,
                 size,
                 pixel,
@@ -59,6 +61,9 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
     let Some((id, p, scene, resources, stamp)) = work else {
         return;
     };
+    if p.reply.is_closed() {
+        return;
+    }
     if p.stamp != stamp {
         let _ = p
             .reply
@@ -67,18 +72,23 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
     }
     engine.set_resources(resources);
     engine.use_compat_document(stamp.doc_id);
-    let result = engine
-        .export(&scene, p.time, p.size)
-        .map_err(|e| e.to_string())
-        .and_then(|rgba| {
-            let i = ((p.pixel[1] as usize * p.size.width as usize) + p.pixel[0] as usize) * 4;
-            let c = rgba.get(i..i + 4).ok_or("composition pixel missing")?;
-            // Renderer's final composition encoding is premultiplied E. Undo only
-            // premultiplication: no display profile, loupe or OS sampler is involved.
-            let a = c[3].clamp(0., 1.);
-            let channel = |v: f32| if a > 0. { v / a } else { 0. };
-            Ok([channel(c[0]), channel(c[1]), channel(c[2]), a])
-        });
+    let raw = engine.export(&scene, p.time, p.size);
+    if raw.as_ref().is_err_and(render::transient) && std::time::Instant::now() < p.deadline {
+        let mut state = shared.state.lock().unwrap();
+        if let Some(v) = state.views.get_mut(&id).filter(|v| v.stamp == p.stamp) {
+            v.picker_samples.push_front(p);
+            return;
+        }
+    }
+    let result = raw.map_err(|e| e.to_string()).and_then(|rgba| {
+        let i = ((p.pixel[1] as usize * p.size.width as usize) + p.pixel[0] as usize) * 4;
+        let c = rgba.get(i..i + 4).ok_or("composition pixel missing")?;
+        // Renderer's final composition encoding is premultiplied E. Undo only
+        // premultiplication: no display profile, loupe or OS sampler is involved.
+        let a = c[3].clamp(0., 1.);
+        let channel = |v: f32| if a > 0. { v / a } else { 0. };
+        Ok([channel(c[0]), channel(c[1]), channel(c[2]), a])
+    });
     let current = shared.state.lock().unwrap().views.get(&id).map(|v| v.stamp);
     let result = if current == Some(p.stamp) {
         result

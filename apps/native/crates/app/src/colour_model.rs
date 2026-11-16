@@ -177,6 +177,16 @@ impl Color {
     }
     pub fn parse_draft(text: &str, notation: &str, alpha: f32) -> Option<Self> {
         let lower = text.trim().to_lowercase();
+        if lower == "transparent" {
+            return Some(Self([0., 0., 0., 0.]));
+        }
+        if lower.contains('(')
+            && (!lower.ends_with(')')
+                || lower.matches('(').count() != 1
+                || lower.matches(')').count() != 1)
+        {
+            return None;
+        }
         let (body, opacity) = lower
             .rsplit_once('/')
             .map_or((lower.as_str(), None), |(b, a)| {
@@ -297,6 +307,8 @@ mod tests {
             assert_eq!(Color::from_hsv(h, s, v, c.0[3]).hex(), c.hex());
         }
         assert!(Color::parse("#12").is_none());
+        assert!(Color::parse("##FF0000").is_none());
+        assert!(Color::parse_draft("rgb(255 0 0", "Hex", 1.).is_none());
         assert!(Color::parse("ééé").is_none());
     }
     #[test]

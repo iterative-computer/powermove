@@ -69,7 +69,11 @@ impl Picker {
         let mut p = Self {
             color,
             previous: color,
-            hue: color.hsv()[0],
+            hue: if p3 {
+                color.p3().hsv()[0]
+            } else {
+                color.clipped().hsv()[0]
+            },
             sampling: false,
             sample_source,
             generation: 0,
@@ -170,6 +174,7 @@ impl Picker {
                         TextEvent::Committed(s) => {
                             p.input(i, s, cx);
                             if !p.status.is_empty() {
+                                p.status.clear();
                                 p.sync_fields(cx);
                             }
                         }
@@ -207,7 +212,11 @@ impl Picker {
         }
         self.sampling = false;
         match result {
-            Ok(Ok(c)) => self.set(Color(c), cx),
+            Ok(Ok(mut c)) => {
+                // Electron's eyedropper changes RGB, retaining the chosen opacity.
+                c[3] = self.color.0[3];
+                self.set(Color(c), cx);
+            }
             Ok(Err(e)) => self.status = e,
             Err(_) => self.status = "Could not sample that color".into(),
         }
@@ -215,6 +224,22 @@ impl Picker {
             f.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
         }
         cx.notify();
+    }
+    fn copy_row(&self, row: usize, cx: &mut Context<Self>) {
+        let mode = if self.p3 {
+            ["OKLCH", "OKLab", "P3"][row]
+        } else {
+            ["OKLCH", "HSL", "RGB"][row]
+        };
+        let text = match mode {
+            "P3" => format!("color(display-p3 {})", self.color.format("Display P3")),
+            "OKLab" => {
+                let [l, a, b] = self.color.oklab();
+                format!("oklab({:.1}% {a:.3} {b:.3})", l * 100.)
+            }
+            _ => format!("{}({})", mode.to_lowercase(), self.color.format(mode)),
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
     fn apply_active(&mut self, cx: &mut Context<Self>) {
         if let Some(i) = (0..10).find(|i| Self::field_stop(*i) == self.focus_index) {
@@ -386,6 +411,32 @@ impl Picker {
             None
         };
         if let Some(c) = next {
+            if i == 9 {
+                let text = value.trim().to_lowercase();
+                let inferred = if text.starts_with("color(display-p3") {
+                    Some("Display P3")
+                } else if text.starts_with("oklch(") {
+                    Some("OKLCH")
+                } else if text.starts_with("hsl(") || text.starts_with("hsla(") {
+                    Some("HSL")
+                } else if text.starts_with("rgb(") || text.starts_with("rgba(") {
+                    Some("RGB")
+                } else if text.starts_with('#') {
+                    Some("Hex")
+                } else {
+                    None
+                };
+                if let Some(mode) = inferred {
+                    self.notation = if self.p3 && !matches!(mode, "Display P3" | "OKLCH")
+                        || !self.p3 && mode == "Display P3"
+                    {
+                        "OKLCH"
+                    } else {
+                        mode
+                    };
+                    PREFERENCES.set((self.p3, self.notation, self.hue_mode));
+                }
+            }
             self.status.clear();
             self.set(c, cx);
         } else {
@@ -547,6 +598,7 @@ impl Picker {
         let hue = self.hue;
         let t = self.tokens.clone();
         let focus_color = t.colors.focus;
+        let focus_width = t.metrics.border;
         let weak = cx.entity().downgrade();
         div()
             .id(label)
@@ -560,9 +612,19 @@ impl Picker {
                     Track::Hue => 7,
                 }],
             )
-            .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+            .focus_visible_style(move |s| s.border(px(focus_width)).border_color(rgb(focus_color)))
             .tab_index(0)
+            .role(Role::Slider)
             .aria_label(label)
+            .aria_value(match kind {
+                Track::Plane => format!(
+                    "{:.0}% saturation, {:.0}% brightness",
+                    self.hsv()[1] * 100.,
+                    self.hsv()[2] * 100.
+                ),
+                Track::Alpha => format!("{:.0}%", self.color.0[3] * 100.),
+                Track::Hue => format!("{:.0} degrees", self.hue),
+            })
             .on_key_down(cx.listener(move |p, e: &KeyDownEvent, _, cx| {
                 let key = e.keystroke.key.as_str();
                 if matches!(key, "up" | "down" | "left" | "right") {
@@ -723,6 +785,7 @@ impl Render for Picker {
         self.motion.frame(window);
         let t = self.tokens.clone();
         let focus_color = t.colors.focus;
+        let focus_width = t.metrics.border;
         let kit = Kit::new(&t, &self.motion, |p| &mut p.motion, window, cx);
         let weak = cx.entity().downgrade();
         let tracking = canvas(
@@ -828,9 +891,11 @@ impl Render for Picker {
                         swatch(self.previous)
                             .track_focus(&self.stops[8])
                             .focus_visible_style(move |s| {
-                                s.border_1().border_color(rgb(focus_color))
+                                s.border(px(focus_width)).border_color(rgb(focus_color))
                             })
                             .id("previous")
+                            .role(Role::Button)
+                            .aria_label("Restore previous color")
                             .on_click(cx.listener(|p, _, _, cx| p.set(p.previous, cx))),
                     )
                     .child(swatch(self.color)),
@@ -850,7 +915,9 @@ impl Render for Picker {
                         .flex_1()
                         .min_w(px(0.))
                         .track_focus(&self.stops[Self::field_stop(i)])
-                        .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
                         .child(if let Some(f) = self.fields.get(i) {
                             f.clone().into_any_element()
                         } else {
@@ -877,21 +944,11 @@ impl Render for Picker {
                     false,
                 )
                 .track_focus(&self.stops[12 + row * 4])
-                .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                .focus_visible_style(move |s| {
+                    s.border(px(focus_width)).border_color(rgb(focus_color))
+                })
                 .on_click(cx.listener(move |p, _, _, cx| {
-                    let text = match copy_mode {
-                        "P3" => format!("color(display-p3 {})", p.color.format("Display P3")),
-                        "OKLab" => {
-                            let [l, a, b] = p.color.oklab();
-                            format!("oklab({:.1}% {a:.3} {b:.3})", l * 100.)
-                        }
-                        _ => format!(
-                            "{}({})",
-                            copy_mode.to_lowercase(),
-                            p.color.format(copy_mode)
-                        ),
-                    };
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    p.copy_row(row, cx);
                 })),
             );
             details = details.child(
@@ -908,7 +965,9 @@ impl Render for Picker {
             details = details.child(
                 div()
                     .track_focus(&self.stops[21])
-                    .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                    .focus_visible_style(move |s| {
+                        s.border(px(focus_width)).border_color(rgb(focus_color))
+                    })
                     .child(f.clone()),
             );
         } else {
@@ -917,7 +976,9 @@ impl Render for Picker {
         details = details.child(
             kit.button("color-notation", self.notation, Button::Quiet, None, None)
                 .track_focus(&self.stops[22])
-                .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                .focus_visible_style(move |s| {
+                    s.border(px(focus_width)).border_color(rgb(focus_color))
+                })
                 .on_click(cx.listener(|p, _, _, cx| {
                     p.menu = if p.menu == Some(false) {
                         None
@@ -932,6 +993,8 @@ impl Render for Picker {
         }
         div()
             .id("colour-picker")
+            .role(Role::Dialog)
+            .aria_label("Color")
             .relative()
             .occlude()
             .track_focus(&self.focus)
@@ -955,6 +1018,7 @@ impl Render for Picker {
                             cx.notify();
                         } else if p.sampling {
                             p.sampling = false;
+                            p.status.clear();
                             p.generation += 1;
                             cx.notify();
                         } else {
@@ -978,6 +1042,9 @@ impl Render for Picker {
                         p.menu = Some(true);
                         p.menu_index = 0;
                         cx.notify();
+                    }
+                    "enter" if matches!(p.focus_index, 12 | 16 | 20) => {
+                        p.copy_row((p.focus_index - 12) / 4, cx)
                     }
                     "enter" if p.focus_index == 8 => p.set(p.previous, cx),
                     "enter" if p.focus_index == 0 || p.focus_index == 1 => {
@@ -1019,7 +1086,7 @@ impl Render for Picker {
                                 kit.button("color-srgb", "sRGB", Button::Quiet, None, None)
                                     .track_focus(&self.stops[0])
                                     .focus_visible_style(move |s| {
-                                        s.border_1().border_color(rgb(focus_color))
+                                        s.border(px(focus_width)).border_color(rgb(focus_color))
                                     })
                                     .when(!self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
@@ -1034,7 +1101,7 @@ impl Render for Picker {
                                 kit.button("color-p3", "Display P3", Button::Quiet, None, None)
                                     .track_focus(&self.stops[1])
                                     .focus_visible_style(move |s| {
-                                        s.border_1().border_color(rgb(focus_color))
+                                        s.border(px(focus_width)).border_color(rgb(focus_color))
                                     })
                                     .when(self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
@@ -1054,7 +1121,9 @@ impl Render for Picker {
                             self.menu == Some(true),
                         )
                         .track_focus(&self.stops[3])
-                        .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
                         .on_click(cx.listener(|p, _, _, cx| {
                             p.menu = if p.menu == Some(true) {
                                 None
@@ -1072,7 +1141,9 @@ impl Render for Picker {
                             self.sampling,
                         )
                         .track_focus(&self.stops[2])
-                        .focus_visible_style(move |s| s.border_1().border_color(rgb(focus_color)))
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
                         .on_click(cx.listener(|p, _, _, cx| {
                             p.sampling = true;
                             p.generation += 1;
@@ -1085,7 +1156,7 @@ impl Render for Picker {
                         kit.icon_button("close-color", "xmark", "Close", false)
                             .track_focus(&self.stops[4])
                             .focus_visible_style(move |s| {
-                                s.border_1().border_color(rgb(focus_color))
+                                s.border(px(focus_width)).border_color(rgb(focus_color))
                             })
                             .on_click(cx.listener(|p, _, _, cx| p.finish(true, cx))),
                     ),
@@ -1156,6 +1227,7 @@ mod tests {
                 cx,
             )
         });
+        vcx.simulate_resize(size(px(600.), px(400.)));
         let events = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let saved = events.clone();
         let _sub = vcx.update(|_, cx| {
@@ -1179,6 +1251,7 @@ mod tests {
         });
         vcx.run_until_parked();
         let renders = picker.read_with(&vcx, |p, _| p.renders);
+        assert!(renders > 0, "picker rendered before checking idle frames");
         vcx.run_until_parked();
         assert_eq!(
             picker.read_with(&vcx, |p, _| p.renders),
@@ -1219,11 +1292,13 @@ mod tests {
         ] {
             vcx.update(|w, cx| {
                 picker.update(cx, |p, cx| {
+                    p.edit_rgba([1., 0.4, 0.1, 0.5], cx);
                     p.sampling = true;
                     p.generation += 1;
                     let generation = p.generation;
                     p.resolve_sample(generation, Ok(result), cx);
                     assert!(!p.sampling);
+                    assert_eq!(p.color.0[3], 0.5, "sampling retains picker opacity");
                     assert!(p.focus.contains_focused(w, cx));
                 })
             });
@@ -1251,6 +1326,51 @@ mod tests {
             })
         });
     }
+    #[gpui::test]
+    fn colour_keyboard_nudges_and_wraps_focus(cx: &mut TestAppContext) {
+        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+            Picker::new(
+                Color::parse("#FF0000").unwrap(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                w,
+                None,
+                cx,
+            )
+        });
+        vcx.simulate_resize(size(px(600.), px(400.)));
+        vcx.update(|w, cx| {
+            w.activate();
+            picker.update(cx, |p, cx| p.stops[5].focus(w, cx));
+        });
+        vcx.simulate_keystrokes("left shift-left");
+        assert!((picker.read_with(&vcx, |p, _| p.hsv()[1]) - 0.89).abs() < 0.0001);
+        vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[6].focus(w, cx)));
+        vcx.simulate_keystrokes("shift-down");
+        assert!((picker.read_with(&vcx, |p, _| p.color.0[3]) - 0.9).abs() < 0.0001);
+        vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[7].focus(w, cx)));
+        vcx.simulate_keystrokes("right");
+        assert!((picker.read_with(&vcx, |p, _| p.hue) - 1.).abs() < 0.0001);
+        vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[22].focus(w, cx)));
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 0);
+        vcx.simulate_keystrokes("shift-tab");
+        vcx.run_until_parked();
+        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 22);
+    }
+    struct CaptureRoot {
+        picker: Entity<Picker>,
+        tokens: pm_design::Tokens,
+    }
+    impl Render for CaptureRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .p(px(self.tokens.space.xl))
+                .bg(rgb(self.tokens.colors.window))
+                .child(self.picker.clone())
+        }
+    }
     #[test]
     fn colour_picker_headless_captures() {
         let Ok(dir) = std::env::var("PM_COLOR_PICKER_CAPTURE") else {
@@ -1271,19 +1391,27 @@ mod tests {
                         ))
                     },
                 );
+                let tokens = pm_design::Tokens::new(scheme, Default::default());
+                let dimensions = size(
+                    px(tokens.metrics.color_picker_width + tokens.space.xl * 2.),
+                    px(tokens.metrics.color_picker_plane_height
+                        + tokens.metrics.control * 4.
+                        + tokens.space.xl * 2.),
+                );
                 let window = cx
-                    .open_window(size(px(565.), px(350.)), |w, cx| {
-                        cx.new(|cx| {
+                    .open_window(dimensions, |w, cx| {
+                        let picker = cx.new(|cx| {
                             let mut p = Picker::new(
                                 Color::parse("#FF6B1ACC").unwrap(),
-                                pm_design::Tokens::new(scheme, Default::default()),
+                                tokens.clone(),
                                 w,
                                 None,
                                 cx,
                             );
                             p.sampling = sampling;
                             p
-                        })
+                        });
+                        cx.new(|_| CaptureRoot { picker, tokens })
                     })
                     .unwrap();
                 cx.run_until_parked();

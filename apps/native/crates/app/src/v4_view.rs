@@ -1773,7 +1773,7 @@ impl SurfaceView {
             .props
             .get("value")
             .and_then(Value::as_str)
-            .and_then(Color::parse)
+            .and_then(|text|Color::parse_draft(text,"Hex",1.))
             .unwrap_or(Color([0.5, 0.5, 0.5, 1.]));
         let tokens = self.table.tokens.clone();
         let source = self.natives.sample_color.borrow().clone();
