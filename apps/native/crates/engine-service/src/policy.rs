@@ -222,7 +222,14 @@ impl AutoQuality {
         let needed = self.stills_needed.max(1);
         if scale >= 1. {
             self.slow_stills = cost_ms > interval_ms;
-            self.slower_stills = false;
+            // A slow full frame (a paused one between two drags) says nothing
+            // about half: the next drag starts where the last one had to go,
+            // instead of drawing at half first and converting every clip's
+            // frames again on the way down (a 200 ms gap at each drag's start).
+            // Only a full frame inside the refresh forgets it.
+            if !self.slow_stills {
+                self.slower_stills = false;
+            }
             self.quick_stills = 0;
             if self.slow_stills && self.came_back {
                 // Slow again at once: the next way back takes a run.
@@ -330,6 +337,29 @@ mod tests {
             0.5,
             "a fixed quality stays"
         );
+    }
+    /// A drag that had to go to a quarter, then a pause whose full frames
+    /// are slow: the next drag starts at a quarter, not at half and down
+    /// again (each change of scale converts the clips' frames again). A full
+    /// frame inside the refresh starts the next drag at full.
+    #[test]
+    fn the_next_drag_starts_where_the_last_one_had_to_go() {
+        let refresh = 1000. / 60.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(80., refresh, 1.);
+        auto.record_still(40., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR);
+        // Paused between drags: full frames, still slow.
+        auto.record_still(70., refresh, 1.);
+        auto.record_still(65., refresh, 1.);
+        assert_eq!(
+            drag(&auto),
+            AUTO_DRAG_FLOOR,
+            "the next drag starts at a quarter"
+        );
+        auto.record_still(10., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
     }
     #[test]
     fn slow_playback_plays_at_half_with_hysteresis() {
