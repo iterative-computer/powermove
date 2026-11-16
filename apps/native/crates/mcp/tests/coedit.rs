@@ -142,7 +142,11 @@ fn a_deleted_agent_target_returns_target_removed() {
         json!({"commands":[{"type":"set_property","target":"gone","path":"opacity","value":30}]}),
     );
     assert_eq!(result["isError"], true);
-    assert!(result.to_string().contains("target_removed"), "{result}");
+    let error: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(error["error"], "target_removed", "{error}");
+    assert_eq!(error["status"], "dropped");
+    assert!(error["reason"].as_str().unwrap().contains("deleted"));
     // Interleaved delete is preserved on disconnect.
     let _ = s.finish(true);
     drop(s);
@@ -905,7 +909,11 @@ fn remote_layer_seen_in_state_or_selection_reports_target_removed() {
         );
         let result=session.call("apply_commands",json!({"compositionId":"pre","commands":[{"type":"set_property","target":"existing","path":"opacity","value":30}]}));
         assert_eq!(result["isError"], true, "{result}");
-        assert!(result.to_string().contains("target_removed"), "{result}");
+        let error: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"], "target_removed", "{error}");
+        assert_eq!(error["status"], "dropped");
+        assert!(error["reason"].as_str().unwrap().contains("deleted"));
         session.finish(true).unwrap();
         drop(session);
         drop(host);

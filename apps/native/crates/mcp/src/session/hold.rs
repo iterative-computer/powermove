@@ -135,11 +135,10 @@ impl McpSession {
                 active.focus = active.comp_focus.get(&comp).cloned().unwrap_or_default();
                 active.focus_comp = comp;
             }
-            if non_open {
-                refresh(active, &mut automation, &project, self.writer)?;
-            } else {
-                observe_foreign(active, &automation, &project);
-            }
+            // This admission is bound to an agent run. Even a cancelled
+            // gesture advances the revision, so refresh before the no-hold
+            // fast return. Unbound MCP retains its original revision guard.
+            refresh(active, &mut automation, &project, self.writer)?;
             let touching = !non_open
                 && (automation.coedit_host().is_some_and(|h| {
                     h.kernel

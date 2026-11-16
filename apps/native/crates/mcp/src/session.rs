@@ -214,6 +214,13 @@ impl McpSession {
                 json!({"content":v,"isError":false})
             }
             Ok(v) => success(v),
+            // Only new co-edit errors carry structured diagnostics. The
+            // generic stdio failure contract remains verbatim message text.
+            Err(e) if e.code == "target_removed" => json!({
+                "content":[{"type":"text","text":json!({
+                    "error":e.code,"status":"dropped","reason":e.message
+                }).to_string()}],"isError":true
+            }),
             Err(e) => failure(e),
         }
     }
