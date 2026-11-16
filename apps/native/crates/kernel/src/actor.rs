@@ -1853,3 +1853,34 @@ impl ActorHandle {
         self.kernel.call(project, Request::new(self.caller, call))
     }
 }
+
+/// A read-only publication of a library project that is not open, built as
+/// an unchanged library open builds its first one (`Kernel::open_known`),
+/// registered nowhere: no session, journal, lock or library write, so
+/// nothing about the project changes (Home draws a poster from it).
+pub fn detached_publication(project: &str, stored: Value) -> Published {
+    let canonical = crate::model::to_canonical(stored);
+    let store = crate::document::DocumentStore::adopt(
+        pm_model::Document::new(Some(canonical), 1),
+        crate::history::History::new(),
+    );
+    Published {
+        actor_work: Default::default(),
+        publication_work: Default::default(),
+        project: project.to_owned(),
+        snapshot: store.snapshot(),
+        changes: Vec::new().into(),
+        history: HistorySummary::default(),
+        entry: None,
+        selection: store.selection().clone(),
+        workspace: Value::Null,
+        ui_state: Default::default(),
+        dirty: false,
+        metadata_revision: store.metadata_revision(),
+        saving: false,
+        session: None,
+        media: store.media().clone(),
+        path: None,
+        fault: None,
+    }
+}

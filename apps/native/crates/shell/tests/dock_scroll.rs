@@ -38,7 +38,6 @@ fn tall(editor: &mut Editor) {
     ]
     .into_iter()
     .map(|tabs| Group {
-        flex_basis: None,
         tabs: tabs.into_iter().map(str::to_owned).collect(),
         active: 0,
         size: Some(400.),
@@ -225,9 +224,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .to_platform_input()
         };
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(-50.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(-50.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
@@ -240,9 +239,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(-50.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(-50.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
@@ -253,9 +252,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(25.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(25.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, _| assert_eq!(v.outer.offset().y, px(-25.)))
@@ -281,7 +280,8 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
             })
             .unwrap();
         cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, _| window.activate()).unwrap();
+        cx.update_window(window.into(), |_, window, _| window.activate())
+            .unwrap();
         cx.run_until_parked();
         // Move through the actual native panel focus handles, one rendered frame each.
         let mut reached_last = false;
@@ -300,11 +300,15 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
                 })
                 .unwrap();
             cx.run_until_parked();
-            reached_last = window.update(&mut cx, |editor, _, _| {
-                let last = editor.panel_rect("fxbrowser").unwrap();
-                last.y + last.h <= 600.
-            }).unwrap();
-            if reached_last { break; }
+            reached_last = window
+                .update(&mut cx, |editor, _, _| {
+                    let last = editor.panel_rect("fxbrowser").unwrap();
+                    last.y + last.h <= 600.
+                })
+                .unwrap();
+            if reached_last {
+                break;
+            }
         }
         assert!(reached_last, "keyboard traversal reveals the final panel");
         window
@@ -339,7 +343,7 @@ fn normal_height_content_floors_capture_before_and_after() {
                             tabs: vec![id.into()],
                             active: 0,
                             size: None,
-                            flex_basis: None,
+
                             collapsed: false,
                         })
                         .collect();
@@ -405,7 +409,7 @@ fn normal_height_content_floors_capture_before_and_after() {
                     .unwrap()
                     .groups
                     .iter()
-                    .all(|g| g.size.is_none() && g.flex_basis.is_none()),
+                    .all(|g| g.size.is_none()),
                 "automatic measurement never changes saved sizing"
             );
             assert_eq!(moves, name == "after");

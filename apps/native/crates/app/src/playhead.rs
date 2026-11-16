@@ -299,6 +299,115 @@ impl Drop for Playhead {
         }
     }
 }
+/// The timeline's skimmer drawn outside GPUI, as the playhead is: a hairline
+/// of text ink down the ruler and tracks and its timecode in a chip on the
+/// ruler. A scroll under a resting pointer moves the time under it with no
+/// panel draw; the playback loop places it from the timeline's facts.
+pub struct Skimmer {
+    line: Retained<AnyObject>,
+    chip: Retained<AnyObject>,
+    text: Retained<AnyObject>,
+    /// The timecode shown and its width (measured once per text).
+    code: Option<(String, f64)>,
+}
+impl Skimmer {
+    pub fn new(parent: &AnyObject, t: &pm_design::Tokens) -> Self {
+        let layer = |class: &objc2::runtime::AnyClass| -> Retained<AnyObject> {
+            unsafe { Retained::from_raw(objc2::msg_send![class, new]) }.unwrap()
+        };
+        let (line, chip, text) = (
+            layer(objc2::class!(CALayer)),
+            layer(objc2::class!(CALayer)),
+            layer(objc2::class!(CATextLayer)),
+        );
+        let font = objc2_app_kit::NSFont::monospacedDigitSystemFontOfSize_weight(
+            t.typography.minimum as f64,
+            unsafe { objc2_app_kit::NSFontWeightRegular },
+        );
+        // CATextLayer.font is a CFTypeRef; NSFont is toll-free bridged to CTFont.
+        let font_ref = Retained::as_ptr(&font) as *const std::ffi::c_void;
+        unsafe {
+            let _: () = objc2::msg_send![&*text, setFont: font_ref];
+            let _: () = objc2::msg_send![&*text, setFontSize: t.typography.minimum as f64];
+            let _: () = objc2::msg_send![&*text, setAlignmentMode: objc2_quartz_core::kCAAlignmentLeft];
+            let _: () = objc2::msg_send![&*chip, addSublayer: &*text];
+            let _: () = objc2::msg_send![parent, addSublayer: &*line];
+            let _: () = objc2::msg_send![parent, addSublayer: &*chip];
+            let _: () = objc2::msg_send![&*line, setHidden: true];
+            let _: () = objc2::msg_send![&*chip, setHidden: true];
+        }
+        Self {
+            line,
+            chip,
+            text,
+            code: None,
+        }
+    }
+    /// Places it at `x` (window points) over a timeline body from `top` to
+    /// `bottom` (window points, y down) in a parent `height` tall (y up):
+    /// the line the body's height, the chip on the ruler right of it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place(
+        &mut self,
+        x: f64,
+        top: f64,
+        bottom: f64,
+        code: &str,
+        height: f64,
+        scale: f64,
+        t: &pm_design::Tokens,
+    ) {
+        let m = t.metrics;
+        let (border, size) = (m.border as f64, t.typography.minimum as f64);
+        if self.code.as_ref().is_none_or(|(shown, _)| shown != code) {
+            let string = objc2_foundation::NSString::from_str(code);
+            unsafe {
+                let _: () = objc2::msg_send![&*self.text, setString: &*string];
+            }
+            let fits: NSSize = unsafe { objc2::msg_send![&*self.text, preferredFrameSize] };
+            self.code = Some((code.to_owned(), fits.width.ceil()));
+        }
+        let width = self.code.as_ref().map_or(0., |(_, w)| *w);
+        // As the panel's chip was: the text's line (GPUI's default leading),
+        // half a gap each side, a hairline border.
+        let line_tall = (size * 1.618).round();
+        let chip = NSSize::new(width + m.gap as f64 + 2. * border, line_tall + 2. * border);
+        let text_tall = (size * 1.2).ceil();
+        let ink = colour(t.colors.text, 0x99 as f64 / 255.);
+        unsafe {
+            let _: () = objc2::msg_send![&*self.line, setBackgroundColor: &*ink];
+            let _: () = objc2::msg_send![&*self.line, setFrame: NSRect::new(
+                NSPoint::new(x - border / 2., height - bottom), NSSize::new(border, (bottom - top).max(0.)))];
+            let _: () = objc2::msg_send![&*self.chip, setBackgroundColor: &*colour(t.colors.floating, 1.)];
+            let _: () = objc2::msg_send![&*self.chip, setBorderColor: &*colour(t.colors.separator, 1.)];
+            let _: () = objc2::msg_send![&*self.chip, setBorderWidth: border];
+            let _: () = objc2::msg_send![&*self.chip, setCornerRadius: m.control_radius as f64];
+            let _: () = objc2::msg_send![&*self.chip, setFrame: NSRect::new(
+                NSPoint::new(x + 2. * border, height - (top + border) - chip.height), chip)];
+            let _: () = objc2::msg_send![&*self.text, setForegroundColor: &*colour(t.colors.text, 1.)];
+            let _: () = objc2::msg_send![&*self.text, setContentsScale: scale];
+            let _: () = objc2::msg_send![&*self.text, setFrame: NSRect::new(
+                NSPoint::new(border + m.gap as f64 / 2., border + (line_tall - text_tall) / 2.),
+                NSSize::new(width, text_tall))];
+            let _: () = objc2::msg_send![&*self.line, setHidden: false];
+            let _: () = objc2::msg_send![&*self.chip, setHidden: false];
+        }
+    }
+    pub fn hide(&mut self) {
+        unsafe {
+            let _: () = objc2::msg_send![&*self.line, setHidden: true];
+            let _: () = objc2::msg_send![&*self.chip, setHidden: true];
+        }
+    }
+}
+impl Drop for Skimmer {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = objc2::msg_send![&*self.line, removeFromSuperlayer];
+            let _: () = objc2::msg_send![&*self.chip, removeFromSuperlayer];
+        }
+    }
+}
 /// v1's playhead pin, `d` pt square in a y-up layer: a flat top, straight
 /// sides down to its shoulders, then a point at the bottom centre.
 fn pin_path(d: f64) -> impl std::ops::Deref<Target = CGMutablePath> {

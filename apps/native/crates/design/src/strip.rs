@@ -2,11 +2,11 @@
 //! trim grip. A strip is a slab of tinted glass on the solid timeline canvas,
 //! derived from the layer's hue for the appearance it stands in.
 //!
-//! On the dark canvas (`Tokens::strip`): a deep, saturated top that opens
-//! smoothly into a luminous foot, a 1 px rim of light in its own hue inside
-//! the edge instead of an outline, light falling on the top edge that thins
-//! out round the top corners (brightest along the top and corners, never a
-//! band with a visible end), and semibold names (3:1, large-bold text) in a
+//! On the dark canvas (`Tokens::strip`): glass, lit from above. A
+//! translucent, saturated slab (the timeline's grid and the row behind show
+//! through) whose top is its lightest and whose foot is deeper, a 1 px rim
+//! of light in its own hue inside the edge instead of an outline, light
+//! falling on the top and left edges at rest, and semibold names (3:1, large-bold text) in a
 //! pale tint of the hue, or a deep shade where a tint cannot hold that and
 //! on yellow and orange, whose slabs are the reference's bright amber. As
 //! bright and saturated as the owner's reference: each hue as vivid as sRGB
@@ -52,8 +52,8 @@ pub struct Strip {
     /// its lightest part under a name (the foot of the descenders), on the
     /// light canvas its deepest (the top). Labels hold their contrast here.
     pub under_label: u32,
-    /// Body opacity over the canvas: 1 (a solid slab, the canvas's grid
-    /// does not run through it) except a dragged strip, which is lifted.
+    /// Body opacity over the canvas: glass, so the grid and the row behind
+    /// show through (a dragged strip, lifted, a little more).
     pub opacity: f32,
     /// The rim: a ring of light just inside the edge, even all round, as
     /// (colour, alpha), `ring_width` points wide.
@@ -196,27 +196,33 @@ impl Tokens {
             return self.strip_light(hue, coloured, state);
         }
         let disabled = state == StripState::Disabled;
+        // Yellow and orange are light hues: the reference's amber slab, a
+        // step brighter, under a dark name, which needs the slab a little
+        // less see-through to hold its contrast.
+        let light_hue = coloured && (35. ..110.).contains(&hue);
+        // Glass: the timeline's grid and the row behind show through the
+        // body (a dragged strip a little more, lifted off them).
+        let glass = if light_hue { 0.9 } else { 0.8 };
         let opacity = match state {
-            StripState::Dragging => 0.88,
+            // A light hue's dark name needs its slab as it is.
+            StripState::Dragging if !light_hue => glass - 0.1,
             StripState::Disabled => 0.55,
-            _ => 1.,
+            _ => glass,
         };
         // A selected strip is a step brighter as well as white-rimmed.
         let lift = if selected { 0.03 } else { 0. };
-        // As bright and saturated as the reference's slabs: a deep top that
-        // opens into a luminous foot, each as vivid as sRGB allows the hue.
+        // As bright and saturated as the reference's slabs, each as vivid as
+        // sRGB allows the hue.
         let vivid = match (coloured, disabled) {
             (false, _) => 0.,
             (true, true) => 0.06,
             (true, false) => 0.26,
         };
-        // Yellow and orange are light hues: the reference's amber slab, a
-        // step brighter, under a dark name.
-        let light_hue = coloured && (35. ..110.).contains(&hue);
-        let (top, foot) = if light_hue { (0.63, 0.74) } else { (0.5, 0.63) };
-        let deep = oklch_fit(top + lift, vivid, hue);
-        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
-        let under = |bottom: u32| mix(deep, bottom, LABEL_FOOT);
+        // Lit from above: the top is the slab's lightest, the foot deeper.
+        let (top, foot) = if light_hue { (0.76, 0.64) } else { (0.62, 0.48) };
+        let lit = oklch_fit(top + lift, vivid * 0.9, hue);
+        let body = oklch_fit(foot + lift, vivid, hue);
+        let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
         let under_label = under(body);
         // Names are semibold, so they hold 3:1 (large-bold text) from the
@@ -225,7 +231,7 @@ impl Tokens {
         // deep shade of it.
         let (veil, veil_alpha) = self.work_area_veil();
         let holds = |name: u32| {
-            [deep, under_label].iter().all(|ground| {
+            [lit, under_label].iter().all(|ground| {
                 let ground = landed(*ground);
                 crate::color::contrast(name, ground) >= NAME_CONTRAST
                     && crate::color::contrast(name, mix(ground, veil, veil_alpha)) >= NAME_CONTRAST
@@ -237,7 +243,7 @@ impl Tokens {
                 .find(|name| holds(*name))
         };
         let shade = || {
-            (0..=18)
+            (0..=19)
                 .map(|step| oklch_fit(0.3 - step as f32 * 0.015, vivid * 0.6, hue))
                 .find(|name| holds(*name))
         };
@@ -252,7 +258,7 @@ impl Tokens {
         let tint = oklch(0.9, chroma * 0.55, hue);
         let whiter = mix(tint, 0xffffff, 0.6);
         let (ring, light) = match state {
-            StripState::Rest => ((tint, 0.16), (tint, 0.5)),
+            StripState::Rest => ((tint, 0.2), (tint, 0.6)),
             StripState::Hover => ((whiter, 0.42), (whiter, 0.8)),
             StripState::Selected => ((0xffffff, 0.92), (0xffffff, 0.)),
             StripState::Dragging => ((whiter, 0.42), (whiter, 0.8)),
@@ -263,7 +269,7 @@ impl Tokens {
         let solid = |c: u32| if disabled { landed(c) } else { c };
         Strip {
             // More chroma at the top, where the slab is deepest.
-            top: solid(deep),
+            top: solid(lit),
             bottom: solid(body),
             under_label: solid(under_label),
             opacity: if disabled { 1. } else { opacity },
@@ -279,7 +285,7 @@ impl Tokens {
             foreground,
             // Marks (waveforms) stand on the foot, the body's lightest part:
             // the palest step of the hue that still reads there.
-            // On the light hues' bright foot the marks are a deep shade.
+            // On the light hues' bright slab the marks are a deep shade.
             primary: if light_hue {
                 (0..=12)
                     .map(|step| oklch_fit(0.4 - step as f32 * 0.02, vivid * 0.6, hue))
