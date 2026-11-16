@@ -287,7 +287,9 @@ impl GizmoSurface {
         if self.effect_picker.is_some() {
             self.effect_picker = self.effect_stop;
             if self.effect_picker.is_none() {
-                self.effect_colour = None;
+                if let Some((picker, _)) = self.effect_colour.take() {
+                    picker.update(cx, |p, _| p.cancel_pending());
+                }
             }
         }
         cx.notify();
@@ -797,7 +799,9 @@ impl GizmoSurface {
         cx.notify();
     }
     pub(super) fn effects_finish_colour(&mut self, commit: bool, cx: &mut Context<Self>) {
-        self.effect_colour = None;
+        if let Some((picker, _)) = self.effect_colour.take() {
+            picker.update(cx, |p, _| p.cancel_pending());
+        }
         self.effect_picker = None;
         if self.effect_drag.take().is_some_and(|d| d.active) {
             self.queue.push_back(Job::Finish(commit));
