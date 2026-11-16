@@ -91,6 +91,11 @@ impl NativeControlSlot {
         let wrapper = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
         wrapper.setWantsLayer(true);
         wrapper.setHidden(true);
+        // Placed by its frame alone, outside Auto Layout: in a window laid
+        // out by constraints (Settings, under its split view), a wrapper
+        // moved as its page scrolled had AppKit lay the window out again,
+        // each control's SwiftUI graph with it (Shortcuts on a fast wheel).
+        wrapper.setTranslatesAutoresizingMaskIntoConstraints(false);
         // GPUI lays out from the top: between a change of the window's
         // height and the next paint, a control keeps its distance from the
         // top edge, not from the bottom one.
