@@ -18,6 +18,7 @@ fn main() {
     macos::rows();
     macos::host_rows();
     macos::viewer_slot(mtm);
+    macos::pictures(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -40,6 +41,121 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// P-SLOT-PICTURE: a control's picture is AppKit's own drawing of it,
+    /// taken whether its slot was ever shown or not (a row that scrolls in
+    /// while the pictures stand has never been shown), and hiding a slot
+    /// leaves the next present nothing to move but the hide itself.
+    /// `PM_PICTURE_DIR=<dir>` writes each picture there (PPM over grey).
+    pub fn pictures(mtm: MainThreadMarker) {
+        use objc2::runtime::AnyClass;
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 300.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let dark = objc2_app_kit::NSAppearance::appearanceNamed(unsafe {
+            objc2_app_kit::NSAppearanceNameDarkAqua
+        });
+        objc2_app_kit::NSAppearanceCustomization::setAppearance(&*window, dark.as_deref());
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let make = |class: &AnyClass, w: f64, h: f64| -> Retained<NSView> {
+            unsafe {
+                let raw: *mut AnyObject = msg_send![class, alloc];
+                let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., w, h)];
+                Retained::from_raw(raw).expect("a control")
+            }
+        };
+        let title = |s: &str| objc2_foundation::NSString::from_str(s);
+        let checkbox = make(objc2::class!(NSButton), 80., 20.);
+        let popup = make(objc2::class!(NSPopUpButton), 140., 24.);
+        let segmented = make(objc2::class!(NSSegmentedControl), 150., 24.);
+        let slider = make(objc2::class!(NSSlider), 140., 20.);
+        let field = make(objc2::class!(NSTextField), 90., 22.);
+        let switch = make(objc2::class!(NSSwitch), 40., 22.);
+        unsafe {
+            let _: () = msg_send![&*checkbox, setButtonType: 3usize];
+            let _: () = msg_send![&*checkbox, setTitle: &*title("Extrude")];
+            let _: () = msg_send![&*checkbox, setState: 1isize];
+            let _: () = msg_send![&*popup, addItemWithTitle: &*title("Geist Width")];
+            let _: () = msg_send![&*segmented, setSegmentCount: 3isize];
+            for (i, l) in ["Left", "Centre", "Right"].iter().enumerate() {
+                let _: () = msg_send![&*segmented, setLabel: &*title(l), forSegment: i as isize];
+            }
+            let _: () = msg_send![&*segmented, setSelectedSegment: 1isize];
+            let _: () = msg_send![&*slider, setDoubleValue: 0.4f64];
+            let _: () = msg_send![&*field, setStringValue: &*title("128 px")];
+            let _: () = msg_send![&*switch, setState: 1isize];
+        }
+        let controls = [
+            ("checkbox", checkbox),
+            ("popup", popup),
+            ("segmented", segmented),
+            ("slider", slider),
+            ("field", field),
+            ("switch", switch),
+        ];
+        let clip = rect(0., 0., 400., 300.);
+        for (i, (name, control)) in controls.into_iter().enumerate() {
+            let size = control.frame().size;
+            let slot = NativeControlSlot::new(&gpui, control);
+            let mut shown_and_hidden = vec![];
+            // Never shown: hidden and not yet in the window.
+            assert!(slot.wrapper().isHidden());
+            shown_and_hidden.push(("never-shown", slot.picture(size)));
+            // Shown by a present.
+            slot.stage(rect(10., 10. + 40. * i as f64, size.width, size.height), clip);
+            probe::painted(&gpui);
+            assert!(probe::place(&gpui));
+            assert!(!slot.wrapper().isHidden());
+            shown_and_hidden.push(("shown", slot.picture(size)));
+            // Hidden for its picture, taken again (a value changed).
+            slot.hide();
+            probe::painted(&gpui);
+            assert!(probe::place(&gpui));
+            assert!(slot.wrapper().isHidden());
+            shown_and_hidden.push(("hidden", slot.picture(size)));
+            // The same picture whether the control was ever shown or not:
+            // the window's appearance (dark here) and key state, never a
+            // detached control's.
+            let first = shown_and_hidden[0].1.as_ref().map(|p| &p.bgra);
+            for (when, p) in &shown_and_hidden[1..] {
+                assert!(p.as_ref().map(|p| &p.bgra) == first, "{name}: {when} differs from never-shown");
+            }
+            for (when, picture) in shown_and_hidden {
+                let p = picture.unwrap_or_else(|| panic!("{name} {when}: no picture"));
+                let (w, h) = (p.width as usize, p.height as usize);
+                assert_eq!(p.bgra.len(), w * h * 4);
+                // At the window's scale, the control's own size.
+                assert!(w as f64 >= size.width && h as f64 >= size.height, "{name} {when}: {w}x{h}");
+                let inked = p.bgra.chunks(4).filter(|px| px[3] > 0).count();
+                let distinct: std::collections::HashSet<&[u8]> = p.bgra.chunks(4).collect();
+                assert!(inked * 20 > w * h && distinct.len() > 4, "{name} {when}: blank ({inked} inked, {} colours)", distinct.len());
+                if let Some(dir) = std::env::var_os("PM_PICTURE_DIR") {
+                    let mut out = format!("P6 {w} {h} 255\n").into_bytes();
+                    for px in p.bgra.chunks(4) {
+                        let over = |c: u8| ((c as u16 * px[3] as u16 + 128 * (255 - px[3] as u16)) / 255) as u8;
+                        out.extend_from_slice(&[over(px[2]), over(px[1]), over(px[0])]);
+                    }
+                    std::fs::write(std::path::Path::new(&dir).join(format!("{name}-{when}.ppm")), out).unwrap();
+                }
+            }
+            // Kept hidden: nothing moves.
+            slot.keep();
+            probe::painted(&gpui);
+            assert!(!probe::pending(&gpui), "{name}: a kept hidden slot moves nothing");
+        }
+        window.close();
+    }
 
     /// The decision a draw makes before it touches a hosted view.
     pub fn policy() {

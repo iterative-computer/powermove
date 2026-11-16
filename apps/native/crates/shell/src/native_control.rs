@@ -331,8 +331,72 @@ pub struct NativeControl {
     search_value: Option<Value>,
     /// Where the slot was painted inside a scroll layer, to follow it.
     layer: Rc<crate::layer_stage::LayerStage>,
+    /// Shown as a picture of itself while its surface's body scrolls.
+    picture: Picture,
 }
 impl EventEmitter<Value> for NativeControl {}
+
+/// Powermove P-SLOT-PICTURE: while a surface's body scrolls, each of its
+/// AppKit controls is drawn with the rows as a picture AppKit takes of the
+/// control itself (its value, state and appearance, light or dark), and the
+/// control stays hidden where it was: moving AppKit views with a scroll made
+/// every frame a synchronous present. The surface holds its controls'
+/// pictures while the scroll moves and lets them go when it rests; one row
+/// is the real control again at once when it is clicked or its value
+/// changes. One hold is shared by a surface's controls, so a control made
+/// for a row that scrolls in starts as a picture too.
+#[derive(Clone, Default)]
+pub struct PictureHold(Rc<std::cell::Cell<bool>>);
+impl PictureHold {
+    pub fn held(&self) -> bool {
+        self.0.get()
+    }
+    /// Whether the hold changed.
+    pub fn set(&self, held: bool) -> bool {
+        self.0.replace(held) != held
+    }
+}
+#[derive(Default)]
+struct Picture {
+    hold: PictureHold,
+    /// The control's picture, taken by the first paint of a hold.
+    image: Rc<std::cell::RefCell<Option<std::sync::Arc<RenderImage>>>>,
+    /// The real control for the rest of the hold: clicked, or its value
+    /// changed.
+    live: Rc<std::cell::Cell<bool>>,
+    /// What the last update set, to tell a changed value from the same one.
+    seen: Option<(Value, Vec<Value>, bool)>,
+}
+impl Picture {
+    fn shown(&self) -> bool {
+        self.hold.held() && !self.live.get()
+    }
+}
+thread_local! {
+    /// Pictures of controls dropped mid-hold, freed by the next paint (the
+    /// sprite atlas belongs to the window).
+    static RETIRED: std::cell::RefCell<Vec<std::sync::Arc<RenderImage>>> =
+        std::cell::RefCell::default();
+}
+impl Drop for NativeControl {
+    fn drop(&mut self) {
+        if let Some(image) = self.picture.image.borrow_mut().take() {
+            RETIRED.with_borrow_mut(|r| r.push(image));
+        }
+    }
+}
+fn retire(window: &mut Window) {
+    for image in RETIRED.with_borrow_mut(std::mem::take) {
+        let _ = window.drop_image(image);
+    }
+}
+/// A slot's picture as GPUI's image.
+fn render_image(p: gpui_macos::native_control::SlotPicture) -> Option<std::sync::Arc<RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(p.width, p.height, p.bgra)?;
+    Some(std::sync::Arc::new(RenderImage::new([image::Frame::new(
+        buffer,
+    )])))
+}
 impl NativeControl {
     /// The width the control fits its title in.
     pub fn width(&self) -> f32 {
@@ -774,7 +838,18 @@ impl NativeControl {
             host_revision: None,
             search_value: None,
             layer: Rc::default(),
+            picture: Picture::default(),
         }
+    }
+    /// Shares its surface's picture hold (P-SLOT-PICTURE).
+    pub fn picture_with(&mut self, hold: &PictureHold) {
+        self.picture.hold = hold.clone();
+    }
+    /// The surface's hold changed: a held control draws as its picture, a
+    /// released one as itself again.
+    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
+        self.picture.live.set(false);
+        cx.notify();
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
     /// one not yet in its window takes it when it is first placed.
@@ -837,6 +912,11 @@ impl NativeControl {
     /// Stages the slot again on a frame whose cached paint did not run: as
     /// last painted, or shifted with the scroll layer it is in.
     pub fn keep(&self, window: &Window) {
+        if self.picture.shown() && self.picture.image.borrow().is_some() {
+            // Its picture stands in the scene the frame replays.
+            self.slot.hide();
+            return;
+        }
         match self.layer.kept(window) {
             Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
             None => self.slot.keep(),
@@ -850,6 +930,8 @@ impl NativeControl {
     /// checkbox or switch and presses a button; the arrows step a slider.
     /// Returns whether the key was the control's.
     pub fn key(&self, key: &str) -> bool {
+        // A key for the control brings the real one back for the hold.
+        self.picture.live.set(true);
         let press = |view: &NSView| unsafe {
             let _: () = msg_send![view, performClick: std::ptr::null::<AnyObject>()];
         };
@@ -941,6 +1023,13 @@ impl NativeControl {
                 options.clone_into(&mut range);
             }
         }
+        // A value that changes while the picture stands brings the real
+        // control back for the rest of the hold.
+        let seen = (value.clone(), options.to_vec(), disabled);
+        if self.picture.seen.as_ref().is_some_and(|s| *s != seen) && self.picture.shown() {
+            self.picture.live.set(true);
+        }
+        self.picture.seen = Some(seen);
         let shown = self._target.ivars().options.borrow().clone();
         let unchanged_search = matches!(self.control, Control::Search(_))
             && self.search_value.replace(value.clone()).as_ref() == Some(value);
@@ -956,10 +1045,39 @@ impl NativeControl {
     }
 }
 impl Render for NativeControl {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
+        let (hold, image, live) = (
+            self.picture.hold.clone(),
+            self.picture.image.clone(),
+            self.picture.live.clone(),
+        );
+        // The keyboard is in a search field: it stays the real one.
+        let pictures = !self.focused();
+        let clicked = {
+            let (image, live) = (image.clone(), live.clone());
+            cx.listener(move |_, _: &MouseDownEvent, window, cx| {
+                if live.get() || image.borrow().is_none() {
+                    return;
+                }
+                // The click fell on the picture: the real control comes
+                // back, and once a frame has shown it the click is its own.
+                live.set(true);
+                cx.stop_propagation();
+                cx.notify();
+                let mtm = MainThreadMarker::new().expect("main thread");
+                if let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() {
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |_, _| {
+                            let mtm = MainThreadMarker::new().expect("main thread");
+                            NSApplication::sharedApplication(mtm).postEvent_atStart(&event, true);
+                        });
+                    });
+                }
+            })
+        };
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -970,12 +1088,37 @@ impl Render for NativeControl {
         } else {
             div().w(px(self.width))
         };
-        root.relative().h(px(self.height)).child(
+        root.relative()
+            .h(px(self.height))
+            .on_mouse_down(MouseButton::Left, clicked)
+            .child(
             canvas(
                 |_, _, _| (),
-                move |bounds, _, window, _| {
+                move |painted, _, window, _| {
+                    retire(window);
                     let (bounds, clip) =
-                        layer.painted(bounds, window.content_mask().bounds, window);
+                        layer.painted(painted, window.content_mask().bounds, window);
+                    if pictures && hold.held() && !live.get() {
+                        let mut kept = image.borrow_mut();
+                        if kept.is_none() {
+                            *kept = slot.picture(ns_rect(bounds).size).and_then(render_image);
+                        }
+                        if let Some(picture) = kept.clone() {
+                            slot.hide();
+                            let _ = window.paint_image(
+                                painted,
+                                painted,
+                                Corners::default(),
+                                0.,
+                                picture,
+                                0,
+                                false,
+                            );
+                            return;
+                        }
+                    } else if let Some(picture) = image.borrow_mut().take() {
+                        let _ = window.drop_image(picture);
+                    }
                     slot.stage(ns_rect(bounds), ns_rect(clip));
                     if focus.get()
                         && let Some(window) = native.window()
