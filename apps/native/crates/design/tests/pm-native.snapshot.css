@@ -60,7 +60,15 @@
       [data-pm-style="tokens-only"] *
     )
   ),
-  input:where(
+  /* Text fields only: a checkbox, radio, slider, colour well or file
+     button keeps the system control the built-in panels draw. */
+  input:not(
+      [type="checkbox"],
+      [type="radio"],
+      [type="range"],
+      [type="color"],
+      [type="file"]
+    ):where(
     :not(
       [data-pm-style="none"],
       [data-pm-style="none"] *,

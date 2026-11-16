@@ -322,3 +322,19 @@ fn native_backing_matches_panel_over_window_over_every_backdrop() {
         }
     }
 }
+
+/// The field look (fill, height, padding) is for text fields: a checkbox
+/// in an extension panel stays the system checkbox, not a filled box.
+#[test]
+fn system_toggles_and_sliders_never_take_the_field_look() {
+    let l = Tokens::new(Scheme::Light, Accessibility::default());
+    let d = Tokens::new(Scheme::Dark, Accessibility::default());
+    let css = stylesheet(&l, &d);
+    let field = css.find("min-height: var(--pm-ctl-h);").unwrap();
+    let rule = &css[css[..field].rfind('}').unwrap()..field];
+    let input = rule.find("input:not(").expect("the field rule names its inputs");
+    for kind in ["checkbox", "radio", "range", "color", "file"] {
+        assert!(rule[input..].contains(&format!("[type=\"{kind}\"]")), "{kind}");
+    }
+    assert!(!rule.contains("  input:where("), "every input took the field look");
+}
