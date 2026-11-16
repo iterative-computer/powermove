@@ -253,7 +253,7 @@ pub struct SurfaceView {
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
     /// Each virtual list's width last told to its panel.
-    list_widths: HashMap<Id, f32>,
+    list_widths: HashMap<Id, (f32, f32)>,
     /// Each virtual list's last `rangechange` (range, width, its geometry):
     /// a wheel step within the same rows sends nothing, so the panel doesn't
     /// commit and draw again (PM-311).
@@ -2347,19 +2347,24 @@ impl SurfaceView {
             // new width as soon as a frame lays it out (measured after
             // layout: a panel maximized or resized draws nothing more until
             // something else does, so a check while rendering saw the size
-            // before and the grid kept its old columns).
+            // before and the grid kept its old columns). A new height asks
+            // for the rows that show now: a list built while its slot was a
+            // row tall kept a page of one row as the slot grew (PM-387).
             let known = self.list_widths.get(&id).copied();
             let view = cx.entity().downgrade();
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let width = f32::from(bounds.size.width);
-                        if width > 0. && known != Some(width) {
+                        let size = (
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                        );
+                        if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
                                 let _ = view.update(cx, |v, cx| {
-                                    if v.list_widths.get(&id) != Some(&width) {
-                                        v.list_widths.insert(id, width);
+                                    if v.list_widths.get(&id) != Some(&size) {
+                                        v.list_widths.insert(id, size);
                                         v.range_change(id, geometry, cx);
                                     }
                                 });

@@ -535,11 +535,38 @@ test("the search field follows a query the host set, not late answers to typing"
   await render();
   const field = find(root, "Search media");
   expect(field.props.value).toBe("");
-  expect((field.props.metadata as { hostValue: number }).hostValue).toBe(1);
+  expect((field.props.metadata as { hostValue: number }).hostValue).toBe(65536);
   // At rest the field shows what filters the list, whoever set it.
   view = { ...view, query: "cl", host_filter: 1 };
   await render();
   expect(find(root, "Search media").props.value).toBe("cl");
+  await root.dispose();
+});
+test("PM-342: Escape's clear replaces the field's text, even while it is typed in", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  const view = { ...projection([asset()]), query: "typ" };
+  await root.render(
+    <ProjectView
+      view={view}
+      input={(i) => inputs.push(i)}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={layout}
+    />,
+  );
+  await event(root, find(root, "Search Media").id, "click");
+  const revision = () =>
+    (find(root, "Search media").props.metadata as { hostValue: number })
+      .hostValue;
+  const before = revision();
+  await event(root, find(root, "Search media").id, "keydown", {
+    key: "Escape",
+  });
+  expect(find(root, "Search media").props.value).toBe("");
+  expect(revision()).not.toBe(before);
+  expect(inputs.at(-1)).toMatchObject({ Filter: { query: "" } });
   await root.dispose();
 });
 test("the search field never shows its placeholder over a filtered list", async () => {

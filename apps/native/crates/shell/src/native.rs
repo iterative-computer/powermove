@@ -496,14 +496,16 @@ define_class!(
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
-                if name == "settings" {
-                    // A Settings window of its own closes; an editor window
-                    // showing the Settings page is titled "Settings" too, and
-                    // its controller toggles the page (PM-292).
+                // ⌘, or ⌘W with Settings in front closes Settings, never
+                // the project behind it (it is known by its identifier: its
+                // title is the section's name).
+                if matches!(
+                    name.as_str(),
+                    "settings" | "closeTab" | "closeWindow" | "closeProject"
+                ) {
                     let app = NSApplication::sharedApplication(self.mtm());
                     if let Some(w) = app.keyWindow()
-                        && w.title().to_string() == "Settings"
-                        && !ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber()))
+                        && crate::settings_window::is_settings(&w)
                     {
                         w.performClose(None);
                         return;
@@ -3838,11 +3840,6 @@ impl Host {
             }
         }
     }
-    /// Which page shows (`None`: the project or Home).
-    pub fn shown_page(&self) -> Option<String> {
-        let pages = self.pages.borrow();
-        pages.1.and_then(|i| pages.0.get(i)).map(|(id, _)| id.clone())
-    }
     /// Home over the window: the Home item reads selected, and the
     /// document's own controls (tools, sidebars, Export, the title) step
     /// aside, as v1's titlebar hides Export and the panel library on Home.
@@ -3874,19 +3871,6 @@ impl Host {
             // The tabs stay, as in v1's title bar on Home.
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
                 item.setHidden(aside);
-            }
-            // The gear reads pressed while Settings is the tab showing, and
-            // says what a press does.
-            if name == "settings" {
-                let shown = self.shown_page().as_deref() == Some("settings");
-                let (sym, label) = if shown {
-                    ("gearshape.fill", "Close Settings")
-                } else {
-                    ("gearshape", "Open Settings")
-                };
-                item.setImage(Some(&toolbar_symbol(sym, "Settings", &self.tokens)));
-                item.setToolTip(Some(&NSString::from_str(label)));
-                item.setLabel(&NSString::from_str(label));
             }
         }
     }
