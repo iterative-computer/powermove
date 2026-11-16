@@ -1693,15 +1693,96 @@ fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut 
     assert_eq!(shown.viewport.scroll_y, 30.);
     wheel(&mut s, -20.);
     assert_eq!(renders(&s), rendered);
-    // Once the steps stop: the layers' render and the written view's
-    // publication.
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
     settle(&mut s);
-    assert!((rendered + 1..=rendered + 2).contains(&renders(&s)));
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
     // Past a viewport of rows: drawn again at once.
     let rendered = renders(&s);
     wheel(&mut s, -2000.);
     assert!(renders(&s) > rendered);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
+/// PM-310: a sideways wheel step moves the tracks and the ruler as they were
+/// drawn (their scroll layers), with no render of the panel, as the steps up
+/// and down do; the frame hit-testing reads is at the new time at once. The
+/// first step of a sideways scroll draws them past each side (other draws
+/// leave that out: it costs them); the panel renders once the steps stop, at
+/// once for a step past the tracks' width drawn, and at every step while the
+/// skimmer shows (it stays under the pointer, its timecode the time there).
+#[gpui::test]
+fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, delta: Point<Pixels>, modifiers: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let time = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    // Zoomed in, so the time has somewhere to scroll; the view it wrote
+    // is back from the worker.
+    wheel(&mut s, point(px(0.), px(-300.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
+    let before = time(&s);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered, "the first sideways step draws past each side");
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 60. / pps)).abs() < 1e-9);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_time, time(&s));
+    // Shift with the wheel scrolls sideways too; then up and down.
+    wheel(&mut s, point(px(0.), px(-20.)), Modifiers::shift());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 80. / pps)).abs() < 1e-9);
+    wheel(&mut s, point(px(0.), px(-30.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past the tracks' width drawn: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    // A zoom draws no further than the view again: the next sideways step
+    // draws.
+    wheel(&mut s, point(px(0.), px(-10.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    s.idle(cx);
+    // The skimmer showing: every step draws.
+    s.recorder.skimming.set(true);
+    s.vcx
+        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    settle(&mut s);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
