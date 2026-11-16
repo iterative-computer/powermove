@@ -21,6 +21,15 @@ const reading = {
   fontSize: t("typography.reading"),
 };
 const line = { display: "flex", flexDirection: "row", alignItems: "center" };
+/** v1's empty composition offers these, in this order (Command / Shift /
+ * Option shown as on the menus). */
+const EMPTY_ACTIONS = [
+  ["Text", "newText", "⌘T"],
+  ["Shape", "newShape", "⇧⌘Y"],
+  ["Solid", "newSolid", "⌘Y"],
+  ["Null", "newNull", "⌥⇧⌘Y"],
+  ["Import…", "import", "⌘I"],
+] as const;
 /** Leading cluster + trailing cluster: replaces the flexible-spacer placeholder
  * (design review 2026-11-01; the validator accepts space-between). */
 const split = { ...line, justifyContent: "space-between" };
@@ -1039,6 +1048,37 @@ export function TimelinePanel({
                       overflow: "hidden",
                     }}
                   >
+                    {/* v1's empty composition: what to add first, each
+                        with its shortcut (in the button's help), then the
+                        drop. */}
+                    <text
+                      style={{
+                        ...text,
+                        textAlign: "center",
+                        whiteSpace: "normal",
+                      }}
+                    >
+                      This composition is empty
+                    </text>
+                    <div
+                      style={{
+                        ...line,
+                        flexWrap: "wrap",
+                        justifyContent: "center",
+                        gap: t("metrics.gap"),
+                      }}
+                    >
+                      {EMPTY_ACTIONS.map(([label, command, keys]) => (
+                        <UI.PushButton
+                          key={command}
+                          id={`timeline:empty:${command}`}
+                          label={label}
+                          title={`${label.replace("…", "")} (${keys})`}
+                          tabIndex={-1}
+                          onClick={action(send, { type: "run", command })}
+                        />
+                      ))}
+                    </div>
                     <text
                       style={{
                         ...reading,
@@ -1046,14 +1086,8 @@ export function TimelinePanel({
                         whiteSpace: "normal",
                       }}
                     >
-                      Drag media here or import from your computer.
+                      or drop media here
                     </text>
-                    <UI.PushButton
-                      id="timeline:import"
-                      label="Import…"
-                      tabIndex={-1}
-                      onClick={action(send, { type: "import" })}
-                    />
                   </div>
                 )}
               </div>

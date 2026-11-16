@@ -698,6 +698,7 @@ pub const PLANNED: [&str; 53] = [
     "new3d",
     "newCamera",
     "newShape",
+    "newText",
     "newAdjustment",
     "newNull",
     "selectAll",
@@ -754,10 +755,10 @@ fn comp_number(published: &Published, key: &str) -> Option<f64> {
         .as_f64()
 }
 fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time: f64) -> Plan {
-    let label = if kind == "null" {
-        "New Null Object".to_owned()
-    } else {
-        format!("New {name}")
+    let label = match kind {
+        "null" => "New Null Object".to_owned(),
+        "text" => "New Text".to_owned(),
+        _ => format!("New {name}"),
     };
     let id = new_id("L");
     let mut properties = Map::new();
@@ -1085,6 +1086,9 @@ pub fn command_plan(
         }
         "newSolid" => Some(new_layer(published, "solid", "Solid", false, time)),
         "newShape" => Some(new_layer(published, "shape", "Shape", true, time)),
+        // v1's "New text layer" (the empty composition's Text button): a
+        // text named Headline at the centre, with the default words.
+        "newText" => Some(new_layer(published, "text", "Headline", true, time)),
         "newAdjustment" => Some(new_layer(
             published,
             "adjustment",

@@ -993,6 +993,10 @@ impl Backend {
                 // The editor's own timeline fits its view to the curves.
                 HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                // The empty composition's buttons: the app's own commands.
+                HostEffect::Run(name) => json!({"kind":"command","name":name}),
+                // Import… from the timeline: File › Import…, at the playhead.
+                HostEffect::Import { .. } => json!({"kind":"command","name":"import"}),
                 other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
             };
             actions.push(("timeline.effect".into(), action));
