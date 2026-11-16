@@ -403,6 +403,36 @@ impl Shared {
     }
 }
 
+/// The extensions a project draws with: the `<extension>` of every
+/// `type` named `<extension>.<name>` (an effect's, a layer's) in its
+/// compositions and layers.
+fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
+    use pm_model::NodeKind;
+    let mut used = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                for (key, value) in map.iter() {
+                    if key.as_str() == Some("type")
+                        && let NodeKind::String(ty) = value.kind()
+                        && let Some((extension, _)) = ty.as_str().and_then(|t| t.split_once('.'))
+                    {
+                        used.insert(extension.to_owned());
+                    }
+                    // Keyframes and values hold no types: not walked.
+                    if !matches!(key.as_str(), Some("kf" | "p" | "v" | "d" | "assets")) {
+                        stack.push(value);
+                    }
+                }
+            }
+            NodeKind::Array(items) => stack.extend(items.iter()),
+            _ => {}
+        }
+    }
+    used
+}
+
 /// Native surfaces read these registries: Effects, Properties, MCP and the kernel's
 /// layer commands see a contribution exactly as they see a built-in.
 fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
@@ -2493,15 +2523,29 @@ impl Owner {
         }
         records
     }
-    /// The plan of the trusted realm. Confined records never enter it.
+    /// The plan of the trusted realm. Confined records never enter it. The
+    /// extensions this project uses come first (its effects and layer
+    /// types are named `<extension>.<name>`): they activate one after
+    /// another, and the first picture waits for exactly those (PM-384).
     fn trusted_records(&self) -> Value {
-        Value::Array(
-            self.records
-                .iter()
-                .filter(|record| record["confined"] != true && record["surface"] != true)
-                .cloned()
-                .collect(),
-        )
+        let used = self
+            .config
+            .kernel
+            .published(&self.config.project)
+            .and_then(|p| p.snapshot.document.root().map(extensions_used))
+            .unwrap_or_default();
+        let mut records: Vec<Value> = self
+            .records
+            .iter()
+            .filter(|record| record["confined"] != true && record["surface"] != true)
+            .cloned()
+            .collect();
+        records.sort_by_key(|record| {
+            !record["id"]
+                .as_str()
+                .is_some_and(|id| used.contains(id))
+        });
+        Value::Array(records)
     }
     fn rescan(&mut self) {
         if self.realm.is_none() {

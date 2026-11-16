@@ -90,6 +90,26 @@ pub(crate) fn font_families() -> Vec<String> {
     vec![]
 }
 /// One realm holds every trusted extension and a live mirror of the project.
+/// An export's realm starts with room enough that V8 never collects its
+/// mirror in full over and over (`EXPORT_SLICE`); a window's starts with
+/// half that, so many windows (a restored session) leave the shared account
+/// room for an export's.
+pub(crate) fn limits_for(scope: &str) -> Limits {
+    let slice = if scope.starts_with("export:") {
+        EXPORT_SLICE
+    } else {
+        WINDOW_SLICE
+    };
+    Limits {
+        initial_heap_bytes: slice,
+        ..limits()
+    }
+}
+/// A real project's 40 MiB mirror in a 32 MiB slice was collected in full
+/// about every few megabytes; 128 MiB cut that by two thirds, 256 MiB to
+/// almost none (runtime-v8 test `a_heap_given_room_…`).
+const EXPORT_SLICE: usize = 256 * 1024 * 1024;
+const WINDOW_SLICE: usize = 128 * 1024 * 1024;
 pub(crate) fn limits() -> Limits {
     Limits {
         heap_bytes: 1024 * 1024 * 1024,
@@ -114,7 +134,7 @@ pub(crate) fn pool(scope: &str, host: Arc<NativeHost>) -> Result<RuntimePool> {
     RuntimePool::new(
         scope,
         Config {
-            limits: limits(),
+            limits: limits_for(scope),
             watchdog: WatchdogPolicy::default(),
             kernel: host.clone(),
             host: host.clone(),

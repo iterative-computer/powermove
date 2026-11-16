@@ -467,6 +467,11 @@ async function mountExtension(
     await this.publish();
     return true;
   },
+  async act(intent: Json) {
+    await mounted?.act?.(intent);
+    await settle();
+    return true;
+  },
   async show(target?: string) {
     await mounted?.show?.(target);
     await settle();

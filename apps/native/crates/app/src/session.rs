@@ -70,6 +70,10 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
+    /// The project's Home poster, shown in the opening viewer's frame until
+    /// the viewer draws: the first picture waits for the open and for the
+    /// extensions the project draws with (PM-384).
+    pub(crate) ghost_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -692,6 +696,8 @@ impl Controller {
             }
         })
         .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -735,6 +741,11 @@ impl Controller {
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {
                                     v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { .. } => {
+                                    crate::appearance::follow(&v.kernel.state())
                                 }
                                 _ => {}
                             }
@@ -789,6 +800,7 @@ impl Controller {
             busy: None,
             opening_name: None,
             ghost_aspect: None,
+            ghost_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -964,6 +976,7 @@ impl Controller {
         self.ghosted.clear();
         self.revealed.clear();
         self.ghost_aspect = None;
+        self.ghost_poster = None;
         self.host
             .borrow()
             .set_document_metadata("Untitled", "", false, None);
@@ -1053,6 +1066,18 @@ impl Controller {
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // Every restored window reopens its project, one open at a
+                // time (an open holds the project-operation fence): a tab
+                // waits for the one before it instead of giving up.
+                for _ in 0..300 {
+                    let busy = this.update(cx, |v, _| v.mcp.operation_in_progress());
+                    if !matches!(busy, Ok(true)) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
                         v.open_named(
@@ -1714,6 +1739,17 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        // Its Home poster stands in the opening viewer, where one was kept.
+        self.ghost_poster = Some(
+            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
+        )
+        .filter(|poster| poster.is_file());
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if !matches!(source, SessionSource::New(_)) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
         let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
@@ -1873,6 +1909,8 @@ impl Controller {
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
                         v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
                     }
                 }
                 match result {
@@ -2699,7 +2737,7 @@ impl Controller {
         })
         .detach();
     }
-    fn project_name(&self) -> String {
+    pub(crate) fn project_name(&self) -> String {
         self.published
             .as_ref()
             .and_then(|p| p.snapshot.document.root())
@@ -3179,9 +3217,8 @@ impl Controller {
             // The gear and ⌘, toggle: Settings showing closes, back to the
             // tab it came forward over; open behind another tab, it comes
             // forward. Its rows have saved as they changed (as its × closes).
-            "settings" if self.pages.toggle_closes("settings") => {
-                self.close_tab_page("settings", cx)
-            }
+            // ⌘, with Settings in front closes it.
+            "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
@@ -3565,12 +3602,8 @@ impl Controller {
                 if self.published.is_none() {
                     return false;
                 }
+                self.builtins.settings_page = Some("project".into());
                 self.show_builtin("settings", window, cx);
-                if let Some(view) = self.builtins.views.get("settings") {
-                    view.update(cx, |v, cx| {
-                        v.scroll_semantic("settings.section.project", cx)
-                    });
-                }
             }
             "actualSize" => self.step_zoom(1., Some(1.), window, cx),
             "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),

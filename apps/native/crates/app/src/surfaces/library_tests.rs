@@ -694,8 +694,11 @@ fn real_kernel_trash_restore_keeps_document_bytes_and_archive_refuses_safely() {
     actor.shutdown();
 }
 
+/// PM-385. Home renames a project no window has open where it is kept,
+/// without opening it: a closed project, and a duplicate just made (the
+/// Rename sheet that follows Duplicate), which no window has ever opened.
 #[test]
-fn real_kernel_closed_slot_rename_is_explicitly_unavailable_and_does_not_open_it() {
+fn real_kernel_renames_a_closed_project_and_a_fresh_duplicate_without_opening_them() {
     let (_dir, actor, mut service) = service();
     let session = create_real(&mut service);
     service
@@ -709,10 +712,36 @@ fn real_kernel_closed_slot_rename_is_explicitly_unavailable_and_does_not_open_it
             id: session.project.clone(),
             name: "Other".into()
         }),
-        Err(Failure::Unsupported(_))
+        Ok(Outcome::Changed)
     ));
     assert!(service.kernel.published(&session.project).is_none());
-    assert_eq!(service.snapshot().unwrap().rows[0].name, "Launch Film");
+    assert_eq!(service.snapshot().unwrap().rows[0].name, "Other");
+    let Outcome::Duplicated(copy) = service
+        .execute(Command::Duplicate {
+            id: session.project.clone(),
+            name: "Other copy".into(),
+        })
+        .unwrap()
+    else {
+        panic!("not duplicated");
+    };
+    assert!(matches!(
+        service.execute(Command::Rename {
+            id: copy.clone(),
+            name: "Run6 Dup".into()
+        }),
+        Ok(Outcome::Changed)
+    ));
+    assert!(service.kernel.published(&copy).is_none());
+    let names: Vec<String> = service
+        .snapshot()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.name.clone())
+        .collect();
+    assert!(names.contains(&"Run6 Dup".to_owned()), "{names:?}");
+    assert!(names.contains(&"Other".to_owned()), "{names:?}");
     actor.shutdown();
 }
 
@@ -1125,4 +1154,19 @@ fn an_untitled_project_in_a_file_is_titled_by_the_file() {
     assert_eq!(r.title(), "Untitled film");
     r.summary.as_mut().unwrap().duration_seconds = Some(62.4);
     assert_eq!(r.length().as_deref(), Some("1:02"));
+fn a_new_project_opens_under_the_name_typed_in_its_sheet() {
+    use pm_kernel::{locks::OpenDecision, session::ShellReply};
+    let mut c = ready();
+    c.begin_new("owner".into(), None, &format()).unwrap();
+    c.form.as_mut().unwrap().name = "Launch Film".into();
+    c.create().unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    c.take_effects();
+    let reply = ShellReply::Library(OpenDecision::Writable);
+    complete(&mut c, serial, Ok(Outcome::Opened(reply)));
+    let opened = c.take_effects().into_iter().find_map(|e| match e {
+        HostEffect::OpenEditor { name, .. } => Some(name),
+        _ => None,
+    });
+    assert_eq!(opened.as_deref(), Some("Launch Film"));
 }

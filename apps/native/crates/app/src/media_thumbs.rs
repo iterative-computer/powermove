@@ -28,6 +28,12 @@ fn registry() -> &'static Mutex<HashMap<String, PathBuf>> {
 }
 
 /// The cached picture behind a key the panel drew (`thumb/<digest>`).
+/// A picture the host made elsewhere (Settings' project poster) under `key`.
+pub fn register(key: &str, path: PathBuf) {
+    if let Ok(mut keys) = registry().lock() {
+        keys.insert(key.to_owned(), path);
+    }
+}
 pub fn resolve(key: &str) -> Option<PathBuf> {
     registry().lock().ok()?.get(key).cloned()
 }

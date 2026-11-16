@@ -443,6 +443,15 @@ fn cached_panel_does_not_rerender_for_a_parent_frame(cx: &mut TestAppContext) {
 /// past what was recorded renders, and the panel renders once the steps stop.
 #[gpui::test]
 fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppContext) {
+    wheel_steps(cx, pm_builtins::PROJECT_PANEL, true);
+}
+/// Elsewhere a step draws the panel again (its hover and controls follow
+/// the content at once: PM-389, PM-390).
+#[gpui::test]
+fn outside_the_project_panel_a_wheel_step_draws_the_panel_again(cx: &mut TestAppContext) {
+    wheel_steps(cx, "fxbrowser", false);
+}
+fn wheel_steps(cx: &mut TestAppContext, panel: &str, layer: bool) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
     let mut ops = node_ops(
@@ -461,7 +470,8 @@ fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppConte
             &["pointerdown"],
         ));
     }
-    let surface = synthetic(&rig, ops);
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = panel.into();
     let runtime = rig.runtime.clone();
     cx.executor().allow_parking();
     let (root, vcx) = cx.add_window_view(|window, cx| {
@@ -487,6 +497,11 @@ fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppConte
         vcx.run_until_parked();
     };
     wheel(&mut vcx, -30.);
+    if !layer {
+        assert!(view.read_with(&vcx, |v, _| v.renders) > rendered);
+        assert_eq!(row(&mut vcx, 4), top + px(50.));
+        return;
+    }
     assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
     // 55 + 30 lands in row 4 (80..100) now.
     events(&view, &mut vcx);
@@ -512,6 +527,61 @@ fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppConte
     assert_eq!(row(&mut vcx, 10), top + px(200. - 200.));
 }
 /// A panel in a 100 pt slot, as a dock gives one.
+/// PM-387: a list built while its slot was short asks for the rows that show
+/// once the slot grows (its page held only the rows of the short slot).
+#[gpui::test]
+fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let ops = node_ops(
+        1,
+        0,
+        "virtual-list",
+        json!({"count": 100, "range": [0, 2], "itemSize": 20, "style": {"width": 100}}),
+        &["rangechange"],
+    );
+    let surface = synthetic(&rig, ops);
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        Tall { child, height: 40. }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let last_range = |vcx: &mut VisualTestContext| {
+        view.update(vcx, |v, _| {
+            v.log
+                .iter()
+                .rev()
+                .find(|(_, e, _)| e == "rangechange")
+                .and_then(|(_, _, d)| d.range)
+        })
+    };
+    assert_eq!(last_range(&mut vcx), Some((0, 2)));
+    root.update(&mut vcx, |r, cx| {
+        r.height = 200.;
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(last_range(&mut vcx), Some((0, 10)));
+}
+/// A slot whose height the test sets.
+struct Tall {
+    child: Entity<SurfaceView>,
+    height: f32,
+}
+impl Render for Tall {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(100.)).h(px(self.height)).flex().flex_col().child(
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().w(px(100.)).h(px(self.height))),
+        )
+    }
+}
 struct Slot {
     child: Entity<SurfaceView>,
 }

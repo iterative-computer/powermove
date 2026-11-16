@@ -1,5 +1,5 @@
 import { SettingsPanel, SettingsModel, type Publication } from "./index";
-import { generalRows, sections } from "./catalogue";
+import { generalRows, sectionCopy, sections, type Section } from "./catalogue";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 import type { Json } from "../../src/protocol";
 
@@ -84,7 +84,20 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   await r.render(
     <SettingsPanel
       model={model}
-      bindings={fields(["search", "extensionSearch", "extensionType"])}
+      bindings={fields([
+        "search",
+        "extensionSearch",
+        "extensionType",
+        "project",
+      ])}
+      window={{
+        project: (id) => {
+          void platform("settings.project", id).catch(report);
+        },
+        reveal: () => {
+          void platform("settings.reveal").catch(report);
+        },
+      }}
     />,
   );
   const mounted: Mounted = {
@@ -108,6 +121,53 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   mounted.show = async (target?: string) => {
     model.show(sections.find((s) => s === target));
     await r.flush();
+  };
+  // The window's sidebar and search field are AppKit's: they act on the
+  // model, and are told what it shows.
+  mounted.act = async (intent: Json) => {
+    const {
+      select,
+      search,
+      tell: again,
+    } = (intent ?? {}) as {
+      select?: string;
+      search?: string;
+      tell?: boolean;
+    };
+    const section = sections.find((s) => s === select);
+    if (section) model.select(section as Section);
+    if (typeof search === "string") await model.search(search);
+    // A window that just opened asks for what to show.
+    if (again) {
+      told = "";
+      tell();
+    }
+    await r.flush();
+  };
+  let told = "";
+  const tell = () => {
+    if (!model.open) return;
+    const query = model.query.trim();
+    const sidebar = {
+      sections: model.availableSections.map((id) => ({
+        id,
+        title: sectionCopy[id].title,
+        project: id === "project" || id === "memory",
+        dim: !!query && !model.matches.sections.has(id),
+      })),
+      active: model.active,
+      query: model.query,
+    };
+    const text = JSON.stringify(sidebar);
+    if (text === told) return;
+    told = text;
+    void platform("settings.sidebar", sidebar as unknown as Json).catch(report);
+  };
+  const untell = model.subscribe(tell);
+  const close = mounted.dispose.bind(mounted);
+  mounted.dispose = async () => {
+    untell();
+    await close();
   };
   return mounted;
 }

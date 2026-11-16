@@ -1095,3 +1095,91 @@ fn a_duplicated_copy_does_not_take_over_its_project() {
         "the project opened the duplicate, not its copy"
     );
 }
+
+/// PM-385. Home renames a project no window has open where it is kept. A
+/// project with work a session left without saving (a forced quit) is not
+/// renamed: the work is replayed onto what the project holds, which a rename
+/// would change; the next open offers it, and once it is recovered and the
+/// project closed, the rename goes through and the next open asks nothing.
+#[test]
+fn a_closed_project_is_renamed_unless_it_has_unsaved_work() {
+    let root = TempDir::new("rename-closed");
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        let mut project = value();
+        project
+            .as_object_mut()
+            .unwrap()
+            .insert("id", Value::from("film"));
+        w.save_project("film", project, Value::Null, Value::Null, Value::Null)
+            .unwrap();
+    }
+    let prepare = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "film".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "film".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let rename = |k: &mut Kernel, name: &str| {
+        k.shell(ShellCall::Rename {
+            project: "film".into(),
+            name: name.into(),
+        })
+        .unwrap()
+    };
+    let row_name = || {
+        pm_kernel::library::LibraryStore::open(&root.0)
+            .projects()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "film")
+            .unwrap()
+            .name
+    };
+    {
+        let mut k = kernel(&root.0);
+        let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+            panic!("not opened")
+        };
+        widen(&mut k, &session.project, 640.);
+        k.durability_barrier().unwrap();
+    }
+    let mut k = kernel(&root.0);
+    assert!(matches!(rename(&mut k, "Other"), ShellReply::HasUnsavedWork));
+    assert_eq!(row_name(), "Base");
+    let ShellReply::RecoveryRequired { ticket, .. } = prepare(&mut k) else {
+        panic!("the unsaved work was not offered");
+    };
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    else {
+        panic!("not opened");
+    };
+    assert_eq!(width(&k, &session.project), 640.);
+    assert!(
+        k.shell(ShellCall::Rename {
+            project: "film".into(),
+            name: "Open".into(),
+        })
+        .is_err(),
+        "an open project is renamed by its window"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert!(matches!(rename(&mut k, "Other"), ShellReply::Changed(true)));
+    assert_eq!(row_name(), "Other");
+    let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+        panic!("a recovery question after the rename");
+    };
+    assert_eq!(name(&k, &session.project), "Other");
+    assert_eq!(width(&k, &session.project), 640.);
+}

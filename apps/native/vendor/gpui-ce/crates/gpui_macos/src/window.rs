@@ -566,6 +566,24 @@ pub(crate) fn convert_mouse_position(
     )
 }
 
+/// Moves a pointer event's position by `offset` (see `view_offset`).
+fn offset_position(event: &mut PlatformInput, offset: Point<Pixels>) {
+    if offset == Point::default() {
+        return;
+    }
+    let position = match event {
+        PlatformInput::MouseDown(e) => &mut e.position,
+        PlatformInput::MouseUp(e) => &mut e.position,
+        PlatformInput::MouseMove(e) => &mut e.position,
+        PlatformInput::MousePressure(e) => &mut e.position,
+        PlatformInput::MouseExited(e) => &mut e.position,
+        PlatformInput::ScrollWheel(e) => &mut e.position,
+        PlatformInput::Pinch(e) => &mut e.position,
+        _ => return,
+    };
+    *position = *position + offset;
+}
+
 /// Stores the cursor style on the active GPUI window and invalidates its cursor rects.
 ///
 /// # Safety
@@ -1273,10 +1291,27 @@ impl MacWindowState {
         )
     }
 
+    /// The size of GPUI's own view: the window's content when GPUI's view
+    /// fills it, the detail area when a split view hosts it.
     fn content_size(&self) -> Size<Pixels> {
-        let content_view: ObjcId = unsafe { msg_send![self.native_window, contentView] };
-        let frame: Objc2NSRect = unsafe { msg_send![content_view, frame] };
+        let frame: Objc2NSRect = unsafe { msg_send![self.native_view.as_ptr(), frame] };
         size(px(frame.size.width as f32), px(frame.size.height as f32))
+    }
+
+    /// What turns a position measured from the window's top-left (as the
+    /// events convert it, against `content_size`'s height) into one measured
+    /// from GPUI's view: zero while the view sits at the window's origin.
+    fn view_offset(&self) -> Point<Pixels> {
+        let view = self.native_view.as_ptr();
+        let bounds: Objc2NSRect = unsafe { msg_send![view, bounds] };
+        let r: Objc2NSRect =
+            unsafe { msg_send![view, convertRect: bounds, toView: std::ptr::null_mut::<Objc2Object>()] };
+        point(px(-r.origin.x as f32), px(r.origin.y as f32))
+    }
+
+    /// A point in the window's coordinates as a position in GPUI's view.
+    fn view_position(&self, location: Objc2NSPoint) -> Point<Pixels> {
+        convert_mouse_position(location, self.content_size().height) + self.view_offset()
     }
 
     fn scale_factor(&self) -> f32 {
@@ -1951,7 +1986,7 @@ impl PlatformWindow for MacWindow {
                 .native_window
                 .mouseLocationOutsideOfEventStream()
         };
-        convert_mouse_position(position, self.content_size().height)
+        self.0.lock().view_position(position)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -2737,6 +2772,12 @@ impl PlatformWindow for MacWindow {
             // AppKit keeps this frame's distance from the event's location as the drag image's
             // offset from the cursor, so it has to stay anchored on `event`.
             let location: Objc2NSPoint = msg_send![event, locationInWindow];
+            // The items' frames are in the dragging view's own coordinates.
+            let location: Objc2NSPoint = msg_send![
+                native_view,
+                convertPoint: location,
+                fromView: std::ptr::null_mut::<Objc2Object>()
+            ];
             let frame = Objc2NSRect::new(
                 Objc2NSPoint::new(location.x - 16., location.y - 16.),
                 NSSize::new(32., 32.),
@@ -3490,7 +3531,10 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
         }
         _ => {}
     }
-    let event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    let mut event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    if let Some(event) = event.as_mut() {
+        offset_position(event, lock.view_offset());
+    }
 
     if let Some(mut event) = event {
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
@@ -4494,7 +4538,7 @@ fn drag_event_position(
     dragging_info: ObjcId,
 ) -> Point<Pixels> {
     let drag_location: Objc2NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
-    convert_mouse_position(drag_location, window_state.lock().content_size().height)
+    window_state.lock().view_position(drag_location)
 }
 
 fn with_input_handler<F, R>(window: &Objc2Object, f: F) -> Option<R>
@@ -4740,8 +4784,9 @@ unsafe extern "C" fn composition_make_first_responder(
         };
         let accepted: Bool = msg_send![super(this, base), makeFirstResponder: responder];
         if accepted.as_bool() {
-            let content: ObjcId = msg_send![this, contentView];
-            crate::composition_accessibility::responder_changed(content as usize);
+            crate::composition_accessibility::responder_changed(
+                crate::composition_accessibility::adapter_host(this),
+            );
         }
         accepted
     }
@@ -4755,9 +4800,10 @@ unsafe extern "C" fn composition_accessibility_hit_test(
     point: Objc2NSPoint,
 ) -> ObjcId {
     unsafe {
-        let window: ObjcId = msg_send![this, window];
-        let content: ObjcId = msg_send![window, contentView];
-        if crate::composition_accessibility::has_adapter(content as usize) {
+        // The adapter is on GPUI's view's parent (the window's content view,
+        // or the detail view of a split view that hosts it).
+        let content: ObjcId = msg_send![this, superview];
+        if !content.is_null() && crate::composition_accessibility::has_adapter(content as usize) {
             msg_send![content, accessibilityHitTest: point]
         } else {
             msg_send![super(this, class!(NSView)), accessibilityHitTest: point]
