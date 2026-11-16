@@ -11,10 +11,22 @@ pub struct Equivalent {
 pub fn equivalents() -> Vec<Equivalent> {
     serde_json::from_str(include_str!("../data/menu-equivalents.json")).unwrap()
 }
-/// A command whose key the menu bar itself matches (Save, Undo): its key is
-/// not the keymap's to change.
+/// A command whose key the menu bar itself matches (Save, Undo). A key the
+/// person records for it becomes the menu item's own (`menus`).
 pub fn is_equivalent(command: &str) -> bool {
     equivalents().iter().any(|e| e.command == command)
+}
+/// The system's own items (Hide, Hide Others, Quit): their keys are macOS's
+/// and are never changed.
+pub fn is_fixed(command: &str) -> bool {
+    matches!(command, "hide" | "hideOthers" | "quit")
+}
+/// The key a menu-bar command has when the person has not changed it.
+pub fn equivalent_accelerator(command: &str) -> Option<String> {
+    equivalents()
+        .into_iter()
+        .find(|e| e.command == command)
+        .map(|e| e.accelerator)
 }
 #[derive(Clone, Debug)]
 pub struct Item {
@@ -80,8 +92,12 @@ pub const BESIDE_SHEET: [&str; 9] = [
     "checkForUpdates",
     "help",
 ];
-pub fn runs_beside_sheet(command: &str) -> bool {
-    BESIDE_SHEET.contains(&command) || command.starts_with("context")
+/// Whether `command` stays in the menu while a sheet is up. The Edit
+/// commands (Undo, Cut, Copy, Paste, Select All) stay only while one of the
+/// sheet's own fields is being edited (`field_editing`): the project under
+/// the sheet never takes them.
+pub fn runs_beside_sheet(command: &str, field_editing: bool) -> bool {
+    BESIDE_SHEET.contains(&command) || (field_editing && command.starts_with("context"))
 }
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
 pub const SUBMENUS: [&str; 7] = [
@@ -226,9 +242,18 @@ pub fn new3d() -> Vec<Item> {
 }
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     let eq = equivalents();
+    // The menu bar matches these keys itself: the person's key, once they
+    // record one (or none, once they remove it), else the item's own.
     let m = |command: &str| {
         let e = eq.iter().find(|e| e.command == command).unwrap();
-        Item::command(&e.label, &e.command, &e.accelerator)
+        let mine = crate::keymap::user_keys(command)
+            .filter(|_| !is_fixed(command))
+            .map(|keys| keys.first().cloned().unwrap_or_default());
+        Item::command(
+            &e.label,
+            &e.command,
+            mine.as_deref().unwrap_or(&e.accelerator),
+        )
     };
     let sep = || Item::command("", "", "");
     // Registry-only commands, labelled for the menu bar, with their W1 chords.
@@ -792,8 +817,69 @@ mod sheet_tests {
             "store",
             "renameProject",
         ] {
-            assert!(!runs_beside_sheet(held), "{held}");
+            assert!(!runs_beside_sheet(held, true), "{held}");
         }
-        assert!(runs_beside_sheet("contextUndo"));
+        // The Edit commands only for a field in the sheet.
+        for edit in [
+            "contextUndo",
+            "contextRedo",
+            "contextCut",
+            "contextCopy",
+            "contextPaste",
+            "contextSelectAll",
+        ] {
+            assert!(runs_beside_sheet(edit, true), "{edit}");
+            assert!(!runs_beside_sheet(edit, false), "{edit}");
+        }
+        assert!(runs_beside_sheet("settings", false));
+    }
+}
+
+#[cfg(test)]
+mod every_menu_tests {
+    use super::*;
+    /// Every menu the app builds, built: the menu bar, each submenu the shell
+    /// fills (Tools, 3D, New, Add 3D Layer), the palette's extra rows and
+    /// rows, and every key equivalent. A row that names something absent
+    /// (a command, an equivalent, a keymap chord) fails here, not at launch.
+    #[test]
+    fn every_menu_and_submenu_builds() {
+        let bar = menus();
+        assert!(!bar.is_empty());
+        let mut rows = 0;
+        for (title, items) in &bar {
+            assert!(!title.is_empty());
+            for item in items {
+                if item.label.is_empty() {
+                    continue; // a separator
+                }
+                rows += 1;
+                let label = &item.label;
+                assert!(!item.command.is_empty(), "{title} › {label} runs nothing");
+                if !item.chord.is_empty() {
+                    let (key, _) = accelerator(&item.chord);
+                    let chord = &item.chord;
+                    assert!(!key.is_empty(), "{title} › {label}: chord {chord}");
+                }
+            }
+        }
+        assert!(rows > 50, "{rows} rows");
+        for (name, sub) in [
+            ("tools", tools()),
+            ("view3d", view3d()),
+            ("newLayers", new_layers()),
+            ("new3d", new3d()),
+        ] {
+            assert!(!sub.is_empty(), "{name}");
+            for item in sub.iter().filter(|i| !i.label.is_empty()) {
+                assert!(!item.command.is_empty(), "{name} › {}", item.label);
+            }
+        }
+        assert!(!extras().is_empty());
+        assert!(!palette_rows().is_empty());
+        for e in equivalents() {
+            let (key, _) = accelerator(&e.accelerator);
+            assert!(!key.is_empty(), "{} ({})", e.command, e.accelerator);
+        }
     }
 }

@@ -39,6 +39,9 @@ harness = false
 name = "child_windows_gpui"
 harness = false
 [[test]]
+name = "hidden_release"
+harness = false
+[[test]]
 name = "tab_close_gpui"
 harness = false
 [[test]]

@@ -106,6 +106,15 @@ pub(crate) fn install(
     let chrome = Rc::new(SettingsChrome::install(view, tx)?);
     let (dark, ground) = scheme(&owner.read(cx).host.borrow().tokens);
     chrome.set_scheme(dark, ground);
+    // A check of the window as built, for any bundle (release included).
+    if let Some(path) = std::env::var_os("PM_NATIVE_SETTINGS_PROBE") {
+        let probe = chrome.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            let _ = cx.update(|_| std::fs::write(&path, probe.report().to_string()));
+        })
+        .detach();
+    }
     let weak = owner.downgrade();
     // One act at a time, in the order done: a search the panel answered
     // late must never overtake a newer one (typing dropped letters, and a

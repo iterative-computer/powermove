@@ -62,6 +62,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.text` | Primary text and glyphs | `#1D1F25` | `#F5F5F4` | `#1D1F25` | `#F5F5F4` |
 | `colors.timeline_selected` | Accent tint for selected timeline layer rows | `#FBDFD2` | `#452818` | `#FBDFD2` | `#452818` |
 | `colors.timeline_selected_hover` | Stronger accent tint for hovered selected timeline layer rows | `#FAD5C3` | `#522D18` | `#FAD5C3` | `#522D18` |
+| `colors.verified` | A verified publisher's seal (Store), the system blue | `#007AFF` | `#0A84FF` | `#007AFF` | `#0A84FF` |
 | `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#090807` | `#E6E6EA` | `#090807` |
 | `colors.viewer_grid` | The viewer's grid over the picture | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` | `#D8D8D8` |
 | `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
@@ -81,6 +82,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.column_least` | Narrowest side column | 200 | 200 | 200 | 200 |
 | `metrics.column_most` | Widest side column | 760 | 760 | 760 | 760 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
+| `metrics.composer_tray` | Agent composer's tray around its field | 4 | 4 | 4 | 4 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
 | `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |

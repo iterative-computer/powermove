@@ -1813,6 +1813,72 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     settle(&mut s);
     assert!(renders(&s) > rendered);
 }
+/// PM-431: the background render reports every frame it stores; a report
+/// that changes no bar the ruler draws draws nothing (the app in front and
+/// untouched stays idle).
+#[gpui::test]
+fn a_render_cache_report_that_moves_no_bar_draws_nothing(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(20), true);
+    s.idle(cx);
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let rendered = renders(&s);
+    for _ in 0..5 {
+        s.surface.update(&mut s.vcx, |t, cx| t.render_bars_changed(cx));
+        s.vcx.run_until_parked();
+    }
+    assert_eq!(renders(&s), rendered);
+}
+/// PM-376: an edit moves the bars at once, and the outline's rows (the
+/// names) are published by the panel's script later. Until that lands each
+/// name stands on its own layer's bar, not after the row before it.
+#[gpui::test]
+fn names_stay_on_their_own_bars_until_the_rows_publication_lands(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let row = |id: &str| format!("[\"layer\",\"{id}\"]");
+    let name_y = |s: &mut Stage, id: &str| {
+        let selector: &'static str = Box::leak(format!("timeline:row:{}", row(id)).into_boxed_str());
+        s.vcx.debug_bounds(selector).map(|b| f32::from(b.origin.y))
+    };
+    let bar_top = |s: &Stage, id: &str| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().unwrap().scroll_for(&row(id)))
+            .unwrap() as f32
+    };
+    let offset = name_y(&mut s, "l2").unwrap() - bar_top(&s, "l2");
+    // Delete the top layer: every bar below moves up a row.
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                        pm_kernel::LayerCommand::Delete {
+                            layer_ids: vec!["l0".into()],
+                        },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    let surface = s.surface.clone();
+    settle(cx, |cx| surface.read_with(cx, |t, _| t.idle()));
+    s.vcx.run_until_parked();
+    // The bars moved; the rows' publication has not been applied yet.
+    for id in ["l1", "l2", "l3"] {
+        assert_eq!(name_y(&mut s, id).unwrap(), bar_top(&s, id) + offset, "{id}");
+    }
+    // Then it lands: the names stay where they are.
+    let l2 = name_y(&mut s, "l2");
+    s.idle(cx);
+    assert_eq!(name_y(&mut s, "l2"), l2);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
@@ -2065,6 +2131,66 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
     // The app hears the scrub start before its first seek and end on
     // release (PM-310: only Properties follows each frame meanwhile).
     assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
+}
+/// PM-310 scrub: a ruler scrub seeks only when the pointer reaches another
+/// frame. Zoomed in, a frame is many points wide and most moves stay in one:
+/// each seek is the viewer's command, the app's tick and the extensions'
+/// time, so a move inside the frame sought sends none.
+#[gpui::test]
+fn a_ruler_scrub_seeks_once_per_frame_it_reaches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let at = s.at(0, 1.);
+    // Zoomed in about the pointer until a frame is several points wide.
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let frame = pps / 30.;
+    assert!(frame >= 8., "a frame is {frame} points");
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let y = px(tokens().metrics.ruler / 2.);
+    let start = origin + point(px(column + 40.), y);
+    s.vcx.simulate_mouse_move(start, None, Modifiers::none());
+    s.vcx.simulate_event(MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.vcx.run_until_parked();
+    let first = s.recorder.seeks.borrow().len();
+    assert!(first >= 1);
+    // Point by point across three frames.
+    let span = (frame * 3.).ceil() as i32;
+    for dx in 1..=span {
+        s.vcx.simulate_mouse_move(
+            start + point(px(dx as f32), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+    }
+    s.vcx.simulate_event(MouseUpEvent {
+        position: start + point(px(span as f32), px(0.)),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    let during = &seeks[first - 1..];
+    assert!(
+        (3..=4).contains(&during.len()),
+        "{span} moves over three frames sought {during:?}"
+    );
+    assert!(during.windows(2).all(|w| w[0] != w[1]), "{during:?}");
 }
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {

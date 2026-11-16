@@ -68,6 +68,10 @@ const ROLES: &[(&str, &str)] = &[
         "colors.accent_wash",
         "Opaque accent tint: drop targets, active guide bed",
     ),
+    (
+        "colors.verified",
+        "A verified publisher's seal (Store), the system blue",
+    ),
     ("colors.danger", "Destructive and error text, offline media"),
     (
         "colors.viewer_guide",
@@ -286,6 +290,10 @@ const ROLES: &[(&str, &str)] = &[
     (
         "metrics.composer_max_lines",
         "Agent composer grows to this many lines, then scrolls",
+    ),
+    (
+        "metrics.composer_tray",
+        "Agent composer's tray around its field",
     ),
     ("metrics.group_radius", "Settings grouped-form card corner"),
     ("metrics.form_row", "Minimum Settings row height"),

@@ -12,6 +12,7 @@ pub fn tabs_mode() -> bool {
 pub fn set_tabs_mode(tabs: bool) {
     TABS_MODE.store(tabs, std::sync::atomic::Ordering::Relaxed);
 }
+pub mod input;
 pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod ease;
@@ -39,6 +40,7 @@ pub mod native_control;
 pub mod scopes;
 pub mod session;
 #[cfg(target_os = "macos")]
+pub mod region_pick;
 pub mod settings_window;
 #[cfg(target_os = "macos")]
 pub mod symbol;
@@ -46,6 +48,7 @@ pub mod symbol;
 pub mod text;
 pub mod theme;
 pub mod transient;
+pub mod typing;
 #[cfg(target_os = "macos")]
 pub mod view;
 pub mod welcome;
@@ -54,6 +57,7 @@ pub mod welcome_view;
 pub mod workspace;
 #[cfg(target_os = "macos")]
 pub use macos::open_editor_tab;
+pub use native::{front_restoring, set_front_restoring};
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{
@@ -70,14 +74,5 @@ pub use native::{
     zoom_limit,
 };
 
-// These suites use pure geometry or a headless renderer, never native windows.
-#[cfg(test)]
-extern crate self as pm_shell;
-#[cfg(test)]
-#[path = "../tests/models.rs"]
-mod regression_models;
-#[cfg(all(test, target_os = "macos"))]
-#[path = "../tests/dock_scroll.rs"]
-mod regression_dock_scroll;
 #[cfg(all(test, target_os = "macos"))]
 mod utility_capture_tests;

@@ -1966,10 +1966,17 @@ pub fn empty_state(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Panels {
     contributed: Vec<(String, String)>,
+    /// Titles of panels seen before that have not registered yet (an
+    /// extension still starting): a tab shows its name, never its id.
+    remembered: Vec<(String, String)>,
 }
 impl Panels {
     pub fn new(contributed: Vec<(String, String)>) -> Self {
-        Self { contributed }
+        Self { contributed, remembered: Vec::new() }
+    }
+    pub fn with_remembered(mut self, remembered: Vec<(String, String)>) -> Self {
+        self.remembered = remembered;
+        self
     }
     pub fn ids(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = PANELS.to_vec();
@@ -1987,6 +1994,7 @@ impl Panels {
     pub fn title<'a>(&'a self, id: &'a str) -> &'a str {
         self.contributed
             .iter()
+            .chain(&self.remembered)
             .find(|(p, _)| p == id)
             .map(|(_, t)| t.as_str())
             .unwrap_or_else(|| builtin_title(id))
@@ -2145,6 +2153,18 @@ mod contributed_tests {
             assert!(rects.iter().any(|r| r.contains(x, y)));
         }
         assert_eq!(outside(area, &[]), vec![area]);
+    }
+    /// PM-427: a panel whose extension is still starting is named by the
+    /// title it registered last time, never by its id.
+    #[test]
+    fn a_panel_not_registered_yet_shows_its_remembered_title() {
+        let panels = Panels::new(vec![])
+            .with_remembered(vec![("pexels".into(), "Pexels".into())]);
+        assert_eq!(panels.title("pexels"), "Pexels");
+        assert!(!panels.contains("pexels"), "still not registered");
+        let now = Panels::new(vec![("pexels".into(), "Pexels Browser".into())])
+            .with_remembered(vec![("pexels".into(), "Pexels".into())]);
+        assert_eq!(now.title("pexels"), "Pexels Browser", "the registered title wins");
     }
     #[test]
     fn contributed_panels_dock_title_and_survive_like_builtins() {

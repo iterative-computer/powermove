@@ -7,6 +7,7 @@
 //! before, and every window rescans when one lands.
 use gpui::{prelude::*, *};
 use pm_compat_runner::{StoreAuthority, discovery, store_install};
+use pm_design::Text;
 use pm_design::Tokens;
 use pm_services::surfaces::publishing::{Draft, Problem};
 use pm_services::{
@@ -19,10 +20,12 @@ use pm_services::{
     },
 };
 use pm_shell::{
-    kit::{Button, Kit},
+    kit::{self, Button, Kit, Recipes, ink},
     motion::Motion,
+    native_control::{ControlSpec, Kind, NativeControl},
+    symbol::Weight,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
 pub type Client = StoreClient<Box<dyn StoreTransport + Send>>;
@@ -124,6 +127,14 @@ impl Page {
         }
     }
 }
+/// One storefront shelf: its id (`featured`, `new` or a kind), its title and
+/// its listings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shelf {
+    pub id: String,
+    pub title: String,
+    pub listings: Vec<Listing>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum Load<T> {
     Loading,
@@ -163,10 +174,13 @@ pub struct Yours {
     pub published: Option<String>,
 }
 enum Reply {
-    Shelves(u64, Result<Vec<(String, Vec<Listing>)>, String>),
+    Shelves(u64, Result<Vec<Shelf>, String>),
     Catalog(pm_services::surfaces::store::SearchReply),
     Detail(u64, Box<Result<Detail, String>>),
-    Library(Vec<Installed>, Vec<Yours>, Option<String>),
+    /// What is installed, what was made here, a note, and whether the Store
+    /// was asked about updates (the first, local reply was not).
+    /// From load `u64` (an older load's late answer is dropped).
+    Library(u64, Vec<Installed>, Vec<Yours>, Option<String>, bool),
     Prepared(Box<Result<crate::publish::Prepared, String>>),
     Frozen(
         Box<(
@@ -185,8 +199,13 @@ pub struct StoreWindow {
     pub page: Page,
     pub query: String,
     search: Option<Entity<pm_shell::text::TextField>>,
+    /// Discover · Library, the system's segmented control (a real window only).
+    pages: Option<Entity<NativeControl>>,
+    /// Publish, a pull-down of the extensions made on this Mac (v1.2.0's
+    /// header Publish menu).
+    publish_menu: Option<Entity<NativeControl>>,
     pub focus: FocusHandle,
-    pub shelves: Load<Vec<(String, Vec<Listing>)>>,
+    pub shelves: Load<Vec<Shelf>>,
     catalog: Catalog,
     pub detail: Option<(Listing, Load<Detail>)>,
     pub library: Load<Vec<Installed>>,
@@ -202,6 +221,10 @@ pub struct StoreWindow {
     /// keeps no room for window buttons.
     pub embedded: bool,
     generation: u64,
+    /// The storefront's own requests: a page opened meanwhile keeps it.
+    shelves_generation: u64,
+    /// The Library's own loads: a later load's answer wins.
+    library_generation: u64,
     tx: async_channel::Sender<Reply>,
 }
 
@@ -224,6 +247,8 @@ impl StoreWindow {
             }
         })
         .detach();
+        // The storefront last seen draws at once; a fresh one replaces it.
+        let shelves = cached_shelves(&services.profile).map_or(Load::Loading, Load::Ready);
         let mut window = Self {
             motion: Motion::default(),
             frame_kit: None,
@@ -232,8 +257,10 @@ impl StoreWindow {
             page: Page::Discover,
             query: String::new(),
             search: None,
+            pages: None,
+            publish_menu: None,
             focus: cx.focus_handle(),
-            shelves: Load::Loading,
+            shelves,
             catalog: Catalog::default(),
             detail: None,
             library: Load::Loading,
@@ -244,6 +271,8 @@ impl StoreWindow {
             message: None,
             embedded: false,
             generation: 0,
+            shelves_generation: 0,
+            library_generation: 0,
             tx,
         };
         window.load_shelves();
@@ -262,7 +291,9 @@ impl StoreWindow {
                 window,
                 cx,
             );
-            field.set_placeholder("Search");
+            field.set_placeholder("Search extensions");
+            field.set_bare(true);
+            field.set_escape_cancels(true);
             field
         });
         cx.subscribe(&field, |v, _, event: &TextEvent, cx| match event {
@@ -273,6 +304,103 @@ impl StoreWindow {
         })
         .detach();
         self.search = Some(field);
+        let index = json!(usize::from(self.page == Page::Library));
+        let tokens = self.tokens.clone();
+        let pages = cx.new(|cx| {
+            NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Segmented,
+                    label: "Store pages",
+                    identifier: "store.pages",
+                    value: &index,
+                    options: vec![json!("Discover"), json!("Library")],
+                    disabled: false,
+                    default: false,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    pull: false,
+                    tint: None,
+                    symbol: None,
+                    glass: true,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(&pages, |v: &mut Self, _, value: &Value, cx| {
+            let page = if value.as_u64() == Some(1) {
+                Page::Library
+            } else {
+                Page::Discover
+            };
+            if page != v.page || v.detail.is_some() {
+                v.set_page(page, cx);
+            }
+        })
+        .detach();
+        self.pages = Some(pages);
+        // Publish's sheets attach to the window the Store is in.
+        self.owner = crate::platform::ns_window(window);
+        let (options, empty) = self.publish_rows();
+        let publish = cx.new(|cx| {
+            NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Popup,
+                    pull: true,
+                    label: "Publish",
+                    identifier: "store.publish",
+                    value: &json!("Publish"),
+                    options,
+                    disabled: empty,
+                    default: false,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    tint: None,
+                    symbol: None,
+                    glass: false,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(&publish, |v: &mut Self, _, value: &Value, cx| {
+            if let Some(id) = value.as_str() {
+                v.publish_from_owner(id.to_owned(), cx);
+            }
+        })
+        .detach();
+        self.publish_menu = Some(publish);
+    }
+    /// Publish's rows: each extension made here, by name (its id the value).
+    fn publish_rows(&self) -> (Vec<Value>, bool) {
+        let rows: Vec<Value> = self
+            .yours
+            .iter()
+            .map(|y| json!({"label": y.name, "v": y.id}))
+            .collect();
+        let empty = rows.is_empty();
+        (rows, empty)
+    }
+    fn show_publish_rows(&self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.publish_menu {
+            let (options, empty) = self.publish_rows();
+            menu.update(cx, |m, cx| m.update(&json!("Publish"), &options, empty, cx));
+        }
+    }
+    /// The segmented control follows the page however it changed.
+    fn show_page(&self, cx: &mut Context<Self>) {
+        if let Some(pages) = &self.pages {
+            let index = json!(usize::from(self.page == Page::Library));
+            pages.update(cx, |p, cx| {
+                p.update(&index, &[json!("Discover"), json!("Library")], false, cx)
+            });
+        }
     }
     /// Runs `work` on a worker with a fresh Store client.
     fn run(&self, work: impl FnOnce(pm_services::Result<Client>) -> Reply + Send + 'static) {
@@ -285,25 +413,23 @@ impl StoreWindow {
             .ok();
     }
     fn load_shelves(&mut self) {
-        self.generation += 1;
-        let generation = self.generation;
+        self.shelves_generation += 1;
+        let generation = self.shelves_generation;
         if !matches!(self.shelves, Load::Ready(_)) {
             self.shelves = Load::Loading;
         }
+        let profile = self.services.profile.clone();
         self.run(move |client| {
             let result = client
                 .and_then(|mut c| c.browse())
                 .map_err(|error| error.to_string())
                 .map(|shelves| {
-                    shelves
-                        .into_iter()
-                        .map(|shelf| {
-                            let items =
-                                shelf.items.iter().filter_map(Listing::from_value).collect();
-                            (shelf.title, items)
-                        })
-                        .filter(|(_, items): &(String, Vec<Listing>)| !items.is_empty())
-                        .collect()
+                    keep_shelves(&profile, &shelves);
+                    shelves_of(
+                        shelves
+                            .iter()
+                            .map(|s| (s.id.as_str(), s.title.as_str(), &s.items)),
+                    )
                 });
             Reply::Shelves(generation, result)
         });
@@ -335,9 +461,20 @@ impl StoreWindow {
     }
     /// What the Store installed here, then which of those it has updates for.
     fn load_library(&mut self) {
+        self.library_generation += 1;
+        let generation = self.library_generation;
         let profile = self.services.profile.clone();
+        let tx = self.tx.clone();
         self.run(move |client| {
             let mut installed = scan(&profile);
+            // What is on this Mac shows at once; updates fill in.
+            let _ = tx.send_blocking(Reply::Library(
+                generation,
+                installed.clone(),
+                yours(&profile),
+                None,
+                false,
+            ));
             let releases: Vec<_> = installed
                 .iter()
                 .filter_map(|i| {
@@ -368,7 +505,7 @@ impl StoreWindow {
                 }
                 Err(error) => Some(load_error(error)),
             };
-            Reply::Library(installed, yours(&profile), note)
+            Reply::Library(generation, installed, yours(&profile), note, true)
         });
     }
     pub fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -380,6 +517,7 @@ impl StoreWindow {
             Page::Library => self.load_library(),
             _ => self.load_catalog(),
         }
+        self.show_page(cx);
         cx.notify();
     }
     pub fn set_query(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -391,6 +529,7 @@ impl StoreWindow {
         self.message = None;
         if self.page == Page::Library {
             self.page = Page::Discover;
+            self.show_page(cx);
         }
         if self.query.trim().is_empty() && self.page == Page::Discover {
             self.catalog.close();
@@ -564,9 +703,11 @@ impl StoreWindow {
                 .push("Store", error);
         }
         match reply {
-            Reply::Shelves(generation, result) if generation == self.generation => {
+            Reply::Shelves(generation, result) if generation == self.shelves_generation => {
                 self.shelves = match result {
                     Ok(shelves) => Load::Ready(shelves),
+                    // Offline, the storefront last seen stays up.
+                    Err(_) if matches!(self.shelves, Load::Ready(_)) => return,
                     Err(error) => Load::Failed(error),
                 };
             }
@@ -586,9 +727,25 @@ impl StoreWindow {
                     };
                 }
             }
-            Reply::Library(items, yours, note) => {
+            Reply::Library(generation, mut items, yours, note, checked)
+                if generation == self.library_generation =>
+            {
+                // A local listing keeps what the Store last said about each
+                // install, until it is asked again.
+                if !checked && let Load::Ready(known) = &self.library {
+                    for item in &mut items {
+                        if let Some(was) = known
+                            .iter()
+                            .find(|k| k.id == item.id && k.release == item.release)
+                        {
+                            item.update = was.update.clone();
+                            item.removed = was.removed;
+                        }
+                    }
+                }
                 self.library = Load::Ready(items);
                 self.yours = yours;
+                self.show_publish_rows(cx);
                 if note.is_some() && self.page == Page::Library {
                     self.message = note;
                 }
@@ -639,10 +796,14 @@ impl StoreWindow {
     /// Library › Yours › Publish…: the account and the folder are checked on
     /// a worker, then the publish sheet asks for the version and listing.
     pub fn publish(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
+        self.owner = crate::platform::ns_window(window);
+        self.publish_from_owner(id, cx);
+    }
+    /// Publish… for `id`, its sheet on the window the Store is in.
+    fn publish_from_owner(&mut self, id: String, cx: &mut Context<Self>) {
         if self.busy.is_some() || self.publishing.is_some() {
             return;
         }
-        self.owner = crate::platform::ns_window(window);
         self.busy = Some(id.clone());
         self.message = None;
         let (account, profile) = (self.services.account.clone(), self.services.profile.clone());
@@ -825,10 +986,19 @@ impl StoreWindow {
             .collect()
     }
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "f" && event.keystroke.modifiers.platform {
+            if let Some(field) = &self.search {
+                field.update(cx, |f, cx| f.begin_editing(cx));
+            }
+            return;
+        }
         if event.keystroke.key == "escape" {
-            // Esc steps back from a listing; on a list page the Store, a
-            // page of the window, closes back to the project.
-            if self.detail.is_none() && self.embedded {
+            // Esc steps back from a listing or a kind's page; on Discover or
+            // Library the Store, a page of the window, closes back to the
+            // project.
+            if self.detail.is_none() && matches!(self.page, Page::Kind(_)) {
+                self.set_page(Page::Discover, cx);
+            } else if self.detail.is_none() && self.embedded {
                 pm_shell::send_menu_command("closeTab");
             } else {
                 self.back(cx);
@@ -997,85 +1167,52 @@ impl StoreWindow {
                     })),
             )
     }
-    /// A listing (the kit's `ListingRow`): its artwork, its name with the
-    /// verified seal, `by {handle}` and its tagline, and its action at the
-    /// end: a check when it's here, else a plus that opens its page (where
-    /// its access is shown before it's installed).
-    fn row(&self, listing: &Listing, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let (c, m, ty) = (
-            &self.tokens.colors,
-            &self.tokens.metrics,
-            self.tokens.typography,
-        );
-        let slug = listing.slug.clone();
-        let item = listing.clone();
-        let open = item.clone();
-        let line = if listing.tagline.is_empty() {
-            format!("by {}", listing.handle)
-        } else {
-            format!("by {} · {}", listing.handle, listing.tagline)
-        };
-        let (from, to) = art(&listing.repo_id);
-        let side = m.row + m.inset;
-        let symbol = |name: &str, points: f32, color: u32| {
-            pm_shell::symbol::symbol(
-                name,
-                points,
-                pm_shell::symbol::Weight::Semibold,
-                color,
-                window,
-            )
-        };
-        let installed = self.installed(listing).is_some();
-        let action = if installed {
-            div()
-                .id(SharedString::from(format!(
-                    "store-row-{}-action",
-                    listing.repo_id
-                )))
-                .role(Role::Image)
-                .aria_label("Installed")
-                .flex_none()
-                .child(symbol("checkmark", m.symbol_inline, c.muted))
-        } else {
-            self.kit()
-                .icon_button(
-                    format!("store-row-{}-action", listing.repo_id),
-                    "plus",
-                    format!("Get: {}", listing.name),
-                    false,
-                )
-                .on_click(cx.listener(move |v, _, _, cx| {
-                    cx.stop_propagation();
-                    v.open_detail(open.clone(), cx)
-                }))
-        };
-        // Keyed by repository: two makers' listings may share a slug.
-        let id = format!("store-row-{}", listing.repo_id);
-        let row = div()
-            .id(SharedString::from(id.clone()))
-            .debug_selector(move || format!("store-row-{slug}"))
+    /// v1.2.0's card (`st-item`): the art on a tile, then three tiers of
+    /// text (the name, one line of what it is, one quiet line of facts) and
+    /// one action at the trailing edge. The caller makes the card a target.
+    fn frame(
+        &self,
+        id: &str,
+        width: f32,
+        face: Face,
+        facts: Div,
+        action: AnyElement,
+    ) -> Stateful<Div> {
+        let t = &self.tokens;
+        let c = &t.colors;
+        let Face { seed, name, line } = face;
+        let (from, to) = art(seed);
+        let card = div()
+            .id(SharedString::from(id.to_owned()))
             .flex()
+            .flex_none()
+            .w(px(width))
             .items_center()
-            .gap(px(m.inset))
-            .flex_grow(1.)
-            .flex_basis(px(m.sheet_width - m.sheet_inset))
-            .min_w(px(0.))
-            .h(px(m.row * 2.))
-            .px(px(m.gap))
-            .rounded(px(m.control_radius));
+            .gap(px(t.space.lg))
+            .p(px(CARD_PAD))
+            .corner(t, t.radius.lg)
+            .bg(rgb(c.panel));
         self.kit()
-            .wash(row, pm_shell::kit::key(&id), m.control_radius)
+            .wash(card, kit::key(id), t.radius.lg)
             .child(
                 div()
                     .flex_none()
-                    .size(px(side))
-                    .rounded(px(m.control_radius))
-                    .bg(linear_gradient(
-                        135.,
-                        linear_color_stop(rgb(from), 0.),
-                        linear_color_stop(rgb(to), 1.),
-                    )),
+                    .size(px(TILE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .corner(t, t.radius.md + t.space.hair)
+                    .bg(rgb(c.floating))
+                    .child(
+                        div()
+                            .size(px(ART))
+                            .corner(t, t.radius.md)
+                            .bg(linear_gradient(
+                                135.,
+                                linear_color_stop(rgb(from), 0.),
+                                linear_color_stop(rgb(to), 1.),
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -1083,86 +1220,258 @@ impl StoreWindow {
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .gap(px(m.border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(m.gap / 2.))
-                            .min_w(px(0.))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_weight(FontWeight(ty.semibold_weight))
-                                    .child(listing.name.clone()),
-                            )
-                            .when(listing.verified, |d| {
-                                d.child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "store-row-{}-verified",
-                                            listing.repo_id
-                                        )))
-                                        .flex_none()
-                                        .role(Role::Image)
-                                        .aria_label("Verified")
-                                        .child(symbol(
-                                            "checkmark.seal.fill",
-                                            m.symbol_inline,
-                                            c.accent_text,
-                                        )),
-                                )
-                            }),
-                    )
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(ty.minimum))
-                            .text_color(rgb(c.muted))
-                            .child(line),
+                            .text_role(t, Text::Title)
+                            .child(name.to_owned()),
+                    )
+                    .children(line.map(|(text, ink)| {
+                        div()
+                            .truncate()
+                            .text_role(t, Text::Body)
+                            .text_color(rgb(ink))
+                            .child(text)
+                    }))
+                    .child(
+                        facts
+                            .flex()
+                            .items_center()
+                            .gap(px(t.space.xs))
+                            .min_w(px(0.))
+                            .pt(px(t.space.hair))
+                            .text_role(t, Text::Body)
+                            .text_color(rgb(c.faint)),
                     ),
             )
             .child(action)
-            .on_click(cx.listener(move |v, _, _, cx| v.open_detail(item.clone(), cx)))
-            .into_any_element()
     }
-    /// Listings in a grid: columns at least `m.sheet_width − m.sheet_inset`.
-    fn grid(&self, rows: Vec<AnyElement>) -> AnyElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .gap(px(self.tokens.metrics.gap))
-            .children(rows)
-            .into_any_element()
+    /// A listing's card: what it does, who made it, and a check when it is
+    /// here or a plus that opens its page (where its access is shown before
+    /// it is installed). `place` names the shelf it is on: one listing can be
+    /// on several, and each card keeps its own hover.
+    fn card(
+        &self,
+        place: &str,
+        listing: &Listing,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let slug = listing.slug.clone();
+        let item = listing.clone();
+        let open = item.clone();
+        let symbol = |name: &str, color: u32| {
+            pm_shell::symbol::symbol(name, m.symbol_inline, Weight::Semibold, color, window)
+        };
+        let action_id = format!("store-{place}-{}-action", listing.repo_id);
+        // v1.2.0's corner: + installs at once, the words while it runs, a
+        // tick once it is here. A listing it cannot install plainly (no
+        // release, or a build with no Store key) opens its page instead.
+        let action = if self.busy.as_deref() == Some(listing.repo_id.as_str()) {
+            div()
+                .id(SharedString::from(action_id))
+                .flex_none()
+                .px(px(t.space.sm))
+                .text_role(t, Text::Body)
+                .text_color(rgb(c.faint))
+                .child("Installing…")
+                .into_any_element()
+        } else if self.installed(listing).is_some() {
+            div()
+                .id(SharedString::from(action_id))
+                .role(Role::Image)
+                .aria_label("Installed")
+                .flex_none()
+                .size(px(PLUS))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(symbol("checkmark", c.faint))
+                .into_any_element()
+        } else {
+            let pick = listing.latest.as_ref().map(|latest| Pick {
+                release: latest.0.clone(),
+                repo: listing.repo_id.clone(),
+                extension: listing.slug.clone(),
+                version: latest.1.clone(),
+                name: listing.name.clone(),
+            });
+            let direct = pick.filter(|_| self.services.source.is_some());
+            let key = kit::key(&action_id);
+            let hover = self.kit().hovered(key);
+            self.kit()
+                .track_hover(
+                    div()
+                        .id(SharedString::from(action_id))
+                        .role(Role::Button)
+                        .aria_label(format!("Install: {}", listing.name))
+                        .flex_none()
+                        .size(px(PLUS))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .corner(t, t.metrics.control_radius)
+                        .bg(rgb(c.floating))
+                        .child(symbol("plus", if hover > 0.5 { c.text } else { c.secondary }))
+                        .when(self.busy.is_some(), |d| self.kit().disabled(d))
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            cx.stop_propagation();
+                            match direct.clone() {
+                                Some(pick) => v.install(pick, cx),
+                                None => v.open_detail(open.clone(), cx),
+                            }
+                        })),
+                    key,
+                )
+                .into_any_element()
+        };
+        let facts = div()
+            .child(div().truncate().child(format!("by {}", listing.handle)))
+            .when(listing.verified, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "store-{place}-{}-verified",
+                            listing.repo_id
+                        )))
+                        .flex_none()
+                        .role(Role::Image)
+                        .aria_label("Verified")
+                        .child(symbol("checkmark.seal.fill", c.verified)),
+                )
+            });
+        // Keyed by repository: two makers' listings may share a slug.
+        self.frame(
+            &format!("store-{place}-{}", listing.repo_id),
+            width,
+            Face {
+                seed: &listing.repo_id,
+                name: &listing.name,
+                line: (!listing.tagline.is_empty()).then(|| (listing.tagline.clone(), c.muted)),
+            },
+            facts,
+            action,
+        )
+        .debug_selector(move || format!("store-row-{slug}"))
+        .on_click(cx.listener(move |v, _, _, cx| v.open_detail(item.clone(), cx)))
+        .into_any_element()
+    }
+    /// How wide a card is and how many share a row: two (one when the
+    /// column is narrow), as v1.2.0's grid.
+    fn card_width(&self, window: &Window) -> (f32, usize) {
+        let t = &self.tokens;
+        let column = (f32::from(window.viewport_size().width) - 2. * t.space.xxl)
+            .min(t.metrics.store_column);
+        let across = if column < NARROW { 1 } else { 2 };
+        let width = ((column - t.space.md * (across - 1) as f32) / across as f32).floor();
+        (width, across)
+    }
+    fn grid(&self, cards: Vec<AnyElement>, across: usize) -> AnyElement {
+        let gap = self.tokens.space.md;
+        let mut rows = div().flex().flex_col().gap(px(gap));
+        let mut cards = cards.into_iter().peekable();
+        while cards.peek().is_some() {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .gap(px(gap))
+                    .children(cards.by_ref().take(across)),
+            );
+        }
+        rows.into_any_element()
+    }
+    fn cards(
+        &self,
+        place: &str,
+        listings: &[Listing],
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (width, across) = self.card_width(window);
+        let cards = listings
+            .iter()
+            .map(|listing| self.card(place, listing, width, window, cx))
+            .collect();
+        self.grid(cards, across)
     }
     fn status(&self, text: &str) -> Div {
         div()
-            .p(px(self.tokens.metrics.gap))
+            .px(px(CARD_PAD))
+            .pb(px(self.tokens.space.xl))
             .text_color(rgb(self.tokens.colors.secondary))
             .child(text.to_string())
     }
-    /// A shelf's heading and how many it holds.
-    fn heading(&self, text: &str, count: usize) -> Div {
-        let (m, ty) = (&self.tokens.metrics, self.tokens.typography);
+    /// A section's head: its name on the cards' text edge, and one quiet
+    /// action at the far edge.
+    fn heading(&self, text: &str, trailing: Option<AnyElement>) -> Div {
+        let t = &self.tokens;
         div()
             .flex()
-            .items_baseline()
-            .gap(px(m.gap))
-            .pt(px(m.inset * 1.5))
-            .pb(px(m.gap))
-            .px(px(m.gap))
+            .flex_none()
+            .items_center()
+            .gap(px(t.space.md))
+            .h(px(t.metrics.row))
+            .mb(px(t.space.md))
+            .pl(px(CARD_PAD))
             .child(
                 div()
-                    .text_size(px(ty.heading))
-                    .font_weight(FontWeight(ty.semibold_weight))
+                    .id(SharedString::from(format!("store-head-{text}")))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .role(Role::Heading)
+                    .text_role(t, Text::Heading)
                     .child(text.to_string()),
             )
+            .children(trailing)
+    }
+    /// v1.2.0's empty section: a card saying what goes here, and the one
+    /// thing to do about it at its trailing edge.
+    fn empty_card(&self, title: &str, body: &str, action: Option<AnyElement>) -> Div {
+        let t = &self.tokens;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xl))
+            .p(px(CARD_PAD))
+            .corner(t, t.radius.lg)
+            .bg(rgb(t.colors.panel))
             .child(
                 div()
-                    .text_size(px(ty.minimum))
-                    .text_color(rgb(self.tokens.colors.muted))
-                    .child(count.to_string()),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(t.space.hair))
+                    .child(div().text_role(t, Text::Title).child(title.to_owned()))
+                    .child(
+                        div()
+                            .max_w(px(t.metrics.sheet_width))
+                            .text_color(rgb(t.colors.muted))
+                            .child(body.to_owned()),
+                    ),
             )
+            .children(action)
+    }
+    /// A quiet text action at a section head's far edge.
+    fn head_action(&self, id: &str, label: &str, trail: Option<&str>) -> Stateful<Div> {
+        let id = id.to_owned();
+        self.kit()
+            .button(id.clone(), label.to_owned(), Button::Quiet, None, trail)
+            .debug_selector(move || id.clone())
+    }
+    /// A section: its head, then what it holds, then the room before the next.
+    fn section(&self, head: Div, body: impl IntoElement) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .pb(px(self.tokens.space.section))
+            .child(head)
+            .child(body)
+            .into_any_element()
     }
     fn list(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
@@ -1172,166 +1481,218 @@ impl StoreWindow {
                 Load::Loading => out.push(self.loading().into_any_element()),
                 Load::Failed(_) => out.push(self.load_failed(cx).into_any_element()),
                 Load::Ready(shelves) if shelves.is_empty() => out.push(
-                    pm_shell::view::empty_state(
-                        &self.tokens,
-                        "No Extensions Yet",
-                        "Check back for extensions published to the Store.",
-                    )
-                    .into_any_element(),
+                    self.kit()
+                        .empty_state(
+                            "shippingbox",
+                            "Nothing Here Yet",
+                            "Extensions people publish show up here. Make one with your agent \
+                             and publish it from your Library.",
+                        )
+                        .into_any_element(),
                 ),
                 Load::Ready(shelves) => {
-                    // A list shows each extension once, under its first shelf.
-                    let mut seen = std::collections::BTreeSet::new();
-                    for (title, items) in shelves.clone() {
-                        let items: Vec<_> = items
-                            .into_iter()
-                            .filter(|l| seen.insert(l.repo_id.clone()))
-                            .collect();
-                        if items.is_empty() {
-                            continue;
-                        }
-                        out.push(self.heading(&title, items.len()).into_any_element());
-                        let rows = items.iter().map(|l| self.row(l, window, cx)).collect();
-                        out.push(self.grid(rows));
+                    for shelf in shelves.clone() {
+                        let kind = KINDS.iter().position(|(id, _)| *id == shelf.id);
+                        let title = if shelf.id == "featured" {
+                            "Featured"
+                        } else {
+                            shelf.title.as_str()
+                        };
+                        let all = kind.map(|i| {
+                            self.head_action(
+                                &format!("store-show-all-{}", shelf.id),
+                                "Show All",
+                                Some("arrow.right"),
+                            )
+                                .on_click(
+                                    cx.listener(move |v, _, _, cx| v.set_page(Page::Kind(i), cx)),
+                                )
+                                .into_any_element()
+                        });
+                        let cards = self.cards(&shelf.id, &shelf.listings, window, cx);
+                        out.push(self.section(self.heading(title, all), cards));
                     }
                 }
             },
-            Page::Library => out.extend(self.library_rows(cx)),
+            Page::Library => out.extend(self.library_rows(window, cx)),
             _ => {
                 let items = self.catalog_items();
-                let rows = items.iter().map(|l| self.row(l, window, cx)).collect();
-                out.push(self.grid(rows));
+                let title = if searching {
+                    format!("Results for “{}”", self.query.trim())
+                } else {
+                    self.page.title().to_owned()
+                };
+                let mut body = div().flex().flex_col().gap(px(self.tokens.space.xl));
+                if !items.is_empty() {
+                    body = body.child(self.cards("results", &items, window, cx));
+                }
                 match self.catalog.state {
-                    CatalogState::Loading => out.push(self.loading().into_any_element()),
-                    CatalogState::Failed(_) => out.push(self.load_failed(cx).into_any_element()),
-                    CatalogState::Ready if items.is_empty() => out.push(
-                        pm_shell::view::empty_state(
-                            &self.tokens,
-                            &if searching {
-                                "No Results".to_owned()
-                            } else {
-                                format!("No {} Yet", self.page.title())
-                            },
-                            if searching {
-                                "Try a different search."
-                            } else {
-                                "Choose another category or check back later."
-                            },
-                        )
-                        .into_any_element(),
-                    ),
+                    CatalogState::Loading => body = body.child(self.loading()),
+                    CatalogState::Failed(_) => body = body.child(self.load_failed(cx)),
+                    CatalogState::Ready if items.is_empty() => {
+                        body = body.child(if searching {
+                            self.kit().empty_state(
+                                "magnifyingglass",
+                                &format!("No Results for “{}”", self.query.trim()),
+                                "Try a shorter name, a maker’s handle, or a kind such as \
+                                 “transition”.",
+                            )
+                        } else {
+                            self.kit().empty_state(
+                                "shippingbox",
+                                "Nothing Here Yet",
+                                &format!(
+                                    "No one has published {} yet.",
+                                    self.page.title().to_lowercase()
+                                ),
+                            )
+                        })
+                    }
                     _ => {}
                 }
                 if self.catalog.next_cursor.is_some()
                     && !matches!(self.catalog.state, CatalogState::Loading)
                 {
-                    out.push(
-                        div()
-                            .p(px(self.tokens.metrics.gap))
-                            .child(
-                                self.button("store-more", "Show More", true, false)
-                                    .on_click(cx.listener(|v, _, _, cx| v.more(cx))),
-                            )
-                            .into_any_element(),
+                    body = body.child(
+                        div().flex().justify_center().child(
+                            self.button("store-more", "Show More", true, false)
+                                .on_click(cx.listener(|v, _, _, cx| v.more(cx))),
+                        ),
                     );
                 }
+                out.push(self.section(self.heading(&title, None), body));
             }
         }
         out
     }
-    fn library_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let (c, m, ty) = (
-            &self.tokens.colors,
-            &self.tokens.metrics,
-            self.tokens.typography,
+    /// v1.2.0's head: the title (on a kind's page, the way back), then
+    /// Discover · Library, search and Publish.
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = &self.tokens;
+        let (c, m, tr) = (&t.colors, &t.metrics, &t.translucency);
+        let kit = self.kit();
+        let back = matches!(self.page, Page::Kind(_)) && self.query.trim().is_empty();
+        let title = if back {
+            div()
+                .id("store-title-back")
+                .debug_selector(|| "store-title-back".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(t.space.xs))
+                .role(Role::Button)
+                .aria_label("Back to Discover")
+                .child(kit.symbol(
+                    "chevron.left",
+                    m.symbol_toolbar + 1.,
+                    Weight::Semibold,
+                    c.muted,
+                ))
+                .child(div().text_role(t, Text::Display).child("Discover"))
+                .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx)))
+        } else {
+            div()
+                .id("store-heading")
+                .flex_none()
+                .role(Role::Heading)
+                .text_role(t, Text::Display)
+                .child("Store")
+        };
+        let width = f32::from(window.viewport_size().width);
+        let search_key = kit::key("store-search");
+        let search = kit.track_hover(
+            div()
+                .id("store-search")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(t.space.md))
+                .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)))
+                .h(px(ACTION))
+                .px(px(t.space.md + t.space.hair))
+                .rounded(px(t.radius.md))
+                .bg(ink(
+                    c.text,
+                    tr.hover + (tr.selected - tr.hover) * kit.hovered(search_key),
+                ))
+                .child(kit.symbol(
+                    "magnifyingglass",
+                    m.symbol_toolbar + 1.,
+                    Weight::Regular,
+                    c.muted,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .children(self.search.clone())
+                        .when(self.search.is_none(), |d| {
+                            d.text_color(rgb(c.faint)).child("Search")
+                        }),
+                )
+                .when(self.query.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_role(t, Text::Caption)
+                            .text_color(rgb(c.faint))
+                            .child("⌘F"),
+                    )
+                })
+                .on_click(cx.listener(|v, _, _, cx| {
+                    if let Some(field) = &v.search {
+                        field.update(cx, |f, cx| f.begin_editing(cx));
+                    }
+                })),
+            search_key,
         );
-        let mut out = Vec::new();
+        // v1.2.0's head: the title, then one toolbar: Discover · Library
+        // where you are, then search and Publish at the far edge.
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(t.space.xl))
+            .mb(px(t.space.section))
+            .child(title)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.md))
+                    .h(px(ACTION))
+                    .children(self.pages.clone())
+                    .child(div().flex_1())
+                    .child(search)
+                    .children(self.publish_menu.clone()),
+            )
+    }
+    /// Library (S077): what needs you, what the Store installed here and
+    /// what was made here, each a section of cards.
+    fn library_rows(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = &self.tokens;
+        let c = &t.colors;
         let items = match &self.library {
             Load::Ready(items) => items.clone(),
             Load::Loading => return vec![self.loading().into_any_element()],
             Load::Failed(_) => return vec![self.load_failed(cx).into_any_element()],
         };
-        if items.is_empty() && self.yours.is_empty() {
-            return vec![
-                pm_shell::view::empty_state(
-                    &self.tokens,
-                    "No Extensions Yet",
-                    "Find an extension in Discover to install it.",
-                )
-                .into_any_element(),
-            ];
-        }
-        out.push(
-            div()
-                .flex()
-                .px(px(m.gap))
-                .pt(px(m.gap))
-                .child(
-                    self.button(
-                        "store-check-updates",
-                        "Check for Updates",
-                        self.busy.is_none(),
-                        false,
-                    )
-                    .on_click(cx.listener(|v, _, _, cx| {
-                        v.message = None;
-                        v.load_library();
-                        cx.notify();
-                    })),
-                )
-                .into_any_element(),
-        );
+        let (width, across) = self.card_width(window);
+        let mut out = Vec::new();
         let (attention, calm): (Vec<_>, Vec<_>) = items
             .into_iter()
             .partition(|i| i.removed || i.update.is_some());
-        for (title, group) in [("Needs Attention", attention), ("Installed", calm)] {
-            if group.is_empty() {
-                continue;
-            }
-            out.push(self.heading(title, group.len()).into_any_element());
-            for item in group {
-                let status = if item.removed {
-                    "No longer on the Store".to_owned()
-                } else if let Some((version, _)) = &item.update {
-                    format!("Installed {} · Update to {version}", item.version)
-                } else {
-                    format!("Installed {}", item.version)
-                };
-                let id = item.id.clone();
-                let mut row = div()
-                    .id(SharedString::from(format!("store-installed-{id}")))
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("store-installed-{id}")
-                    })
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(m.inset))
-                    .py(px(m.gap * 0.75))
-                    .px(px(m.gap))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(0.))
-                            .gap(px(m.border))
-                            .child(div().truncate().child(item.name.clone()))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(ty.minimum))
-                                    .text_color(rgb(if item.removed {
-                                        c.danger
-                                    } else {
-                                        c.secondary
-                                    }))
-                                    .child(status),
-                            ),
-                    );
-                if let (Some((version, release)), Some(repo), false) =
-                    (&item.update, &item.repo, item.removed)
-                {
+        let installed_card = |item: Installed, cx: &mut Context<Self>| {
+            let (line, ink) = if item.removed {
+                ("No longer on the Store".to_owned(), c.warning)
+            } else if let Some((version, _)) = &item.update {
+                (format!("Update to {version} available"), c.warning)
+            } else {
+                (format!("Version {}", item.version), c.muted)
+            };
+            let id = item.id.clone();
+            let action = match (&item.update, &item.repo, item.removed) {
+                (Some((version, release)), Some(repo), false) => {
                     let pick = Pick {
                         release: release.clone(),
                         repo: repo.clone(),
@@ -1340,60 +1701,104 @@ impl StoreWindow {
                         name: item.name.clone(),
                     };
                     let busy = self.busy.as_deref() == Some(repo.as_str());
-                    row = row.child(
-                        self.button(
-                            format!("store-update-{id}"),
-                            if busy { "Updating…" } else { "Update" },
-                            self.busy.is_none() && self.services.source.is_some(),
-                            true,
-                        )
-                        .on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx))),
-                    );
-                }
-                out.push(row.into_any_element());
-            }
-        }
-        // Made on this Mac: publish to the Store (v1 Library › Yours).
-        if !self.yours.is_empty() {
-            out.push(self.heading("Yours", self.yours.len()).into_any_element());
-        }
-        for item in self.yours.clone() {
-            let (status, label) = match &item.published {
-                Some(published) if *published == item.version => {
-                    (format!("Published {published}"), "Publish Update…")
-                }
-                Some(published) => (
-                    format!("Published {published} · Changed since"),
-                    "Publish Update…",
-                ),
-                None => ("Not on the Store".to_owned(), "Publish…"),
-            };
-            let id = item.id.clone();
-            let busy = self.busy.as_deref() == Some(id.as_str());
-            out.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(m.inset))
-                    .py(px(m.gap * 0.75))
-                    .px(px(m.gap))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(0.))
-                            .gap(px(m.border))
-                            .child(div().truncate().child(item.name.clone()))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(ty.minimum))
-                                    .text_color(rgb(c.secondary))
-                                    .child(status),
-                            ),
+                    self.button(
+                        format!("store-update-{id}"),
+                        if busy { "Updating…" } else { "Update" },
+                        self.busy.is_none() && self.services.source.is_some(),
+                        true,
                     )
-                    .child(
+                    .on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx)))
+                    .into_any_element()
+                }
+                _ => div().into_any_element(),
+            };
+            let facts = div().child(div().truncate().child(if item.update.is_some() {
+                format!("Version {} installed", item.version)
+            } else {
+                "From the Store".to_owned()
+            }));
+            self.frame(
+                &format!("store-installed-{id}"),
+                width,
+                Face {
+                    seed: item.repo.as_deref().unwrap_or(&item.id),
+                    name: &item.name,
+                    line: Some((line, ink)),
+                },
+                facts,
+                action,
+            )
+            .debug_selector(move || format!("store-installed-{id}"))
+            .into_any_element()
+        };
+        // Check for Updates heads the first Store section.
+        let mut check = (!attention.is_empty() || !calm.is_empty()).then(|| {
+            self.head_action("store-check-updates", "Check for Updates", None)
+                .when(self.busy.is_some(), |d| self.kit().disabled(d))
+                .on_click(cx.listener(|v, _, _, cx| {
+                    if v.busy.is_none() {
+                        v.message = None;
+                        v.load_library();
+                        cx.notify();
+                    }
+                }))
+                .into_any_element()
+        });
+        let needs_you = !attention.is_empty();
+        if needs_you {
+            let cards = attention
+                .into_iter()
+                .map(|i| installed_card(i, cx))
+                .collect();
+            let grid = self.grid(cards, across);
+            out.push(self.section(self.heading("Needs Attention", check.take()), grid));
+        }
+        if !calm.is_empty() {
+            let cards = calm.into_iter().map(|i| installed_card(i, cx)).collect();
+            let grid = self.grid(cards, across);
+            out.push(self.section(self.heading("Installed", check.take()), grid));
+        } else if !needs_you {
+            let empty = self.empty_card(
+                "Nothing Installed Yet",
+                "Extensions you install from the Store live here, and update when their makers \
+                 publish.",
+                Some(
+                    self.button("store-discover", "Discover Extensions", true, false)
+                        .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx)))
+                        .into_any_element(),
+                ),
+            );
+            out.push(self.section(self.heading("Installed", None), empty));
+        }
+        // Made on this Mac: published from here (v1.2.0's Library › Made by You).
+        let made = if self.yours.is_empty() {
+            self.empty_card(
+                "Nothing Made Yet",
+                "Ask your agent for an effect, a panel or a theme. What it makes shows up here, \
+                 ready to publish.",
+                None,
+            )
+            .into_any_element()
+        } else {
+            let cards = self
+                .yours
+                .clone()
+                .into_iter()
+                .map(|item| {
+                    let (status, label) = match &item.published {
+                        Some(published) if *published == item.version => {
+                            (format!("Published {published}"), "Publish Update…")
+                        }
+                        Some(published) => (
+                            format!("Published {published} · changed since"),
+                            "Publish Update…",
+                        ),
+                        None => ("Not on the Store".to_owned(), "Publish…"),
+                    };
+                    let id = item.id.clone();
+                    let busy = self.busy.as_deref() == Some(id.as_str());
+                    let publish = {
+                        let id = id.clone();
                         self.button(
                             format!("store-publish-{id}"),
                             if busy { "Publishing…" } else { label },
@@ -1402,74 +1807,137 @@ impl StoreWindow {
                         )
                         .on_click(
                             cx.listener(move |v, _, window, cx| v.publish(id.clone(), window, cx)),
-                        ),
+                        )
+                        .into_any_element()
+                    };
+                    self.frame(
+                        &format!("store-yours-{id}"),
+                        width,
+                        Face {
+                            seed: &format!("local:{id}"),
+                            name: &item.name,
+                            line: Some((format!("Version {}", item.version), c.muted)),
+                        },
+                        div().child(div().truncate().child(status)),
+                        publish,
                     )
-                    .into_any_element(),
-            );
-        }
+                    .into_any_element()
+                })
+                .collect();
+            self.grid(cards, across)
+        };
+        out.push(self.section(self.heading("Made by You", None), made));
         out
     }
+    /// An extension's page (S076): its head (art, name, what it does, who
+    /// made it, and the action at the trailing edge), then About and a card
+    /// of facts and one of versions, each under a small label as v1.2.0's.
     fn detail_view(
         &self,
         listing: &Listing,
         load: &Load<Detail>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let (c, m, ty) = (
-            &self.tokens.colors,
-            &self.tokens.metrics,
-            self.tokens.typography,
-        );
-        let mut out = vec![
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let back = div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xs))
+            .mb(px(t.space.xl))
+            .child(
+                self.kit()
+                    .icon_button("store-back", "chevron.left", "Back", false)
+                    .debug_selector(|| "store-back".into())
+                    .on_click(cx.listener(|v, _, _, cx| v.back(cx))),
+            )
+            .child(
+                div()
+                    .text_role(t, Text::Label)
+                    .text_color(rgb(c.muted))
+                    .child(self.title_for_back()),
+            );
+        let (from, to) = art(&listing.repo_id);
+        let seal = listing.verified.then(|| {
             div()
-                .flex()
-                .items_center()
-                .gap(px(m.gap))
-                .child(
-                    self.kit()
-                        .icon_button("store-back", "chevron.left", "Back", false)
-                        .debug_selector(|| "store-back".into())
-                        .on_click(cx.listener(|v, _, _, cx| v.back(cx))),
-                )
-                .child(self.title_for_back())
-                .into_any_element(),
-            div()
-                .px(px(m.gap))
-                .pt(px(m.gap))
-                .text_size(px(ty.title))
-                .font_weight(FontWeight(ty.semibold_weight))
-                .child(listing.name.clone())
-                .into_any_element(),
-            div()
-                .px(px(m.gap))
-                .text_color(rgb(c.secondary))
-                .child(format!(
-                    "{} · by {}{}",
-                    kind_label(&listing.category),
-                    listing.handle,
-                    if listing.verified {
-                        " · Verified publisher"
-                    } else {
-                        ""
-                    }
+                .id("store-detail-verified")
+                .flex_none()
+                .role(Role::Image)
+                .aria_label("Verified")
+                .child(pm_shell::symbol::symbol(
+                    "checkmark.seal.fill",
+                    m.symbol_inline,
+                    Weight::Semibold,
+                    c.verified,
+                    window,
                 ))
-                .into_any_element(),
-        ];
+        });
+        let copy = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap(px(t.space.hair))
+            .child(
+                div()
+                    .text_role(t, Text::Display)
+                    .child(listing.name.clone()),
+            )
+            .when(!listing.tagline.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_role(t, Text::Reading)
+                        .text_color(rgb(c.secondary))
+                        .child(listing.tagline.clone()),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.xs))
+                    .text_color(rgb(c.muted))
+                    .child(format!("by {}", listing.handle))
+                    .children(seal),
+            );
+        let mut head = div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xl))
+            .pb(px(t.space.xxl))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(HERO))
+                    .corner(t, t.radius.xl + t.space.xs)
+                    .bg(linear_gradient(
+                        135.,
+                        linear_color_stop(rgb(from), 0.),
+                        linear_color_stop(rgb(to), 1.),
+                    )),
+            )
+            .child(copy);
         let detail = match load {
             Load::Loading => {
-                out.push(self.loading().into_any_element());
-                return out;
+                return vec![
+                    back.into_any_element(),
+                    head.into_any_element(),
+                    self.loading().into_any_element(),
+                ];
             }
             Load::Failed(_) => {
-                out.push(self.load_failed(cx).into_any_element());
-                return out;
+                return vec![
+                    back.into_any_element(),
+                    head.into_any_element(),
+                    self.load_failed(cx).into_any_element(),
+                ];
             }
             Load::Ready(detail) => detail,
         };
         // The one action, then Uninstall for an install.
         let action = self.action(detail);
         let installed = self.installed(listing).cloned();
-        let mut actions = div().flex().gap(px(m.gap)).px(px(m.gap)).pt(px(m.gap));
         let can_act = match action {
             DetailAction::Install | DetailAction::InstallAndSetUp | DetailAction::Update => {
                 self.services.source.is_some() && self.busy.is_none()
@@ -1501,8 +1969,14 @@ impl StoreWindow {
             };
             button = button.on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx)));
         }
-        actions = actions.child(button);
-        if let Some(item) = installed {
+        let mut actions = div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .items_end()
+            .gap(px(t.space.md))
+            .child(button);
+        if let Some(item) = &installed {
             let (id, name, repo) = (item.id.clone(), item.name.clone(), item.repo.clone());
             actions = actions.child(
                 self.button("store-uninstall", "Uninstall…", self.busy.is_none(), false)
@@ -1511,10 +1985,9 @@ impl StoreWindow {
                     })),
             );
         }
-        out.push(actions.into_any_element());
-        if let Some(message) = self.message_line() {
-            out.push(message.into_any_element());
-        }
+        head = head.child(actions);
+        let mut out = vec![back.into_any_element(), head.into_any_element()];
+        out.extend(self.message_line().map(IntoElement::into_any_element));
         if primary && self.services.source.is_none() {
             out.push(
                 self.status(SIGNING)
@@ -1522,98 +1995,196 @@ impl StoreWindow {
                     .into_any_element(),
             );
         }
-        let block = |title: &str, body: Div| {
+        // A small label over its card or text, as a Settings page.
+        let block = |title: &str, body: AnyElement| {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(m.border * 2.))
-                .px(px(m.gap))
-                .pt(px(m.inset))
+                .pb(px(t.space.xxl))
                 .child(
                     div()
-                        .font_weight(FontWeight(ty.semibold_weight))
+                        .px(px(CARD_PAD))
+                        .pb(px(t.space.md))
+                        .text_role(t, Text::Label)
+                        .text_color(rgb(c.muted))
                         .child(title.to_string()),
                 )
                 .child(body)
                 .into_any_element()
         };
-        if !listing.tagline.is_empty() {
-            out.push(
-                div()
-                    .px(px(m.gap))
-                    .pt(px(m.gap))
-                    .child(listing.tagline.clone())
-                    .into_any_element(),
-            );
-        }
-        if let Some(about) = &detail.about {
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .corner(t, t.radius.lg)
+                .bg(rgb(c.panel))
+        };
+        let fact = |key: &str, value: AnyElement| {
+            div()
+                .flex()
+                .gap(px(t.space.xl))
+                .px(px(CARD_PAD))
+                .py(px(t.space.md + t.space.hair))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(FACT_KEY))
+                        .text_color(rgb(c.secondary))
+                        .child(key.to_string()),
+                )
+                .child(div().flex_1().min_w(px(0.)).child(value))
+        };
+        let text = |s: String| div().child(s).into_any_element();
+        // About only when it says more than the tagline under the name.
+        if let Some(about) = detail
+            .about
+            .as_ref()
+            .filter(|a| a.trim() != listing.tagline.trim())
+        {
             out.push(block(
                 "About",
-                div().text_color(rgb(c.secondary)).child(about.clone()),
+                div()
+                    .px(px(CARD_PAD))
+                    .text_role(t, Text::Reading)
+                    .child(about.clone())
+                    .into_any_element(),
             ));
         }
+        let mut facts: Vec<Div> = vec![
+            fact(
+                "Made by",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.xs))
+                    .child(listing.handle.clone())
+                    .when(listing.verified, |d| {
+                        d.child(pm_shell::symbol::symbol(
+                            "checkmark.seal.fill",
+                            m.symbol_inline,
+                            Weight::Semibold,
+                            c.verified,
+                            window,
+                        ))
+                    })
+                    .into_any_element(),
+            ),
+            fact("Kind", text(kind_label(&listing.category).to_string())),
+        ];
+        if let Some(latest) = &listing.latest {
+            facts.push(fact(
+                "Version",
+                text(match &installed {
+                    Some(item) if item.version != latest.1 => {
+                        format!("{} installed · {} available", item.version, latest.1)
+                    }
+                    _ => latest.1.clone(),
+                }),
+            ));
+            let updated = relative_date(&latest.3, today());
+            if !updated.is_empty() {
+                facts.push(fact("Updated", text(updated)));
+            }
+        }
+        facts.push(fact(
+            "Identifier",
+            text(format!("{}/{}", listing.handle, listing.slug)),
+        ));
         let uses = permission_lines(&detail.listing.permissions);
         if !uses.is_empty() || !detail.link_hosts.is_empty() {
-            let mut body = div().flex().flex_col();
+            let mut lines = div().flex().flex_col().gap(px(t.space.hair));
             for (label, warn) in uses {
-                body = body.child(
+                lines = lines.child(
                     div()
-                        .text_color(rgb(if warn { c.danger } else { c.secondary }))
+                        .text_color(rgb(if warn { c.warning } else { c.text }))
                         .child(label),
                 );
             }
             if !detail.link_hosts.is_empty() {
-                body = body.child(div().text_color(rgb(c.secondary)).child(format!(
+                lines = lines.child(div().child(format!(
                     "Opens {} in your browser without asking",
                     detail.link_hosts.join(", ")
                 )));
             }
-            out.push(block("Uses", body));
+            facts.push(fact("Access", lines.into_any_element()));
         }
         if !detail.contributes.is_empty() {
-            out.push(block(
-                "Includes",
-                div()
-                    .text_color(rgb(c.secondary))
-                    .child(includes_text(&detail.contributes)),
-            ));
+            facts.push(fact("Includes", text(includes_text(&detail.contributes))));
         }
-        out.push(block(
-            "Requires",
-            div()
-                .text_color(rgb(c.secondary))
-                .child(requires_text(listing.latest.as_ref().and_then(|l| l.2))),
+        facts.push(fact(
+            "Compatibility",
+            text(requires_text(listing.latest.as_ref().and_then(|l| l.2)).to_string()),
         ));
-        let mut versions = div().flex().flex_col().gap(px(m.border * 2.));
-        for release in &detail.releases {
-            let mut line = vec![release.version.clone()];
-            let date = relative_date(&release.published_at, today());
-            if !date.is_empty() {
-                line.push(date);
+        let mut details = card();
+        for (i, row) in facts.into_iter().enumerate() {
+            if i > 0 {
+                details = details.child(self.kit().separator().mx(px(CARD_PAD)));
             }
-            if release.withdrawn {
-                line.push("Withdrawn".into());
+            details = details.child(row);
+        }
+        // v1.2.0's order: what changed, then the facts and the sandbox's word.
+        let details = div()
+            .flex()
+            .flex_col()
+            .gap(px(t.space.md))
+            .child(details)
+            .child(
+                div()
+                    .px(px(CARD_PAD))
+                    .text_color(rgb(c.muted))
+                    .child("This extension runs in a sandbox with the permissions listed above."),
+            );
+        let mut versions = card();
+        for (i, release) in detail.releases.iter().enumerate() {
+            if i > 0 {
+                versions = versions.child(self.kit().separator().mx(px(CARD_PAD)));
             }
             let id = release.version.clone();
+            let date = relative_date(&release.published_at, today());
             versions = versions.child(
                 div()
                     .debug_selector(move || format!("store-version-{id}"))
                     .flex()
                     .flex_col()
+                    .px(px(CARD_PAD))
+                    .py(px(t.space.md + t.space.hair))
                     .child(
                         div()
-                            .text_color(rgb(if release.withdrawn { c.muted } else { c.text }))
-                            .child(line.join(" · ")),
+                            .flex()
+                            .items_baseline()
+                            .gap(px(t.space.md))
+                            .when(release.withdrawn, |d| {
+                                d.child(div().text_color(rgb(c.warning)).child("Withdrawn"))
+                            })
+                            .child(
+                                div()
+                                    .text_role(t, Text::Label)
+                                    .text_color(rgb(if release.withdrawn {
+                                        c.muted
+                                    } else {
+                                        c.text
+                                    }))
+                                    .child(release.version.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_role(t, Text::Caption)
+                                    .text_color(rgb(c.muted))
+                                    .child(date),
+                            ),
                     )
                     .children(release.notes.clone().map(|note| {
                         div()
-                            .text_size(px(ty.minimum))
+                            .pt(px(t.space.hair))
                             .text_color(rgb(c.secondary))
                             .child(note)
                     })),
             );
         }
-        out.push(block("Versions", versions));
+        if !detail.releases.is_empty() {
+            out.push(block("Version History", versions.into_any_element()));
+        }
+        out.push(block("Details", details.into_any_element()));
         out
     }
     fn message_line(&self) -> Option<Div> {
@@ -1643,98 +2214,79 @@ impl Render for StoreWindow {
             cx,
         ));
         let t = self.tokens.clone();
-        let m = &t.metrics;
-        let kit = self.kit();
-        let mut sidebar =
-            kit.utility_sidebar()
-                .pt(px(if self.embedded { t.space.md } else { m.toolbar }));
-        let pages = std::iter::once(Page::Discover)
-            .chain((0..KINDS.len()).map(Page::Kind))
-            .chain([Page::Library]);
-        for page in pages {
-            let label = page.title();
-            let selected = self.page == page;
-            if page == Page::Library || page == Page::Kind(0) {
-                sidebar = sidebar.child(div().h(px(m.gap)));
-            }
-            sidebar = sidebar.child(
-                kit.nav_row(
-                    label,
-                    match page {
-                        Page::Discover => "sparkles",
-                        Page::Library => "square.stack",
-                        Page::Kind(i) => [
-                            "wand.and.stars",
-                            "square.on.square",
-                            "rectangle.split.3x1",
-                            "paintpalette",
-                            "command",
-                            "square.3.layers.3d",
-                            "wrench.and.screwdriver",
-                        ][i],
-                    },
-                    label.into(),
-                    None,
-                    selected,
-                )
-                .debug_selector(move || format!("store-section-{label}"))
-                .on_click(cx.listener(move |v, _, _, cx| v.set_page(page, cx))),
-            );
-        }
-        let heading = match &self.detail {
-            Some(_) => "",
-            None if !self.query.trim().is_empty() => "Results",
-            None => self.page.title(),
-        };
-        let mut body = div()
-            .id("store-body")
-            .flex_1()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll();
         let content = match self.detail.clone() {
-            Some((listing, load)) => self.detail_view(&listing, &load, cx),
+            Some((listing, load)) => self.detail_view(&listing, &load, window, cx),
             None => self.list(window, cx),
         };
-        // The original app's Store column: its shelves and pages centre in
-        // the sheet at a readable width however wide the window grows.
-        let centred = |inner: Div| {
-            div()
-                .flex()
-                .justify_center()
-                .child(inner.flex_1().min_w(px(0.)).max_w(px(m.store_column)))
-        };
-        let mut column = div().flex().flex_col();
-        // A list page says what happened above its rows; a detail page
-        // says it under its action (`detail_view`).
-        if self.detail.is_none()
-            && let Some(message) = self.message_line()
-        {
-            column = column.child(message);
+        // v1.2.0's Store column: a readable width centred however wide the
+        // window grows. A list page says what happened under its header; a
+        // detail page says it under its action (`detail_view`).
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.))
+            .max_w(px(t.metrics.store_column));
+        if self.detail.is_none() {
+            column = column
+                .child(self.header(window, cx))
+                .children(self.message_line());
         }
-        body = body.child(centred(column.children(content)));
-        let actions = self
-            .search
-            .clone()
-            .map(|field| {
+        let body = div()
+            .id("store-body")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            // A window of its own keeps the toolbar's height for its buttons.
+            // v1.2.0's page starts 48 pt down; a window of its own also
+            // keeps the toolbar's height for its buttons.
+            .pt(px(t.space.section
+                + t.space.xl
+                + if self.embedded { 0. } else { t.metrics.toolbar }))
+            .pb(px(t.space.section * 2.))
+            .px(px(t.space.xxl))
+            .child(
                 div()
-                    .w(px(m.settings_sidebar))
-                    .child(field)
-                    .into_any_element()
-            })
-            .into_iter()
-            .collect();
-        kit.utility_window(
-            heading,
-            Some(sidebar.into_any_element()),
-            actions,
-            body.into_any_element(),
-            vec![],
-        )
-        .track_focus(&self.focus)
-        .on_key_down(cx.listener(Self::on_key))
+                    .flex()
+                    .justify_center()
+                    .child(column.children(content)),
+            );
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(t.colors.window))
+            .text_color(rgb(t.colors.text))
+            .text_role(&t, Text::Body)
+            .font_family(pm_design::TEXT_FONT)
+            .child(body)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
     }
 }
+/// A card's art seed, name and the line under it (text and ink).
+struct Face<'a> {
+    seed: &'a str,
+    name: &'a str,
+    line: Option<(String, u32)>,
+}
+/// The header's controls stand this high (v1.2.0's toolbar).
+const ACTION: f32 = 32.;
+/// v1.2.0's search field: 280 pt, narrower in a narrow window.
+const SEARCH: f32 = 280.;
+const SEARCH_ROOM: f32 = 320.;
+const SEARCH_LEAST: f32 = 160.;
+/// v1.2.0's card: 14 pt around a 44 pt tile holding 30 pt of art; one card
+/// to a row below 640 pt of column.
+const CARD_PAD: f32 = 14.;
+const TILE: f32 = 44.;
+const ART: f32 = 30.;
+const NARROW: f32 = 640.;
+/// The card's corner button (v1.2.0's 30 pt `st-plus`).
+const PLUS: f32 = 30.;
+/// An extension page's art, and the key column of its facts.
+const HERO: f32 = 80.;
+const FACT_KEY: f32 = 120.;
 
 /// A listing's artwork when it has none: two hues fixed by its repository
 /// (v1.2.0's `artFor`), as a diagonal ramp.
@@ -1758,4 +2310,51 @@ impl StoreWindow {
     pub(crate) fn catalog_state_for_tests(&self) -> &CatalogState {
         &self.catalog.state
     }
+}
+/// Where the storefront last seen is kept (the admitted listings as served).
+fn shelves_file(profile: &std::path::Path) -> PathBuf {
+    profile.join("caches").join("store-shelves.json")
+}
+/// Titled shelves of listings, empty shelves dropped.
+fn shelves_of<'a>(shelves: impl Iterator<Item = (&'a str, &'a str, &'a Vec<Value>)>) -> Vec<Shelf> {
+    shelves
+        .map(|(id, title, items)| Shelf {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            listings: items.iter().filter_map(Listing::from_value).collect(),
+        })
+        .filter(|shelf| !shelf.listings.is_empty())
+        .collect()
+}
+fn keep_shelves(profile: &std::path::Path, shelves: &[pm_services::store::Shelf]) {
+    let kept: Vec<Value> = shelves
+        .iter()
+        .map(|shelf| json!({ "id": shelf.id, "title": shelf.title, "items": shelf.items }))
+        .collect();
+    let file = shelves_file(profile);
+    let partial = file.with_extension("json.partial");
+    let written = file
+        .parent()
+        .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+        && serde_json::to_vec(&kept).is_ok_and(|bytes| std::fs::write(&partial, bytes).is_ok());
+    if written {
+        let _ = std::fs::rename(&partial, &file);
+    }
+}
+/// The storefront last seen, if there is one worth drawing.
+fn cached_shelves(profile: &std::path::Path) -> Option<Vec<Shelf>> {
+    let file = shelves_file(profile);
+    // The Store's own page limits keep it far below this.
+    if std::fs::metadata(&file).ok()?.len() > 4 << 20 {
+        return None;
+    }
+    let kept: Vec<Value> = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+    let shelves = shelves_of(kept.iter().filter_map(|shelf| {
+        Some((
+            shelf.get("id").and_then(Value::as_str).unwrap_or_default(),
+            shelf.get("title")?.as_str()?,
+            shelf.get("items")?.as_array()?,
+        ))
+    }));
+    (!shelves.is_empty()).then_some(shelves)
 }

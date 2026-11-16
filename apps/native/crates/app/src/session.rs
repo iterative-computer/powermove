@@ -71,10 +71,22 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
-    /// The project's Home poster, shown in the opening viewer's frame until
-    /// the viewer draws: the first picture waits for the open and for the
-    /// extensions the project draws with (PM-384).
+    /// The picture the viewer last showed for the opening project (or its
+    /// Home poster), in the opening viewer's frame until the viewer is
+    /// bound, then over the viewer until its first frame (`viewer_poster`):
+    /// the first picture waits for the open and for the extensions the
+    /// project draws with (PM-384).
     pub(crate) ghost_poster: Option<std::path::PathBuf>,
+    /// The picture the opening project's viewer stands in with until its
+    /// first real frame (`playback::Placeholder`); taken when its viewer is
+    /// bound.
+    pub(crate) viewer_poster: Option<std::path::PathBuf>,
+    /// The picture the viewer shows, kept as the last frame once it holds
+    /// still (`poster::still`).
+    pub(crate) last_frame_watch: crate::poster::StillWatch,
+    /// This window was in front at the last quit and is opening its
+    /// project before the other restored windows (`release_front`).
+    front_restore: bool,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -153,6 +165,9 @@ pub struct Controller {
     pub message: String,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
+    /// What the shell reads from the project on every frame, kept per
+    /// revision (`crate::frame_facts`).
+    pub(crate) frame_facts: crate::frame_facts::FrameFacts,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
     /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
     pub home: bool,
@@ -244,6 +259,10 @@ pub struct Controller {
 }
 /// How long arrow keys rest before a run of nudges becomes its undo step.
 const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
+/// How many tenths of a second a restored window waits for the front one's
+/// first frame (a Recover question there can hold it) before it opens its
+/// own project anyway (PM-384).
+const FRONT_WAIT_LOOKS: u32 = 300;
 
 /// Why a project opened as a copy, in user language (never the enum name):
 /// said when it opens. The window's subtitle keeps saying it
@@ -378,16 +397,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
-    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
-        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    fn palette_effects(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_effects(&c.kernel.state())
     }
-    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
-        self.0
-            .read(cx)
-            .published
-            .as_deref()
-            .map(crate::layer_commands::palette_layers)
-            .unwrap_or_default()
+    fn palette_layers(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_layers(c.published.as_ref())
     }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
@@ -501,6 +517,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
     }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
@@ -594,7 +613,12 @@ impl pm_shell::integration::Integration for Bridge {
         panels::format_facts(c.dimensions, c.rate.to_f64())
     }
     fn status_alert(&self, cx: &App) -> String {
-        panels::offline_summary(self.0.read(cx).offline_count())
+        let c = self.0.read(cx);
+        panels::offline_summary(c.frame_facts.offline(
+            c.published.as_ref(),
+            c.builtins.media_observed,
+            || c.offline_count(),
+        ))
     }
     fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
         self.0.update(cx, |v, cx| v.show_offline_media(cx));
@@ -884,6 +908,9 @@ impl Controller {
             opening_name: None,
             ghost_aspect: None,
             ghost_poster: None,
+            viewer_poster: None,
+            last_frame_watch: Default::default(),
+            front_restore: false,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -933,6 +960,7 @@ impl Controller {
             message: "No project".into(),
             path: None,
             recent: vec![],
+            frame_facts: Default::default(),
             library: None,
             home: false,
             home_visible: false,
@@ -1061,8 +1089,16 @@ impl Controller {
             .set_document_metadata(name, "Opening…", false, None);
         cx.notify();
     }
+    /// The front window's restored project showed its first frame, or its
+    /// open ended without one: the other restored windows open theirs.
+    pub(crate) fn release_front(&mut self) {
+        if std::mem::take(&mut self.front_restore) {
+            pm_shell::set_front_restoring(None);
+        }
+    }
     /// An open that ended without a project: the ghost goes, Home is back.
     pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        self.release_front();
         self.opening_name = None;
         self.ghosted.clear();
         self.revealed.clear();
@@ -1139,6 +1175,13 @@ impl Controller {
                 .get("restoreWindows")
                 .and_then(pm_model::Value::as_bool)
                 != Some(false);
+        // Its picture stands in from the window's first frame, while the
+        // library is read (PM-384).
+        if keep {
+            self.stage_poster(&project);
+        }
+        let front = self.host.borrow().restored_front;
+        self.front_restore = front;
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -1153,16 +1196,43 @@ impl Controller {
                 .find(|row| row.id == project)?;
             Some((row.id, row.name))
         });
-        // Home waits for the answer, so a project that reopens never
-        // flashes Home first.
+        // Home waits for the answer, showing the project's ghost, so a
+        // project that reopens never flashes Home or an empty editor first.
         self.reopening = true;
         cx.spawn(async move |this, cx| {
             let found = found.await;
             let _ = this.update(cx, |v, cx| {
                 v.reopening = false;
+                // The tab shows its project opening, with its picture, from
+                // now: not Home while the tabs before it open (PM-384).
+                if let Some((id, name)) = &found
+                    && v.session.is_none()
+                    && !v.opening
+                {
+                    v.stage_poster(id);
+                    v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_none() {
+                    v.ghost_poster = None;
+                    v.viewer_poster = None;
+                }
+                if found.is_none() {
+                    v.release_front();
+                }
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // The window that was in front opens first, alone, and
+                // shows its first frame; the others wait for it.
+                if !front {
+                    for _ in 0..FRONT_WAIT_LOOKS {
+                        if pm_shell::front_restoring().is_none() {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
+                }
                 // Every restored window reopens its project, one open at a
                 // time (an open holds the project-operation fence): a tab
                 // waits for the one before it instead of giving up.
@@ -1183,9 +1253,13 @@ impl Controller {
                                 profile: v.profile.clone(),
                                 project: id,
                             },
-                            Some(name),
+                            Some(name.clone()),
                             cx,
                         );
+                        // It could not start: the ghost gives way to Home.
+                        if !v.opening && v.session.is_none() && v.opening_name.as_deref() == Some(&name) {
+                            v.end_ghost(cx);
+                        }
                     }
                 });
             }
@@ -1349,16 +1423,12 @@ impl Controller {
             p.dirty,
             self.path.as_deref(),
         );
-        platform::history_labels(
-            p.history
-                .undo_label
-                .as_deref()
-                .filter(|_| p.history.can_undo),
-            p.history
-                .redo_label
-                .as_deref()
-                .filter(|_| p.history.can_redo),
-        );
+        // The menu bar is the app's: only the editor last in front names
+        // its Undo and Redo (a tab behind publishing its own history left
+        // a bare "Undo" over the front project's, PM-396).
+        if menu_editor_is(cx.entity_id()) {
+            history_menu(&p.history);
+        }
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
@@ -1861,11 +1931,7 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        // Its Home poster stands in the opening viewer, where one was kept.
-        self.ghost_poster = Some(
-            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
-        )
-        .filter(|poster| poster.is_file());
+        self.stage_poster(&open_id);
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -1906,6 +1972,14 @@ impl Controller {
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
+    /// The picture the viewer last showed for `project` stands in the
+    /// opening viewer until its first real frame; Home's poster where none
+    /// was kept (PM-384).
+    pub(crate) fn stage_poster(&mut self, project: &str) {
+        self.ghost_poster = crate::poster::opening_poster(&self.profile, project);
+        self.viewer_poster = self.ghost_poster.clone();
+        self.last_frame_watch.shown = None;
+    }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(
         &mut self,
@@ -1932,6 +2006,9 @@ impl Controller {
             }
             return;
         };
+        if let ShellReply::Opened { session, .. } = &reply {
+            self.stage_poster(&session.project);
+        }
         // A library project's saved version is in the library, wherever its file went.
         self.settle_open(
             operation,
@@ -2870,6 +2947,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
+                        v.keep_last_frame(None, cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
@@ -4468,5 +4546,44 @@ mod open_failure_tests {
                 alert.message
             );
         }
+    }
+}
+
+thread_local! {
+    /// The editor whose window was last in front: the Edit menu's Undo and
+    /// Redo name its history.
+    static MENU_EDITOR: std::cell::Cell<Option<gpui::EntityId>> = const { std::cell::Cell::new(None) };
+}
+/// Whether `editor` names the Edit menu's Undo and Redo (none chosen yet:
+/// any, so the first window's do).
+pub(crate) fn menu_editor_is(editor: gpui::EntityId) -> bool {
+    MENU_EDITOR.with(|m| m.get().is_none_or(|e| e == editor))
+}
+/// `editor`'s window came to the front: its history names the menu.
+pub(crate) fn set_menu_editor(editor: gpui::EntityId) {
+    MENU_EDITOR.with(|m| m.set(Some(editor)));
+}
+/// Undo and Redo named by `history` (each disabled when there is none).
+pub(crate) fn history_menu(history: &pm_kernel::actor::HistorySummary) {
+    platform::history_labels(
+        history.undo_label.as_deref().filter(|_| history.can_undo),
+        history.redo_label.as_deref().filter(|_| history.can_redo),
+    );
+}
+
+#[cfg(test)]
+mod menu_editor_tests {
+    /// PM-396: Undo and Redo name the history of the editor last in front;
+    /// another tab's publication leaves them as they are.
+    #[test]
+    fn only_the_editor_last_in_front_names_undo_and_redo() {
+        let (front, behind) = (gpui::EntityId::from(1u64), gpui::EntityId::from(2u64));
+        // Before any window comes to the front, the first editor's do.
+        assert!(super::menu_editor_is(behind));
+        super::set_menu_editor(front);
+        assert!(super::menu_editor_is(front));
+        assert!(!super::menu_editor_is(behind));
+        super::set_menu_editor(behind);
+        assert!(!super::menu_editor_is(front));
     }
 }

@@ -76,6 +76,8 @@ pub struct Colors {
     pub accent_text: u32,
     /// Opaque accent tint over `panel`: drop targets, the active snap guide bed.
     pub accent_wash: u32,
+    /// A verified publisher's seal in the Store: the system blue, as v1.2.0's.
+    pub verified: u32,
     pub danger: u32,
     pub warning: u32,
     pub success: u32,
@@ -376,6 +378,8 @@ pub struct Metrics {
     pub sheet_body_max: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
+    /// The agent composer's tray around its field (v1's 4 pt).
+    pub composer_tray: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -671,6 +675,7 @@ impl Colors {
                 if dark { 0xff6b1a } else { 0xf0580a },
                 if dark { 0.16 } else { 0.1 },
             ),
+            verified: if dark { 0x0a84ff } else { 0x007aff },
             danger: if dark {
                 oklch(0.68, 0.18, 27.6)
             } else {
@@ -889,6 +894,7 @@ impl Tokens {
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
                 composer_max_lines: 10.,
+                composer_tray: space.xs,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
@@ -1062,7 +1068,8 @@ impl Tokens {
         colors.secondary: color, colors.muted: color, colors.accent: color,
         colors.timeline_selected: color, colors.timeline_selected_hover: color,
         colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
-        colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
+        colors.accent_text: color, colors.accent_wash: color, colors.verified: color,
+        colors.danger: color,
         colors.warning: color, colors.success: color,
         metrics.gap: size, metrics.inset: size, metrics.panel_radius: size,
         metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,
