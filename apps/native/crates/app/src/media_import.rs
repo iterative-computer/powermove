@@ -791,10 +791,12 @@ pub(crate) fn import_task(
     if queued > 0 {
         title.push_str(&format!(" · {queued} more waiting"));
     }
+    let progress =
+        (sequence.is_none() && total > 0).then(|| done.min(total) as f32 / total as f32);
     pm_shell::TaskStatus {
         title,
         detail: sequence.filter(|s| !s.is_empty()).unwrap_or(file),
-        progress: (sequence.is_none() && total > 0).then(|| done.min(total) as f32 / total as f32),
+        progress,
         finished: false,
         cancel: Some(("Cancel Import".into(), "cancelImport".into())),
     }
