@@ -300,6 +300,7 @@ impl StoreWindow {
             NativeControl::new(
                 ControlSpec {
                     kind: Kind::Segmented,
+                    pull: false,
                     label: "Store pages",
                     identifier: "store.pages",
                     value: &index,
