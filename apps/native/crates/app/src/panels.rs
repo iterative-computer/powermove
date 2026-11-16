@@ -8,12 +8,9 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
     (id == "scopes").then(|| v.scopes_panel(cx))
 }
 
-/// Ghost loading: from the moment a project is chosen, and until each panel
-/// has mounted for it, every panel shows its ghost (`crate::ghost`) in the
-/// shape of what it will show; a panel's real content replaces it when that
-/// panel is ready.
-pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
-    let shows = crate::ghost::shows(crate::ghost::Open {
+/// Whether panel `id` shows its ghost now (`opening`).
+pub fn ghost_shows(v: &Controller, id: &str) -> bool {
+    crate::ghost::shows(crate::ghost::Open {
         chosen: v.opening_name.is_some() || v.reopening,
         landed: v.session.is_some(),
         settling: v.settling.is_some(),
@@ -23,8 +20,14 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
         waiting: id == "viewer" && v.extensions.settle_after.is_some(),
         // An extension's own page draws below GPUI: a ghost would sit under it.
         native: v.extensions.owns_panel(id),
-    });
-    if !shows {
+    })
+}
+/// Ghost loading: from the moment a project is chosen, and until each panel
+/// has mounted for it, every panel shows its ghost (`crate::ghost`) in the
+/// shape of what it will show; a panel's real content replaces it when that
+/// panel is ready.
+pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
+    if !ghost_shows(v, id) {
         return None;
     }
     let t = v.host.borrow().tokens.clone();
