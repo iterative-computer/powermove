@@ -1847,6 +1847,68 @@ fn route(number: isize, name: String) {
 }
 /// After a relaunch: the window with session id `id` (the one that was in
 /// front) comes forward, its tab the one its group shows.
+thread_local! {
+    /// Editor windows a release put back on screen while the app was hidden,
+    /// taken back until the app is unhidden (`keep_hidden_after_release`).
+    static TAKEN_BACK: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+    static UNHIDE_OBSERVER: RefCell<Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> = const { RefCell::new(None) };
+}
+/// A press that began before the app was hidden (Cmd-H with the button
+/// held, a hide from another app) is released while it is hidden: that
+/// release puts the editor window back on screen while the app still counts
+/// as hidden, so it stands among other apps' windows and a later hide does
+/// nothing (PM-401). A moment after such a release, an editor window that
+/// is showing is taken back, and shows again when the app is unhidden.
+fn keep_hidden_after_release() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if !NSApplication::sharedApplication(mtm).isHidden() {
+        return;
+    }
+    let check = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+        let app = NSApplication::sharedApplication(mtm);
+        if !app.isHidden() {
+            return;
+        }
+        for window in app.windows().to_vec() {
+            if window.isVisible() && ROUTES.with(|r| r.borrow().contains_key(&window.windowNumber())) {
+                window.orderOut(None);
+                TAKEN_BACK.with(|t| t.borrow_mut().push(window));
+            }
+        }
+        watch_unhide(mtm);
+    });
+    for delay in [0.05, 0.4] {
+        let timer = unsafe {
+            objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(delay, false, &check)
+        };
+        unsafe {
+            objc2_foundation::NSRunLoop::mainRunLoop()
+                .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+        };
+    }
+}
+/// Windows taken back while hidden show again once the app is unhidden.
+fn watch_unhide(mtm: MainThreadMarker) {
+    if UNHIDE_OBSERVER.with(|o| o.borrow().is_some()) {
+        return;
+    }
+    let shown = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        for window in TAKEN_BACK.with(|t| std::mem::take(&mut *t.borrow_mut())) {
+            gpui_macos::child_window::present(&window, false);
+        }
+    });
+    let observer = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(NSApplicationDidUnhideNotification),
+            Some(&NSApplication::sharedApplication(mtm)),
+            None,
+            &shown,
+        )
+    };
+    UNHIDE_OBSERVER.with(|o| *o.borrow_mut() = Some(observer));
+}
 /// The session ids of the editor windows open now.
 pub fn live_window_ids() -> Vec<u64> {
     WINDOW_IDS.with(|m| m.borrow().values().copied().filter(|id| *id != 0).collect())
@@ -2822,6 +2884,7 @@ impl Host {
                     // was drawn again, or covered, while held).
                     if e.r#type() == NSEventType::LeftMouseUp {
                         host.borrow().send_command("pointerReleased", vec![]);
+                        keep_hidden_after_release();
                         return event.as_ptr();
                     }
                     let (palette, fields, window, splitter_focus, gpui) = {
