@@ -179,9 +179,9 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   ).toMatchObject({
     timelineLayerDrag: { layer: "headline" },
   });
-  // At rest (not hovered, not selected): three columns, the parent link and
-  // visibility drawn (as v1), Lock held open. Shy and Solo have no button.
-  expect(switches.children.length).toBe(3);
+  // At rest (not hovered, not selected): five columns, the parent link and
+  // visibility drawn (as v1), Shy, Solo and Lock held open (PM-367).
+  expect(switches.children.length).toBe(5);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
   for (const name of ["shy", "solo", "lock"])
@@ -191,7 +191,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     expect(slot.props.style).toMatchObject({
       minWidth: { token: "metrics.hit" },
     });
-  // Hovered: every switch, in the same three columns; never Shy or Solo.
+  // Hovered: every switch, in the same five columns.
   await root.render(
     <TimelinePanel
       frame={frame({
@@ -201,11 +201,42 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     />,
   );
   const hovered = byId(root, "timeline:row:layer:headline").children[1];
-  expect(hovered.children.length).toBe(3);
-  for (const name of ["parent", "lock", "visibility"])
+  expect(hovered.children.length).toBe(5);
+  for (const name of ["parent", "shy", "solo", "lock", "visibility"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
-  for (const name of ["shy", "solo"])
-    expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
+  await root.dispose();
+});
+
+test("selected rows take the accent only while the timeline holds the keyboard (PM-367)", async () => {
+  const { root } = recorder();
+  const selected = { ...layer(), selected: true };
+  const style = () => byId(root, "timeline:row:layer:headline").props.style;
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [selected] } })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.timeline_selected" },
+    color: { token: "colors.accent_text" },
+  });
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        focused: false,
+        window: { total: 1, first: 0, rows: [selected] },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.selected_fill" },
+  });
+  expect(style().color?.token).not.toBe("colors.accent_text");
+  expect(
+    byId(root, "timeline:name:layer:headline").props.style.color,
+  ).toMatchObject({ token: "colors.text" });
   await root.dispose();
 });
 

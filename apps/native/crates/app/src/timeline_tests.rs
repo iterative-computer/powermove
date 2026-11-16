@@ -1293,9 +1293,9 @@ fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppCon
     let mut s = stage(cx, 2);
     let m = tokens().metrics;
     let least = crate::timeline_surface::least_layer_column(&m);
-    // Number, disclosure, badge, three slots of name and three switches.
+    // Number, disclosure, badge, three slots of name and five switches.
     let gap = m.gap as f64;
-    let row = 6. * gap + 8. * m.hit as f64 + m.kind_badge as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
     assert!(least >= row && least >= 320., "{least} < {row}");
     let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
     assert!(column >= least);

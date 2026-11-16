@@ -152,6 +152,11 @@ pub async fn dispatch(
             context.millis,
             context.property_facts,
         )?,
+        // The shell's word on whether the timeline holds the keyboard.
+        "panelFocus" => {
+            client.model.panel_blurred = !boolean(intent, "focused")?;
+            Plan::default()
+        }
         "mode" => {
             client.model.mode = match string(intent, "mode")? {
                 "Layers" => TimelineMode::Layers,
@@ -714,6 +719,7 @@ fn frame_facts(
     json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
         "hasComposition": model.index.has_composition(),
+        "focused": !model.panel_blurred,
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,

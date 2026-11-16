@@ -449,8 +449,23 @@ impl pm_shell::integration::Integration for Bridge {
         if id != "timeline" {
             return;
         }
-        if let Some(timeline) = self.0.read(cx).builtins.timeline.clone() {
-            timeline.update(cx, |t, cx| t.set_focused(focused, cx));
+        let (timeline, runtime) = {
+            let v = self.0.read(cx);
+            (v.builtins.timeline.clone(), v.builtins.runtime.clone())
+        };
+        let Some(timeline) = timeline else { return };
+        // The tracks' scene and the panel's rows (its frame) follow it.
+        if timeline.update(cx, |t, cx| t.set_focused(focused, cx))
+            && let Some(runtime) = runtime
+            && let Ok(ticket) = runtime
+                .timeline_action(serde_json::json!({"type": "panelFocus", "focused": focused}))
+        {
+            let controller = self.0.downgrade();
+            cx.spawn(async move |cx| {
+                let _ = ticket.await;
+                let _ = controller.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
         }
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
