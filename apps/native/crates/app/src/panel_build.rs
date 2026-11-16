@@ -174,7 +174,7 @@ impl State {
         let elapsed=now.saturating_duration_since(self.changed).as_secs_f32();
         match self.stage {
             Stage::Ready => elapsed < 0.7,
-            Stage::Erase => elapsed < 0.24,
+            Stage::Erase => elapsed < 0.36,
             _ => !reduced || !self.pending.is_empty() || self.complete || elapsed < 0.28,
         }
     }
