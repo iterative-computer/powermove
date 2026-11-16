@@ -1377,7 +1377,7 @@ mod tests {
 
 const GUIDE_TOGGLES: [(&str, Action); 2] = [
     ("Lock Guides", Action::LockGuides),
-    ("Toggle Viewer Snapping", Action::Snapping),
+    ("Snapping", Action::Snapping),
 ];
 fn guide_checked(action: Action, locked: bool, snapping: bool) -> bool {
     match action {
@@ -1392,7 +1392,7 @@ mod guide_menu_tests {
     #[test]
     fn guide_toggles_follow_their_independent_states() {
         assert!(matches!(GUIDE_TOGGLES[0], ("Lock Guides", Action::LockGuides)));
-        assert!(matches!(GUIDE_TOGGLES[1], ("Toggle Viewer Snapping", Action::Snapping)));
+        assert!(matches!(GUIDE_TOGGLES[1], ("Snapping", Action::Snapping)));
         for locked in [false, true] {
             for snapping in [false, true] {
                 assert_eq!(guide_checked(GUIDE_TOGGLES[0].1, locked, snapping), locked);
