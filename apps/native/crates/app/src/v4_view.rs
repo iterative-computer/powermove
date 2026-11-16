@@ -76,6 +76,14 @@ impl Outline {
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
     }
+    /// A row's top in the rows' content, when the timeline's scene has it.
+    fn row_top(&self, row: &str) -> Option<f32> {
+        self.scene
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.scroll_for(row))
+            .map(|top| top as f32)
+    }
     /// The first JS row's top in the rows' content (all rows' height).
     fn top(&self, first: &str) -> f32 {
         self.scene
@@ -2397,6 +2405,7 @@ impl SurfaceView {
                 .right(px(0.))
                 .top(px(self.natives.outline.top(first)));
         }
+        element = self.place_outline_row(node, element);
         #[cfg(test)]
         {
             let name = node
@@ -2733,6 +2742,42 @@ impl SurfaceView {
     /// The timeline outline's rows in a layer the surface scrolls: all
     /// rows' height of content at the surface's offset, JS's window of rows
     /// placed at its first row's top.
+    /// Each row of the outline stands at its own row's top in the timeline's
+    /// scene, not after the row before it: the rows' publication lands later
+    /// than the bars (an undo, a redo, a split), and stacked in its own order
+    /// it put every name below the change beside the next layer's bar
+    /// (PM-376). A row the scene no longer has is not drawn. Its own frame,
+    /// out of the recursive render's.
+    #[inline(never)]
+    fn place_outline_row(&self, node: &NodeView, element: Stateful<Div>) -> Stateful<Div> {
+        let Some(first) = node
+            .parent
+            .and_then(|p| self.prepared.node(p))
+            .and_then(|p| p.outline_first.clone())
+        else {
+            return element;
+        };
+        let Some(row) = node
+            .semantic
+            .as_ref()
+            .and_then(|s| s.strip_prefix("timeline:row:"))
+        else {
+            return element;
+        };
+        let outline = &self.natives.outline;
+        // No timeline drawing the bars: the rows' own order stands.
+        if outline.scene.borrow().is_none() {
+            return element;
+        }
+        match outline.row_top(row) {
+            Some(top) => element
+                .absolute()
+                .left(px(0.))
+                .right(px(0.))
+                .top(px(top - outline.top(&first))),
+            None => element.absolute().top(px(0.)).invisible(),
+        }
+    }
     fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
         let outline = &self.natives.outline;
         outline
