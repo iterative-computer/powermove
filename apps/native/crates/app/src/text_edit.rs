@@ -913,8 +913,16 @@ impl GizmoSurface {
             fresh: s.fresh,
             rename,
         });
-        if !keep_tool && self.host.tool(cx) == super::Tool::Text {
-            self.host.command("toolSelect", cx);
+        // Afterwards the tool returns to Select. Asked once the update that
+        // ended the edit is over: Escape ends it inside the Controller's own
+        // update (cancel_gesture), and the tool is read from the Controller.
+        if !keep_tool {
+            let host = self.host.clone();
+            cx.defer(move |cx| {
+                if host.tool(cx) == super::Tool::Text {
+                    host.command("toolSelect", cx);
+                }
+            });
         }
         self.text_pump(cx);
         self.refresh(cx);

@@ -810,9 +810,12 @@ define_class!(
             // The next key goes on now: a turn through the editor's queue per
             // key let typing fall behind a busy frame (and Escape or a click
             // overtake it). A host being changed hears it through the queue.
-            if let Some(mut host)=host.as_ref().and_then(|h|h.try_borrow_mut().ok()){
-                host.in_flight.remove(&token);
-                host.replayed(token);
+            if let Some(mut h)=host.as_ref().and_then(|h|h.try_borrow_mut().ok()){
+                h.in_flight.remove(&token);
+                h.replayed(token);
+                drop(h);
+                // The keys queued behind it go on in this same turn.
+                if let Some(host)=&host{Host::deliver_waiting(host);}
             }else if let Some(sender)=&self.ivars().sender{let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
         }
         /// A Shape variant from the Shape segment's menu.
@@ -5049,10 +5052,6 @@ impl Host {
     /// all of them; none is left to land on the canvas as a shortcut after.
     /// Stops at a key that waits on a command's answer.
     pub fn flush_typing(host: &Rc<RefCell<Self>>) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let app = NSApplication::sharedApplication(mtm);
         {
             let Ok(mut h) = host.try_borrow_mut() else {
                 return;
@@ -5080,20 +5079,38 @@ impl Host {
                 h.effects(effects);
             }
         }
+        Self::deliver_waiting(host);
+    }
+    /// Hands every key already waiting its replay to the window now, in
+    /// order, each freeing the next; stops at one that waits on a command's
+    /// answer. One key per run-loop turn let typing fall seconds behind a
+    /// slow frame, and what came after it (Escape's blurField) land on the
+    /// next text. A key typed for a text that has since lost the keyboard
+    /// goes nowhere (it would be a shortcut on the canvas).
+    fn deliver_waiting(host: &Rc<RefCell<Self>>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
         // Bounded: a key handed over can queue no more than it was.
         for _ in 0..4096 {
             let next = {
                 let Ok(mut h) = host.try_borrow_mut() else {
                     return;
                 };
-                h.take_in_flight()
+                h.take_in_flight().map(|(token, event)| {
+                    let stale = h.typed.remove(&token) && !h.text_has_keyboard();
+                    (token, event, stale)
+                })
             };
-            let Some((token, event)) = next else { return };
-            REPLAYING.with(|guard| {
-                guard.set(true);
-                app.sendEvent(&event);
-                guard.set(false);
-            });
+            let Some((token, event, stale)) = next else { return };
+            if !stale {
+                REPLAYING.with(|guard| {
+                    guard.set(true);
+                    app.sendEvent(&event);
+                    guard.set(false);
+                });
+            }
             let Ok(mut h) = host.try_borrow_mut() else {
                 return;
             };
@@ -5121,7 +5138,6 @@ impl Host {
                 .remove(&(Retained::as_ptr(&event) as usize))
                 .is_some();
             if posted {
-                self.typed.remove(&token);
                 unsafe {
                     let _: () = msg_send![
                         NSObject::class(),
