@@ -4419,13 +4419,24 @@ impl SurfaceView {
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabbed = self.tabbed;
-        self.view.update(cx, |v, cx| match v.prepared.header {
+        let header = self.view.update(cx, |v, cx| match v.prepared.header {
             Some(id) => {
                 let skip = if tabbed { v.header_title(id) } else { None };
                 v.element(id, window, cx, skip)
             }
             None => div().into_any_element(),
-        })
+        });
+        // A cached view lays its element out as a root of its own, which a
+        // root with no width sizes to its content: the header then never had
+        // its row's width, and groups meant to share the row (the viewer
+        // bar's leading and trailing ones) shrank to less than what cannot
+        // give way in them, so the 2D | 3D control stood over the title and
+        // the pop-ups (PM-463). Alone in its row, the header takes the row.
+        if tabbed {
+            header
+        } else {
+            div().size_full().child(header).into_any_element()
+        }
     }
 }
 

@@ -636,6 +636,7 @@ impl Run {
             return;
         };
         let culprit = realm.culprit(execution);
+        let place = realm.culprit_place(execution);
         realm.stop(execution);
         let records = self.start.records.as_array().cloned().unwrap_or_default();
         let name = culprit.and_then(|id| {
@@ -646,9 +647,12 @@ impl Run {
                     .to_owned()
             })
         });
+        let place = place.map_or_else(String::new, |place| format!(" (in {place})"));
         self.failure = Some(match name {
-            Some(name) => format!("{name} stopped responding while drawing the export"),
-            None => "An extension stopped responding while drawing the export".into(),
+            Some(name) => format!("{name} stopped responding while drawing the export{place}"),
+            None => format!(
+                "Powermove's extension host stopped responding while drawing the export{place}"
+            ),
         });
     }
     fn page(&mut self, message: Value) {
