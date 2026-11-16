@@ -889,6 +889,9 @@ struct MacWindowState {
     force_render_pending: bool,
     frame_requested: bool,
     idle_cleanup: Option<gpui::Task<()>>,
+    /// Powermove P-IDLE-WAKE: the link is paused because the window was idle
+    /// (PM-407); the first input that wakes it draws at once (PM-310).
+    idle: bool,
     /// GPUI painted since hosted views were last placed.
     painted: bool,
     /// Drawables from the layer, taken off the main thread, for frames
@@ -1071,6 +1074,7 @@ impl MacWindowState {
 
     fn start_display_link(&mut self) {
         self.frame_requested = true;
+        self.idle = false;
         self.idle_cleanup.take();
         // Core Animation follows the layer/view's display and refresh timing.
         // Metal updates also provide a drawable and a CPU submission deadline.
@@ -1489,6 +1493,7 @@ impl MacWindow {
                 force_render_pending: false,
                 frame_requested: false,
                 idle_cleanup: None,
+                idle: false,
                 painted: false,
                 #[cfg(not(feature = "wgpu"))]
                 direct_source: None,
@@ -3306,7 +3311,10 @@ unsafe extern "C" fn handle_key_equivalent(
 }
 
 unsafe extern "C" fn handle_key_down(this: &Objc2Object, _: Sel, native_event: ObjcId) {
+    let window_state = unsafe { get_window_state(this) };
+    let was_idle = window_state.lock().idle;
     unsafe { handle_key_event(this, native_event, false) };
+    wake_frame(this, &window_state, was_idle);
 }
 
 unsafe extern "C" fn handle_key_up(this: &Objc2Object, _: Sel, native_event: ObjcId) {
@@ -3532,6 +3540,7 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();
+    let was_idle = lock.idle;
     let window_height = lock.content_size().height;
     let native_event_type = unsafe { native_event.eventType() };
     match native_event_type {
@@ -3702,6 +3711,20 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
             callback(event);
             window_state.lock().event_callback = Some(callback);
         }
+        wake_frame(this, &window_state, was_idle);
+    }
+}
+
+/// Powermove P-IDLE-WAKE: an input that wakes an idle window (its link
+/// paused, PM-407) draws its frame now rather than when the restarted link
+/// first steps, a refresh or more later (PM-310). Only from idle: a running
+/// link is the one source of frames, as two sources pace unevenly.
+/// `PM_GPUI_IDLE_WAKE=0` waits for the link (a measurement).
+fn wake_frame(view: &Objc2Object, window_state: &Arc<Mutex<MacWindowState>>, was_idle: bool) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("PM_GPUI_IDLE_WAKE").is_none_or(|v| v != "0"));
+    if on && was_idle && window_state.lock().frame_requested {
+        step(view as *const Objc2Object as *mut c_void);
     }
 }
 
@@ -4119,6 +4142,7 @@ extern "C" fn step(view: *mut c_void) {
             if !lock.frame_requested {
                 if let Some(link) = &lock.ca_display_link {
                     let _: () = msg_send![&**link, setPaused: true];
+                    lock.idle = true;
                     // Preserve the existing delayed GPU-target release without
                     // keeping a display link alive to check its deadline.
                     #[cfg(not(feature = "wgpu"))]
