@@ -317,16 +317,33 @@ impl BuildPixels {
 }
 /// PNG decoding normalizes AppKit bitmap layouts; GPUI sprites use straight BGRA.
 pub fn snapshot_bitmap(rep: &NSBitmapImageRep) -> Option<std::sync::Arc<RenderImage>> {
+    snapshot_bitmap_on_ground(rep,None)
+}
+fn snapshot_bitmap_on_ground(rep:&NSBitmapImageRep,ground:Option<u32>)->Option<std::sync::Arc<RenderImage>> {
     let properties=objc2_foundation::NSDictionary::new();
     let data=unsafe {rep.representationUsingType_properties(NSBitmapImageFileType::PNG,&properties)}?;
     let mut pixels=image::load_from_memory(unsafe {data.as_bytes_unchecked()}).ok()?.to_rgba8();
-    for pixel in pixels.pixels_mut() {pixel.0.swap(0,2);}
+    for pixel in pixels.pixels_mut() {
+        if let Some(ground)=ground {
+            let matches=[(ground>>16) as u8,(ground>>8) as u8,ground as u8];
+            if pixel.0[..3].iter().zip(matches).all(|(a,b)|a.abs_diff(b)<=2){pixel.0[3]=0;}
+        }
+        pixel.0.swap(0,2);
+    }
+    if pixels.pixels().all(|p|p.0[3]==0){return None;}
     Some(std::sync::Arc::new(RenderImage::new([image::Frame::new(pixels)])))
 }
 pub fn snapshot_image(image: &NSImage) -> Option<std::sync::Arc<RenderImage>> {
     let data=image.TIFFRepresentation()?;
     let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data)?;
     snapshot_bitmap(&rep)
+}
+/// The normal panel ground is painted separately, so a WK body contributes
+/// its actual controls rather than turning an opaque background into hot dots.
+pub fn snapshot_image_on_ground(image:&NSImage,ground:u32)->Option<std::sync::Arc<RenderImage>> {
+    let data=image.TIFFRepresentation()?;
+    let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data)?;
+    snapshot_bitmap_on_ground(&rep,Some(ground))
 }
 pub struct NativeControl {
     build: Option<BuildSnapshot>,

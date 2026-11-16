@@ -1477,6 +1477,7 @@ pub(crate) struct AgentBuild {
     pub finishing: bool,
     pub owner: Option<String>,
     pub snapshot: Option<(usize,std::sync::Arc<RenderImage>)>,
+    pub snapshot_key: Option<usize>,
 }
 
 pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &mut Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
@@ -1531,8 +1532,9 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
                     if let Some((source,image))=image {
                         let key=(&*image as *const objc2_app_kit::NSImage) as usize;
                         let cached=v.agent_panel_builds.get_mut(id).unwrap();
-                        if cached.snapshot.as_ref().map(|s|s.0)!=Some(key) {
-                            cached.snapshot=pm_shell::native_control::snapshot_image(&image).map(|image|(key,image));
+                        if cached.snapshot_key!=Some(key) {
+                            cached.snapshot_key=Some(key);
+                            cached.snapshot=pm_shell::native_control::snapshot_image_on_ground(&image,v.host.borrow().tokens.colors.panel).map(|image|(key,image));
                         }
                         web_capture=cached.snapshot.as_ref().map(|(_,image)|(source,image.clone()));
                     }

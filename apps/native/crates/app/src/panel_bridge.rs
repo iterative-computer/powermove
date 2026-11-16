@@ -374,7 +374,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
                 cx.notify();
             });
             editor.update(cx, |_, cx| cx.notify());
