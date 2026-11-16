@@ -868,3 +868,28 @@ mutants and the probes' verdicts on every build (`tests/probes.rs`).
   and one GPU family.
 - WebGL's "Expression too complex" rule and ternaries on structs and arrays are not
   reproduced (S3).
+
+
+### Gradient-stop parameters and viewer handles
+
+`gradientStops` parameters carry 2–16 normalized `{position,color:[r,g,b,a]}`
+entries through definition snapshots and ordinary animation channels. Renderer
+bindings sort a copy, preserve the authored collection order and emit named
+scalar uniforms (`u_<key>Count`, `u_<key>P0..P15`, `u_<key>C0..C15`). Zeroed tail
+slots prevent old stop data from surviving a shorter collection. The generated
+`pm_<key>(t)` function interpolates straight RGBA; the effect owns premultiplying
+its output. Native GPU execution and the fallback runner use the same transport.
+Extension fragment layers use that transport too.
+
+Definitions declare `viewerHandles` for points, lines, angles, radii and rectangles.
+A line may bind a stop collection. The viewer applies layer/world transforms and
+composition zoom to its positions, but draws controls and hit targets in screen
+points. Stop deletion uses perpendicular screen distance greater than 24 points;
+a collection always retains two stops. All pointer edits use the kernel's normal
+gesture and automatic keyframe path, including hand-edit intent. During a drag,
+local control values own the preview until the gesture completes.
+
+Gradient Ramp revision 3 uses this generic declaration and stop transport. Its
+saved revisions 1 and 2 retain their original two-colour schemas and shaders.
+Agent authoring examples and the interaction contract are in
+[`apps/native/js/compat/api-pack/EXTENSIONS.md`](../../apps/native/js/compat/api-pack/EXTENSIONS.md#viewer-handles).

@@ -823,11 +823,18 @@ pub fn layer_transition<'d>(
     let params = step
         .params
         .iter()
-        .map(|p| match p.value {
-            Binding::Float(v) => Param::Float(v),
-            Binding::Color(c) => Param::Color(c),
+        .map(|p| match &p.value {
+            Binding::Float(v) => Some(Param::Float(*v)),
+            Binding::Color(c) => Some(Param::Color(*c)),
+            // The independent scalar/RGB reference has no collection formula.
+            // Leave this case explicitly unreferenced; GPU pixel assertions
+            // for stop collections live in effect_versions.rs.
+            Binding::Stops(_) => None,
         })
-        .collect();
+        .collect::<Option<Vec<_>>>();
+    let Some(params) = params else {
+        return Ok(Some(Err("gradient-stop transition is not reference-modeled".into())));
+    };
     Ok(Some(Ok((
         step.definition,
         params,
@@ -931,11 +938,14 @@ pub fn effect_chain<'d>(
         let params = step
             .params
             .iter()
-            .map(|p| match p.value {
-                Binding::Float(v) => Param::Float(v),
-                Binding::Color(c) => Param::Color(c),
+            .map(|p| match &p.value {
+                Binding::Float(v) => Some(Param::Float(*v)),
+                Binding::Color(c) => Some(Param::Color(*c)),
+                // This reference models scalar/RGB built-ins, not stop arrays.
+                Binding::Stops(_) => None,
             })
-            .collect();
+            .collect::<Option<Vec<_>>>();
+        let Some(params) = params else { return Ok(None); };
         chain.push((step.definition, params));
     }
     Ok(Some(chain))
@@ -1346,7 +1356,7 @@ fn footprint<'d>(
                     let size = step
                         .params
                         .iter()
-                        .find_map(|param| (param.key == "size").then_some(param.value));
+                        .find_map(|param| (param.key == "size").then_some(param.value.clone()));
                     let block = match size {
                         Some(pm_render::effects::plan::Binding::Float(value)) => value.max(1.0),
                         _ => 1.0,

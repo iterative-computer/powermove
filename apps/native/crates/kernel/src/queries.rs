@@ -340,6 +340,36 @@ impl QueryContext {
         self.layer_query("ev", comp_id, layer_id, t, &[("key", Value::from(channel))])
     }
 
+    /// An addressed property (including effect parameters, shader uniforms and
+    /// extension parameters) at composition time `t`. Unlike `evaluate`, this
+    /// resolves outside `layer.p` and passes the stored channel to `PM.evP`,
+    /// preserving its keyframes, expressions and collection values.
+    pub fn evaluate_property(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        channel: &str,
+        t: f64,
+    ) -> Result<Value, QueryError> {
+        let (comp, index) = self.resolve(comp_id, layer_id)?;
+        let root = self.root().expect("resolved document");
+        let layer = model::comp_node(root, (!comp.is_empty()).then_some(comp.as_str()))
+            .and_then(|node| model::layers_of(node).nth(index))
+            .ok_or_else(|| QueryError::LayerNotFound(layer_id.into()))?;
+        let prop = pm_eval::address::find_prop(layer, &channel.into())
+            .map_err(|e| QueryError::Error(format!("{e:?}")))?
+            .node()
+            .map(Node::to_value)
+            .ok_or_else(|| QueryError::Error(format!("Missing property {channel}")))?;
+        self.layer_query(
+            "evP",
+            comp_id,
+            layer_id,
+            t,
+            &[("key", Value::from(channel)), ("prop", prop)],
+        )
+    }
+
     /// Opacity (percent) multiplied through the parent chain.
     pub fn world_opacity(
         &mut self,

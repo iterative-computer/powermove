@@ -8,6 +8,7 @@ publish = false
 name = "powermove-native"
 path = "src/main.rs"
 [dependencies]
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-mcp = { path = "../mcp" }
 pm-export = { path = "../../../../engine/crates/pm-export" }
 url = "2.5"
@@ -130,3 +131,8 @@ path = "../../vendor/gpui-ce/crates/gpui_macos/src/native_text_keyboard.rs"
 
 [dev-dependencies.pm-panel-inspector]
 path = "../panel-inspector"
+
+# Headless capture fixtures upload already rendered pixels synchronously.
+[dev-dependencies.image]
+version = "0.25"
+default-features = false

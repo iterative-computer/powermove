@@ -1026,3 +1026,92 @@ Project agents can manage media directly, without generating a recovery extensio
 Paths must be absolute local paths. Imports read native file chunks, accept files up to 512 MiB and do not silently download cloud placeholders. Both import tools verify durable storage and live availability before returning success. Failed replacements leave the original intact. Retry only failed assets; media bytes never belong in extension source.
 
 Replacement and management use normal editor Undo. They are preserved if the agent run stops and cannot be restored with `rollback_changes`, because snapshot rollback cannot restore retained media runtime versions. Importing media follows normal import behavior: media survives timeline Undo. Planning runs can list media but cannot mutate it; app runs without an attached project receive none of these tools.
+
+### Viewer handles
+
+Effect definitions can declare `viewerHandles`. These bind the existing numeric
+parameter keys, so the same channels appear in Properties, animation and undo.
+Coordinates are **layer-local pixels from the content bounds' top-left**; the
+viewer applies parent/layer transforms,
+composition zoom and pan. Handles stay 10 screen points across and hide on playback.
+
+```ts
+viewerHandles: [
+  { kind: 'line', start: { x: 'startX', y: 'startY' },
+    end: { x: 'endX', y: 'endY' }, radial: 'rampShape' },
+  { kind: 'point', point: { x: 'centerX', y: 'centerY' } },
+  { kind: 'radius', center: { x: 'centerX', y: 'centerY' }, radius: 'size' },
+  { kind: 'angle', center: { x: 'centerX', y: 'centerY' }, angle: 'rotation' },
+  { kind: 'rect', start: { x: 'left', y: 'top' }, end: { x: 'right', y: 'bottom' } },
+]
+```
+
+`radial` is optional: a value greater than 0.5 shows the radius circle. Angles
+are degrees. Radius is a distance in local pixels. Rectangles have two opposite
+corner bindings. Shift snaps a line's screen angle to 45 degree increments, including under
+nonuniform layer scale; angle dials snap their degree parameter in 45 degree steps.
+Every drag is one undo item. Animated channels get a key at the playhead.
+The user owns the gesture: agents must wait for it to finish and must respect
+hand-edit intent markers when generating later changes.
+
+Declare these on the definition passed to `api.effects.register`, including from
+compat extensions and agent-published extensions. The extension package manifest
+continues to identify the package and entry point; handles belong to each effect's
+parameter schema, rather than the package as a whole. `validate_effect` checks the
+bindings. Unknown fields, missing params and nonnumeric bindings are rejected.
+
+For an authored shader layer, put the same array in `d.viewerHandles` and bind the
+names of annotated `@param` uniforms, such as `{kind:'point',point:{x:'uX',y:'uY'}}`.
+The viewer writes the normal `u.uX` and `u.uY` animation channels.
+
+A line's optional `stops` key binds a `gradientStops` parameter. Stop collections
+contain 2–16 entries, each `{ position, color: [r, g, b, a] }`, with normalized
+positions and straight RGBA channels in 0–1. Stop order is preserved in the
+animation channel; shader transport sorts a copy by position. Coincident stops
+are allowed. The collection uses the same keyframes, hand-edit protection and
+undo history as other parameters.
+
+```ts
+api.effects.register({
+  id: 'agent.ramp', label: 'Agent Ramp', group: 'Generate',
+  params: [
+    { k: 'startX', label: 'Start X', def: 0, min: -10000, max: 10000 },
+    { k: 'startY', label: 'Start Y', def: 0, min: -10000, max: 10000 },
+    { k: 'endX', label: 'End X', def: 640, min: -10000, max: 10000 },
+    { k: 'endY', label: 'End Y', def: 0, min: -10000, max: 10000 },
+    { k: 'stops', label: 'Colour Stops', type: 'gradientStops', def: [
+      { position: 0, color: [1, 0, 0, 1] },
+      { position: 1, color: [0, 0, 1, 1] },
+    ] },
+  ],
+  viewerHandles: [{ kind: 'line', start: { x: 'startX', y: 'startY' },
+    end: { x: 'endX', y: 'endY' }, stops: 'stops' }],
+  frag: `vec2 d=vec2(u_endX-u_startX,u_endY-u_startY);
+    float t=dot(pm_layerPoint(v_px)-vec2(u_startX,u_startY),d)/max(dot(d,d),1e-8);
+    vec4 c=pm_stops(clamp(t,0.,1.)); float a=c.a*texture(u_tex,v_st).a;
+    o=vec4(c.rgb*a,a);`,
+});
+```
+
+For each collection `k`, the shader wrapper provides `vec4 pm_<k>(float t)`.
+For effects with viewer handles, `pm_layerPoint(v_px)` converts the output pixel
+to layer-local pixels, keeping shader coordinates aligned with the handles under
+layer transforms and composition zoom. Raw shaders supply `u_layerUV` and
+`u_layerRes` declarations and this coordinate mapping themselves.
+
+It binds `u_<k>Count` (float), `u_<k>P0` through `P15` (float positions), and
+`u_<k>C0` through `C15` (vec4 RGBA). Raw shaders declare these uniforms and the
+sampling function themselves; ordinary shader bodies get them automatically.
+Extension fragment layers can also use `gradientStops` params and the same
+sampler. Their viewer handles bind the registered parameter keys and use the
+normal `x.<key>` channels.
+
+On the viewer, click an empty part of the line to insert the interpolated colour.
+Drag a swatch along the line to move it. Drag it more than 24 screen points off
+the line, or select it and press Delete, to remove it; two stops always remain.
+Double-click a swatch to open the shared anchored colour picker. Its live
+previews form one undo step when committed; Escape cancels the open edit. A selected swatch has an accent
+ring. The white endpoint centres move the line independently of its stops.
+
+New Gradient Ramp instances use revision 3 and this collection API. Saved
+revision 1/2 ramps retain their original two-colour shader and parameter schema.

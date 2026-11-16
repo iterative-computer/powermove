@@ -378,3 +378,93 @@ fn a_saved_revision_this_build_lacks_is_bypassed_and_named_in_the_viewer_and_ref
     renderer.set_main_effects_for_document(&current).unwrap();
     assert!(renderer.missing_effects().is_empty());
 }
+
+fn stop_document(positions: &[f64], radial: bool) -> pm_model::Document {
+    let source = doc("gradient", Some(3));
+    let mut value: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &source.to_value().unwrap(),
+    ))
+    .unwrap();
+    let colors = if positions.len() == 3 {
+        vec![
+            json!([1, 0, 0, 1]),
+            json!([0, 1, 0, 1]),
+            json!([0, 0, 1, 1]),
+        ]
+    } else {
+        vec![json!([1, 0, 0, 1]), json!([0, 0, 1, 1])]
+    };
+    let stops: Vec<_> = positions
+        .iter()
+        .zip(colors)
+        .map(|(p, c)| json!({"position":p,"color":c}))
+        .collect();
+    value["layers"][0]["fx"][0]["p"] = json!({"startX":ch(json!(0)),"startY":ch(json!(0)),"endX":ch(json!(16)),"endY":ch(json!(0)),"stops":ch(json!(stops)),"rampShape":ch(json!(if radial{1}else{0}))});
+    pm_model::Document::new(Some(pm_model::json::parse(&value.to_string()).unwrap()), 1)
+}
+#[test]
+fn gradient_stop_add_move_delete_and_radial_change_real_pixels() {
+    let mut renderer = Renderer::headless().unwrap();
+    let two = stop_document(&[0., 1.], false);
+    renderer.set_main_effects_for_document(&two).unwrap();
+    let a = draw(&mut renderer, &two);
+    let three = stop_document(&[0., 0.5, 1.], false);
+    renderer.set_main_effects_for_document(&three).unwrap();
+    let b = draw(&mut renderer, &three);
+    let moved = stop_document(&[0., 0.75, 1.], false);
+    renderer.set_main_effects_for_document(&moved).unwrap();
+    let c = draw(&mut renderer, &moved);
+    let radial = stop_document(&[0., 0.5, 1.], true);
+    renderer.set_main_effects_for_document(&radial).unwrap();
+    let d = draw(&mut renderer, &radial);
+    let at = (8 * 16 + 8) * 4;
+    assert_eq!(&a[at..at + 4], &[0.46875, 0., 0.53125, 1.]);
+    assert_eq!(&b[at..at + 4], &[0., 0.9375, 0.0625, 1.]);
+    assert!((c[at + 1] - 0.7083333).abs() < 0.002);
+    assert!(d[at + 2] > b[at + 2] + 0.4);
+}
+#[test]
+fn agent_declared_stop_shader_receives_its_default_collection_on_gpu() {
+    use pm_protocol::definitions::*;
+    let source = format!(
+        "#version 300 es\nprecision highp float;\nin vec2 v_px; uniform mat3 u_layerUV;\nout vec4 o;\n{}\nvoid main(){{vec4 c=pm_ramp((u_layerUV*vec3(v_px,1.)).x);o=vec4(c.rgb*c.a,c.a);}}",
+        pm_fx_defs::handles::gradient_glsl("ramp")
+    );
+    let mut set = pm_render::all_builtin_definitions();
+    set.definitions.push(DefinitionSnapshot {
+        id: "agentRamp".into(),
+        kind: DefinitionKind::Effect,
+        version: 0,
+        origin: DefinitionOrigin::Local,
+        renderer: None,
+        glsl: Some(WrappedGlsl {
+            body_line_offset: 0,
+            body_utf16_len: source.encode_utf16().count() as u32,
+            body_utf8_len: source.len() as u32,
+            source,
+        }),
+        params: vec![ParamSpec::GradientStops {
+            key: "ramp".into(),
+            default: vec![
+                GradientStop {
+                    position: 0.,
+                    color: [1., 0., 0., 1.],
+                },
+                GradientStop {
+                    position: 0.5,
+                    color: [0., 1., 0., 1.],
+                },
+                GradientStop {
+                    position: 1.,
+                    color: [0., 0., 1., 1.],
+                },
+            ],
+        }],
+        flags: Default::default(),
+    });
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_definitions(&set).unwrap();
+    let pixels = draw(&mut renderer, &doc("agentRamp", None));
+    let at = (8 * 16 + 8) * 4;
+    assert_eq!(&pixels[at..at + 4], &[0., 0.9375, 0.0625, 1.]);
+}

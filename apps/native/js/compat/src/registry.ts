@@ -11,6 +11,7 @@
  * `disposeOwner(id)` releases everything an extension contributed in one call —
  * the invariant the loader relies on for deactivate/reload.
  */
+import { validateViewerHandles } from "./viewer-handles";
 import type { Disposable } from "./types";
 
 export type RegistryChangeKind = "add" | "remove" | "replace";
@@ -71,6 +72,7 @@ export class Registry<T extends { id: string }> {
   }
 
   register(ownerId: string, item: T): Disposable {
+    validateViewerHandles(item);
     const id = item?.id;
     if (typeof id !== "string" || id.length === 0)
       throw new Error("registry: item.id is required");

@@ -49,6 +49,8 @@ impl EffectCatalog {
             revisions: BTreeMap::new(),
         };
         for definition in definitions {
+            crate::handles::parse(definition.metadata.get("viewerHandles"), &definition.params).map_err(CatalogError)?;
+            for p in definition.params.iter().filter(|p|p.kind.as_deref()==Some("gradientStops")) { crate::handles::validate_stops(&p.def).map_err(CatalogError)?; }
             let id = definition.id.clone();
             let version = effect_version(definition.metadata.get("version"))?;
             if result.current.insert(id.clone(), version).is_some() {
@@ -65,6 +67,7 @@ impl EffectCatalog {
                     let old: Definition = serde_json::from_value(raw.clone()).map_err(|e| {
                         CatalogError(format!("{id}: invalid historical definition: {e}"))
                     })?;
+                    crate::handles::parse(old.metadata.get("viewerHandles"), &old.params).map_err(CatalogError)?;
                     let old_version = effect_version(old.metadata.get("version"))?;
                     if old.id != id
                         || old.metadata.get("version").is_none_or(Value::is_null)
@@ -137,6 +140,7 @@ pub fn main_effects() -> &'static MainEffects {
         add_lut_revision(&mut main);
         add_unclipped_revisions(&mut main);
         crate::grade::add(&mut main);
+        add_gradient_stops_revision(&mut main);
         main
     })
 }
@@ -477,4 +481,22 @@ pub fn definition_for_file(
         return main_catalog().instance(id, saved);
     }
     saved_definition(id, saved, Some(generation))
+}
+
+/// New instances use stop collections; saved two-colour ramps keep their exact shader.
+fn add_gradient_stops_revision(main:&mut MainEffects) {
+    let old=main.effects.iter().find(|d|d.id=="gradient").expect("gradient").clone();
+    let declarations=crate::handles::gradient_glsl("stops");
+    let needle="void main(){";
+    let shader=old.frag.replacen(needle,&format!("{declarations}{needle}"),1)
+        .replace("vec3 mapped=mix(u_startColor,u_endColor,t);", "vec4 mapped=pm_stops(t);")
+        .replace("o=vec4(mix(mapped,c.rgb/c.a,u_blendWithOriginal/100.)*c.a,c.a);", "float a=mix(mapped.a,1.,u_blendWithOriginal/100.)*c.a; o=vec4(mix(mapped.rgb,c.rgb/c.a,u_blendWithOriginal/100.)*a,a);");
+    revise(main,"gradient",&[(&old.frag,&shader)],&[]);
+    let d=main.effects.iter_mut().find(|d|d.id=="gradient").unwrap();
+    d.params.retain(|p| !matches!(p.k.as_str(),"startColor"|"endColor"));
+    d.params.push(Parameter { k:"stops".into(),label:"Colour Stops".into(),kind:Some("gradientStops".into()),def:serde_json::json!([
+        {"position":0.,"color":[0.,0.,0.,1.]},{"position":1.,"color":[1.,1.,1.,1.]}
+    ]),min:None,max:None,presentation:Default::default() });
+    d.metadata.remove("actions");
+    if let Some(h)=d.metadata.get_mut("viewerHandles").and_then(Value::as_array_mut).and_then(|a|a.first_mut()) { h["stops"]=Value::from("stops"); }
 }

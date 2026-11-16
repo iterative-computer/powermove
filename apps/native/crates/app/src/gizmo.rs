@@ -12,6 +12,8 @@ use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
 use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
 #[path = "marquee.rs"]
 mod marquee;
+#[path = "effect_handles.rs"]
+mod effect_handles;
 #[path = "pen_tool.rs"]
 pub mod pen;
 #[path = "snap.rs"]
@@ -191,6 +193,13 @@ pub struct ViewFrame {
     pub size: [f64; 2],
 }
 pub trait Host: 'static {
+    fn sample_color(&self, _: &App) -> Option<crate::colour_picker::SampleSource> {
+        None
+    }
+    fn effect_visible(&self, _: &str, _: &str, _: &App) -> Option<bool> {
+        None
+    }
+
     fn time(&self, cx: &App) -> f64;
     /// The Project panel's dragged items dropped on the viewer: placed at
     /// the playhead, on top of the stack.
@@ -402,6 +411,11 @@ impl Job {
 }
 pub struct GizmoSurface {
     zoom_input: ZoomInput,
+    effect_controls: Vec<effect_handles::Control>,
+    effect_drag: Option<effect_handles::Drag>,
+    effect_stop: Option<(usize, usize)>,
+    effect_picker: Option<(usize, usize)>,
+    effect_colour: Option<(Entity<crate::colour_picker::Picker>, Subscription, AnyWindowHandle)>,
     /// The layer a click would select under the pointer, outlined
     /// (viewer.ts hoverTargetId): its id and composition corners.
     hover_box: Option<(String, [[f64; 2]; 4])>,
@@ -693,6 +707,11 @@ impl GizmoSurface {
     ) -> Self {
         Self {
             zoom_input: ZoomInput::default(),
+            effect_controls: vec![],
+            effect_drag: None,
+            effect_stop: None,
+            effect_picker: None,
+            effect_colour: None,
             hover_box: None,
             hover_out: false,
             hover_next: None,
@@ -755,13 +774,17 @@ impl GizmoSurface {
                 s.reread(cx);
                 s.text_reread(cx);
                 s.pen_reread(cx);
+                s.effects_reread(cx);
             });
         });
     }
     /// Lines depend on the shown scale; repaint them from the current poses.
     pub fn redraw(&mut self, cx: &mut Context<Self>) {
         let this = cx.entity();
-        cx.defer(move |cx| this.update(cx, |s, cx| s.draw(cx)));
+        cx.defer(move |cx| this.update(cx, |s, cx| {
+            s.draw(cx);
+            cx.notify();
+        }));
     }
     /// Reread the pose off the main thread. While playing the engine owns the
     /// frame and gizmos stay down.
@@ -925,6 +948,7 @@ impl GizmoSurface {
                     s.draw(cx);
                     #[cfg(test)]
                     { s.completed_read = ticket; }
+                    s.effects_reread(cx);
                 }
             });
         })
@@ -1106,6 +1130,10 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(position, frame);
+        if self.effects_hover(at, frame) && self.controls && self.text_session().is_none() && self.host.tool(cx) == Tool::Select && !self.host.playing(cx) {
+            self.set_cursor(CursorStyle::Crosshair, cx);
+            return;
+        }
         let tool = self.host.tool(cx);
         let in_text = !matches!(tool, Tool::Hand | Tool::Zoom)
             && self
@@ -1312,6 +1340,7 @@ impl GizmoSurface {
         {
             return;
         }
+        if tool == Tool::Select && self.effects_down(event, frame, window, cx) { return; }
         let start = |hit, click| Drag {
             hit,
             origin: event.position,
@@ -1647,6 +1676,7 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.effects_move(event, cx) { return; }
         if self.studio_flying() {
             self.studio_fly_pointer(event.position);
             return;
@@ -1830,6 +1860,13 @@ impl GizmoSurface {
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
+        if self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_some()) { return; }
+        if let Some(drag) = self.effect_drag.take() {
+            if drag.removed { self.effect_stop = None; self.effect_picker = None; }
+            if drag.active { self.queue.push_back(Job::Finish(commit)); self.pump(cx); }
+            self.effects_reread(cx);
+            return;
+        }
         if self.rulers.dragging.is_some() {
             let at = window
                 .as_ref()
@@ -1890,6 +1927,7 @@ impl GizmoSurface {
     /// release does, so no edit stays open.
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let held = self.drag.is_some()
+            || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
             || self.pen_drag.is_some()
             || self.panning.is_some()
             || self.rulers.dragging.is_some();
@@ -1899,6 +1937,13 @@ impl GizmoSurface {
         held
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.effect_colour.is_some() {
+            self.effects_finish_colour(false, cx); return true;
+        }
+        if self.effect_picker.take().is_some() {
+            if self.effect_drag.is_some() { self.on_up(false, None, cx); }
+            cx.notify(); return true;
+        }
         if self.finish_text(false, cx) {
             return true;
         }
@@ -1908,7 +1953,7 @@ impl GizmoSurface {
         if self.studio.busy() {
             return self.studio_up(false, cx);
         }
-        if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
+        if self.drag.is_none() && self.effect_drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
             return false;
         }
         self.on_up(false, None, cx);
@@ -2099,6 +2144,7 @@ impl GizmoSurface {
                 }
                 if s.queue.is_empty()
                     && s.drag.is_none()
+                    && s.effect_drag.is_none()
                     && s.pen_drag.is_none()
                     && !s.studio.busy()
                 {
@@ -2908,6 +2954,10 @@ impl Render for GizmoSurface {
             .id("viewer-gizmos")
             .size_full()
             .track_focus(&focus)
+            .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
+                if matches!(e.keystroke.key.as_str(), "backspace" | "delete") && s.effects_delete(cx) { cx.stop_propagation(); }
+                if e.keystroke.key=="escape" && s.effect_picker.is_some() {s.cancel(cx);cx.stop_propagation();}
+            }))
             .on_key_up(cx.listener(|s, event: &KeyUpEvent, _, cx| {
                 s.studio_fly_key(&event.keystroke, false, cx);
             }))
@@ -3003,6 +3053,7 @@ impl Render for GizmoSurface {
                     move |_, _, window, cx| {
                         let _ = this.update(cx, |s, cx| {
                             if let Some(frame) = s.host.frame(s.bounds, cx) {
+                                s.effects_paint(frame, window, cx);
                                 s.pen_paint(frame, window);
                                 s.marquee_paint(frame, window);
                                 s.guides_paint(frame, window);
@@ -3027,6 +3078,7 @@ impl Render for GizmoSurface {
                 )
                 .size_full(),
             )
+            .children(self.effects_picker_element(cx))
     }
 }
 
