@@ -387,20 +387,34 @@ impl Default for OpenOptions {
 /// `hashProjectFile`: the SHA-256 of the whole file. It reads beside the
 /// container's parse (`open_project`); media checksums, which need the
 /// container's index, are verified after it (`verify_media`).
-fn hash_project_file(file: &File, path: &Path, size: u64) -> Result<String, ProjectIoError> {
+/// Stops between chunks once `stop` is set (the container failed: its error
+/// is the open's, so the rest of the file need not be read).
+fn hash_project_file(
+    file: &File,
+    path: &Path,
+    size: u64,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<String, ProjectIoError> {
     durable::reading_whole(path);
     let mut whole = Sha256::new();
-    read_range(file, path, 0, size, |bytes| whole.update(bytes))?;
+    read_range(file, path, 0, size, |bytes| {
+        whole.update(bytes);
+        !stop.load(std::sync::atomic::Ordering::Relaxed)
+    })?;
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(ProjectIoError::Invalid("The open stopped.".into()));
+    }
     Ok(durable::hex(&whole.finalize()))
 }
 
-/// Reads `length` bytes of `file` from `offset` a megabyte at a time.
+/// Reads `length` bytes of `file` from `offset` a megabyte at a time, until
+/// `take` says to stop.
 fn read_range(
     file: &File,
     path: &Path,
     offset: u64,
     length: u64,
-    mut take: impl FnMut(&[u8]),
+    mut take: impl FnMut(&[u8]) -> bool,
 ) -> Result<(), ProjectIoError> {
     let mut buf = vec![0u8; (1usize << 20).min(length.max(1) as usize)];
     let end = offset + length;
@@ -425,7 +439,9 @@ fn read_range(
                 pm_model::container::ContainerError::Invalid("The project container is truncated."),
             ));
         }
-        take(&buf[..n]);
+        if !take(&buf[..n]) {
+            return Ok(());
+        }
         position += n as u64;
     }
     Ok(())
@@ -453,7 +469,10 @@ fn verify_media(file: &File, path: &Path, media: &[&MediaRecord]) -> Result<(), 
     pm_model::parallel::map(ranges.len(), |i| {
         let record = ranges[i];
         let mut hash = Sha256::new();
-        read_range(file, path, record.offset, record.length, |bytes| hash.update(bytes))?;
+        read_range(file, path, record.offset, record.length, |bytes| {
+            hash.update(bytes);
+            true
+        })?;
         if Some(durable::hex(&hash.finalize()).as_str()) != record.sha256.as_deref() {
             return Err(bad());
         }
@@ -495,14 +514,20 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
     // whole file's hash needs nothing from it, so it reads beside the parse
     // (a 285 MB project: both are hundreds of milliseconds); media
     // checksums need the index, so they are verified after it.
+    let stop = std::sync::atomic::AtomicBool::new(false);
     let (container, hash) = std::thread::scope(|scope| {
-        let whole = scope.spawn(|| hash_project_file(&file, path, before.size));
+        let whole = scope.spawn(|| hash_project_file(&file, path, before.size, &stop));
         let container = read_container(
             &file,
             ReadOptions {
                 verify_media: false,
             },
         );
+        // A container that failed is the open's error: the hash stops at
+        // its next chunk instead of reading the rest of the file.
+        if container.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let hash = whole
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
