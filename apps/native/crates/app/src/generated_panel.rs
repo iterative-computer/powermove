@@ -1942,6 +1942,7 @@ pub(crate) struct AgentBuild {
     pub owner: Option<String>,
     pub snapshot: Option<(usize, std::sync::Arc<RenderImage>)>,
     pub snapshot_key: Option<usize>,
+    pub agent_run: Option<String>,
 }
 
 pub(crate) fn agent_slot(
@@ -1952,41 +1953,6 @@ pub(crate) fn agent_slot(
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
     let build = v.agent_panel_builds.get(id)?.clone();
-    if build
-        .owner
-        .as_deref()
-        .is_some_and(|run| !pm_agents::launch::grants::run_live(run))
-    {
-        if let Some(state) = v.panel_builds.get_mut(id) {
-            if state.stage != panel_build::Stage::Erase {
-                state.event("cancel", state.row);
-            }
-            if state.changed.elapsed().as_secs_f32() >= 0.36 {
-                let id = id.to_owned();
-                let owner = cx.weak_entity();
-                cx.defer(move |cx| {
-                    let _ = owner.update(cx, |v, cx| {
-                        if let Some(shell) = v.shell.clone().and_then(|shell| shell.upgrade()) {
-                            shell.update(cx, |e, cx| {
-                                e.release_agent_panel(&id);
-                                cx.notify();
-                            });
-                        }
-                        if let Some(build) = v.agent_panel_builds.remove(&id) {
-                            if let Some(target) = build.target {
-                                if let Some(page) = v.extensions.page_of(&target) {
-                                    page.borrow_mut().finish_panel_build(&target);
-                                }
-                                v.panel_builds.remove(&target);
-                            }
-                        }
-                        v.panel_builds.remove(&id);
-                        cx.notify();
-                    });
-                });
-            }
-        }
-    }
     let mut content = None;
     let mut generated = false;
     let mut native_tree = false;
@@ -2181,4 +2147,87 @@ pub(crate) fn extension_build(
             t.accessibility.reduce_motion,
         )))
         .into_any_element()
+}
+
+// Pure lifecycle decisions, shared by the bridge and the controller sweep.
+pub(crate) fn slot_authorized(owner: Option<&str>, caller: Option<&str>, live: bool) -> bool {
+    owner.is_some() && owner == caller && live
+}
+impl AgentBuild {
+    pub(crate) fn live(&self) -> bool {
+        self.owner.as_deref().is_some_and(pm_mcp::panel_lease::live)
+            && self
+                .agent_run
+                .as_deref()
+                .is_none_or(pm_agents::launch::grants::run_live)
+    }
+}
+impl Controller {
+    pub(crate) fn forget_agent_build(&mut self, id: &str) {
+        if let Some(build) = self.agent_panel_builds.remove(id) {
+            if let Some(target) = build.target {
+                self.panel_builds.remove(&target);
+            }
+        }
+        self.panel_builds.remove(id);
+    }
+}
+pub(crate) fn sweep_agent_builds(v: &mut Controller, cx: &mut Context<Controller>) -> bool {
+    for id in expired_slots(&v.agent_panel_builds) {
+        if let Some(shell) = v.shell.clone().and_then(|s| s.upgrade()) {
+            shell.update(cx, |e, cx| {
+                e.release_agent_panel(&id);
+                cx.notify();
+            });
+        }
+        v.forget_agent_build(&id);
+        cx.notify();
+    }
+    let running = !v.agent_panel_builds.is_empty();
+    v.agent_panel_sweep = running;
+    running
+}
+fn expired_slots(builds: &std::collections::HashMap<String, AgentBuild>) -> Vec<String> {
+    builds
+        .iter()
+        .filter(|(_, b)| !b.live())
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+#[cfg(test)]
+mod slot_regression_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn p1_build_requires_same_live_session_at_mutation_and_handoff() {
+        assert!(slot_authorized(Some("a"), Some("a"), true));
+        assert!(!slot_authorized(Some("a"), Some("b"), true));
+        assert!(!slot_authorized(Some("a"), Some("a"), false));
+        assert!(!slot_authorized(None, None, true));
+    }
+    #[::core::prelude::v1::test]
+    fn p3_hidden_builds_expire_without_rendering_panel_body() {
+        let mut builds = std::collections::HashMap::new();
+        builds.insert(
+            "hidden".into(),
+            AgentBuild {
+                title: "Hidden".into(),
+                planned: vec![],
+                target: None,
+                finishing: false,
+                owner: Some("retired-session".into()),
+                agent_run: None,
+            snapshot: None,
+            snapshot_key: None,
+            },
+        );
+        assert_eq!(expired_slots(&builds), vec!["hidden"]);
+        let lease = pm_mcp::panel_lease::Lease::new();
+        builds.get_mut("hidden").unwrap().owner = Some(lease.id().into());
+        assert!(expired_slots(&builds).is_empty());
+        builds.get_mut("hidden").unwrap().agent_run = Some("retired-agent-run".into());
+        assert_eq!(expired_slots(&builds), vec!["hidden"]);
+        builds.get_mut("hidden").unwrap().agent_run = None;
+        drop(lease);
+        assert_eq!(expired_slots(&builds), vec!["hidden"]);
+    }
 }

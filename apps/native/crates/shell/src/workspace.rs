@@ -415,6 +415,18 @@ fn rounded(n: f32) -> Value {
 /// own extra fields (a title, a `min`, extension metadata); only placement
 /// fields are rewritten. A panel that is shown again leaves `hiddenPanels`.
 pub fn write(layout: &Layout, record: &Value) -> Value {
+    // All persistent layout writers pass here, including named agent saves.
+    let mut persistent = layout.clone();
+    let transient: Vec<String> = persistent
+        .open_panels()
+        .into_iter()
+        .filter(|id| id.starts_with("panel-build-"))
+        .map(str::to_owned)
+        .collect();
+    for id in transient {
+        crate::layout::remove_build(&mut persistent, &id);
+    }
+    let layout = &persistent;
     let mut out = record.as_object().cloned().unwrap_or_default();
     let old_docks = record
         .pointer("/layout/docks")
@@ -504,7 +516,7 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                 .filter(|h| {
                     h.get("id")
                         .and_then(Value::as_str)
-                        .is_none_or(|id| !open.contains(id))
+                        .is_none_or(|id| !id.starts_with("panel-build-") && !open.contains(id))
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -876,6 +888,27 @@ mod tests {
         assert_eq!(record_id(&s.active(Some("broken"))), Some("design"));
         s.apply(&Write::Archive("mine".into()));
         assert!(s.get("mine").is_none());
+    }
+}
+
+/// Guard raw workspace definitions as well as serialized live layouts.
+pub fn persistent_record(record: Value) -> Value {
+    let transient = record
+        .pointer("/layout/docks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|d| d["panels"].as_array().into_iter().flatten())
+        .chain(record["hiddenPanels"].as_array().into_iter().flatten())
+        .any(|p| {
+            p["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("panel-build-"))
+        });
+    if transient {
+        write(&layout(&record), &record)
+    } else {
+        record
     }
 }
 

@@ -17,6 +17,7 @@ pub mod media;
 pub mod media_tools;
 pub mod memory;
 pub mod memory_admission;
+pub mod panel_lease;
 pub mod pro_edit;
 mod recovery;
 pub mod presence;

@@ -116,6 +116,7 @@ pub struct McpSession {
     pending: Option<PendingHold>,
     bypass_hold: bool,
     hold_note: Option<Value>,
+    panel_lease: Option<crate::panel_lease::Lease>,
 }
 fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
     let Some(note) = pending.take() else {
@@ -183,6 +184,7 @@ impl McpSession {
             pending: None,
             bypass_hold: false,
             hold_note: None,
+            panel_lease: None,
         }
     }
     pub fn tools(&self) -> Value {
@@ -526,8 +528,10 @@ impl McpSession {
             let owner = agent(self.agent_token.as_deref(), &host).map(|(run, _)| run);
             drop(host);
             let mut surface_args = args.clone();
-            if name == "panel_begin" {
+            if ["panel_begin", "panel_build"].contains(&name) {
                 surface_args["_panel_owner"] = json!(owner);
+                surface_args["_panel_session"] =
+                    json!(self.panel_lease.as_ref().map(|lease| lease.id()));
             }
             let live = surfaces.call(name, project.as_deref(), &surface_args);
             if acting && let Some(id) = project.as_deref() {
@@ -1450,6 +1454,7 @@ impl McpSession {
             host.agent_turn(id, self.writer, true)?;
         }
         let steer_epoch = project.as_deref().map_or(0, crate::coedit::steer_epoch);
+        self.panel_lease = Some(crate::panel_lease::Lease::new());
         self.active = Some(Active {
             project,
             document,
@@ -1482,6 +1487,7 @@ impl McpSession {
                 json!({"status":"held","reason":"A write is still waiting for the user. The session remains open; finish again after it resolves."}),
             );
         }
+        self.panel_lease = None;
         let Some(mut session) = self.active.take() else {
             return Ok(json!({"changed":false}));
         };

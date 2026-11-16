@@ -109,6 +109,8 @@ pub trait Integration {
     fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Explicit dismissal of a build, independent of workspace refreshes.
+    fn panel_closed(&self, _id: &str, _cx: &mut App) {}
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The panels on screen this frame (each tab group's front panel, or the

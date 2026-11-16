@@ -33,6 +33,14 @@ pub(crate) struct Rig {
     pub runtime: Arc<Builtins>,
     _actor: KernelActor,
 }
+/// A test's window outlives the test (GPUI's test app keeps it), and with it
+/// the panel's runtime: its isolates are closed when the test ends, or every
+/// test kept one and the process's heap account filled over the suite.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.runtime.close();
+    }
+}
 /// Three adjacent static strips on one lane, with handles: pro-edit material.
 pub(crate) fn strips_json() -> String {
     let strip = |id: &str, from: f64| {
@@ -77,7 +85,10 @@ pub(crate) fn rig_source(panel: &str, source: OpenSource) -> Rig {
     }
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A mount waits its turn in the process's shared heap account while
+    // other tests' isolates hold it (the whole suite runs in parallel), then
+    // runs: the time in line counts here too.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(result) = ticket.try_take() {
             result.expect("built-in mount");
