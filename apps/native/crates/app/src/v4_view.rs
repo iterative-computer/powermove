@@ -2965,7 +2965,7 @@ impl SurfaceView {
             let top = self.natives.outline.scene.borrow().as_ref()
                 .and_then(|s| s.span(start).map(|(_, top, _)| top)).unwrap_or(0.);
             element = element.absolute().left(px(0.)).right(px(0.))
-                .top(px(top as f32 - self.natives.outline.scroll_y.get()));
+                .top(px(top as f32));
         } else if let Some(first) = &node.outline_first {
             element = element
                 .absolute()
