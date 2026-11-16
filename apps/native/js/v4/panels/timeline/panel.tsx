@@ -448,6 +448,7 @@ function Layer({
   // the pointer. Visibility and the parent link always show; Lock shows
   // when set, or under the pointer, keyboard focus or a single selected
   // layer. Shy and Solo stay reachable on each layer row.
+  const focusedSelection = row.selected && useContext(TimelineFocused);
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
@@ -501,7 +502,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t(row.selected ? "colors.accent_text" : "colors.muted"),
+              color: t(focusedSelection ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -532,7 +533,7 @@ function Layer({
               label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
               symbol={row.expanded ? "chevron.down" : "chevron.right"}
               quiet
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               tabIndex={-1}
               send={send}
               intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -571,7 +572,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t(row.selected ? "colors.accent_text" : "colors.text"),
+            color: t(focusedSelection ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -603,7 +604,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
-              ...(row.selected ? { color: t("colors.accent_text") } : {}),
+              ...(focusedSelection ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -624,7 +625,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}

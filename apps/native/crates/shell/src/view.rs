@@ -3403,7 +3403,7 @@ impl Render for Editor {
                             .id("drop-frame")
                             .rounded(px(m.panel_radius))
                             .border(px(m.drop_stroke))
-                            .border_color(rgb(c.accent)),
+                            .border_color(rgb(c.separator)),
                     );
                 }
                 // A quiet landing outline and neutral wash keep the destination readable.
