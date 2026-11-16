@@ -81,6 +81,10 @@ fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Dur
 }
 /// The longest a quit signal keeps the process running.
 const SIGNAL_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Whether a quit has begun (its questions may be up) and was not cancelled.
+pub(crate) fn quitting(cx: &App) -> bool {
+    cx.try_global::<QuitCoordinator>().is_some_and(|q| q.quitting)
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -686,7 +690,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(250))
                 .await;
-            if watched.update(cx, |v, _| v.follow_shown()).is_err() {
+            if watched.update(cx, |v, cx| v.follow_shown(cx)).is_err() {
                 break;
             }
         }
