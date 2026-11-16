@@ -1135,6 +1135,30 @@ impl MacDomHost {
     }
     /// The colour shown under the page within its regions (the panels'
     /// ground), sRGB red, green, blue and alpha in 0–1.
+    /// Whether the panels' ground, as last presented, covers window point
+    /// (`x`, `y`), top-left origin: the slot's own background, or the ground
+    /// layer's path with a colour. False where the page shows what lies
+    /// under it (the viewer's stage, PM-378). For tests.
+    #[doc(hidden)]
+    pub fn ground_covers(&self, x: f64, y: f64) -> bool {
+        let Some(layer) = self.slot.layer() else {
+            return false;
+        };
+        if layer.backgroundColor().is_some() {
+            return true;
+        }
+        let h = self.slot.bounds().size.height;
+        let point = NSPoint::new(x, h - y);
+        self.ground.fillColor().is_some()
+            && self.ground.path().is_some_and(|path| unsafe {
+                objc2_core_graphics::CGPath::contains_point(
+                    Some(&path),
+                    std::ptr::null(),
+                    point,
+                    false,
+                )
+            })
+    }
     pub fn set_fill(&mut self, fill: Option<[f64; 4]>) {
         if self.fill != fill {
             self.fill = fill;
