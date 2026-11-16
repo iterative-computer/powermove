@@ -75,6 +75,13 @@ impl Cull {
         self.extents.borrow_mut().retain(|id, _| live(id));
         self.deferred.retain(|id, _| live(id));
     }
+    /// A new tree: where rows were is the old one's, so tops are forgotten
+    /// (NaN) and heights kept as guesses until the next layout records both.
+    pub(super) fn forget_tops(&self) {
+        for extent in self.extents.borrow_mut().values_mut() {
+            extent.0 = f32::NAN;
+        }
+    }
     /// What stands in for a node left out: a box of its height, keeping its
     /// place recorded when it was measured.
     pub(super) fn stand_in(&self, id: Id) -> Option<AnyElement> {
@@ -219,7 +226,12 @@ impl SurfaceView {
         let Some(node) = prepared.node(id) else {
             return 0.;
         };
-        let known = extents.get(&id).copied();
+        // A top from before the newest publication is no longer known (NaN):
+        // the node goes where its siblings' heights put it.
+        let known = extents
+            .get(&id)
+            .copied()
+            .map(|(t, h)| (if t.is_nan() { top } else { t }, h));
         if !stacks(&node.style) {
             // Side by side (a row wrapping a page's column): each child starts
             // where the node does, and is laid out the same way, none left out.
@@ -256,7 +268,8 @@ impl SurfaceView {
             self.cull.measured.insert(child, handle.clone());
             let measured = extents.get(&child).copied();
             let (child_top, height) = match measured {
-                Some((t, h)) => (t, h),
+                Some((t, h)) if !t.is_nan() => (t, h),
+                Some((_, h)) => (cursor, h),
                 None => (cursor, self.estimate(child, extents)),
             };
             let away = child_top + height < near.0 || child_top > near.1;

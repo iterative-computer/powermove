@@ -123,6 +123,10 @@ pub fn fact(map: &Keymap, recording: Option<&str>, asked: Option<&str>) -> Value
             .filter(|b| b.command == command && b.args == args)
             .map(|b| b.chord.clone())
             .collect();
+        // A menu item's own key, while the person has not changed it.
+        if keys.is_empty() && args.is_empty() && !changed(map, command) {
+            keys.extend(menu_key(command));
+        }
         // A Control twin of a Command key is the same shortcut on another keyboard.
         let twins: Vec<String> = keys
             .iter()
@@ -153,7 +157,7 @@ pub fn fact(map: &Keymap, recording: Option<&str>, asked: Option<&str>) -> Value
                 "keys": keys.iter().map(|k| menu::glyphs(k)).collect::<Vec<_>>(),
                 "chords": keys,
                 "changed": map.bindings.iter().any(|a| a.command == *command && a.args == *args),
-                "fixed": menu::is_equivalent(command),
+                "fixed": menu::is_fixed(command),
                 "recording": recording == Some(id.as_str()),
                 // The key the recording row asked about, and who has it.
                 "asked": asked
@@ -211,8 +215,8 @@ fn target(id: &str) -> (String, Vec<Value>) {
 /// `map` with `command` given exactly `keys`.
 pub fn assign(mut map: Keymap, id: &str, keys: Vec<String>) -> Result<Keymap, String> {
     let (command, args) = target(id);
-    if menu::is_equivalent(&command) {
-        return Err("This key belongs to the menu bar.".into());
+    if menu::is_fixed(&command) {
+        return Err("This key belongs to macOS.".into());
     }
     map.bindings
         .retain(|a| !(a.command == command && a.args == args));
@@ -281,15 +285,73 @@ pub enum Recorded {
 pub fn holder(map: &Keymap, id: &str, chord: &str) -> Option<(String, String, bool)> {
     let table = keymap::effective(map);
     let own = target(id);
-    let b = table
+    let held = table
         .iter()
-        .find(|b| b.chord == chord && (b.command.as_str(), &b.args) != (own.0.as_str(), &own.1))?;
-    let other = row_id(&b.command, &b.args);
+        .find(|b| b.chord == chord && (b.command.as_str(), &b.args) != (own.0.as_str(), &own.1))
+        .map(|b| (b.command.clone(), b.args.clone()))
+        // A menu item the person has not changed answers its own key.
+        .or_else(|| {
+            menu::equivalents()
+                .into_iter()
+                .find(|e| {
+                    e.command != own.0
+                        && !changed(map, &e.command)
+                        && keymap::from_accelerator(&e.accelerator).as_deref() == Some(chord)
+                })
+                .map(|e| (e.command, vec![]))
+        });
+    // The menu bar's own items (Minimize, Hide, Quit) never give theirs up.
+    let Some(held) = held else {
+        let role = menu::menus()
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .find(|i| {
+                i.role.is_some() && keymap::from_accelerator(&i.chord).as_deref() == Some(chord)
+            })?;
+        return Some((role.command, role.label, true));
+    };
+    let other = row_id(&held.0, &held.1);
     let label = commands(&table)
         .into_iter()
         .find(|e| e.1 == other)
-        .map_or_else(|| b.command.clone(), |e| e.2);
-    Some((other, label, menu::is_equivalent(&b.command)))
+        .map(|e| e.2)
+        // A menu item with no row of its own (Quit) goes by its menu name.
+        .or_else(|| {
+            menu::equivalents()
+                .into_iter()
+                .find(|e| e.command == held.0)
+                .map(|e| e.label)
+        })
+        .unwrap_or_else(|| held.0.clone());
+    Some((other, label, menu::is_fixed(&held.0)))
+}
+/// Keys macOS answers before any app sees them (switching apps, Spotlight,
+/// Force Quit, Lock Screen, screenshots, cycling windows): never recorded.
+fn reserved(chord: &str) -> bool {
+    [
+        "Command-Tab",
+        "Command-Shift-Tab",
+        "Command-Space",
+        "Command-Option-Escape",
+        "Control-Command-Q",
+        "Command-Shift-3",
+        "Command-Shift-4",
+        "Command-Shift-5",
+        "Command-`",
+    ]
+    .iter()
+    .filter_map(|keys| keymap::normalize(keys))
+    .any(|keys| keys == chord)
+}
+/// Whether the person gave `command` (no arguments) keys of their own.
+fn changed(map: &Keymap, command: &str) -> bool {
+    map.bindings
+        .iter()
+        .any(|a| a.command == command && a.args.is_empty())
+}
+/// A menu-bar command's own key, as a table chord.
+fn menu_key(command: &str) -> Option<String> {
+    keymap::from_accelerator(&menu::equivalent_accelerator(command)?)
 }
 
 /// The key pressed while row `id` records. `asked` is the key the row last
@@ -308,6 +370,12 @@ pub fn recorded(map: Keymap, id: &str, chord: &str, asked: Option<&str>) -> Reco
     let Some(chord) = keymap::normalize(chord) else {
         return Recorded::Error(format!("{chord} cannot be a shortcut."));
     };
+    if reserved(&chord) {
+        return Recorded::Error(format!(
+            "macOS uses {} itself. Type another.",
+            menu::glyphs(&chord)
+        ));
+    }
     let Some((other, _, menu_owned)) = holder(&map, id, &chord) else {
         return match assign(map, id, vec![chord]) {
             Ok(next) => Recorded::Store(next),
@@ -320,9 +388,14 @@ pub fn recorded(map: Keymap, id: &str, chord: &str, asked: Option<&str>) -> Reco
     // Pressed again: the key moves here, and the other command keeps the
     // rest of its keys.
     let (command, args) = target(&other);
+    // The key's Control twin (the same shortcut on another keyboard) goes with it.
+    let twin = chord
+        .strip_prefix("cmd+")
+        .map(|rest| format!("ctrl+{rest}"));
     let rest: Vec<String> = keymap::effective(&map)
         .into_iter()
         .filter(|b| b.command == command && b.args == args && b.chord != chord)
+        .filter(|b| twin.as_deref() != Some(b.chord.as_str()))
         .map(|b| b.chord)
         .collect();
     match assign(map, id, vec![chord]).and_then(|next| assign(next, &other, rest)) {
@@ -363,6 +436,7 @@ impl crate::session::Controller {
         }
         let map = stored(&state);
         if value != self.keymap_seen {
+            keymap::set_user(&map.bindings);
             self.host.borrow_mut().set_keymap(keymap::effective(&map));
         }
         self.keymap_seen = value;
@@ -419,11 +493,11 @@ impl crate::session::Controller {
         match act(map.clone(), action) {
             Ok(Act::Store(next)) => self.store_keymap(next, cx),
             Ok(Act::Record(id)) => {
-                // Pressing Change… again on the row that is listening stops it.
-                if recording.as_deref() != Some(id.as_str()) {
-                    self.shortcut_recording = Some(id);
-                    self.host.borrow_mut().record_next_key(true);
-                }
+                // A second press (a double-click, a click on the listening
+                // capsule) keeps listening: Escape is what stops it.
+                let _ = recording;
+                self.shortcut_recording = Some(id);
+                self.host.borrow_mut().record_next_key(true);
             }
             Ok(Act::StopRecording) => {}
             Ok(Act::Import) => {
@@ -542,7 +616,9 @@ mod tests {
         }
         // One shortcut per key: the Control twin of Command-S is not listed.
         assert_eq!(row(&page, "save")["chords"], json!(["cmd+s"]));
-        assert_eq!(row(&page, "save")["fixed"], json!(true));
+        // Menu-bar commands take keys like any other; only macOS's own don't.
+        assert_eq!(row(&page, "save")["fixed"], json!(false));
+        assert_eq!(row(&page, "newWindow")["chords"], json!(["cmd+shift+n"]));
         assert_eq!(page["preset"], "after-effects");
         assert_eq!(page["presets"].as_array().unwrap().len(), 4);
         let shared: Vec<&str> = page["conflicts"]
@@ -587,9 +663,9 @@ mod tests {
         // change the move made to it (it lost Q).
         assert!(!map.bindings.iter().any(|a| a.command == "rippleTrimIn"));
         assert_eq!(map.bindings.len(), 1);
-        // The menu bar's keys stay its own.
+        // macOS's own items keep their keys.
         assert!(matches!(
-            recorded(map.clone(), "save", "cmd+shift+x", None),
+            recorded(map.clone(), "quit", "cmd+shift+x", None),
             Recorded::Error(_)
         ));
         let Ok(Act::Store(map)) = act(map, &json!({"op":"clear","id":"slipLayers\u{1f}[-1]"}))
@@ -629,18 +705,82 @@ mod tests {
         let page = fact(&next, None, None);
         assert_eq!(row(&page, "rippleTrimIn")["chords"], json!([taken]));
         assert!(!row(&page, "play")["chords"].as_array().unwrap().contains(&json!(taken)));
-        // A key the menu bar owns is never moved, however often it is pressed.
-        assert!(matches!(
-            recorded(map.clone(), "rippleTrimIn", "cmd+s", Some("cmd+s")),
-            Recorded::Ask { .. }
-        ));
+        // A menu item's key asks the same way, and moves the same way.
         let page = fact(&map, Some("rippleTrimIn"), Some("cmd+s"));
-        assert_eq!(row(&page, "rippleTrimIn")["asked"]["menu"], json!(true));
+        assert_eq!(row(&page, "rippleTrimIn")["asked"]["menu"], json!(false));
+        let Recorded::Store(moved) = recorded(map.clone(), "rippleTrimIn", "cmd+s", Some("cmd+s"))
+        else {
+            panic!()
+        };
+        let page = fact(&moved, None, None);
+        assert_eq!(row(&page, "rippleTrimIn")["chords"], json!(["cmd+s"]));
+        assert!(
+            !row(&page, "save")["chords"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("cmd+s"))
+        );
         // Delete takes the row's key away.
         let Recorded::Store(cleared) = recorded(map, "play", "backspace", None) else {
             panic!()
         };
         assert_eq!(row(&fact(&cleared, None, None), "play")["chords"], json!([]));
+    }
+
+    /// A menu-bar command (New Window, Save) records a key, which the menu
+    /// item then shows and answers; a key one of them had moves on a second
+    /// press. Only macOS's own items (Quit) keep theirs.
+    #[test]
+    fn menu_bar_commands_record_keys_and_their_menu_items_show_them() {
+        let map = Keymap::default();
+        let Recorded::Store(map) = recorded(map, "newWindow", "cmd+ctrl+alt+w", None) else {
+            panic!()
+        };
+        let page = fact(&map, None, None);
+        assert_eq!(row(&page, "newWindow")["chords"], json!(["cmd+ctrl+alt+w"]));
+        assert_eq!(row(&page, "newWindow")["changed"], json!(true));
+        keymap::set_user(&map.bindings);
+        let menu_chord = |command: &str| {
+            menu::menus()
+                .into_iter()
+                .flat_map(|(_, items)| items)
+                .find(|i| i.command == command)
+                .map(|i| i.chord)
+        };
+        assert_eq!(menu_chord("newWindow").as_deref(), Some("cmd+ctrl+alt+w"));
+        // New Window's old key is free for another command, at once.
+        let Recorded::Store(map) = recorded(map, "rippleTrimIn", "cmd+shift+n", None) else {
+            panic!()
+        };
+        // Save's key asks, then moves; Save's menu item then has no key.
+        assert!(matches!(
+            recorded(map.clone(), "rippleTrimIn", "cmd+s", None),
+            Recorded::Ask { .. }
+        ));
+        let Recorded::Store(map) = recorded(map, "rippleTrimIn", "cmd+s", Some("cmd+s")) else {
+            panic!()
+        };
+        keymap::set_user(&map.bindings);
+        assert_eq!(menu_chord("save").as_deref(), Some(""));
+        assert!(assign(map.clone(), "quit", vec!["cmd+k".into()]).is_err());
+        // Keys macOS takes first are refused; the menu bar's own (Minimize)
+        // ask and never move.
+        for taken in ["cmd+tab", "cmd+space", "cmd+shift+3"] {
+            let chord = keymap::normalize(&taken.replace('+', "-")).unwrap_or(taken.into());
+            assert!(
+                matches!(
+                    recorded(map.clone(), "newWindow", &chord, None),
+                    Recorded::Error(_)
+                ),
+                "{taken}"
+            );
+        }
+        assert!(matches!(
+            recorded(map.clone(), "newWindow", "cmd+m", Some("cmd+m")),
+            Recorded::Ask { .. }
+        ));
+        keymap::set_user(&[]);
+        assert_eq!(menu_chord("save").as_deref(), Some("CommandOrControl+S"));
     }
 
     #[test]
