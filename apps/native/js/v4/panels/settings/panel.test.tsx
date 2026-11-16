@@ -671,3 +671,35 @@ test("the installed extensions take their rows' height (PM-386): every row up to
     f.model.dispose();
   }
 });
+test("every command on Shortcuts arrives in commits the host's 1 MiB argument quota accepts", async () => {
+  const { model } = fixture();
+  model.show();
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    id: `c${i}`,
+    menu: ["Layer", "Edit", "View", "Playback"][i % 4]!,
+    label: `Command ${i}`,
+    keys: ["⌘⇧K"],
+    chords: [],
+    changed: false,
+    fixed: false,
+    recording: false,
+  }));
+  model.publish({
+    ...model.publication,
+    revision: 2,
+    shortcuts: { preset: "premiere-pro", changed: false, rows, conflicts: [] },
+  });
+  model.show("shortcuts");
+  const { root, commits } = recorder();
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+  await root.flush();
+  const sizes = commits.map((c) => JSON.stringify(c).length);
+  expect(Math.max(...sizes)).toBeLessThan(1024 * 1024);
+  const groups = root
+    .inspect()
+    .nodes.filter((n) => String(n.props.id ?? "").startsWith("settings.shortcut."));
+  expect(groups).toHaveLength(400);
+  root.dispose();
+  model.dispose();
+});

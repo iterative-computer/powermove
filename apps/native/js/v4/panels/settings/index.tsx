@@ -766,6 +766,9 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
  * one letter matching hundreds of commands stays one page the host takes;
  * the rest are counted under them. */
 const SEARCH_ROWS = 40;
+/** Shortcut rows per commit: a row is about 5 KB of ops, a commit at most
+ * 1 MiB. */
+const SHORTCUT_CHUNK = 60;
 function More({ count, title }: { count: number; title: string }) {
   if (count <= 0) return null;
   return (
@@ -953,10 +956,9 @@ function Shortcuts({
 }) {
   const [filter, setFilter] = useState("");
   const page = model.publication.shortcuts;
-  if (!page) return null;
   const query = model.query.trim();
   const own = filter.trim().toLocaleLowerCase();
-  const matching = page.rows.filter(
+  const matching = (page?.rows ?? []).filter(
     (row) =>
       (!query || model.matches.rows.has(`shortcut.${row.id}`)) &&
       (!own ||
@@ -964,7 +966,23 @@ function Shortcuts({
           .toLocaleLowerCase()
           .includes(own)),
   );
-  const rows = query || own ? matching.slice(0, SEARCH_ROWS) : matching;
+  const all = query || own ? matching.slice(0, SEARCH_ROWS) : matching;
+  // Every command at once is more than one commit may carry (the host's
+  // argument quota): the rows arrive a chunk a turn, from the first again
+  // whenever the search changes.
+  const key = `${query}\u0000${own}`;
+  const [shown, setShown] = useState({ key, limit: SHORTCUT_CHUNK });
+  const limit = shown.key === key ? shown.limit : SHORTCUT_CHUNK;
+  useLayoutEffect(() => {
+    if (limit >= all.length) return;
+    const timer = setTimeout(
+      () => setShown({ key, limit: limit + SHORTCUT_CHUNK }),
+      0,
+    );
+    return () => clearTimeout(timer);
+  }, [key, limit, all.length]);
+  if (!page) return null;
+  const rows = all.slice(0, limit);
   const menus = [...new Set(rows.map((row) => row.menu))];
   const act = (op: "record" | "reset" | "clear", id: string) => {
     void model.perform({ type: "shortcut", op, id });
