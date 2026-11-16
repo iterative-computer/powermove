@@ -1767,6 +1767,8 @@ impl SurfaceView {
             .get("binding")
             .and_then(Value::as_str)
             .map(SharedString::from);
+        let binding = binding.filter(|_| !node.listeners.contains_key("change"));
+        let initial = node.props.get("value").cloned().unwrap_or(json!("#808080"));
         let color = node
             .props
             .get("value")
@@ -1791,6 +1793,7 @@ impl SurfaceView {
                 }
             }
             Edit::Finish(commit) => {
+                if !commit && binding.is_none() {v.change(id,initial.clone(),cx);}
                 if v.scrub_busy || v.scrub_gesture.is_some() || !v.scrub_ops.is_empty() {
                     v.scrub_ops.push_back(ScrubOp::Finish(*commit));
                     v.scrub_pump(cx);
@@ -3735,6 +3738,7 @@ impl Render for SurfaceView {
         }
         self.presence = presence;
         self.motion.frame(window);
+        let viewport = window.viewport_size();
         let t = &self.table.tokens;
         let root = div().relative().w_full();
         let root = if self.grows {
@@ -3759,12 +3763,15 @@ impl Render for SurfaceView {
             .child(Self::tracking(cx, self.origin.clone()))
             .children(self.colour.as_ref().map(|(id, picker, _)| {
                 let bounds = self.anchors.borrow().get(id).copied().unwrap_or_default();
+                let width=px(t.metrics.color_picker_width);
+                let height=px(t.metrics.color_picker_plane_height+t.metrics.control+2.*t.space.md+t.space.sm);
+                let margin=px(t.space.lg);let gap=px(t.space.sm);
+                let x=(bounds.origin.x+bounds.size.width-width).max(margin).min((viewport.width-width-margin).max(margin));
+                let below=bounds.origin.y+bounds.size.height+gap;
+                let y=if below+height<=viewport.height-margin {below}else{(bounds.origin.y-gap-height).max(margin)};
                 deferred(
                     anchored()
-                        .position(point(
-                            bounds.origin.x,
-                            bounds.origin.y + bounds.size.height + px(t.space.sm),
-                        ))
+                        .position(point(x,y))
                         .snap_to_window()
                         .child(picker.clone()),
                 )

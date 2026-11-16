@@ -230,7 +230,7 @@ export function ColourWell(props: Bound<string> & { minimal?: boolean }) {
     "button",
     {
       ...rest,
-      metadata: kitMetadata(props, { minimal: !!minimal, nativeColourPicker: true }),
+      metadata: kitMetadata(props, { minimal: !!minimal }),
       "aria-haspopup": "dialog",
     },
     {
