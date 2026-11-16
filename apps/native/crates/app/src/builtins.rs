@@ -2363,7 +2363,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
         let input = crate::skimming::input();
-        let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
+        let _ = self.0.update(cx, |v, _| {
+            v.skim(seconds, input);
+            // The skimmer is drawn with the playhead: place it again.
+            if let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
     }
     fn skimming(&self, cx: &App) -> bool {
         crate::skimming::on(&self.0, cx)

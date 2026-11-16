@@ -471,6 +471,8 @@ pub struct TimelineSurface {
     /// has not moved (a seek, a click, playback put the viewer back on the
     /// playhead's frame).
     skim_playhead: Option<f64>,
+    /// A wheel step moves the skimmer: no panel draw for it.
+    quiet_skim: bool,
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
@@ -560,6 +562,7 @@ impl TimelineSurface {
             skimmer: None,
             pointer: None,
             skim_playhead: None,
+            quiet_skim: false,
             hover_clip: None,
             // As the scene and the panel's model start: the shell's first
             // word (unfocused, at the first layout) is then a change, and
@@ -1026,8 +1029,6 @@ impl TimelineSurface {
             || self.media_over.is_some()
             || self.effect_over.is_some()
             || self.tip.is_some()
-            // Its line stands at its time: it moves with the tracks.
-            || (sideways && self.skimmer.is_some())
             // Recorded no further than the view.
             || (sideways && !self.rows.as_ref().is_some_and(|(_, _, reach)| *reach > 0.))
         {
@@ -2792,8 +2793,13 @@ impl TimelineSurface {
             self.view.scroll_time -= travel / self.view.pps;
             self.clamp_time();
             self.sideways = true;
-            if self.skimmer.is_none() {
-                self.scrolled_while_hot(true, window, cx);
+            if self.step_layers(true, window, cx) {
+                // A skim showing stays under the pointer: the time there now,
+                // drawn with the playhead, not by a panel draw.
+                self.quiet_skim = true;
+                self.reskim(x, cx);
+                self.quiet_skim = false;
+                self.persist_when_idle(false, cx);
                 return;
             }
             self.reskim(x, cx);
@@ -3014,7 +3020,11 @@ impl TimelineSurface {
         if at != self.skimmer {
             self.skimmer = at;
             self.delegate.skim(at, cx);
-            cx.notify();
+            // The ruler leaves out the label under its timecode: drawn again,
+            // but not for a wheel step (the layers' settle draws it).
+            if !self.quiet_skim {
+                cx.notify();
+            }
         }
     }
     /// Development builds' review sweep: the pointer over `seconds` on the
@@ -4641,7 +4651,6 @@ impl Render for TimelineSurface {
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
-            .children(self.skimmer_marks())
             .children(self.graph_readout_element())
     }
 }
@@ -4718,8 +4727,9 @@ impl TimelineSurface {
             .child(text.clone()).into_any_element())
     }
     /// The skimmer: a hairline of text ink across the ruler and tracks
-    /// (the playhead is the accent), with its timecode on the ruler.
-    /// The skimmer's x in the panel and its timecode, while it shows.
+    /// (the playhead is the accent), with its timecode on the ruler, drawn
+    /// with the playhead (`crate::playhead::Skimmer`). Its x in the panel
+    /// and its timecode, while it shows.
     fn skimmer_at(&self) -> Option<(f64, String)> {
         let at = self.skimmer?;
         let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
@@ -4740,34 +4750,10 @@ impl TimelineSurface {
         );
         Some((x, code))
     }
-    fn skimmer_marks(&self) -> Vec<AnyElement> {
-        let Some((x, code)) = self.skimmer_at() else {
-            return vec![];
-        };
-        let t = &self.tokens;
-        let ink = (t.colors.text << 8) | 0x99;
-        let line = div()
-            .id("timeline-skimmer")
-            .absolute()
-            .left(px(x as f32 - t.metrics.border / 2.))
-            .top_0()
-            .bottom_0()
-            .w(px(t.metrics.border))
-            .bg(rgba(ink));
-        let label = div()
-            .absolute()
-            .left(px(x as f32 + t.metrics.border * 2.))
-            .top(px(t.metrics.border))
-            .px(px(t.metrics.gap / 2.))
-            .rounded(px(t.metrics.control_radius))
-            .bg(rgb(t.colors.floating))
-            .border(px(t.metrics.border))
-            .border_color(rgb(t.colors.separator))
-            .text_size(px(t.typography.minimum))
-            .text_color(rgb(t.colors.text))
-            .whitespace_nowrap()
-            .child(code);
-        vec![line.into_any_element(), label.into_any_element()]
+    /// Where the skimmer stands (panel points) and its timecode, while it
+    /// shows: the playback loop draws it with the playhead.
+    pub fn skimmer_mark(&self) -> Option<(f64, String)> {
+        self.skimmer_at()
     }
 }
 /// Where a playing head at `x` (points into a time area `width` wide)

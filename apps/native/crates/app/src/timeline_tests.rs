@@ -1712,9 +1712,9 @@ fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut 
 /// drawn (their scroll layers), with no render of the panel, as the steps up
 /// and down do; the frame hit-testing reads is at the new time at once. The
 /// first step of a sideways scroll draws them past each side (other draws
-/// leave that out: it costs them); the panel renders once the steps stop, at
-/// once for a step past the tracks' width drawn, and at every step while the
-/// skimmer shows (it stays under the pointer, its timecode the time there).
+/// leave that out: it costs them); the panel renders once the steps stop and
+/// at once for a step past the tracks' width drawn. A skimmer showing stays
+/// under the pointer at the time there, drawn outside the panel.
 #[gpui::test]
 fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     cx: &mut TestAppContext,
@@ -1739,7 +1739,7 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     s.vcx.simulate_mouse_move(at, None, Modifiers::none());
     // Zoomed in, so the time has somewhere to scroll; the view it wrote
     // is back from the worker.
-    wheel(&mut s, point(px(0.), px(-300.)), Modifiers::control());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
     settle(&mut s);
     s.idle(cx);
     let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
@@ -1779,14 +1779,38 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     assert!(renders(&s) > rendered);
     settle(&mut s);
     s.idle(cx);
-    // The skimmer showing: every step draws.
-    s.recorder.skimming.set(true);
-    s.vcx
-        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    // The skimmer showing (drawn with the playhead, outside the panel): a
+    // step moves the time under it with no panel draw, and the skim follows.
+    // Back at the start, zoomed in, the sideways layers recorded.
+    wheel(&mut s, point(px(5000.), px(0.)), Modifiers::none());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    wheel(&mut s, point(px(-10.), px(0.)), Modifiers::none());
     settle(&mut s);
-    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let (pps, start, _) = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let over = s.at(2, start + 300. / pps);
+    s.vcx.simulate_mouse_move(over, None, Modifiers::none());
+    settle(&mut s);
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let (x, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
     let rendered = renders(&s);
-    wheel(&mut s, point(px(30.), px(0.)), Modifiers::none());
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: over,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        ..Default::default()
+    });
+    s.vcx.run_until_parked();
+    assert_eq!(renders(&s), rendered);
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now > skimmed, "the time under the pointer: later after a scroll on");
+    // Still under the pointer (within the frame it snaps to).
+    let (moved, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    assert!((moved - x).abs() <= pps / 30. + 1., "{x} -> {moved}");
+    // Once the steps stop, the panel draws again.
+    settle(&mut s);
     assert!(renders(&s) > rendered);
 }
 #[gpui::test]
