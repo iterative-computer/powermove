@@ -450,3 +450,148 @@ fn a_real_project_with_keys_without_ids() {
     drop(store);
     edit_one_and_compare(&path, &first);
 }
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A session that moved keys stored without ids saves (a reopen names them
+/// otherwise) while its first checkpoint is held behind a slow disk, is
+/// edited while the save runs and after it publishes, then the app is gone.
+/// Recovery lands every edit on the key it was made to and leaves no two
+/// keys one id: the save waited for a checkpoint of this session's ids, so
+/// recovery never replays the session's lines onto a reopen's ids.
+#[test]
+fn recovery_after_a_save_of_moved_keys_lands_every_edit_on_its_key() {
+    use pm_kernel::journal::JournalConfig;
+    use pm_kernel::session::{
+        RecoveryDecision, RecoveryResult, SessionSource, ShellCall, ShellReply,
+    };
+    use pm_kernel::{Call, Caller, Kernel, KernelActor, KernelConfig, Request, WriteBody};
+    let dir = TempDir::new("pathless-keys-recovery");
+    let file = dir.path("project.pmv");
+    save_as(&mut DocumentStore::new_untitled(project()), &file).unwrap();
+    use std::sync::{Arc, Condvar, Mutex};
+    let hold = Arc::new((Mutex::new(true), Condvar::new()));
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(dir.path("journals")),
+        backup_root: Some(dir.path("backups")),
+        journal: JournalConfig {
+            checkpoint_revisions: 1000,
+            hold_checkpoints: Some(hold.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    // The disk catches up later; a save that needs a checkpoint waits for it.
+    let release = {
+        let hold = hold.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            *hold.0.lock().unwrap() = false;
+            hold.1.notify_all();
+        })
+    };
+    let k = actor.handle();
+    let session = match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    };
+    let edit = |command: KeyframeCommand| {
+        k.call(
+            "P",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: WriteBody::Commands(vec![Command::Keyframe(command)]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    };
+    // The middle key past the last: the session's ids now differ from a
+    // reopen's ([0, 2, 1] by place).
+    edit(KeyframeCommand::Move {
+        key_ids: vec![id(1)],
+        delta: 1.5,
+    });
+    let plan = k.prepare_save(session, None).wait().unwrap().unwrap();
+    // While the save runs, the first key past the one now second: another
+    // reorder, journalled after the save point under this session's ids.
+    edit(KeyframeCommand::Move {
+        key_ids: vec![id(0)],
+        delta: 2.2,
+    });
+    let completion = plan.run();
+    edit(KeyframeCommand::Edit {
+        key_id: id(1),
+        time: None,
+        value: Some(Value::from(77.0)),
+    });
+    // Completing the save may wait on the held checkpoint; the app is gone
+    // before it does (the journals synced from outside, as Quit Now does).
+    let finishing = k.finish_save(completion);
+    k.sync_journals().unwrap();
+    let exited = dir.path("after-exit");
+    copy_tree(&dir.path("journals"), &exited.join("journals"));
+    std::fs::copy(&file, exited.join("project.pmv")).unwrap();
+    release.join().unwrap();
+    finishing.wait().unwrap().unwrap();
+    drop(actor);
+
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(exited.join("journals")),
+        ..Default::default()
+    });
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(exited.join("project.pmv")),
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+        panic!("{reply:?}");
+    };
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { .. }),
+        "{recovery:?}"
+    );
+    k.shell(ShellCall::DecideRecovery {
+        ticket,
+        decision: RecoveryDecision::Recover,
+    })
+    .unwrap();
+    let store = k.project("P").unwrap().store();
+    let x = keys(store, "x");
+    // Stored order: the key once second (20 at 2 s), the first (0 at 2.2 s),
+    // the one once middle (edited to 77 at 2.5 s).
+    assert_eq!(times(&x), [2.0, 2.2, 2.5]);
+    let values: Vec<f64> = x.iter().map(|k| k.get("v").unwrap().as_f64().unwrap()).collect();
+    assert_eq!(values, [20.0, 0.0, 77.0], "every edit found its key");
+    let named = ids(&x);
+    let unique: std::collections::HashSet<_> = named.iter().collect();
+    assert_eq!(unique.len(), 3, "{named:?}");
+}

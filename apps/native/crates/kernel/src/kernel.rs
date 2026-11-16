@@ -782,16 +782,30 @@ impl Kernel {
             .unwrap_or_default();
         let project = &slot.project;
         let history = project.store().history().identity();
+        let state = || {
+            let store = project.store();
+            CheckpointState {
+                revision: store.revision(),
+                document: store.current().clone(),
+                history: store.history().snapshot(),
+                workspace: project.workspace().clone(),
+            }
+        };
+        // A reopen of the file names keys stored without ids by place; once
+        // this session moved some, its ids differ, and recovery must replay
+        // from a checkpoint holding this session's ids, durable before the
+        // save can publish, never from the save point onto that reopen.
+        let current = project.store().current();
+        if model::reopened_hash(current).is_some_and(|h| Some(h) != current.canonical_hash()) {
+            journal.checkpoint_now(durability, state()).map_err(|e| {
+                KernelFailure::Storage(format!(
+                    "Not saved: the recovery journal could not record the save ({e}). \
+                     The file was not changed; your work is still open."
+                ))
+            })?;
+        }
         journal
-            .mark_save(durability, &hash, &history, revision, || {
-                let store = project.store();
-                CheckpointState {
-                    revision: store.revision(),
-                    document: store.current().clone(),
-                    history: store.history().snapshot(),
-                    workspace: project.workspace().clone(),
-                }
-            })
+            .mark_save(durability, &hash, &history, revision, state)
             .map_err(|e| {
                 KernelFailure::Storage(format!(
                     "Not saved: the recovery journal could not record the save ({e}). \
