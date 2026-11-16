@@ -295,7 +295,7 @@ pub enum KeyframeCommand {
     /// composition and none comes within a frame of a key it does not own
     /// (the graph never replaces keys); numeric values move by
     /// `value_delta` (rounded to 0.001). Send totals with
-    /// `update_gesture_from_start`. Label "Edit curve" / "Edit keyframes".
+    /// `update_gesture_from_start`. Label "Edit Curve" / "Edit Keyframes".
     GraphMove {
         key_ids: Vec<String>,
         delta: f64,
@@ -336,9 +336,9 @@ impl KeyframeCommand {
             KeyframeCommand::SetHold { .. } => "Toggle Hold Keyframe",
             KeyframeCommand::SetHandle { .. } => "Adjust Handle",
             KeyframeCommand::SetSpring { .. } => "Set Spring",
-            KeyframeCommand::GraphMove { key_ids, .. } if key_ids.len() > 1 => "Edit keyframes",
-            KeyframeCommand::GraphMove { .. } => "Edit curve",
-            KeyframeCommand::Transform { .. } => "Scale keyframes",
+            KeyframeCommand::GraphMove { key_ids, .. } if key_ids.len() > 1 => "Edit Keyframes",
+            KeyframeCommand::GraphMove { .. } => "Edit Curve",
+            KeyframeCommand::Transform { .. } => "Scale Keyframes",
         }
         .to_owned()
     }
@@ -627,6 +627,62 @@ fn set_unit_handles(keys: &mut [Value], index: usize, eo: [f64; 2], ei: [f64; 2]
     e.in_interp = Interp::Bezier;
     e.in_ease = pm_eval::temporal::ease_from_unit_handle(ei, dt, dv, Side::In);
     track::write_ease(&mut keys[index], &e);
+}
+
+/// The named ease preset key `index` has, as [`set_easing`] wrote it (v1's
+/// `Ease.nameOf(eo, ei)` of its unit handles): `None` for a hold key, a
+/// custom curve, or a numeric key on a flat segment (whose handles keep no
+/// height to name). The keyframe menu checks the preset every chosen key has.
+pub fn ease_preset(keys: &[Value], index: usize) -> Option<&'static str> {
+    let key = keys.get(index)?;
+    if key.get("hold").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let named = |name: &'static str| (name != "custom").then_some(name);
+    // v1's own handles: a non-numeric track's, or a key not yet adopted
+    // into the AE model (no interpolation of its own).
+    let legacy = key.get("outInterp").is_none() && (key.get("eo").is_some() || key.get("ei").is_some());
+    if legacy || !keys.iter().all(|k| track::numeric(k.get("v"))) {
+        let handle = |field: &str, default: [f64; 2]| {
+            key.get(field)
+                .and_then(Value::as_array)
+                .and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]))
+                .unwrap_or(default)
+        };
+        return named(pm_eval::easing::name_of(
+            handle("eo", [0., 0.]),
+            handle("ei", [1., 1.]),
+        ));
+    }
+    let e = track::ease_key(key);
+    if e.out_interp == Interp::Hold {
+        return None;
+    }
+    // The spans `set_unit_handles` measured the handles against.
+    let other = |offset: isize| -> Option<pm_eval::temporal::EaseKeyframe> {
+        let i = index as isize + offset;
+        (i >= 0)
+            .then(|| keys.get(i as usize))
+            .flatten()
+            .map(track::ease_key)
+    };
+    let span = |o: Option<pm_eval::temporal::EaseKeyframe>| match o {
+        Some(o) => (
+            (o.t - e.t).abs(),
+            (o.v.unwrap_or(f64::NAN) - e.v.unwrap_or(f64::NAN)) * (o.t - e.t).signum(),
+        ),
+        None => (1.0, 1.0),
+    };
+    let handle = |interp: Interp, ease, (dt, dv): (f64, f64), side: Side, linear: [f64; 2]| {
+        if interp == Interp::Linear {
+            Some(linear)
+        } else {
+            pm_eval::temporal::unit_handle_from_ease(ease, dt, dv, side)
+        }
+    };
+    let eo = handle(e.out_interp, e.out_ease, span(other(1).or_else(|| other(-1))), Side::Out, [0., 0.])?;
+    let ei = handle(e.in_interp, e.in_ease, span(other(-1).or_else(|| other(1))), Side::In, [1., 1.])?;
+    named(pm_eval::easing::name_of(eo, ei))
 }
 
 fn pair(v: [f64; 2]) -> Value {

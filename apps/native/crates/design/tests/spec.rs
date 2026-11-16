@@ -160,6 +160,10 @@ const ROLES: &[(&str, &str)] = &[
         "Least width of an inspector row's value column",
     ),
     (
+        "metrics.value_column_most",
+        "Most width of a capped inspector row's value column (Effect Controls)",
+    ),
+    (
         "metrics.label_column",
         "Most an inspector row's label takes before its value",
     ),

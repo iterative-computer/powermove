@@ -130,15 +130,26 @@ export function EffectsPanel({
       >
         {model.installedCount() === 0 ? null : (
           // v1's category rail: every category one click away, the list beside
-          // it showing the chosen one (All, Recent, then each group).
+          // it showing the chosen one (All, Recent, then each group). It is at
+          // least as wide as its widest name (the host measures them in the
+          // rows' font, with the rail's padding and the rows' indent), never
+          // narrower than a label column, and never gives way in a narrow
+          // dock: names are never cut.
           <List
             id={ids.scope}
             label="Effect categories"
             tabIndex={0}
+            metadata={{
+              fitsLabels: model.scopes().map((scope) => scope.label),
+              fitsInsetToken: "metrics.gap",
+            }}
             style={{
               ...hitStyle,
+              flexGrow: 0,
               flexShrink: 0,
-              width: token("metrics.label_column"),
+              flexBasis: "auto",
+              fontSize: token("typography.body"),
+              minWidth: token("metrics.label_column"),
               paddingLeft: token("metrics.gap"),
               paddingRight: token("metrics.gap"),
               borderRightWidth: token("metrics.border"),

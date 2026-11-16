@@ -44,6 +44,55 @@ const V4_THEME: &str = "extension.v4theme:";
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
+/// Runs the row chosen from a menu (`target`: `token:index`) once the
+/// update that heard it returns: what a row does may read the entity that
+/// heard it (the timeline asks the Controller for the time), and reading an
+/// entity inside its own update is a double lease, a panic in any build.
+pub(crate) fn run_choice<T: 'static>(
+    pending: &mut Option<(u64, crate::timeline_surface::Choose)>,
+    target: &str,
+    cx: &mut Context<T>,
+) {
+    if let Some((token, index)) = target.split_once(':')
+        && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+        && let Some((_, choose)) = pending.take_if(|(waiting, _)| *waiting == token)
+    {
+        cx.defer(move |cx| choose(Some(index), cx));
+    }
+}
+#[cfg(test)]
+mod choice_tests {
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+    struct Holder {
+        pending: Option<(u64, crate::timeline_surface::Choose)>,
+    }
+    /// A row chosen while the entity that holds the menu is updating runs
+    /// after that update: the row reads the entity (the timeline's rows ask
+    /// the Controller for the time), which inside its update panicked.
+    #[gpui::test]
+    fn a_chosen_row_may_read_the_entity_that_heard_it(cx: &mut TestAppContext) {
+        let holder = cx.new(|_| Holder { pending: None });
+        let ran = Rc::new(Cell::new(None));
+        let (weak, seen) = (holder.downgrade(), ran.clone());
+        holder.update(cx, |h, _| {
+            h.pending = Some((
+                7,
+                Box::new(move |index, cx| {
+                    // Reads the holder, as the timeline's rows read the Controller.
+                    let waiting = weak.upgrade().map(|h| h.read(cx).pending.is_some());
+                    seen.set(Some((index, waiting)));
+                }),
+            ));
+        });
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "7:2", cx));
+        cx.run_until_parked();
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+        // Another menu's token runs nothing.
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "8:0", cx));
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+    }
+}
 /// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
 const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
@@ -1033,6 +1082,12 @@ impl Controller {
                         return MenuEntry::separator();
                     }
                     let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
                     let mut entry = match row["children"].as_array() {
                         Some(children) if !children.is_empty() => {
                             MenuEntry::submenu(label, entries(children, token, next))
@@ -1041,6 +1096,7 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
+                    entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()
@@ -1574,15 +1630,7 @@ impl Controller {
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(CHOICE) {
-            if let Some((token, index)) = target.split_once(':')
-                && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
-                && let Some((_, choose)) = self
-                    .extensions
-                    .choice
-                    .take_if(|(pending, _)| *pending == token)
-            {
-                choose(Some(index), cx);
-            }
+            run_choice(&mut self.extensions.choice, target, cx);
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
