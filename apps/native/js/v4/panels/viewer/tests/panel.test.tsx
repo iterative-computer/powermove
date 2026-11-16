@@ -226,13 +226,19 @@ for (const [name, change] of cases) {
               ...(state.host.source
                 ? ["viewer.source.close"]
                 : [
+                    // 2D | 3D leads the bar (its checked segment takes focus).
+                    ...(state.model?.studio ? [nodes.find(
+                      (n) => n.props.role === "radio" && n.props.label === "2D",
+                    )?.props.id] : []),
+                    ...[
                     "gotoStart",
                     "prevFrame",
                     "play",
                     "nextFrame",
                     "gotoEnd",
                     "loop",
-                  ].map((id) => `viewer.transport.${id}`)),
+                  ].map((id) => `viewer.transport.${id}`),
+                  ]),
               "viewer.channels",
               "viewer.zoom",
               "viewer.quality",
@@ -490,9 +496,12 @@ test("a 3D composition adds no toolbar; away from the shot one top-left control 
   ])
     expect(nodes.some((n) => n.props.id === id)).toBe(false);
   await root.dispose();
+  // Focus has no bar (no 2D | 3D): one control returns.
+  const focused = at("free");
+  focused.host.presentation = "Focus";
   const { root: free } = recorder();
   await free.render(
-    <ViewerPanel state={at("free")} actions={{ ...actions, drive }} />,
+    <ViewerPanel state={focused} actions={{ ...actions, drive }} />,
   );
   nodes = free.inspect().nodes;
   const ret = nodes.find((n) => n.props.id === "viewer.studio.viewCamera")!;
@@ -539,4 +548,75 @@ test("a 3D composition's bar has one preview pop-up: Fast by default, before RGB
   await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
   expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.studio.tier")).toBe(false);
   await flat.dispose();
+});
+
+test("2D | 3D leads the bar: it switches the shot and the scene, and hides without a scene", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const segment = (nodes: { props: Record<string, unknown> }[], label: string) =>
+    nodes.find((n) => n.props.role === "radio" && n.props.label === label)!;
+  const s = fixture();
+  s.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  let nodes = root.inspect().nodes;
+  const ids = nodes.map((n) => String(n.props.id));
+  expect(ids.indexOf("viewer.dimension")).toBeGreaterThanOrEqual(0);
+  expect(ids.indexOf("viewer.dimension")).toBeLessThan(ids.indexOf("viewer.channels"));
+  expect(segment(nodes, "2D").props["aria-checked"]).toBe(true);
+  expect(segment(nodes, "3D").props.disabled).toBeFalsy();
+  await root.drive((segment(nodes, "3D") as unknown as { id: number }).id, "click", {});
+  await root.dispose();
+  // In the scene: 3D is on, and the bar replaces the floating View camera.
+  s.model!.studio = { tier: "fast", tool: "move", look: "free" };
+  const { root: scene } = recorder();
+  await scene.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  nodes = scene.inspect().nodes;
+  expect(segment(nodes, "3D").props["aria-checked"]).toBe(true);
+  expect(nodes.some((n) => n.props.id === "viewer.studio.viewCamera")).toBe(false);
+  await scene.drive((segment(nodes, "2D") as unknown as { id: number }).id, "click", {});
+  expect(seen).toEqual([
+    ["viewer.studio.look", "free"],
+    ["viewer.studio.look", "camera"],
+  ]);
+  await scene.dispose();
+  // Adding and deleting the last 3D layer updates the same mounted bar.
+  const { root: flat } = recorder();
+  const state = fixture();
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
+  state.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(true);
+  delete state.model!.studio;
+  await flat.render(<ViewerPanel state={state} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.dimension")).toBe(false);
+  await flat.dispose();
+});
+
+test("nested composition breadcrumbs navigate ancestors and retain the way back down", async () => {
+  const seen: [string, unknown][] = [];
+  const state = fixture();
+  state.model!.compositions = [
+    { id: "main", name: "Main", parents: [] },
+    { id: "logo", name: "Logo", parents: ["main"] },
+    { id: "spinner", name: "Spinner", parents: ["logo"] },
+  ];
+  state.model!.composition = "logo";
+  state.model!.trail = { ids: ["main", "logo", "spinner"], index: 1 };
+  const { root, commits } = recorder();
+  await root.render(<ViewerPanel state={state} actions={{ ...actions, drive: (id, argument) => { seen.push([id, argument]); } }} />);
+  const nodes = root.inspect().nodes;
+  expect(nodes.find(n => n.props.id === "viewer.path")?.props.label).toBe("Composition path");
+  for (const id of ["main", "spinner"]) {
+    const crumb = nodes.find(n => n.props.id === `viewer.crumb.${id}`)!;
+    expect(crumb).toBeDefined();
+    await root.drive(crumb.id, "click", {});
+  }
+  expect(seen).toEqual([["viewer.composition.open", "main"], ["viewer.composition.open", "spinner"]]);
+  const report = replay(commits).at(-1);
+  expect(report.accepted).toBe(true);
+  expect(report.wireDiagnostics).toEqual([]);
+  expect(report.focusOrder.map((id: number) => report.nodes[id].props.id)).not.toContain("viewer.crumb.logo");
+  await root.dispose();
 });

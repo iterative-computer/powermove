@@ -247,3 +247,14 @@ test("a queued action cannot follow an acknowledgement onto a different target",
   );
   await c.dispose();
 });
+
+test("parity Duplicate Effect menu dispatches the selected effect", async () => {
+  const f = await fixture(selected());
+  f.kit.api.contextMenu = async (items) => {
+    expect(items.find((item) => item.id === "duplicate")?.label).toBe("Duplicate Effect");
+    return "duplicate";
+  };
+  await f.controller.menu("f1");
+  expect(f.requests).toContainEqual(expect.objectContaining({command: "panel.effect-controls", args: expect.objectContaining({intent: {type: "duplicate", id: "f1"}})}));
+  await f.controller.dispose();
+});

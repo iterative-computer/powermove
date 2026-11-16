@@ -1,8 +1,10 @@
+import { showsFlyHint } from "./contract";
 import { useEffect, useState } from "preact/hooks";
 import {
   EmptyState,
   PopUpButton,
   PushButton,
+  SegmentedControl,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -326,7 +328,71 @@ export function ViewerPanel({
       </text>
     </div>
   ) : null;
-  const viewCamera = free ? (
+  // 2D | 3D, the bar's leading control: the composition as shot, or the 3D
+  // scene's editor view (the same switch as View camera and looking around).
+  // Only compositions with a 3D scene need this control.
+  const dimension = source || !m.studio ? null : (
+    <SegmentedControl
+      id="viewer.dimension"
+      label="View"
+      value={free ? "3d" : "2d"}
+      options={[
+        {
+          id: "2d",
+          label: "2D",
+          help: "The composition, as its camera sees it.",
+        },
+        {
+          id: "3d",
+          label: "3D",
+          ...(m.studio
+            ? {
+                help: "The 3D scene: look around and frame it without moving the camera.",
+              }
+            : { title: "Add a 3D layer to view the scene" }),
+          disabled: !m.studio,
+        },
+      ]}
+      onChange={(id) =>
+        actions.drive("viewer.studio.look", id === "3d" ? "free" : "camera")
+      }
+      style={{ fontSize: token("typography.body"), flexShrink: 0 }}
+    />
+  );
+  // Fly navigation (Shift+`, Blender's Fly): its keys while it lasts.
+  const flyHint = showsFlyHint(m, !!source) ? (
+    <div
+      id="viewer.studio.flyHint"
+      role="status"
+      label="Fly navigation"
+      style={{
+        position: "absolute",
+        left: token("metrics.inset"),
+        right: token("metrics.inset"),
+        bottom: token("metrics.inset"),
+        display: "flex",
+        flexDirection: "row",
+        justifyContent: "center",
+      }}
+    >
+      <text
+        style={{
+          color: token("colors.secondary"),
+          fontSize: token("typography.body"),
+          background: token("colors.floating"),
+          borderRadius: token("metrics.pill_radius"),
+          paddingLeft: token("metrics.inset"),
+          paddingRight: token("metrics.inset"),
+          whiteSpace: "nowrap",
+        }}
+      >
+        Fly · Steer with the pointer · W S or scroll: speed · A D: sideways · E Q: up and down · ⇧ faster · ⌥ slower · Click or Return: keep · Esc or right-click: cancel
+      </text>
+    </div>
+  ) : null;
+  // Focus and full screen have no bar: there, one control returns.
+  const viewCamera =
+    free && !m.studio?.fly && state.host.presentation !== "Docked" ? (
     <div
       id="viewer.studio.return"
       role="group"
@@ -395,6 +461,65 @@ export function ViewerPanel({
               gap: token("metrics.gap"),
             }}
           >
+            {dimension}
+            {!source && m.trail && m.trail.ids.length > 0 && (
+              <div
+                id="viewer.path"
+                role="navigation"
+                label="Composition path"
+                style={{
+                  ...row,
+                  gap: token("metrics.gap"),
+                  overflow: "hidden",
+                }}
+              >
+                {m.trail.ids.map((id, index) => (
+                  <div key={id} style={row}>
+                    {index > 0 && <text label="">›</text>}
+                    {index === m.trail!.index ? (
+                      <text
+                        id={`viewer.crumb.${id}`}
+                        label={
+                          m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"
+                        }
+                        style={{
+                          color: token("colors.text"),
+                          fontSize: token("typography.body"),
+                          fontWeight: token("typography.medium_weight"),
+                          flexShrink: 0,
+                        }}
+                      >
+                        {m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"}
+                      </text>
+                    ) : (
+                      <ToolbarItem
+                        id={`viewer.crumb.${id}`}
+                        label={
+                          m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"
+                        }
+                        style={{
+                          color: token(
+                            index === m.trail!.index
+                              ? "colors.text"
+                              : "colors.muted",
+                          ),
+                          fontSize: token("typography.body"),
+                        }}
+                        onClick={() =>
+                          actions.drive("viewer.composition.open", id)
+                        }
+                      >
+                        {m.compositions?.find((c) => c.id === id)?.name ??
+                          "Composition"}
+                      </ToolbarItem>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             {source ? (
               <>
                 <text
@@ -526,6 +651,7 @@ export function ViewerPanel({
           style={{ position: "absolute", inset: "fill" }}
         />
         {viewCamera}
+        {flyHint}
         {capsule}
       </div>
       {!source && m.canvasLost && (

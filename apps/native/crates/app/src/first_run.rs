@@ -4,12 +4,15 @@
 //!
 //! Decisions: the app shares `pm_first_launch::default_paths` with the coordinator;
 //! a clean outcome goes straight to the editor, because the normal path takes no
-//! click; a later launch shows no gate unless merging runs past a second.
+//! click. The full-screen migration shows once, on the launch that imports. A
+//! later launch never waits on the original app and shows no window for it
+//! (`pm_first_launch::later` holds the rule); newer work there comes in only
+//! when the person asks, with its progress in this window.
 use crate::extension_transfer::Update;
 use anyhow::Result;
 use pm_first_launch::{
-    Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused,
-    onboarding_completed,
+    Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused, Step,
+    later, onboarding_completed,
     secrets::MacKeychain,
     source_access::{self, Activity, Choice as FolderChoice},
     surfaces::{
@@ -134,12 +137,41 @@ pub enum Message {
     ElectronClosed,
     /// Bringing in the original app's extensions (N004–N006).
     Extensions(Update),
+    /// The requested bring-in of recent work ended.
+    Recent(RecentEnd),
+}
+/// How a requested bring-in of recent work ended.
+#[derive(Clone, Debug)]
+pub enum RecentEnd {
+    Done,
+    WaitingForElectron,
+    Failed {
+        reason: String,
+        low_disk: Option<(u64, u64)>,
+        details: String,
+    },
+}
+/// The person asked to bring in recent work (Settings › Storage or Home):
+/// it runs before the library opens, on screen.
+#[derive(Clone, Debug, PartialEq)]
+enum Recent {
+    Running {
+        step: Option<Step>,
+        progress: Option<(usize, usize)>,
+    },
+    /// The original app is open; this waits for it to quit.
+    Waiting,
+    Failed {
+        reason: String,
+        low_disk: Option<(String, String)>,
+        details: String,
+    },
 }
 /// Leaving the gate for the editor. `Enter` happens at most once per attempt.
 #[derive(Debug)]
 enum Entry {
     Waiting,
-    Entering { updating: bool },
+    Entering,
     Failed { details: String },
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +192,10 @@ pub enum Effect {
     RunExtensions,
     /// Not Now: remember it, so later launches don't ask again.
     DeclineExtensions,
+    /// Bring in the recent work the person asked for, before the library opens.
+    BringIn,
+    /// Open without it: the request is withdrawn.
+    WithdrawRequest,
 }
 #[derive(Debug)]
 struct Choices {
@@ -181,6 +217,8 @@ pub struct Flow {
     chosen: Option<serde_json::Value>,
     /// The original app's extensions on offer, before the library opens.
     extensions: Option<Extensions>,
+    /// Recent work the person asked to bring in, before the library opens.
+    recent: Option<Recent>,
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -204,6 +242,7 @@ impl Flow {
             entry: Entry::Waiting,
             chosen: None,
             extensions: None,
+            recent: None,
             plan,
         }
     }
@@ -215,6 +254,20 @@ impl Flow {
         if self.plan.onboard {
             self.onboarding = Some(Onboarding::new(true));
             return vec![];
+        }
+        // Asked for from Settings › Storage or Home, the launch before.
+        if self.plan.launch == Launch::Later
+            && let Some(config) = &self.plan.config
+            && later::requested(&config.native_profile)
+        {
+            if config.electron_profile.is_dir() {
+                self.recent = Some(Recent::Running {
+                    step: None,
+                    progress: None,
+                });
+                return vec![Effect::BringIn];
+            }
+            later::cancel_request(&config.native_profile);
         }
         // An existing library and an original app with extensions it may not
         // have yet: look first (nothing shows unless there's something to
@@ -234,10 +287,8 @@ impl Flow {
         self.plan.launch == Launch::Migrate
             || self.onboarding.is_some()
             || self.extensions.is_some()
-            || matches!(
-                self.entry,
-                Entry::Failed { .. } | Entry::Entering { updating: true }
-            )
+            || self.recent.is_some()
+            || matches!(self.entry, Entry::Failed { .. })
     }
     fn after_migration(&mut self) -> Vec<Effect> {
         if self.plan.onboard && !onboarding_completed(&self.plan.profile) {
@@ -247,14 +298,8 @@ impl Flow {
         self.enter()
     }
     fn enter(&mut self) -> Vec<Effect> {
-        self.entry = Entry::Entering { updating: false };
+        self.entry = Entry::Entering;
         vec![Effect::Enter(self.chosen.clone())]
-    }
-    /// The merge before the library attaches passed a second.
-    pub fn updating(&mut self) {
-        if let Entry::Entering { updating } = &mut self.entry {
-            *updating = true;
-        }
     }
     /// The library didn't open. The editor stays closed and the person can retry.
     pub fn enter_failed(&mut self, details: String) -> Vec<Effect> {
@@ -273,15 +318,78 @@ impl Flow {
     pub fn message(&mut self, message: Message) -> Vec<Effect> {
         match message {
             Message::Event(event) => {
+                if let Some(Recent::Running { step, progress }) = &mut self.recent {
+                    match event {
+                        Event::Started(started) => {
+                            *step = Some(started);
+                            *progress = None;
+                        }
+                        Event::Progress { done, total, .. } if total > 0 => {
+                            *progress = Some((done, total))
+                        }
+                        _ => {}
+                    }
+                    return vec![];
+                }
                 self.model.event(&event);
                 vec![]
+            }
+            Message::ElectronClosed if self.recent == Some(Recent::Waiting) => {
+                self.recent = Some(Recent::Running {
+                    step: None,
+                    progress: None,
+                });
+                vec![Effect::BringIn]
             }
             Message::ElectronClosed => {
                 self.model.electron_owner_local = false;
                 vec![Effect::Run(Run::Ordinary)]
             }
+            Message::Recent(end) => self.recent_end(end),
             Message::Finished(finished) => self.finished(finished),
             Message::Extensions(update) => self.extensions_update(update),
+        }
+    }
+    fn recent_end(&mut self, end: RecentEnd) -> Vec<Effect> {
+        match end {
+            RecentEnd::Done => self.start_after_recent(),
+            RecentEnd::WaitingForElectron => {
+                self.recent = Some(Recent::Waiting);
+                let local = self.plan.config.as_ref().is_some_and(|c| {
+                    electron_owner(&c.electron_profile) == ElectronOwner::Local
+                });
+                if local { vec![Effect::Watch] } else { vec![] }
+            }
+            RecentEnd::Failed {
+                reason,
+                low_disk,
+                details,
+            } => {
+                self.recent = Some(Recent::Failed {
+                    reason,
+                    low_disk: low_disk.map(|(needed, available)| (bytes(needed), bytes(available))),
+                    details,
+                });
+                vec![]
+            }
+        }
+    }
+    /// After the bring-in the library opens. The extensions look waits for the
+    /// next launch: the window already open would show it as a second step.
+    fn start_after_recent(&mut self) -> Vec<Effect> {
+        self.recent = None;
+        self.enter()
+    }
+    fn recent_action(&mut self, id: &str) -> Vec<Effect> {
+        match (&self.recent, id) {
+            (_, "quit") => vec![Effect::Quit],
+            (Some(Recent::Waiting), "open_native") => {
+                let mut effects = vec![Effect::WithdrawRequest];
+                effects.extend(self.start_after_recent());
+                effects
+            }
+            (Some(Recent::Failed { .. }), "open_native") => self.start_after_recent(),
+            _ => vec![],
         }
     }
     fn extensions_update(&mut self, update: Update) -> Vec<Effect> {
@@ -471,13 +579,16 @@ impl Flow {
         self.error = None;
         match (&self.entry, id) {
             (Entry::Waiting, _) => {}
-            (Entry::Entering { .. } | Entry::Failed { .. }, "quit") => return vec![Effect::Quit],
+            (Entry::Entering | Entry::Failed { .. }, "quit") => return vec![Effect::Quit],
             (Entry::Failed { .. }, "try_again") => return self.enter(),
             // Already on its way: a second click or a held Return does nothing.
             _ => return vec![],
         }
         if self.onboarding.is_some() {
             return self.onboarding_action(id);
+        }
+        if self.recent.is_some() {
+            return self.recent_action(id);
         }
         if self.extensions.is_some() {
             return self.extensions_action(id);
@@ -709,8 +820,10 @@ impl Flow {
     pub fn frame(&self) -> Frame {
         match (&self.entry, &self.onboarding) {
             (Entry::Failed { details }, _) => library_failed_frame(details),
-            (Entry::Entering { updating: true }, _) => updating_frame(),
-            (Entry::Entering { updating: false }, None) => Frame {
+            (Entry::Waiting, None) if self.recent.is_some() => {
+                recent_frame(self.recent.as_ref().unwrap())
+            }
+            (Entry::Entering, None) => Frame {
                 surface: "N003".into(),
                 title: "Your Library Is Ready".into(),
                 status: Some("Opening Powermove…".into()),
@@ -718,7 +831,7 @@ impl Flow {
                 ..Frame::default()
             },
             (_, Some(onboarding)) => self.onboarding_frame(onboarding),
-            (Entry::Waiting, None) => match &self.extensions {
+            (_, None) => match &self.extensions {
                 Some(extensions) => crate::extension_transfer::frame(extensions),
                 None => self.migration_frame(),
             },
@@ -740,16 +853,93 @@ fn library_failed_frame(details: &str) -> Frame {
         ..Frame::default()
     }
 }
-fn updating_frame() -> Frame {
-    Frame {
-        surface: "N001".into(),
-        title: "Updating Your Library".into(),
-        line: "Your original app stays unchanged.".into(),
-        status: Some("Bringing in your recent work…".into()),
-        spinner: true,
-        buttons: vec![Button::new("quit", "Quit Powermove").leading()],
-        ..Frame::default()
+/// The bring-in the person asked for, in the first launch's language.
+fn recent_frame(recent: &Recent) -> Frame {
+    let quit = Button::new("quit", "Quit Powermove").leading();
+    match recent {
+        Recent::Running { step, progress } => {
+            let doing = match step {
+                None | Some(Step::Checkpoint) => "Reading the original app",
+                Some(Step::Library) => "Bringing in projects",
+                Some(Step::Media | Step::Inventory) => "Bringing in media",
+                Some(Step::Extensions) => "Bringing in extensions",
+                Some(_) => "Bringing in settings",
+            };
+            Frame {
+                surface: "N001".into(),
+                title: "Bringing In Recent Work".into(),
+                line: "Your original app stays unchanged.".into(),
+                status: Some(match progress {
+                    Some((done, total)) => format!("{doing}… {done} of {total}"),
+                    None => format!("{doing}…"),
+                }),
+                spinner: true,
+                buttons: vec![quit],
+                ..Frame::default()
+            }
+        }
+        Recent::Waiting => Frame {
+            surface: "N001".into(),
+            title: "Quit the Original App".into(),
+            line: "Powermove brings in your recent work once the original app is closed. The original app stays unchanged.".into(),
+            status: Some("Waiting for the original app to quit…".into()),
+            spinner: true,
+            buttons: vec![quit, Button::new("open_native", "Open Without It")],
+            ..Frame::default()
+        },
+        Recent::Failed {
+            reason,
+            low_disk,
+            details,
+        } => Frame {
+            surface: "N001".into(),
+            title: "Recent Work Couldn’t Come In".into(),
+            line: match low_disk {
+                Some((needed, available)) => format!(
+                    "It needs {needed} free on this Mac, and there’s {available}. Nothing in the original app changed. You can try again from Settings › Storage."
+                ),
+                None => format!(
+                    "{reason} Nothing in the original app changed. You can try again from Settings › Storage."
+                ),
+            },
+            details: Some(details.clone()),
+            buttons: vec![quit, Button::new("open_native", "Open Powermove")],
+            default: Some("open_native".into()),
+            ..Frame::default()
+        },
     }
+}
+/// The requested bring-in, before the library opens, on its own thread.
+fn spawn_bring_in(config: Config, tx: async_channel::Sender<Message>) {
+    std::thread::spawn(move || {
+        let events = tx.clone();
+        let result = later::bring_in(&config, |event| {
+            let _ = events.send_blocking(Message::Event(event));
+            Ok(())
+        });
+        let end = match result {
+            Ok(Outcome::WaitingForElectron) => RecentEnd::WaitingForElectron,
+            Ok(_) => RecentEnd::Done,
+            Err(error) => {
+                let failure = later::last_failure(&config.native_profile);
+                RecentEnd::Failed {
+                    reason: failure.as_ref().map_or_else(
+                        || "Something in the original app’s library couldn’t be read.".into(),
+                        |f| f.reason.clone(),
+                    ),
+                    low_disk: failure
+                        .and_then(|f| f.low_disk)
+                        .map(|l| (l.needed, l.available)),
+                    details: format!("{error:#}"),
+                }
+            }
+        };
+        crate::diag::line(serde_json::json!({"recent_work": format!("{end:?}")
+            .chars()
+            .take(300)
+            .collect::<String>()}));
+        let _ = tx.send_blocking(Message::Recent(end));
+    });
 }
 /// Runs the coordinator on a worker, and reads the report there too: it walks the
 /// store and replays journals. Pausing lands on the next durable boundary.
@@ -889,8 +1079,10 @@ pub fn write_marker(profile: &Path, choices: &serde_json::Value) -> std::io::Res
     drop(file);
     std::fs::rename(temporary, target)
 }
-/// A later launch: merge what changed in the original app before the library
-/// attaches. The caller logs an error and carries on; the capture resumes next launch.
+/// A later launch, before the library attaches: finishes a capture an earlier
+/// attempt already took, and never starts one (`later::resume_pending`). The
+/// caller logs an error and carries on; the failure is recorded, so no launch
+/// tries that capture again on its own.
 pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> Result<bool> {
     let Some(config) = &plan.config else {
         return Ok(false);
@@ -899,7 +1091,7 @@ pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> Resu
         return Ok(false);
     }
     Ok(matches!(
-        pm_first_launch::delta_if_changed(config, events)?,
+        later::resume_pending(config, events)?,
         DeltaPrepared::MediaPending
     ))
 }
@@ -1137,6 +1329,14 @@ impl Driver {
                 Effect::DeclineExtensions => {
                     crate::extension_transfer::decline(&self.library.plan.profile)
                 }
+                Effect::BringIn => {
+                    if let Some(config) = self.library.plan.config.clone() {
+                        spawn_bring_in(config, self.tx.clone());
+                    }
+                }
+                Effect::WithdrawRequest => {
+                    later::cancel_request(&self.library.plan.profile)
+                }
             }
         }
     }
@@ -1196,32 +1396,9 @@ impl Driver {
         let work = cx
             .background_executor()
             .spawn(async move { library.open(choices) });
-        // Merging later changes normally finishes unseen. If it doesn't, say so.
-        let done = Rc::new(std::cell::Cell::new(false));
-        let late = self.window.borrow().is_none().then(|| {
-            let (done, driver) = (done.clone(), self.clone());
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                cx.update(|cx| {
-                    if !done.get() {
-                        driver.step(
-                            |flow| {
-                                flow.updating();
-                                vec![]
-                            },
-                            cx,
-                        );
-                    }
-                });
-            })
-        });
         let driver = self.clone();
         cx.spawn(async move |cx| {
             let result = work.await;
-            done.set(true);
-            drop(late);
             cx.update(|cx| match result {
                 Ok(opened) => driver.opened(opened, cx),
                 Err(error) => {
@@ -1248,6 +1425,12 @@ impl Driver {
         }
         if opened.media {
             self.library.finish_media(log, cx);
+        }
+        // Newer work in the original app: a quiet line on Home, never a wait.
+        if self.library.plan.launch == Launch::Later
+            && let Some(config) = self.library.plan.config.clone()
+        {
+            crate::recent_work::check(config, cx);
         }
     }
 }

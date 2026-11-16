@@ -947,3 +947,59 @@ fn effect_controls_folds_a_grades_wheels_and_curve_points_into_summary_rows() {
     assert!(key(rows, "liftRed") && key(rows, "x3"));
     assert!(!rows.iter().any(|r| r["kind"] == "summary"));
 }
+
+#[test]
+fn parity_duplicate_effect_is_one_undo_step() {
+    let (actor, mut backend) = setup();
+    let kernel = actor.handle();
+    let request = backend
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    backend.sync().unwrap();
+    let model = backend.model.as_mut().unwrap();
+    let mut panel = pm_panel_inspector::v4_effects::EffectsPanel::new(Default::default(), 0..100);
+    let projection = panel.project(model, 0.).unwrap();
+    let before = effect(&kernel);
+    let args = data::model(&json!({"documentId":projection.get("documentId").unwrap().as_f64().unwrap(),"revision":projection.get("revision").unwrap().as_f64().unwrap(),"layer":"a","intent":{"type":"duplicate","id":before["id"]}})).unwrap();
+    let plan = panel.plan(model, Caller::native(), &args, 0.).unwrap();
+    kernel
+        .call("synthetic", plan.request.unwrap())
+        .wait()
+        .unwrap()
+        .unwrap();
+    let p = kernel.published("synthetic").unwrap();
+    let root = p.snapshot.root().unwrap();
+    let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+    let effects = data::wire(
+        &pm_kernel::model::layer_at(root, &loc)
+            .unwrap()
+            .get("fx")
+            .unwrap()
+            .to_value(),
+    );
+    let fx = effects.as_array().unwrap();
+    assert_eq!(fx.len(), 2);
+    assert_ne!(fx[0]["id"], fx[1]["id"]);
+    assert_eq!(fx[0]["p"], fx[1]["p"]);
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(effect(&kernel), before);
+    let p = kernel.published("synthetic").unwrap();
+    let root = p.snapshot.root().unwrap();
+    let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+    assert_eq!(pm_kernel::model::layer_at(root, &loc).unwrap().get("fx").unwrap().to_value().as_array().unwrap().len(), 1);
+    actor.shutdown();
+}

@@ -47,6 +47,7 @@ pub struct Controller {
     pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
+    pub(crate) linked_sync: crate::linked_sync::Sync,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     /// The Project panel grid's thumbnails.
     pub(crate) thumbs: crate::media_thumbs::Thumbs,
@@ -104,6 +105,7 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
+    pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
@@ -372,6 +374,17 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
+    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
+        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    }
+    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
+        self.0
+            .read(cx)
+            .published
+            .as_deref()
+            .map(crate::layer_commands::palette_layers)
+            .unwrap_or_default()
+    }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
     }
@@ -389,13 +402,15 @@ impl pm_shell::integration::Integration for Bridge {
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
-                    v.open_timer.mark("ghost", serde_json::json!({ "panel": id }));
+                    v.open_timer
+                        .mark("ghost", serde_json::json!({ "panel": id }));
                 }
                 return Some(ghost);
             }
             // The ghost gave way: the real content fades in over it.
             if v.ghosted.remove(id) {
-                v.open_timer.mark("panel_ready", serde_json::json!({ "panel": id }));
+                v.open_timer
+                    .mark("panel_ready", serde_json::json!({ "panel": id }));
                 v.revealed.insert(id.to_owned(), std::time::Instant::now());
             }
             let content = v
@@ -420,7 +435,13 @@ impl pm_shell::integration::Integration for Bridge {
                 return Some(content);
             }
             w.request_animation_frame();
-            Some(div().size_full().opacity(shown).child(content).into_any_element())
+            Some(
+                div()
+                    .size_full()
+                    .opacity(shown)
+                    .child(content)
+                    .into_any_element(),
+            )
         })
     }
     fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
@@ -433,6 +454,29 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
+        if id != "timeline" {
+            return;
+        }
+        let (timeline, runtime) = {
+            let v = self.0.read(cx);
+            (v.builtins.timeline.clone(), v.builtins.runtime.clone())
+        };
+        let Some(timeline) = timeline else { return };
+        // The tracks' scene and the panel's rows (its frame) follow it.
+        if timeline.update(cx, |t, cx| t.set_focused(focused, cx))
+            && let Some(runtime) = runtime
+            && let Ok(ticket) = runtime
+                .timeline_action(serde_json::json!({"type": "panelFocus", "focused": focused}))
+        {
+            let controller = self.0.downgrade();
+            cx.spawn(async move |cx| {
+                let _ = ticket.await;
+                let _ = controller.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
@@ -454,9 +498,20 @@ impl pm_shell::integration::Integration for Bridge {
             v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
+            let was_docked = v.builtins.agent_docked;
             v.builtins.agent_docked = open.contains(&"agent");
             if v.builtins.agent_docked {
                 v.builtins.agent_parked = false;
+            }
+            // Closing the docked Agent (its tab, its own Close) returns it to
+            // its popover, as the original app's did; the toolbar item's
+            // park hides it in place instead.
+            if crate::builtins::returns_to_popover(
+                was_docked,
+                v.builtins.agent_docked,
+                v.builtins.agent_parked,
+            ) {
+                v.host.borrow().send_command("agent", vec![]);
             }
         });
     }
@@ -647,18 +702,29 @@ impl Controller {
         if let Some(note) = &self.closing_note {
             return note.clone();
         }
+        let preview_pause = self
+            .session
+            .as_ref()
+            .and_then(|session| self.pro_media.preview_pause_message(&session.project));
         // "Saved" is the state word the computed line already starts with.
-        if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
-            return self.message.clone();
+        let status =
+            if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
+                self.message.clone()
+            } else {
+                let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
+                panels::status_line(
+                    dirty,
+                    self.path.is_some(),
+                    self.layers().len(),
+                    self.keyframes,
+                )
+            };
+        match preview_pause {
+            Some(pause) => format!("{pause} · {status}"),
+            None => status,
         }
-        let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
-        panels::status_line(
-            dirty,
-            self.path.is_some(),
-            self.layers().len(),
-            self.keyframes,
-        )
     }
+
     pub fn new(
         kernel: KernelHandle,
         engine: Arc<EngineService>,
@@ -796,6 +862,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             media: MediaCatalog::default(),
+            linked_sync: Default::default(),
             media_refresh: Default::default(),
             thumbs: Default::default(),
             media_base: MediaCatalog::default(),
@@ -825,6 +892,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),
             captions: Default::default(),
@@ -944,7 +1012,11 @@ impl Controller {
     /// A project that was to open here and won't (its replacement was
     /// cancelled): one the kernel already opened for this window closes
     /// again; nothing of it is lost (it was only opened).
-    pub(crate) fn dispose_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
+    pub(crate) fn dispose_pending(
+        &mut self,
+        pending: crate::entry::Pending,
+        cx: &mut Context<Self>,
+    ) {
         let session = match pending {
             crate::entry::Pending::Session(session) => Some(session),
             crate::entry::Pending::Adopt { reply, .. } => match *reply {
@@ -993,11 +1065,7 @@ impl Controller {
     /// One project per window: `next` opens in place of the project shown.
     /// That project closes first as any close does (an unsaved one asks
     /// Save, Don't Save or Cancel); Cancel keeps it and `next` does not open.
-    pub(crate) fn replace_project(
-        &mut self,
-        next: crate::entry::Pending,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn replace_project(&mut self, next: crate::entry::Pending, cx: &mut Context<Self>) {
         match crate::lifecycle::open_plan(
             self.session.is_some(),
             self.opening,
@@ -1116,6 +1184,7 @@ impl Controller {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
         let Some(session) = &self.session else {
+            self.linked_sync = Default::default();
             cx.notify();
             return;
         };
@@ -1177,16 +1246,14 @@ impl Controller {
             // playing and snapping follow at once, where the playhead was;
             // a run in progress carries on at its speed.
             let time = self.time();
-            let playing = self
-                .running()
-                .then(|| {
-                    self.viewer
-                        .as_ref()
-                        .and_then(|v| v.status().clock)
-                        .map(|c| c.rate)
-                        .filter(|rate| *rate != PlaybackRate::STOPPED)
-                        .unwrap_or(PlaybackRate::NORMAL)
-                });
+            let playing = self.running().then(|| {
+                self.viewer
+                    .as_ref()
+                    .and_then(|v| v.status().clock)
+                    .map(|c| c.rate)
+                    .filter(|rate| *rate != PlaybackRate::STOPPED)
+                    .unwrap_or(PlaybackRate::NORMAL)
+            });
             self.published = Some(p.clone());
             self.builtins.natives.published.replace(Some(p.clone()));
             self.bind_composition();
@@ -1195,6 +1262,11 @@ impl Controller {
             self.seek(time);
             if let Some(rate) = playing {
                 self.transport(TransportCommand::Play { rate });
+            }
+        }
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            if self.linked_sync.update(&p, runtime) {
+                self.media_refresh.reset();
             }
         }
         self.refresh_media(cx);
@@ -1278,6 +1350,11 @@ impl Controller {
         );
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
+        if let Some(previous) = &self.published {
+            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
+                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
+            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
+        }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
@@ -2516,6 +2593,9 @@ impl Controller {
         history_rejected: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+        }
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
         }
@@ -3009,6 +3089,16 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
+        // flight where it began, the rest wait (no play, scrub or edits).
+        if let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_flying()
+        {
+            if matches!(cmd.name.as_str(), "deselect" | "cancel") {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+            }
+            return true;
+        }
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }
@@ -3020,7 +3110,86 @@ impl Controller {
             self.agent_picked(index);
             return true;
         }
+        if cmd.name == "palette.addEffect" {
+            if let (Some(published), Some(runtime), Some(id)) = (
+                self.published.as_deref(),
+                self.builtins.runtime.as_ref(),
+                cmd.args.first().and_then(|a| a.as_str()),
+            ) {
+                let state = self.kernel.state();
+                if let Some((_, label)) = crate::layer_commands::palette_effects(&state)
+                    .into_iter()
+                    .find(|(key, _)| key == id)
+                {
+                    let plan =
+                        crate::layer_commands::palette_effect_plan(published, &label, |layer| {
+                            runtime.effect_commands("viewer", layer, id, self.time())
+                        });
+                    match plan {
+                        Ok(Some(plan)) => self.run_layer_plan(plan, cx),
+                        Ok(None) => {}
+                        Err(why) => {
+                            self.message = why;
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         match cmd.name.as_str() {
+            "timeline.parentMenu" => {
+                let Some(id) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.as_str())
+                else {
+                    return false;
+                };
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let rows = crate::layer_commands::layer_menu(published, id, self.time());
+                let items = rows
+                    .iter()
+                    .find(|row| row["label"] == "Parent")
+                    .and_then(|row| row["children"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let choices = items.clone();
+                let ids = cmd.args.first().cloned().unwrap_or_default();
+                let host = self.host.clone();
+                crate::v4_native::menu(
+                    window,
+                    &items,
+                    cx,
+                    Box::new(move |choice: Option<usize>, _: &mut App| {
+                        if let Some(row) = choice.and_then(|i| choices.get(i)) {
+                            host.borrow().send_command("timeline.propertyEdit", vec![serde_json::json!({"type":"parent","ids":ids,"parent":row["args"][0]})]);
+                        }
+                    }),
+                );
+                return true;
+            }
+            "timeline.propertyEdit" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(action) = cmd.args.first().cloned() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.timeline_action(action) else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+                return true;
+            }
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();
                 self.shortcuts_action(&action, window, cx);
@@ -3170,6 +3339,15 @@ impl Controller {
                         .to_owned()
                 };
                 let (group, value) = (arg(0), arg(1));
+                if cmd.token.is_some() {
+                    let canvas = self.host.borrow().canvas_focus.get();
+                    let takes = self.builtins.gizmos.as_ref().is_some_and(|g| {
+                        g.read(cx).studio_takes_key(&group, canvas, window)
+                    });
+                    if !takes {
+                        return false;
+                    }
+                }
                 if let Some(g) = self.builtins.gizmos.clone() {
                     cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
                 }
@@ -3252,6 +3430,8 @@ impl Controller {
             | "viewer.showRangeOverlay"
             | "viewer.rulers"
             | "viewer.grid"
+            | "viewer.snapping"
+            | "viewer.lockGuides"
             | "viewer.clearGuides"
             | "viewer.popout"
             | "viewer.toggleProxies"
@@ -3320,7 +3500,8 @@ impl Controller {
             "revealProject" => match self.path.clone() {
                 Some(path) => crate::platform::reveal(&path),
                 None => {
-                    self.message = "This project is kept in your library, not in a file of its own.".into();
+                    self.message =
+                        "This project is kept in your library, not in a file of its own.".into();
                     cx.notify();
                 }
             },
@@ -3399,6 +3580,38 @@ impl Controller {
                 .detach();
             }
             "save" => self.save(None, cx),
+            "native.saveTake" => {
+                crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
+            }
+            "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
+                if let (Some(runtime), Some(published)) = (&self.builtins.runtime, &self.published)
+                {
+                    let (assets, comps) = runtime
+                        .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
+                    match pm_builtins::media_import::place_items(
+                        published,
+                        &assets,
+                        &comps,
+                        self.time(),
+                        None,
+                    ) {
+                        Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
+                            crate::layer_commands::Plan {
+                                label: "Add to Timeline".into(),
+                                commands,
+                                select: Some(layers),
+                                count_keys: None,
+                            },
+                            cx,
+                        ),
+                        Err(why) => {
+                            self.message = why;
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }
+            }
             "saveAs" => self.save_dialog(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
@@ -3515,6 +3728,32 @@ impl Controller {
                     },
                     cx,
                 );
+            }
+            // v1: Return (and the row menu's Rename…) opens the selected
+            // layer's name field in the timeline; a text layer's Return edits
+            // its text first (text.editSelected steps aside otherwise).
+            "renameLayer" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(p) = self.published.clone() else {
+                    return false;
+                };
+                let [id] = p.selection.layers() else {
+                    return false;
+                };
+                let row =
+                    pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(id.clone()));
+                let Ok(ticket) =
+                    runtime.timeline_action(serde_json::json!({"type":"rename","id":row}))
+                else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
             }
             "toggleLayerStrips" => {
                 let Some(runtime) = self.builtins.runtime.clone() else {

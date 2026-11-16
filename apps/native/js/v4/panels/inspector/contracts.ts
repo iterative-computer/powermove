@@ -71,6 +71,7 @@ export interface Row {
   hidden?: boolean;
   animation?: "static" | "animated" | "key-at-playhead";
   linked?: boolean;
+  separateDimensions?: boolean;
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
 }
@@ -111,7 +112,7 @@ export interface Section {
   action?: SectionAction;
   /** Several quiet actions in a row (Time: remap, freeze, reverse). */
   actions?: SectionAction[];
-  animators?: { id: string; name: string }[];
+  animators?: { id: string; name: string; rows: Row[] }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];
@@ -144,7 +145,9 @@ export type RowAction =
   | "remove-expression"
   | "reset"
   | "show-graph"
-  | "link";
+  | "link"
+  | "separate-dimensions"
+  | `ease:${string}`;
 export type Intent =
   | { type: "key"; row: string; removeAnimation: boolean }
   | { type: "row-action"; row: string; action: RowAction }
@@ -206,6 +209,7 @@ export interface ReadoutClock {
 export function sectionRows(section: Section): Row[] {
   return [
     ...section.rows,
+    ...(section.animators ?? []).flatMap((animator) => animator.rows),
     ...(section.masks ?? []).flatMap((mask) => mask.rows),
   ];
 }
