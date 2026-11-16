@@ -7100,6 +7100,105 @@ fn embedded_media_in_a_copy_survives_removal_of_the_original_file() {
         count
     );
 }
+/// A project of this library whose backing file (with its embedded media)
+/// is not here opens as itself and keeps naming that file through a close
+/// and a save: when the file is back, its media connect again, and the edit
+/// made meanwhile is kept (Sol review of PM-421).
+#[test]
+fn an_unavailable_backing_file_stays_named_and_its_media_connect_again() {
+    let dir = common::TempDir::new("offline-media");
+    let file = dir.path("external.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let _lock = lock_project(&user_lock_root(), &file).unwrap();
+    let profile = dir.path("native");
+    let mut k = kernel(&profile);
+    // The external file is locked by another app: the project opens as a
+    // copy whose embedded media are in a backing file of this library.
+    let h = open(&mut k, "P", SessionSource::File(file.clone()));
+    let count = k.project("P").unwrap().store().media().len();
+    assert!(count > 0, "the fixture has embedded media");
+    k.shell(ShellCall::Close(h)).unwrap();
+    drop(k);
+    let slot = LibraryStore::open(&profile).projects().unwrap()[0].id.clone();
+    let backing_of = || {
+        LibraryStore::open(&profile)
+            .read(&format!("projectMeta.{slot}"))
+            .unwrap()
+            .and_then(|m| m.get("file")?.get("path")?.as_str().map(std::path::PathBuf::from))
+    };
+    let backing = backing_of().expect("the copy names its backing file");
+    assert!(backing.is_file());
+    let away = dir.path("away.pmv");
+    fs::rename(&backing, &away).unwrap();
+    let library = |slot: &str| SessionSource::Library {
+        profile: profile.clone(),
+        project: slot.into(),
+    };
+    let rename = |k: &mut Kernel, id: &str, name: &str| {
+        let a = k
+            .handle(
+                id,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some("Rename".into()),
+                        body: WriteBody::Commands(vec![
+                            commands::comps::CompCommand::Set {
+                                patch: Box::new(commands::comps::CompPatch {
+                                    name: Some(name.into()),
+                                    ..Default::default()
+                                }),
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        assert!(matches!(a.reply, Reply::Applied { changed: true, .. }));
+    };
+    let mut k = kernel(&profile);
+    // Opened while its file is away, closed: still named.
+    let h = open(&mut k, &slot, library(&slot));
+    let before = LibraryStore::open(&profile).projects().unwrap().len();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a close keeps the file named");
+    // Edited and saved while it is away: still named, no entry made.
+    let h = open(&mut k, &slot, library(&slot));
+    rename(&mut k, &slot, "Edited while away");
+    k.shell(ShellCall::Save(h.clone())).unwrap();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a save keeps the file named");
+    assert_eq!(LibraryStore::open(&profile).projects().unwrap().len(), before);
+    drop(k);
+    // Opened under another session id while its file is away (as a copy's
+    // reopen does): still its own slot, still named.
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "elsewhere", library(&slot));
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "another session id keeps it named");
+    // Opened while away, and the file comes back before the close: the
+    // session never took its media up, so the close keeps it named.
+    let h = open(&mut k, &slot, library(&slot));
+    fs::rename(&away, &backing).unwrap();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a file back mid-session stays named");
+    drop(k);
+    // The file is back: its media connect again, with the edit.
+    let mut k = kernel(&profile);
+    open(&mut k, &slot, library(&slot));
+    let store = k.project(&slot).unwrap().store();
+    assert_eq!(store.media().len(), count, "its embedded media connect again");
+    let name = store.root().unwrap().get("name").unwrap().to_value();
+    assert_eq!(name.as_str(), Some("Edited while away"));
+}
 #[test]
 fn creating_an_existing_project_id_is_refused_without_changing_the_slot() {
     let dir = common::TempDir::new("create-collision");
@@ -7134,8 +7233,39 @@ fn the_same_source_cannot_have_two_live_sessions() {
         Err(KernelFailure::AlreadyOpen(_))
     ));
 }
+fn ask_library(k: &mut Kernel, profile: &Path, id: &str) -> String {
+    match k
+        .shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source: SessionSource::Library {
+                profile: profile.to_path_buf(),
+                project: id.into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::RecoveryRequired { ticket, .. } => ticket,
+        other => panic!("not asked: {other:?}"),
+    }
+}
+fn recover(k: &mut Kernel, ticket: String) -> SessionHandle {
+    match k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("not opened: {other:?}"),
+    }
+}
+/// Compaction folds in nothing the person did not choose: work a forced
+/// quit left in a library project no window has open stays in its journal,
+/// its slot as saved, and the next open asks; Recover brings it back.
 #[test]
-fn compact_all_publishes_unopened_library_journals_for_rollback() {
+fn compact_all_leaves_unopened_library_journals_for_the_recover_question() {
     let dir = common::TempDir::new("compact-library");
     {
         let mut k = kernel(&dir.0);
@@ -7143,21 +7273,24 @@ fn compact_all_publishes_unopened_library_journals_for_rollback() {
         edit(&mut k, "P", 12.0);
         k.sync_all();
     }
+    let slot = fs::read(dir.path("store/project.P.json")).unwrap();
     let mut k = kernel(&dir.0);
     let ShellReply::Compacted { projects, .. } = k.shell(ShellCall::CompactAll).unwrap() else {
         panic!()
     };
-    assert_eq!(projects, 1);
-    let p = LibraryStore::open(&dir.0).load("P").unwrap().unwrap();
-    let mut rollback = Kernel::new(Default::default());
-    rollback.open("P", OpenSource::Library(p)).unwrap();
+    assert_eq!(projects, 0);
+    assert_eq!(fs::read(dir.path("store/project.P.json")).unwrap(), slot);
+    let ticket = ask_library(&mut k, &dir.0, "P");
+    let session = recover(&mut k, ticket);
     assert_eq!(
-        common::opacity_of(rollback.project("P").unwrap().store(), "layer0"),
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
         Some(12.0)
     );
 }
+/// The same for a project kept in its own file: compaction leaves the file
+/// and the work, and the next open of the file asks.
 #[test]
-fn compact_all_publishes_unopened_external_file_journals() {
+fn compact_all_leaves_an_unopened_files_journal_for_the_recover_question() {
     let dir = common::TempDir::new("compact-file");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7168,10 +7301,16 @@ fn compact_all_publishes_unopened_external_file_journals() {
         edit(&mut k, "P", 18.0);
         k.sync_all();
     }
+    let before = fs::read(&path).unwrap();
     let mut k = kernel(&profile);
     k.shell(ShellCall::CompactAll).unwrap();
-    let store = common::open_store(&path);
-    assert_eq!(common::opacity_of(&store, "layer0"), Some(18.0));
+    assert_eq!(fs::read(&path).unwrap(), before, "the file as saved");
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(18.0)
+    );
 }
 #[test]
 fn duplicate_includes_unsaved_live_edits() {
@@ -7214,8 +7353,11 @@ fn live_lock_refreshes_heartbeat_and_keeps_its_inode() {
     );
     assert_eq!(fs::metadata(path).unwrap().ino(), inode);
 }
+/// A project kept in its own file, which is gone: compaction makes nothing
+/// of its work on its own. The next open asks; Recover opens the work as a
+/// recovered copy in the library, and the entry stays, naming its file.
 #[test]
-fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
+fn an_offline_external_projects_work_waits_for_the_recover_question() {
     let dir = common::TempDir::new("offline");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7227,6 +7369,8 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
         k.sync_all();
     }
     fs::remove_file(&path).unwrap();
+    let rows = || LibraryStore::open(&profile).projects().unwrap().len();
+    let before = rows();
     let mut k = kernel(&profile);
     let ShellReply::Compacted {
         recovery_copies, ..
@@ -7234,7 +7378,15 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
     else {
         panic!()
     };
-    assert_eq!(recovery_copies.len(), 1);
+    assert!(recovery_copies.is_empty(), "no copy made on its own");
+    assert_eq!(rows(), before);
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(17.0)
+    );
+    assert_eq!(rows(), before + 1, "the one recovered copy, chosen");
     let reader = LibraryStore::open(&profile);
     // The entry stays, naming its file; the file was its only body.
     assert!(reader.load("P").unwrap().is_none());
@@ -7247,23 +7399,6 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
             .and_then(|f| f.get("path"))
             .and_then(|p| p.as_str())
             .is_some_and(|p| p.ends_with("source.pmv"))
-    );
-    assert!(
-        reader
-            .read("projects")
-            .unwrap()
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r.get("id").and_then(|id| id.as_str()) == Some("P"))
-    );
-    let p = reader.load(&recovery_copies[0]).unwrap().unwrap();
-    let mut copy = Kernel::new(Default::default());
-    copy.open("copy", OpenSource::Library(p)).unwrap();
-    assert_eq!(
-        common::opacity_of(copy.project("copy").unwrap().store(), "layer0"),
-        Some(17.0)
     );
 }
 #[test]
@@ -7622,8 +7757,10 @@ fn a_session_killed_after_only_layout_changes_reopens_without_asking() {
     };
     let _ = ticket;
 }
+/// Opening the entry of a deleted file asks before its unsaved work is
+/// recovered; Recover opens it as a library project, and the entry stays.
 #[test]
-fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
+fn opening_the_entry_of_a_deleted_file_asks_then_recovers_its_unsaved_work() {
     let dir = common::TempDir::new("deleted-file-open");
     let path = dir.path("source.pmv");
     fs::write(&path, PROJECT).unwrap();
@@ -7636,19 +7773,8 @@ fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
     }
     fs::remove_file(&path).unwrap();
     let mut k = kernel(&profile);
-    let reply = k
-        .shell(ShellCall::PrepareOpen {
-            id: "P".into(),
-            source: SessionSource::Library {
-                profile: profile.clone(),
-                project: "P".into(),
-            },
-            electron_profile: None,
-        })
-        .unwrap();
-    let ShellReply::Opened { session, .. } = reply else {
-        panic!("{reply:?}")
-    };
+    let ticket = ask_library(&mut k, &profile, "P");
+    let session = recover(&mut k, ticket);
     assert_eq!(
         common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
         Some(17.0)
