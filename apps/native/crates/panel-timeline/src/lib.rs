@@ -13,6 +13,7 @@ mod reveal;
 mod session;
 pub mod snap;
 mod snapshot;
+pub mod stagger;
 pub mod tracks;
 pub mod v4;
 mod v4_actions;
@@ -105,6 +106,9 @@ pub struct TimelineModel {
     /// Hide Shy Layers: shy layers (and what a shy group holds) have no row.
     /// They still draw, play and export.
     pub hide_shy: bool,
+    /// The timeline panel does not hold the keyboard: selected rows take
+    /// the neutral selection fill, not the accent (PM-367).
+    pub panel_blurred: bool,
     pub search: String,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
@@ -650,6 +654,7 @@ impl TimelineModel {
             });
         if l.kind == "group" {
             d.group_collapsed = !d.group_collapsed;
+            d.collapsed = d.group_collapsed;
         } else {
             d.collapsed = !d.collapsed;
         }

@@ -35,7 +35,7 @@ fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
             }
             if c.can_nest {
                 result.push((
-                    "Add to Timeline",
+                    "Add Composition to Timeline",
                     invoke(MenuCommand::NestComposition(c.id.clone())),
                 ));
             }
@@ -52,7 +52,7 @@ fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
             match &runtime.availability {
                 Availability::Ready => {
                     result.push((
-                        "Add to Timeline",
+                        "Add Layer from Asset",
                         invoke(MenuCommand::AddAsset(a.id.clone())),
                     ));
                     if a.kind != "model" {

@@ -34,10 +34,13 @@ pub fn ask_other_files_work(name: &str, from: &str, truncated: bool) -> Alert<Ac
         ],
     )
 }
+/// `signal`: the last session ended by a quit signal (logout, shutdown, a
+/// script), which leaves unsaved work for this offer on purpose: no crash.
 pub fn ask_recovery(
     name: &str,
     truncated: bool,
     can_archive_recently_deleted: bool,
+    signal: bool,
 ) -> Alert<Action> {
     let mut buttons = vec![
         Button::new("Recover", Action::Recover).default(),
@@ -47,7 +50,11 @@ pub fn ask_recovery(
         buttons.push(Button::new("Discard Edits", Action::Discard).destructive());
     }
     Alert::new(
-        format!("Powermove quit unexpectedly while “{name}” had unsaved changes."),
+        if signal {
+            format!("Powermove quit before the changes to “{name}” were saved.")
+        } else {
+            format!("Powermove quit unexpectedly while “{name}” had unsaved changes.")
+        },
         format!(
             "Recover opens your latest edits. Open as Copy keeps the saved project unchanged and opens the edits beside it.{}",
             if truncated {
@@ -148,7 +155,12 @@ impl PreparedRecovery {
             RecoveryResult::None => return None,
             RecoveryResult::Recovered { truncated }
             | RecoveryResult::OfferCopy { truncated, .. } => {
-                ask_recovery(name, *truncated, archive_recently_deleted)
+                ask_recovery(
+                    name,
+                    *truncated,
+                    archive_recently_deleted,
+                    crate::error_log::last_quit_by_signal(),
+                )
             }
             RecoveryResult::Unrecoverable { lost, .. } => unrecoverable(name, saved_exists, lost),
             RecoveryResult::FromOtherFile {

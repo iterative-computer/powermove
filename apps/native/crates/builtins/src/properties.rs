@@ -45,14 +45,23 @@ impl Properties {
     /// every channel of the row.
     fn expression(
         &mut self,
-        model: &Inspector,
+        model: &mut Inspector,
         row: &str,
         bindings: Vec<Binding>,
         source: Option<String>,
+        time: f64,
     ) -> Result<Option<Value>, String> {
         let Some(source) = source else {
             return Ok(None);
         };
+        let mut runtime_error = None;
+        for binding in &bindings {
+            if let Some(id) = binding.property_id() {
+                runtime_error = runtime_error.or(model
+                    .expression_error(&id, time)
+                    .map_err(|e| e.to_string())?);
+            }
+        }
         let key = format!("expr.{row}");
         let handle = match self.handles.get(&key) {
             Some(handle) => handle.clone(),
@@ -65,7 +74,8 @@ impl Properties {
                 handle
             }
         };
-        let error = pm_kernel::commands::properties::expression_diagnostic(&source);
+        let error = runtime_error
+            .or_else(|| pm_kernel::commands::properties::expression_diagnostic(&source));
         Ok(Some(
             json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
         ))
@@ -397,6 +407,7 @@ impl Properties {
                         id,
                         vec![field.binding.clone()],
                         state.expression.clone(),
+                        time,
                     )?
                 {
                     row["expression"] = expression;
@@ -504,6 +515,16 @@ impl Properties {
                     }
                     if !axes.is_empty() {
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                        if id == "position" {
+                            row["separateDimensions"] = json!(
+                                model
+                                    .layer(&layer)
+                                    .map_err(|e| e.to_string())?
+                                    .get("separateDimensions")
+                                    .and_then(pm_model::Value::as_bool)
+                                    .unwrap_or(false)
+                            );
+                        }
                         if id == "scale" {
                             row["linked"] = json!(
                                 model
@@ -514,7 +535,9 @@ impl Properties {
                                     .unwrap_or(true)
                             );
                         }
-                        if let Some(expression) = self.expression(model, id, bound, expression)? {
+                        if let Some(expression) =
+                            self.expression(model, id, bound, expression, time)?
+                        {
                             row["expression"] = expression;
                         }
                         rows.push(row);
@@ -526,12 +549,138 @@ impl Properties {
                 }
             }
             if target["first"]["type"] == "text" {
-                let animators = model
-                    .text_animators(&layer)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|(id, name)| json!({"id":id,"name":name}))
-                    .collect::<Vec<_>>();
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let mut animators = vec![];
+                for animator in record["d"]["animators"].as_array().into_iter().flatten() {
+                    let Some(id) = animator["id"].as_str() else {
+                        continue;
+                    };
+                    let mut rows = vec![];
+                    for (field, label, default, choices) in [
+                        (
+                            "unit",
+                            "Based on",
+                            "characters",
+                            vec!["characters", "words", "lines"],
+                        ),
+                        (
+                            "order",
+                            "Order",
+                            "forward",
+                            vec!["forward", "reverse", "center", "edges", "random"],
+                        ),
+                        (
+                            "shape",
+                            "Shape",
+                            "square",
+                            vec!["square", "rampUp", "rampDown", "triangle", "round"],
+                        ),
+                        (
+                            "easing",
+                            "Ease",
+                            "cubicOut",
+                            vec![
+                                "expoOut",
+                                "cubicOut",
+                                "cubicInOut",
+                                "cubicIn",
+                                "backOut",
+                                "spring",
+                                "power",
+                                "linear",
+                            ],
+                        ),
+                    ] {
+                        let mode = animator["mode"].as_str().unwrap_or("range");
+                        if (field == "shape" && mode != "range")
+                            || (field == "easing" && mode != "stagger")
+                        {
+                            continue;
+                        }
+                        let path = format!("animator.{id}.{field}");
+                        let lease = self.control_lease(&path);
+                        let value = animator[field]
+                            .as_str()
+                            .or_else(|| animator["p"][field]["v"].as_str())
+                            .unwrap_or(default);
+                        let options = choices
+                            .into_iter()
+                            .map(|v| {
+                                let label = match v {
+                                    "characters" => "Characters",
+                                    "words" => "Words",
+                                    "lines" => "Lines",
+                                    "forward" => "First to last",
+                                    "reverse" => "Last to first",
+                                    "center" => "Center out",
+                                    "edges" => "Edges in",
+                                    "random" => "Random",
+                                    "square" => "Square",
+                                    "rampUp" => "Ramp up",
+                                    "rampDown" => "Ramp down",
+                                    "triangle" => "Triangle",
+                                    "round" => "Round",
+                                    "expoOut" => "Expo out",
+                                    "cubicOut" => "Ease out",
+                                    "cubicInOut" => "Ease in-out",
+                                    "cubicIn" => "Ease in",
+                                    "backOut" => "Back out",
+                                    "spring" => "Spring",
+                                    "power" => "Power",
+                                    "linear" => "Linear",
+                                    _ => v,
+                                };
+                                json!({"v":v,"label":label})
+                            })
+                            .collect::<Vec<_>>();
+                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
+                    }
+                    for (key, label, unit) in [
+                        ("amount", "Amount", "%"),
+                        ("delay", "Start", "s"),
+                        ("duration", "Duration", "s"),
+                        ("stagger", "Stagger", "s"),
+                        ("start", "Range start", "%"),
+                        ("end", "Range end", "%"),
+                        ("offset", "Range offset", "%"),
+                        ("smoothness", "Softness", "%"),
+                        ("speed", "Speed", ""),
+                        ("spread", "Spread", ""),
+                        ("x", "Position X", "px"),
+                        ("y", "Position Y", "px"),
+                        ("opacity", "Opacity", "%"),
+                        ("scale", "Scale", "%"),
+                        ("rotation", "Rotation", "°"),
+                        ("skew", "Skew", "°"),
+                        ("blur", "Blur", "px"),
+                        ("tracking", "Tracking", "px"),
+                        ("color", "Color", ""),
+                    ] {
+                        if animator["p"].get(key).is_none() {
+                            continue;
+                        }
+                        let path = format!("ta.{id}.{key}");
+                        let binding = Binding::Property(PropertyId::new(&layer, &path));
+                        let state = model
+                            .binding_state(&binding, time)
+                            .map_err(|e| e.to_string())?;
+                        let lease = self.lease(model, &path, binding)?;
+                        let animation = if state.key_at_playhead {
+                            "key-at-playhead"
+                        } else if state.animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
+                        let control = if key == "color" {
+                            json!({"kind":"colour","binding":lease,"value":super::data::wire(&state.value)})
+                        } else {
+                            json!({"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else if matches!(key,"tracking"|"blur") {0.5} else {1.0},"precision":2}]})
+                        };
+                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control}));
+                    }
+                    animators.push(json!({"id":id,"name":animator["name"],"rows":rows}));
+                }
                 let presets = pm_panel_inspector::text_animators::preset_menu()
                     .into_iter()
                     .map(|(id, label)| json!({"id":id,"label":label,"disabled":id.is_none()}))
@@ -577,11 +726,13 @@ impl Properties {
             .iter()
             .flat_map(|section| {
                 let masks = section["masks"].as_array().into_iter().flatten();
+                let animators = section["animators"].as_array().into_iter().flatten();
                 section["rows"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .chain(masks.flat_map(|m| m["rows"].as_array().into_iter().flatten()))
+                    .chain(animators.flat_map(|a| a["rows"].as_array().into_iter().flatten()))
             })
             .filter_map(|row| {
                 Some((
@@ -604,6 +755,11 @@ impl Properties {
     ) -> Result<Vec<Value>, String> {
         use pm_panel_studio3d::properties::Role;
         let mut rows = vec![];
+        // A camera aims at its point of interest unless Auto-Orient is Off.
+        let one_node = role == Role::Camera
+            && super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?)["d"]["data"]["camera"]
+                ["autoOrient"]
+                == "off";
         let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
             "position",
             "Position",
@@ -615,7 +771,22 @@ impl Properties {
             "",
             0.1,
         )];
-        if role != Role::Camera {
+        // The point of interest is what turns the view when the camera moves,
+        // so it sits under Position (After Effects' two-node camera).
+        if role == Role::Camera && !one_node {
+            groups.push((
+                "target",
+                "Point of Interest",
+                vec![
+                    ("camera.targetX", "X"),
+                    ("camera.targetY", "Y"),
+                    ("camera.targetZ", "Z"),
+                ],
+                "",
+                0.1,
+            ));
+        }
+        if role != Role::Camera || one_node {
             groups.push((
                 "rotation3d",
                 "Rotation",
@@ -1439,6 +1610,24 @@ impl Properties {
                         json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
                     ),
                 );
+                // Off moves the camera without re-aiming it; switching keeps the view.
+                let lease = self.control_lease("3d.autoOrient");
+                let value = if data["camera"]["autoOrient"] == "off" {
+                    "off"
+                } else {
+                    "target"
+                };
+                push(
+                    &mut groups,
+                    "Camera",
+                    row(
+                        "3d.autoOrient",
+                        "Auto-Orient",
+                        json!({"kind":"choice","binding":lease,"value":value,"options":[
+                            {"v":"target","label":"Toward Point of Interest","detail":"Moving the camera turns it to keep looking at the point of interest."},
+                            {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
+                    ),
+                );
             }
         }
         for field in fields {
@@ -2039,6 +2228,52 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
+        if let Some(control) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("animator."))
+        {
+            let (id, field) = control.rsplit_once('.').ok_or("Invalid animator field")?;
+            if !matches!(field, "unit" | "order" | "shape" | "easing") {
+                return Err("Invalid animator field".into());
+            }
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            if model.selected_layers().len() != 1 || !model.editable(&layer) {
+                return Err("Select one unlocked text layer".into());
+            }
+            let record = model.layer(&layer).map_err(|e| e.to_string())?;
+            let mut animators = record
+                .get("d")
+                .and_then(|d| d.get("animators"))
+                .cloned()
+                .ok_or("No animators")?;
+            let list = animators.as_array_mut().ok_or("Invalid animators")?;
+            let animator = list
+                .iter_mut()
+                .find(|a| a.get("id").and_then(pm_model::Value::as_str) == Some(id))
+                .ok_or("Animator removed")?;
+            animator
+                .as_object_mut()
+                .ok_or("Invalid animator")?
+                .insert(field, value);
+            let mut patch = pm_model::Map::new();
+            patch.insert("animators", animators);
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Edit Text Animator".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Content(
+                        pm_kernel::ContentCommand::Set {
+                            layer_id: layer,
+                            patch,
+                            time,
+                        },
+                    )]),
+                },
+            ));
+        }
         // A variation axis may not be stored yet: set_axis creates it first.
         if let Some((id, _)) = self
             .handles
@@ -2450,6 +2685,8 @@ impl Properties {
                 Some("reset") => V4Action::Reset(None),
                 Some("remove-expression") => V4Action::Expression(None),
                 Some("link") => V4Action::LinkScale,
+                Some("separate-dimensions") => V4Action::SeparateDimensions,
+                Some(action) if action.starts_with("ease:") => V4Action::Ease(action[5..].into()),
                 Some("show-graph") => V4Action::ShowGraph,
                 _ => return Err("Unknown property action".into()),
             }

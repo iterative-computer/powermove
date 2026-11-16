@@ -157,6 +157,7 @@ fn precompose_exact_copy_and_enabled_states() {
         can_leave: true,
         leave: false,
         adjust_duration: false,
+        size_to_selection: false,
         open_after: false,
     };
     let s = d.surface(id(), owner());
@@ -165,8 +166,11 @@ fn precompose_exact_copy_and_enabled_states() {
     assert_eq!(s.fields[1].description.as_deref(), Some(LEAVE_DESCRIPTION));
     assert_eq!(s.fields[2].description.as_deref(), Some(MOVE_DESCRIPTION));
     assert!(s.fields[3].enabled);
-    assert_eq!(s.fields[4].label, "Open New Composition");
+    assert_eq!(s.fields[4].label, "Fit size to layers");
+    assert_eq!(s.fields[5].label, "Open New Composition");
+    assert!(s.fields[4].enabled);
     d.leave = true;
+    assert!(!d.surface(id(), owner()).fields[4].enabled);
     assert!(!d.surface(id(), owner()).fields[3].enabled);
     d.can_leave = false;
     let s = d.surface(id(), owner());
@@ -519,6 +523,7 @@ fn reviewed_precompose_disabled_label_and_scale_errors_are_exact() {
         can_leave: false,
         leave: false,
         adjust_duration: false,
+        size_to_selection: false,
         open_after: false,
     };
     assert_eq!(

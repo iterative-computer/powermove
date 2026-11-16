@@ -89,7 +89,7 @@ fn drag_to_dock_preview_and_result_render() {
         let bottom = layout.docks.iter().find(|d| d.id == "bottom").unwrap();
         assert_eq!(bottom.groups.len(), 2);
         assert_eq!(bottom.groups[1].tabs, ["fxbrowser"]);
-        // The right dock is now a single full-height Properties panel.
+        // Properties and Agent remain in the right dock.
         assert_eq!(
             layout
                 .docks
@@ -98,7 +98,7 @@ fn drag_to_dock_preview_and_result_render() {
                 .unwrap()
                 .groups
                 .len(),
-            1
+            2
         );
         // Saved layout round trip through the shell command path (no AppKit host).
         window
