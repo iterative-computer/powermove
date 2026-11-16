@@ -325,11 +325,6 @@ impl McpSession {
                     .map_err(|_| Error::unavailable("MCP host stopped"))?;
                 let current = automation.view(&project)?.snapshot;
                 let user = changed(&baseline, &current);
-                let contested: Vec<_> = scopes
-                    .iter()
-                    .filter(|path| user.iter().any(|u| overlaps(path, u)))
-                    .cloned()
-                    .collect();
                 let active = worker.active.as_mut().unwrap();
                 for target in active.focus.iter().map(String::as_str).chain(
                     args["commands"]
@@ -356,6 +351,19 @@ impl McpSession {
                 }
                 active.owned_scopes.extend(user);
                 refresh(active, &mut automation, &project, worker.writer)?;
+                // Committed user edits own the path even if two edits return
+                // its value to the pre-hold value. A net snapshot diff alone
+                // loses that intent; cancelled provisional edits own nothing.
+                let contested: Vec<_> = scopes
+                    .iter()
+                    .filter(|path| {
+                        active
+                            .owned_scopes
+                            .iter()
+                            .any(|owned| overlaps(path, owned))
+                    })
+                    .cloned()
+                    .collect();
                 let mut landing_args = args.clone();
                 let dropped = !contested.is_empty();
                 if dropped {

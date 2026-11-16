@@ -913,3 +913,64 @@ fn remote_layer_seen_in_state_or_selection_reports_target_removed() {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn committed_user_roundtrip_drops_the_waiting_write_and_retains_ownership() {
+    use pm_kernel::{Call, Caller, Command, Request};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    let initial =
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"]
+            .as_f64()
+            .unwrap();
+    pm_mcp::coedit::touch_field(&id, "roundtrip-opacity", true);
+    let kernel = actor.handle();
+    let project = id.clone();
+    let user = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        for value in [17., initial] {
+            let ack = kernel
+                .call(
+                    &project,
+                    Request::new(
+                        Caller::native(),
+                        Call::Transact {
+                            label: Some("User value".into()),
+                            expected_revision: None,
+                            body: vec![Command::SetStaticOpacity {
+                                layer_id: "L".into(),
+                                value,
+                            }]
+                            .into(),
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(
+                !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+                "{:?}",
+                ack.reply
+            );
+        }
+        pm_mcp::coedit::touch_field(&project, "roundtrip-opacity", false);
+    });
+    let args =
+        json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]});
+    let result = session.dispatch("apply_commands", &args).unwrap();
+    user.join().unwrap();
+    assert_eq!(result["status"], "dropped", "{result}");
+    assert_eq!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"]
+            .as_f64()
+            .unwrap(),
+        initial
+    );
+    let next = session.dispatch("apply_commands", &args).unwrap();
+    assert_eq!(next["error"], "user_owned", "{next}");
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
