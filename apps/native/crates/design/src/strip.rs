@@ -202,7 +202,7 @@ impl Tokens {
         let light_hue = coloured && (35. ..110.).contains(&hue);
         // Glass: the timeline's grid and the row behind show through the
         // body (a dragged strip a little more, lifted off them).
-        let glass = if light_hue { 0.9 } else { 0.8 };
+        let glass = if light_hue { 0.9 } else { 0.86 };
         let opacity = match state {
             // A light hue's dark name needs its slab as it is.
             StripState::Dragging if !light_hue => glass - 0.1,
@@ -220,7 +220,7 @@ impl Tokens {
         };
         // As the reference's slab: deep and saturated at the top, more
         // luminous toward the foot (the light hues the reference's amber).
-        let (top, foot) = if light_hue { (0.64, 0.74) } else { (0.5, 0.62) };
+        let (top, foot) = if light_hue { (0.64, 0.74) } else { (0.52, 0.64) };
         let lit = oklch_fit(top + lift, vivid, hue);
         let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
@@ -277,7 +277,7 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
-            grid: (tint, if disabled { 0.12 } else { 0.4 }),
+            grid: (tint, if disabled { 0.12 } else { 0.6 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.45, 6., 16.)
             } else {
@@ -293,9 +293,16 @@ impl Tokens {
                     .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
                     .unwrap_or(0x000000)
             } else {
-                (0..=12)
-                    .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
+                // Else the pale step that reads best: a mark stays the hue's.
+                let pale = (0..=12).map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue));
+                pale.clone()
                     .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .or_else(|| {
+                        pale.max_by(|a, b| {
+                            crate::color::contrast(*a, solid(body))
+                                .total_cmp(&crate::color::contrast(*b, solid(body)))
+                        })
+                    })
                     .unwrap_or(0xffffff)
             },
         }

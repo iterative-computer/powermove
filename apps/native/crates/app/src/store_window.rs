@@ -179,7 +179,8 @@ enum Reply {
     Detail(u64, Box<Result<Detail, String>>),
     /// What is installed, what was made here, a note, and whether the Store
     /// was asked about updates (the first, local reply was not).
-    Library(Vec<Installed>, Vec<Yours>, Option<String>, bool),
+    /// From load `u64` (an older load's late answer is dropped).
+    Library(u64, Vec<Installed>, Vec<Yours>, Option<String>, bool),
     Prepared(Box<Result<crate::publish::Prepared, String>>),
     Frozen(
         Box<(
@@ -222,6 +223,8 @@ pub struct StoreWindow {
     generation: u64,
     /// The storefront's own requests: a page opened meanwhile keeps it.
     shelves_generation: u64,
+    /// The Library's own loads: a later load's answer wins.
+    library_generation: u64,
     tx: async_channel::Sender<Reply>,
 }
 
@@ -269,6 +272,7 @@ impl StoreWindow {
             embedded: false,
             generation: 0,
             shelves_generation: 0,
+            library_generation: 0,
             tx,
         };
         window.load_shelves();
@@ -457,12 +461,15 @@ impl StoreWindow {
     }
     /// What the Store installed here, then which of those it has updates for.
     fn load_library(&mut self) {
+        self.library_generation += 1;
+        let generation = self.library_generation;
         let profile = self.services.profile.clone();
         let tx = self.tx.clone();
         self.run(move |client| {
             let mut installed = scan(&profile);
             // What is on this Mac shows at once; updates fill in.
             let _ = tx.send_blocking(Reply::Library(
+                generation,
                 installed.clone(),
                 yours(&profile),
                 None,
@@ -498,7 +505,7 @@ impl StoreWindow {
                 }
                 Err(error) => Some(load_error(error)),
             };
-            Reply::Library(installed, yours(&profile), note, true)
+            Reply::Library(generation, installed, yours(&profile), note, true)
         });
     }
     pub fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -720,7 +727,9 @@ impl StoreWindow {
                     };
                 }
             }
-            Reply::Library(mut items, yours, note, checked) => {
+            Reply::Library(generation, mut items, yours, note, checked)
+                if generation == self.library_generation =>
+            {
                 // A local listing keeps what the Store last said about each
                 // install, until it is asked again.
                 if !checked && let Load::Ready(known) = &self.library {
@@ -1419,6 +1428,34 @@ impl StoreWindow {
             )
             .children(trailing)
     }
+    /// v1.2.0's empty section: a card saying what goes here, and the one
+    /// thing to do about it at its trailing edge.
+    fn empty_card(&self, title: &str, body: &str, action: Option<AnyElement>) -> Div {
+        let t = &self.tokens;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xl))
+            .p(px(CARD_PAD))
+            .corner(t, t.radius.lg)
+            .bg(rgb(t.colors.panel))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(t.space.hair))
+                    .child(div().text_role(t, Text::Title).child(title.to_owned()))
+                    .child(
+                        div()
+                            .max_w(px(t.metrics.sheet_width))
+                            .text_color(rgb(t.colors.muted))
+                            .child(body.to_owned()),
+                    ),
+            )
+            .children(action)
+    }
     /// A quiet text action at a section head's far edge.
     fn head_action(&self, id: &str, label: &str, trail: Option<&str>) -> Stateful<Div> {
         let id = id.to_owned();
@@ -1721,30 +1758,27 @@ impl StoreWindow {
             let grid = self.grid(cards, across);
             out.push(self.section(self.heading("Installed", check.take()), grid));
         } else if !needs_you {
-            let empty = self
-                .kit()
-                .empty_state(
-                    "shippingbox",
-                    "Nothing Installed Yet",
-                    "Extensions you install from the Store live here, and update when their \
-                     makers publish.",
-                )
-                .child(
+            let empty = self.empty_card(
+                "Nothing Installed Yet",
+                "Extensions you install from the Store live here, and update when their makers \
+                 publish.",
+                Some(
                     self.button("store-discover", "Discover Extensions", true, false)
-                        .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx))),
-                );
+                        .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx)))
+                        .into_any_element(),
+                ),
+            );
             out.push(self.section(self.heading("Installed", None), empty));
         }
         // Made on this Mac: published from here (v1.2.0's Library › Made by You).
         let made = if self.yours.is_empty() {
-            self.kit()
-                .empty_state(
-                    "hammer",
-                    "Nothing Made Yet",
-                    "Ask your agent for an effect, a panel or a theme. What it makes shows up \
-                     here, ready to publish.",
-                )
-                .into_any_element()
+            self.empty_card(
+                "Nothing Made Yet",
+                "Ask your agent for an effect, a panel or a theme. What it makes shows up here, \
+                 ready to publish.",
+                None,
+            )
+            .into_any_element()
         } else {
             let cards = self
                 .yours
@@ -2001,7 +2035,12 @@ impl StoreWindow {
                 .child(div().flex_1().min_w(px(0.)).child(value))
         };
         let text = |s: String| div().child(s).into_any_element();
-        if let Some(about) = &detail.about {
+        // About only when it says more than the tagline under the name.
+        if let Some(about) = detail
+            .about
+            .as_ref()
+            .filter(|a| a.trim() != listing.tagline.trim())
+        {
             out.push(block(
                 "About",
                 div()
@@ -2012,7 +2051,24 @@ impl StoreWindow {
             ));
         }
         let mut facts: Vec<Div> = vec![
-            fact("Made by", text(listing.handle.clone())),
+            fact(
+                "Made by",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.xs))
+                    .child(listing.handle.clone())
+                    .when(listing.verified, |d| {
+                        d.child(pm_shell::symbol::symbol(
+                            "checkmark.seal.fill",
+                            m.symbol_inline,
+                            Weight::Semibold,
+                            c.verified,
+                            window,
+                        ))
+                    })
+                    .into_any_element(),
+            ),
             fact("Kind", text(kind_label(&listing.category).to_string())),
         ];
         if let Some(latest) = &listing.latest {
@@ -2025,7 +2081,15 @@ impl StoreWindow {
                     _ => latest.1.clone(),
                 }),
             ));
+            let updated = relative_date(&latest.3, today());
+            if !updated.is_empty() {
+                facts.push(fact("Updated", text(updated)));
+            }
         }
+        facts.push(fact(
+            "Identifier",
+            text(format!("{}/{}", listing.handle, listing.slug)),
+        ));
         let uses = permission_lines(&detail.listing.permissions);
         if !uses.is_empty() || !detail.link_hosts.is_empty() {
             let mut lines = div().flex().flex_col().gap(px(t.space.hair));
@@ -2058,7 +2122,18 @@ impl StoreWindow {
             }
             details = details.child(row);
         }
-        out.push(block("Details", details.into_any_element()));
+        // v1.2.0's order: what changed, then the facts and the sandbox's word.
+        let details = div()
+            .flex()
+            .flex_col()
+            .gap(px(t.space.md))
+            .child(details)
+            .child(
+                div()
+                    .px(px(CARD_PAD))
+                    .text_color(rgb(c.muted))
+                    .child("This extension runs in a sandbox with the permissions listed above."),
+            );
         let mut versions = card();
         for (i, release) in detail.releases.iter().enumerate() {
             if i > 0 {
@@ -2109,6 +2184,7 @@ impl StoreWindow {
         if !detail.releases.is_empty() {
             out.push(block("Version History", versions.into_any_element()));
         }
+        out.push(block("Details", details.into_any_element()));
         out
     }
     fn message_line(&self) -> Option<Div> {
