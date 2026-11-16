@@ -4,7 +4,14 @@
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Stage { Wake, Sketch, Ink, Rest, Erase, Ready }
+pub enum Stage {
+    Wake,
+    Sketch,
+    Ink,
+    Rest,
+    Erase,
+    Ready,
+}
 
 pub fn stage(event: &str) -> Option<Stage> {
     Some(match event {
@@ -28,16 +35,23 @@ pub fn ink_ease(progress: f32) -> f32 {
     let (mut lo, mut hi) = (0., 1.);
     for _ in 0..24 {
         let t = (lo + hi) * 0.5;
-        let bx = 3. * (1.-t)*(1.-t)*t*0.2 + 3.*(1.-t)*t*t*0.3 + t*t*t;
-        if bx < x { lo = t; } else { hi = t; }
+        let bx = 3. * (1. - t) * (1. - t) * t * 0.2 + 3. * (1. - t) * t * t * 0.3 + t * t * t;
+        if bx < x {
+            lo = t;
+        } else {
+            hi = t;
+        }
     }
     let t = (lo + hi) * 0.5;
-    3.*(1.-t)*(1.-t)*t*0.9 + 3.*(1.-t)*t*t + t*t*t
+    3. * (1. - t) * (1. - t) * t * 0.9 + 3. * (1. - t) * t * t + t * t * t
 }
 
 pub fn reveal(seconds: f32, reduced: bool) -> f32 {
-    if reduced { fade(seconds - 0.120, 0.160) }
-    else { fade(seconds - 0.080, 0.200) }
+    if reduced {
+        fade(seconds - 0.120, 0.160)
+    } else {
+        fade(seconds - 0.080, 0.200)
+    }
 }
 
 pub fn playback(playing: bool) -> (f32, u32) {
@@ -74,20 +88,26 @@ mod tests {
         assert_eq!(reveal(0.08, false), 0.);
     }
     #[test]
-    fn playback_budget() { assert_eq!(playback(true), (0.4, 30)); }
+    fn playback_budget() {
+        assert_eq!(playback(true), (0.4, 30));
+    }
 }
 
 /// A slot-local brush. Integrating in bounded steps keeps the spring stable
 /// when a background window resumes after a long pause.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Brush { pub position: [f32; 2], velocity: [f32; 2] }
+pub struct Brush {
+    pub position: [f32; 2],
+    velocity: [f32; 2],
+}
 impl Brush {
     pub fn advance(&mut self, target: [f32; 2], seconds: f32) {
         let mut remaining = seconds.clamp(0., 1.);
         while remaining > 0. {
             let dt = remaining.min(1. / 120.);
             for axis in 0..2 {
-                self.velocity[axis] += (120. * (target[axis] - self.position[axis]) - 14. * self.velocity[axis]) * dt;
+                self.velocity[axis] +=
+                    (120. * (target[axis] - self.position[axis]) - 14. * self.velocity[axis]) * dt;
                 self.position[axis] += self.velocity[axis] * dt;
             }
             remaining -= dt;
@@ -96,13 +116,19 @@ impl Brush {
 }
 
 /// Analytic accumulation decay is independent of the rendering frame rate.
-pub fn afterglow(age: f32) -> f32 { (-3.712 * age.max(0.)).exp() }
+pub fn afterglow(age: f32) -> f32 {
+    (-3.712 * age.max(0.)).exp()
+}
 
 /// Test a dot against the rounded slot before submitting paint primitives.
 pub fn inside_slot(point: [f32; 2], size: [f32; 2], radius: f32) -> bool {
-    if size.iter().any(|v| !v.is_finite() || *v <= 0.) || point.iter().any(|v| !v.is_finite()) { return false; }
+    if size.iter().any(|v| !v.is_finite() || *v <= 0.) || point.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
     let r = radius.max(0.).min(size[0].min(size[1]) / 2.);
-    if point[0] < 0. || point[1] < 0. || point[0] > size[0] || point[1] > size[1] { return false; }
+    if point[0] < 0. || point[1] < 0. || point[0] > size[0] || point[1] > size[1] {
+        return false;
+    }
     let dx = point[0] - point[0].clamp(r, size[0] - r);
     let dy = point[1] - point[1].clamp(r, size[1] - r);
     dx * dx + dy * dy <= r * r
@@ -114,7 +140,9 @@ mod brush_tests {
     #[test]
     fn spring_settles() {
         let mut brush = Brush::default();
-        for _ in 0..180 { brush.advance([100., 50.], 1. / 60.); }
+        for _ in 0..180 {
+            brush.advance([100., 50.], 1. / 60.);
+        }
         assert!((brush.position[0] - 100.).abs() < 0.01);
         assert!((brush.position[1] - 50.).abs() < 0.01);
     }
@@ -135,25 +163,49 @@ mod brush_tests {
 
 /// Renderer-independent primitives; coordinates are local to the reserved slot.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Dot { pub center: [f32; 2], pub radius: f32, pub alpha: f32, pub orange: bool }
+pub struct Dot {
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub alpha: f32,
+    pub orange: bool,
+}
 
 /// Stable dot field shared by native painting and headless frame assertions.
 /// Reduced motion lights the whole planned track without moving a brush.
-pub fn draw_dots(size: [f32; 2], age: f32, row: Option<f32>, light: bool, reduced: bool, playing: bool) -> Vec<Dot> {
+pub fn draw_dots(
+    size: [f32; 2],
+    age: f32,
+    row: Option<f32>,
+    light: bool,
+    reduced: bool,
+    playing: bool,
+) -> Vec<Dot> {
     let mut dots = Vec::new();
-    if size.iter().any(|v| !v.is_finite() || *v <= 0.) { return dots; }
+    if size.iter().any(|v| !v.is_finite() || *v <= 0.) {
+        return dots;
+    }
     let dim = playback(playing).0;
     let wake = fade(age, 0.24);
-    for y in (6..(size[1]-6.).max(6.).min(4096.) as usize).step_by(12) {
-        for x in (6..(size[0]-6.).max(6.).min(4096.) as usize).step_by(12) {
+    for y in (6..(size[1] - 6.).max(6.).min(4096.) as usize).step_by(12) {
+        for x in (6..(size[0] - 6.).max(6.).min(4096.) as usize).step_by(12) {
             let center = [x as f32, y as f32];
-            if !inside_slot(center, size, 8.) { continue; }
-            dots.push(Dot { center, radius: 0.5,
-                alpha: dim * (if light { 0.05 } else { 0.06 }) * wake, orange: false });
+            if !inside_slot(center, size, 8.) {
+                continue;
+            }
+            dots.push(Dot {
+                center,
+                radius: 0.5,
+                alpha: dim * (if light { 0.05 } else { 0.06 }) * wake,
+                orange: false,
+            });
         }
     }
     if let Some(y) = row {
-        dots.extend(sketch_dots(size, y, dim * if reduced { fade(age, 0.12) } else { wake }));
+        dots.extend(sketch_dots(
+            size,
+            y,
+            dim * if reduced { fade(age, 0.12) } else { wake },
+        ));
     }
     dots
 }
@@ -166,12 +218,25 @@ pub fn sketch_dots(size: [f32; 2], y: f32, strength: f32) -> Vec<Dot> {
         let mut x = 16. + width * start;
         let mut index = 0;
         while x <= 16. + width * end {
-            let cy = y + if jitter { (index as f32 * 1.7).sin() } else { 0. };
+            let cy = y + if jitter {
+                (index as f32 * 1.7).sin()
+            } else {
+                0.
+            };
             if inside_slot([x, cy], size, 8.) {
-                dots.push(Dot { center: [x, cy], radius: 0.85, alpha: 0.25 * strength, orange: true });
+                dots.push(Dot {
+                    center: [x, cy],
+                    radius: 0.85,
+                    alpha: 0.25 * strength,
+                    orange: true,
+                });
             }
             index += 1;
-            x += if start > 0.8 { (width * 0.03).max(1.) } else { 6. };
+            x += if start > 0.8 {
+                (width * 0.03).max(1.)
+            } else {
+                6.
+            };
         }
     }
     dots
@@ -183,7 +248,10 @@ mod draw_tests {
     #[test]
     fn deterministic_clipped_field() {
         let dots = draw_dots([120., 80.], 0.24, Some(39.), false, false, false);
-        assert_eq!(dots, draw_dots([120., 80.], 0.24, Some(39.), false, false, false));
+        assert_eq!(
+            dots,
+            draw_dots([120., 80.], 0.24, Some(39.), false, false, false)
+        );
         assert!(dots.iter().all(|d| inside_slot(d.center, [120., 80.], 8.)));
         assert!(dots.iter().any(|d| d.orange && d.alpha == 0.25));
     }
@@ -211,13 +279,25 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let now = std::time::Instant::now();
-        Self { explicit: false, planned: Default::default(), stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
+        Self {
+            explicit: false,
+            planned: Default::default(),
+            stage: Stage::Wake,
+            started: now,
+            changed: now,
+            row: 0,
+            pending: Default::default(),
+            complete: false,
+            committed: Default::default(),
+        }
     }
 }
 impl State {
     pub fn event(&mut self, event: &str, row: usize) {
         if let Some(stage) = stage(event) {
-            if stage == Stage::Ink { self.committed.insert(row, std::time::Instant::now()); }
+            if stage == Stage::Ink {
+                self.committed.insert(row, std::time::Instant::now());
+            }
             self.stage = stage;
             self.row = row;
             self.changed = std::time::Instant::now();
@@ -231,32 +311,56 @@ impl State {
     pub fn published(&mut self, rows: impl IntoIterator<Item = usize>, complete: bool) {
         self.pending.extend(rows);
         self.complete = complete;
-        if self.stage == Stage::Ready { self.event("start", self.row); }
+        if self.stage == Stage::Ready {
+            self.event("start", self.row);
+        }
     }
     pub fn tick(&mut self) {
         let age = self.changed.elapsed().as_secs_f32();
         if self.explicit {
-            if self.stage == Stage::Erase || self.stage == Stage::Ready { return; }
-            if (self.stage == Stage::Wake && age >= 0.24) || (self.stage == Stage::Ink && age >= 0.58) || self.stage == Stage::Rest || self.stage == Stage::Sketch {
-                if let Some(row) = self.pending.pop_front() { self.event("commit", row); return; }
-                else if self.complete { self.event("ready", self.row); return; }
-                else if !self.planned.is_empty() && self.stage == Stage::Wake { self.event("plan", *self.planned.first().unwrap()); }
+            if self.stage == Stage::Erase || self.stage == Stage::Ready {
+                return;
             }
-            if age >= 2. && self.stage != Stage::Rest && self.pending.is_empty() && !self.complete { self.event("rest", self.row); }
+            if (self.stage == Stage::Wake && age >= 0.24)
+                || (self.stage == Stage::Ink && age >= 0.58)
+                || self.stage == Stage::Rest
+                || self.stage == Stage::Sketch
+            {
+                if let Some(row) = self.pending.pop_front() {
+                    self.event("commit", row);
+                    return;
+                } else if self.complete {
+                    self.event("ready", self.row);
+                    return;
+                } else if !self.planned.is_empty() && self.stage == Stage::Wake {
+                    self.event("plan", *self.planned.first().unwrap());
+                }
+            }
+            if age >= 2. && self.stage != Stage::Rest && self.pending.is_empty() && !self.complete {
+                self.event("rest", self.row);
+            }
             return;
         }
         match self.stage {
-            Stage::Wake | Stage::Rest if !self.pending.is_empty() && (self.stage == Stage::Rest || age >= 0.24) => {
+            Stage::Wake | Stage::Rest
+                if !self.pending.is_empty() && (self.stage == Stage::Rest || age >= 0.24) =>
+            {
                 let row = self.pending.pop_front().unwrap();
                 self.event("plan", row);
             }
             Stage::Sketch if age >= 0.65 => self.event("commit", self.row),
             Stage::Ink if age >= 0.58 => {
-                if let Some(row) = self.pending.pop_front() { self.event("plan", row); }
-                else if self.complete { self.event("ready", self.row); }
-                else if age >= 2. { self.event("rest", self.row); }
+                if let Some(row) = self.pending.pop_front() {
+                    self.event("plan", row);
+                } else if self.complete {
+                    self.event("ready", self.row);
+                } else if age >= 2. {
+                    self.event("rest", self.row);
+                }
             }
-            Stage::Wake | Stage::Rest if self.complete && self.pending.is_empty() => self.event("ready", self.row),
+            Stage::Wake | Stage::Rest if self.complete && self.pending.is_empty() => {
+                self.event("ready", self.row)
+            }
             _ => {}
         }
     }
@@ -287,7 +391,11 @@ mod wiring_tests {
 /// The ink a row is written in: the accent while wet, drying to the theme's
 /// text colour.
 pub fn ink_color(elapsed: f32, accent: u32, ink: u32, reduced: bool) -> u32 {
-    let dry = if reduced { 1. } else { ink_ease((elapsed - 0.28) / 0.3) };
+    let dry = if reduced {
+        1.
+    } else {
+        ink_ease((elapsed - 0.28) / 0.3)
+    };
     pm_design::mix(accent, ink, dry.clamp(0., 1.))
 }
 
@@ -310,11 +418,17 @@ mod anatomy_tests {
     #[test]
     fn pencil_has_three_inset_parts_and_a_jittered_label() {
         let dots = sketch_dots([300., 260.], 58., 1.);
-        assert!(dots.iter().all(|d| d.center[0] >= 16. && d.center[0] <= 284.));
-        for (lo, hi) in [(0.,0.22),(0.38,0.82),(0.88,0.94)] {
-            assert!(dots.iter().any(|d| (16.+268.*lo..=16.+268.*hi).contains(&d.center[0])));
+        assert!(
+            dots.iter()
+                .all(|d| d.center[0] >= 16. && d.center[0] <= 284.)
+        );
+        for (lo, hi) in [(0., 0.22), (0.38, 0.82), (0.88, 0.94)] {
+            assert!(
+                dots.iter()
+                    .any(|d| (16. + 268. * lo..=16. + 268. * hi).contains(&d.center[0]))
+            );
         }
-        assert!(dots.iter().all(|d| (d.center[1]-58.).abs() <= 1.));
+        assert!(dots.iter().all(|d| (d.center[1] - 58.).abs() <= 1.));
     }
 }
 
@@ -322,7 +436,10 @@ mod anatomy_tests {
 pub fn ink_track(width: f32, fraction: f32, age: f32, reduced: bool) -> [f32; 2] {
     let inner = (width - 32.).max(0.);
     let grow = if reduced { 1. } else { ink_ease(age / 0.28) };
-    [16. + inner * 0.38, inner * 0.44 * fraction.clamp(0., 1.) * grow]
+    [
+        16. + inner * 0.38,
+        inner * 0.44 * fraction.clamp(0., 1.) * grow,
+    ]
 }
 #[cfg(test)]
 mod track_tests {
@@ -332,13 +449,20 @@ mod track_tests {
         let [x, w] = ink_track(300., 0.5, 0.28, false);
         assert!((x - 117.84).abs() < 0.001);
         assert!((w - 58.96).abs() < 0.001);
-        assert_eq!(ink_track(300., 0.5, 0., true), ink_track(300., 0.5, 0.28, true));
+        assert_eq!(
+            ink_track(300., 0.5, 0., true),
+            ink_track(300., 0.5, 0.28, true)
+        );
     }
 }
 
 /// The entire real control fades through the ink; no substitute geometry.
 pub fn control_alpha(age: f32, reduced: bool) -> f32 {
-    if reduced { reveal(age, true) } else { fade(age, 0.28) }
+    if reduced {
+        reveal(age, true)
+    } else {
+        fade(age, 0.28)
+    }
 }
 #[cfg(test)]
 mod reveal_tests {
@@ -346,7 +470,7 @@ mod reveal_tests {
     #[test]
     fn real_controls_fade_over_the_full_commit_window() {
         assert_eq!(control_alpha(0., false), 0.);
-        assert!((control_alpha(0.14, false)-0.5).abs() < 0.00001);
+        assert!((control_alpha(0.14, false) - 0.5).abs() < 0.00001);
         assert_eq!(control_alpha(0.28, false), 1.);
         assert_eq!(control_alpha(0.12, true), 0.);
         assert_eq!(control_alpha(0.28, true), 1.);
@@ -356,24 +480,48 @@ mod reveal_tests {
 #[cfg(test)]
 mod explicit_build_tests {
     use super::*;
-    fn elapsed(s: &mut State, ms: u64) { s.changed -= std::time::Duration::from_millis(ms); s.tick(); }
-    #[test] fn plans_wait_for_real_commits_and_idle_breathes() {
-        let mut s = State::default(); s.explicit = true; s.planned.insert(0);
-        elapsed(&mut s,241); assert_eq!(s.stage,Stage::Sketch);
-        elapsed(&mut s,2100); assert_eq!(s.stage,Stage::Rest); assert!(s.committed.is_empty());
-        s.pending.push_back(0); s.tick(); assert_eq!(s.stage,Stage::Ink);
+    fn elapsed(s: &mut State, ms: u64) {
+        s.changed -= std::time::Duration::from_millis(ms);
+        s.tick();
+    }
+    #[test]
+    fn plans_wait_for_real_commits_and_idle_breathes() {
+        let mut s = State::default();
+        s.explicit = true;
+        s.planned.insert(0);
+        elapsed(&mut s, 241);
+        assert_eq!(s.stage, Stage::Sketch);
+        elapsed(&mut s, 2100);
+        assert_eq!(s.stage, Stage::Rest);
+        assert!(s.committed.is_empty());
+        s.pending.push_back(0);
+        s.tick();
+        assert_eq!(s.stage, Stage::Ink);
         assert!(s.committed.contains_key(&0));
     }
-    #[test] fn extension_handoff_waits_for_first_render_and_queued_ink() {
-        let mut s = State::default(); s.explicit = true; s.pending.extend([0,1]);
-        elapsed(&mut s,241); assert_eq!(s.row,0);
-        elapsed(&mut s,581); assert_eq!(s.row,1);
-        elapsed(&mut s,2100); assert_eq!(s.stage,Stage::Rest);
-        s.complete = true; s.tick(); assert_eq!(s.stage,Stage::Ready);
+    #[test]
+    fn extension_handoff_waits_for_first_render_and_queued_ink() {
+        let mut s = State::default();
+        s.explicit = true;
+        s.pending.extend([0, 1]);
+        elapsed(&mut s, 241);
+        assert_eq!(s.row, 0);
+        elapsed(&mut s, 581);
+        assert_eq!(s.row, 1);
+        elapsed(&mut s, 2100);
+        assert_eq!(s.stage, Stage::Rest);
+        s.complete = true;
+        s.tick();
+        assert_eq!(s.stage, Stage::Ready);
     }
-    #[test] fn cancel_stops_queued_commits() {
-        let mut s = State::default(); s.explicit = true; s.pending.push_back(0);
-        s.event("cancel",0); elapsed(&mut s,400);
-        assert_eq!(s.stage,Stage::Erase); assert!(s.committed.is_empty());
+    #[test]
+    fn cancel_stops_queued_commits() {
+        let mut s = State::default();
+        s.explicit = true;
+        s.pending.push_back(0);
+        s.event("cancel", 0);
+        elapsed(&mut s, 400);
+        assert_eq!(s.stage, Stage::Erase);
+        assert!(s.committed.is_empty());
     }
 }

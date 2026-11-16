@@ -33,7 +33,7 @@ export function status(
     return { overlay: "Loading…", detail: "", tone: "muted" };
   if (availability === "Offline")
     return {
-      overlay: "Media offline",
+      overlay: "Missing",
       detail: a.source_path
         ? `Missing · ${a.source_path}`
         : "Missing · locate the file to relink it",

@@ -151,6 +151,11 @@ pub struct Extensions {
     known_panels: BTreeSet<String>,
     /// Panels whose definition went away while open. They return with it.
     suspended: BTreeSet<String>,
+    /// Suspended panels the shell parked (their extension stayed away past
+    /// `PARK_GRACE`): a later registration shows them again in place.
+    parked: BTreeSet<String>,
+    /// The shell was last told the panels it lists are all in (`panels:ready`).
+    panels_ready: bool,
     open_panels: BTreeSet<String>,
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
@@ -241,6 +246,8 @@ impl Default for Extensions {
             panels: BTreeMap::new(),
             known_panels: BTreeSet::new(),
             suspended: BTreeSet::new(),
+            parked: BTreeSet::new(),
+            panels_ready: false,
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
@@ -1191,6 +1198,9 @@ impl Controller {
             }
         }
         self.extensions.booted |= ready;
+        if self.extensions.booted && self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(true);
+        }
     }
     /// The panel shows once its first commit is accepted; a failure says whose.
     fn await_panel(
@@ -1218,6 +1228,22 @@ impl Controller {
             });
         })
         .detach();
+    }
+    /// Tells the shell whether the extension panels it lists are all in:
+    /// until then a tab whose panel has not registered yet keeps a quiet body
+    /// instead of saying it is unavailable.
+    fn tell_panels_ready(&mut self, ready: bool) {
+        if self.extensions.panels_ready != ready {
+            self.extensions.panels_ready = ready;
+            self.host.borrow().send_command(
+                if ready {
+                    "panels:ready"
+                } else {
+                    "panels:waiting"
+                },
+                vec![],
+            );
+        }
     }
     fn apply_contributions(
         &mut self,
@@ -1271,19 +1297,52 @@ impl Controller {
         let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
         // As in the shipped app: the workspace keeps a retired panel's place, and
         // it comes back if something registers the id again.
-        let shell = self.host.borrow();
+        // A panel whose extension left the registry (they restart as a
+        // project opens) keeps its place and its stack's showing tab for
+        // `PARK_GRACE`, its body quiet: it is parked only if it stays away,
+        // so the dock never jumps to another tab and back (run 16).
+        let mut vanished = false;
         for id in self.extensions.known_panels.difference(&known) {
             if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
-                self.extensions.suspended.insert(id.clone());
-                shell.send_command(&format!("panel:park:{id}"), vec![]);
+                vanished |= self.extensions.suspended.insert(id.clone());
             }
         }
-        for id in known.intersection(&self.extensions.suspended.clone()) {
-            self.extensions.suspended.remove(id);
-            shell.send_command(&format!("panel:show:{id}"), vec![]);
+        {
+            let shell = self.host.borrow();
+            for id in known.intersection(&self.extensions.suspended.clone()) {
+                self.extensions.suspended.remove(id);
+                if self.extensions.parked.remove(id) {
+                    shell.send_command(&format!("panel:show:{id}"), vec![]);
+                }
+            }
         }
-        drop(shell);
         self.extensions.known_panels = known;
+        if vanished {
+            self.tell_panels_ready(false);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PARK_GRACE).await;
+                let _ = this.update(cx, |v, _| {
+                    let gone: Vec<String> = v
+                        .extensions
+                        .suspended
+                        .iter()
+                        .filter(|id| !v.extensions.known_panels.contains(*id))
+                        .filter(|id| !v.extensions.parked.contains(*id))
+                        .cloned()
+                        .collect();
+                    for id in gone {
+                        v.extensions.parked.insert(id.clone());
+                        v.host
+                            .borrow()
+                            .send_command(&format!("panel:park:{id}"), vec![]);
+                    }
+                    v.tell_panels_ready(v.extensions.booted);
+                });
+            })
+            .detach();
+        } else if self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(self.extensions.booted);
+        }
         let surfaces = self
             .extensions
             .surfaces
@@ -1758,9 +1817,15 @@ impl Controller {
     pub(crate) fn extension_build_rendered(&self, id: &str) -> bool {
         let bodies = self.host.borrow().native_panels.clone();
         let bodies = bodies.borrow();
-        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else { return false; };
-        self.extensions.page_of(id).is_some_and(|page| page.borrow().panel_layout_applied(id,
-            Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64)))
+        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else {
+            return false;
+        };
+        self.extensions.page_of(id).is_some_and(|page| {
+            page.borrow().panel_layout_applied(
+                id,
+                Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64),
+            )
+        })
     }
     pub fn extension_panel(
         &mut self,
@@ -1772,11 +1837,13 @@ impl Controller {
             return None;
         }
         let t = self.host.borrow().tokens.clone();
+        // Layout uses the same full-width body as native rows. Splitter
+        // grabs are protected separately by the shell's presentation mask.
         let body = layout::Rect {
-            x: bounds.x + t.metrics.border,
+            x: bounds.x,
             y: bounds.y + t.metrics.header,
-            w: (bounds.w - t.metrics.border * 2.).max(0.),
-            h: (bounds.h - t.metrics.header - t.metrics.border).max(0.),
+            w: bounds.w.max(0.),
+            h: (bounds.h - t.metrics.header).max(0.),
         };
         self.extensions.hidden.remove(id);
         if self.extensions.panels.insert(id.to_owned(), body).is_none()
@@ -1983,7 +2050,8 @@ impl Controller {
         // editor is occluded, in the editor's window.
         let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
-            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
         if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
@@ -2004,7 +2072,9 @@ impl Controller {
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
-        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(&shell.tokens)));
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
+            &shell.tokens,
+        )));
         let themed_fill = fill.clone();
         let themed_views = self.extensions.views.clone();
         shell.native_style = Some(Rc::new(move |tokens| {
@@ -2016,6 +2086,12 @@ impl Controller {
                 let _ = page.borrow().set_native_style(&css, tokens.scheme);
             }
         }));
+        // A body stops short of its panel's sides and bottom (the shell's
+        // native body inset), so its corners are the panel's less that inset.
+        let corner = {
+            let m = &shell.tokens.metrics;
+            f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
+        };
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -2059,10 +2135,13 @@ impl Controller {
                     && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
                 {
                     let _ = host.place_panels(
-                        mine.iter().map(|(id, rect)| ((*id).clone(), *rect)).collect(),
+                        mine.iter()
+                            .map(|(id, rect)| ((*id).clone(), *rect))
+                            .collect(),
                     );
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
+                host.set_corner_radius(corner);
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill.get()));
@@ -2682,3 +2761,7 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
         })
         .collect()
 }
+
+/// How long a panel whose extension left the registry keeps its place before
+/// it is parked (an extension restarting for a project open comes back sooner).
+const PARK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);

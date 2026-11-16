@@ -2638,6 +2638,8 @@
     "store_library"
   ],
   "app": [
+    "panel_begin",
+    "panel_build",
     "orchestrator_capabilities",
     "delegate_task",
     "task_status",
