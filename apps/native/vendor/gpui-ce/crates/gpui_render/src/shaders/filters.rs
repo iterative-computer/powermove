@@ -160,19 +160,20 @@ pub mod blur {
                     for x in 0..3 {
                         let offset = vec2f(x as f32 - 1.0, y as f32 - 1.0) * pitch * 0.33;
                         let uv = (get!(BLUR_LOCALS).bounds.origin + (gp + offset) * scale) / get!(BLUR_LOCALS).target_size;
-                        sample += texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, uv, 0.0) / 9.0;
+                        sample = sample + texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, uv, 0.0) / 9.0;
                     }
                 }
                 let cov = clamp(sample.w, 0.0, 1.0);
                 let a = clamp(1.35 - length(local - gp) + 0.5 / scale, 0.0, 1.0) * vis * smoothstep(0.04, 0.35, cov);
                 if a > best.w {
                     let base = sample.xyz() / max(cov, 0.001);
-                    let hot = mix(get!(BLUR_LOCALS).dot_accent.xyz(), vec3f(1.0, 1.0, 1.0), 0.35 + 0.65 * cov);
-                    let color = min(mix(base, hot, 0.55) * 1.15, vec3f(1.0, 1.0, 1.0));
+                    let heat = 0.35 + 0.65 * cov;
+                    let hot = get!(BLUR_LOCALS).dot_accent.xyz() * (1.0 - heat) + vec3f(1.0, 1.0, 1.0) * heat;
+                    let color = min((base * 0.45 + hot * 0.55) * 1.15, vec3f(1.0, 1.0, 1.0));
                     best = vec4f(color.x * a, color.y * a, color.z * a, a);
                 }
             }
-            blurred = mix(best, blurred, params.y);
+            blurred = best * (1.0 - params.y) + blurred * params.y;
         }
         let factor = coverage * get!(BLUR_LOCALS).opacity;
         vec4f(
