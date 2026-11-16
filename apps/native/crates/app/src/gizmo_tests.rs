@@ -472,6 +472,31 @@ fn the_rotate_handle_turns_about_the_anchor_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(s.pose().rotation, before.rotation);
 }
+/// A turn and then a move are two undo steps: each Cmd-Z undoes exactly one
+/// (PM-433: two presses once undid only one).
+#[gpui::test]
+fn a_turn_then_a_move_undo_one_step_each(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let start = s.pose();
+    let (.., rotate) = s.points();
+    let at = s.point_of(rotate);
+    s.drag(cx, at, point(px(60.), px(20.)), Modifiers::none());
+    let turned = s.pose();
+    assert!(turned.rotation != start.rotation);
+    let (body, ..) = s.points();
+    let at = s.point_of(body);
+    s.drag(cx, at, point(px(40.), px(-10.)), Modifiers::none());
+    let moved = s.pose();
+    assert_ne!(moved.position, turned.position);
+    s.undo(cx);
+    let once = s.pose();
+    assert_eq!(once.position, turned.position, "the first undo undoes the move");
+    assert_eq!(once.rotation, turned.rotation, "and only the move");
+    s.undo(cx);
+    let twice = s.pose();
+    assert_eq!(twice.rotation, start.rotation, "the second undoes the turn");
+    assert_eq!(twice.position, start.position);
+}
 /// While the rotate handle is held the box is already turned with the layer
 /// (it does not wait for the kernel's read-back), and it is the box the
 /// layer has once released, under a parent scaled 200 % × 100 % too.
