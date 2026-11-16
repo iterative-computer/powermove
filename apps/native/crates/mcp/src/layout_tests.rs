@@ -233,7 +233,12 @@ fn corpus_project_reads_selection_rollback_and_library_management() {
         let mut session = McpSession::new(shared.clone());
         result(session.call("start_session", json!({"prompt":"Corpus project workflow"})));
         for tool in ["get_project_state", "get_timeline"] {
-            let actual = result(session.call(tool, json!({})));
+            let mut actual = result(session.call(tool, json!({})));
+            // Keep the historical digest comparison; composition discovery is
+            // additive and covered by composition_target integration tests.
+            if tool == "get_project_state" {
+                actual.as_object_mut().unwrap().remove("compositions");
+            }
             let mut child = Process::new("node")
                 .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/source-pairs.mjs"))
                 .stdin(Stdio::piped())
