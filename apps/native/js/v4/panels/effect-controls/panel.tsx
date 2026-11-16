@@ -1,7 +1,7 @@
 import { useLayoutEffect, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
-import { EffectsController } from "./controller";
+import { EffectsController, pointBinding } from "./controller";
 import {
   PANEL_ID,
   PANEL_TITLE,
@@ -317,6 +317,9 @@ export function EffectControls(props: PanelProps) {
                       });
                     }}
                   />
+                ) : row.kind === "spacer" ? (
+                  // Under a point row: its pad reaches down into it.
+                  <div key={row.id} role="presentation" />
                 ) : row.kind === "ramp" ? (
                   <RampView key={row.id} row={row} locked={p.locked} />
                 ) : row.kind === "point" ? (
@@ -589,33 +592,6 @@ export function EffectControls(props: PanelProps) {
 }
 /** Read-only text for a value without a registry control (design review T4). */
 /** A channel value as a colourist reads it: two places, a true minus. */
-/** A colour as red, green, blue and alpha (0 to 1), from `#rgb`, `#rrggbb` or
- * `#rrggbbaa`; anything else is not blended. */
-function rgba(value: unknown): [number, number, number, number] | undefined {
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(String(value));
-  if (!m) return undefined;
-  const h = m[1].length === 3 ? m[1].replace(/./g, (c) => c + c) : m[1];
-  const n = (i: number) => parseInt(h.slice(i, i + 2), 16) / 255;
-  return [n(0), n(2), n(4), h.length === 8 ? n(6) : 1];
-}
-/** The bar's slices: the colour at each slice's middle, start to end. */
-export function rampSlices(start: unknown, end: unknown, count = 64): string[] {
-  const a = rgba(start);
-  const b = rgba(end);
-  if (!a || !b)
-    return Array.from({ length: count }, (_, i) =>
-      String(i < count / 2 ? start : end),
-    );
-  const hex = (v: number) =>
-    Math.round(Math.min(1, Math.max(0, v)) * 255)
-      .toString(16)
-      .padStart(2, "0");
-  return Array.from({ length: count }, (_, i) => {
-    const f = (i + 0.5) / count;
-    const c = a.map((v, k) => v + (b[k] - v) * f);
-    return `#${hex(c[0])}${hex(c[1])}${hex(c[2])}${c[3] < 1 ? hex(c[3]) : ""}`;
-  });
-}
 /** v1's gradient bar: the effect's start colour to its end colour, above
  * their own rows. */
 function RampView({
@@ -626,7 +602,7 @@ function RampView({
   row: RampRow;
   locked: boolean;
 }) {
-  const [start, end] = row.parameters;
+  const [start, end, midpoint] = row.parameters;
   const muted = locked || !row.enabled;
   return (
     <div role="group" label={`${row.effectLabel}, ${row.label}`}>
@@ -636,25 +612,23 @@ function RampView({
         style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
         leading={<div role="presentation" style={hit} />}
       >
-        <div
-          role="img"
-          label={`${row.label}, ${scalar(start.value) ?? "start"} to ${scalar(end.value) ?? "end"}`}
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            flexGrow: 1,
-            height: t("metrics.control"),
-            borderRadius: t("metrics.control_radius"),
-            overflow: "hidden",
-            borderWidth: t("metrics.border"),
-            borderColor: t("colors.separator"),
-            opacity: muted ? 0.5 : 1,
-          }}
-        >
-          {rampSlices(start.value, end.value).map((colour, i) => (
-            <div key={i} style={{ flexGrow: 1, background: colour }} />
-          ))}
-        </div>
+        <UI.GradientBar
+          id={`${PANEL_ID}:ramp:${row.id}`}
+          label={`${row.label}, ${scalar(start.value) ?? "start"} to ${scalar(end.value) ?? "end"}${midpoint ? `, midpoint ${scalar(midpoint.value)}` : ""}`}
+          start={String(start.value)}
+          end={String(end.value)}
+          {...(midpoint
+            ? {
+                binding: midpoint.binding,
+                value: midpoint.value as number,
+                min: midpoint.min ?? 0,
+                max: midpoint.max ?? 100,
+              }
+            : {})}
+          disabled={locked || !!midpoint?.readonly}
+          style={{ opacity: muted ? 0.5 : 1 }}
+          onKeyDown={stop}
+        />
       </UI.InspectorRow>
     </div>
   );
@@ -739,48 +713,71 @@ function PointView({
           style={{
             display: "flex",
             flexDirection: "row",
-            alignItems: "center",
+            // One row high and from its top: the pad and the X over Y
+            // reach down into the room the spacer row under it leaves.
+            alignItems: "flex-start",
+            height: t("metrics.row"),
+            paddingTop: t("metrics.border"),
             gap: t("metrics.gap"),
             flexGrow: 1,
           }}
         >
-          {axes.map((p, i) => (
-            <div
-              key={p.id}
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                gap: t("metrics.border"),
-                flexGrow: 1,
-                flexBasis: 0,
-              }}
-            >
-              <text
+          {/* v1's point: the pad, and its X over its Y. */}
+          <UI.PointPad
+            id={`${PANEL_ID}:pad:${row.id}`}
+            label={`${row.label}, ${axes.map((p, i) => `${i ? "Y" : "X"} ${scalar(p.value)}`).join(", ")}`}
+            binding={pointBinding(row)}
+            value={[axes[0].value as number, axes[1].value as number]}
+            min={[axes[0].min ?? -100, axes[1].min ?? -100]}
+            max={[axes[0].max ?? 100, axes[1].max ?? 100]}
+            disabled={disabled}
+            onKeyDown={stop}
+          />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: t("metrics.border"),
+              flexGrow: 1,
+              flexBasis: 0,
+            }}
+          >
+            {axes.map((p, i) => (
+              <div
+                key={p.id}
                 style={{
-                  color: t("colors.muted"),
-                  fontSize: t("typography.label"),
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: t("metrics.border"),
                 }}
               >
-                {i ? "Y" : "X"}
-              </text>
-              <UI.NumberField
-                id={`${PANEL_ID}:field:${row.id}:${i}`}
-                label={p.label}
-                binding={p.binding}
-                disabled={disabled || p.readonly}
-                mixed={p.mixed}
-                value={p.value as number}
-                step={p.step}
-                min={p.min}
-                max={p.max}
-                precision={p.precision}
-                unit={p.unit}
-                onKeyDown={stop}
-                onClick={stop}
-              />
-            </div>
-          ))}
+                <text
+                  style={{
+                    color: t("colors.muted"),
+                    fontSize: t("typography.label"),
+                  }}
+                >
+                  {i ? "Y" : "X"}
+                </text>
+                <UI.NumberField
+                  id={`${PANEL_ID}:field:${row.id}:${i}`}
+                  label={p.label}
+                  binding={p.binding}
+                  disabled={disabled || p.readonly}
+                  mixed={p.mixed}
+                  value={p.value as number}
+                  step={p.step}
+                  min={p.min}
+                  max={p.max}
+                  precision={p.precision}
+                  unit={p.unit}
+                  onKeyDown={stop}
+                  onClick={stop}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       </UI.InspectorRow>
     </div>

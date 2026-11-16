@@ -378,7 +378,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 36);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -410,6 +410,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             }
             "ease-curve" | "ease-thumbnail" => {
                 props["value"] = json!([0.42, 0., 0.58, 1.]);
+            }
+            "point-pad" => {
+                props["value"] = json!([10., -20.]);
+                props["binding"] = json!("x+y");
+                props["metadata"] = json!({"pmKit":{"minX":-100.,"maxX":100.,"minY":-100.,"maxY":100.}});
+            }
+            "gradient-bar" => {
+                props["value"] = json!(40.);
+                props["binding"] = json!("midpoint");
+                props["metadata"] = json!({"pmKit":{"start":"#000000","end":"#ffffff","min":1.,"max":99.}});
             }
             _ => {}
         }

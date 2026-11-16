@@ -43,6 +43,9 @@ struct FlatRow {
     /// An effect's More disclosure: how many it holds, whether it is open,
     /// and whether any of them differs from its default.
     more: Option<(usize, bool, bool)>,
+    /// Room under a point row for its pad, two rows tall (the list's rows
+    /// are one height): a row with nothing in it.
+    spacer: bool,
 }
 type Member = (PropertyId, String, Option<crate::ParamDefinition>);
 
@@ -143,6 +146,7 @@ impl EffectsPanel {
         for (index, effect) in fx.iter().enumerate() {
             self.flat.push(FlatRow {
                 more: None,
+                spacer: false,
                 id: format!("effect:{}", text(effect, "id")),
                 effect: index,
                 parameter: None,
@@ -160,6 +164,7 @@ impl EffectsPanel {
                 }
                 self.flat.push(FlatRow {
                     more: None,
+                    spacer: false,
                     id: action_id,
                     effect: index,
                     parameter: None,
@@ -190,6 +195,7 @@ impl EffectsPanel {
                         let Some((group, label)) = group else {
                             self.flat.push(FlatRow {
                                 more: None,
+                                spacer: false,
                                 id: pm_model::json::to_canonical_string(&property.value()),
                                 effect: index,
                                 parameter: Some((property, key, Some(param))),
@@ -208,6 +214,7 @@ impl EffectsPanel {
                             }
                             None => self.flat.push(FlatRow {
                                 more: None,
+                                spacer: false,
                                 id: row_id,
                                 effect: index,
                                 parameter: None,
@@ -226,6 +233,7 @@ impl EffectsPanel {
                         self.flat.extend(params.iter().map(|(key, _)| {
                             FlatRow {
                                 more: None,
+                                spacer: false,
                                 id: pm_model::json::to_canonical_string(
                                     &PropertyId::new(
                                         layer,
@@ -313,8 +321,8 @@ impl EffectsPanel {
             parameter: Some(m),
             ..FlatRow::default()
         };
-        let group = |kind: &str, row_id: String, label: &str, keys: [&str; 2]| {
-            let members: Vec<Member> = keys.into_iter().filter_map(member).collect();
+        let group = |kind: &str, row_id: String, label: &str, keys: &[&str]| {
+            let members: Vec<Member> = keys.iter().filter_map(|k| member(k)).collect();
             FlatRow {
                 id: row_id,
                 effect: index,
@@ -324,14 +332,15 @@ impl EffectsPanel {
         };
         let widget = |w: &Widget, rows: &mut Vec<FlatRow>| match w {
             Widget::Ramp {
-                start, end, mode, ..
+                start,
+                end,
+                midpoint,
+                mode,
             } => {
-                rows.push(group(
-                    "ramp",
-                    format!("ramp:{id}"),
-                    "Gradient",
-                    [start.as_str(), end.as_str()],
-                ));
+                // The bar's colours, and its midpoint (a diamond on it).
+                let mut keys = vec![start.as_str(), end.as_str()];
+                keys.extend(midpoint.as_deref());
+                rows.push(group("ramp", format!("ramp:{id}"), "Gradient", &keys));
                 rows.extend(mode.as_deref().and_then(member).map(row));
             }
             Widget::Point { x, y, label, .. } => {
@@ -339,8 +348,14 @@ impl EffectsPanel {
                     "point",
                     format!("point:{id}:{x}"),
                     label,
-                    [x.as_str(), y.as_str()],
+                    &[x.as_str(), y.as_str()],
                 ));
+                rows.push(FlatRow {
+                    id: format!("point:{id}:{x}:pad"),
+                    effect: index,
+                    spacer: true,
+                    ..FlatRow::default()
+                });
             }
         };
         let mut rows = vec![];
@@ -643,6 +658,14 @@ impl EffectsPanel {
                     ("index", (action.index as f64).into()),
                     ("label", action.label.clone().into()),
                     ("readonly", (!model.editable(&layer)).into()),
+                ]));
+                continue;
+            }
+            if entry.spacer {
+                rows.push(object([
+                    ("kind", "spacer".into()),
+                    ("id", entry.id.clone().into()),
+                    ("effect", id.into()),
                 ]));
                 continue;
             }
