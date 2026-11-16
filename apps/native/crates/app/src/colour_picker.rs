@@ -676,21 +676,37 @@ impl Picker {
                             }
                         }
                         let [h, s, v] = color.hsv();
+                        let knob = t.metrics.color_picker_track + 2. * t.metrics.border;
+                        let mark = t.space.xs + t.metrics.border;
                         let (x, y, w, h) = match kind {
-                            Track::Plane => (s, 1. - v, 8., 8.),
-                            Track::Hue => (0., h / 360., 14., 4.),
-                            Track::Alpha => (0., 1. - color.0[3], 14., 4.),
+                            Track::Plane => (s, 1. - v, knob, knob),
+                            Track::Hue => (0., h / 360., t.metrics.color_picker_track, mark),
+                            Track::Alpha => {
+                                (0., 1. - color.0[3], t.metrics.color_picker_track, mark)
+                            }
                         };
                         let b = Bounds::new(
                             bounds.origin
                                 + point(
                                     bounds.size.width * x
-                                        - px(if matches!(kind, Track::Plane) { 4. } else { 0. }),
+                                        - px(if matches!(kind, Track::Plane) {
+                                            w / 2.
+                                        } else {
+                                            0.
+                                        }),
                                     bounds.size.height * y - px(h / 2.),
                                 ),
                             size(px(w), px(h)),
                         );
-                        window.paint_quad(outline(b, rgb(t.colors.text), BorderStyle::Solid));
+                        window.paint_quad(
+                            outline(b, rgb(t.colors.text), BorderStyle::Solid)
+                                .border_widths(px(t.metrics.border))
+                                .corner_radii(Corners::all(px(if matches!(kind, Track::Plane) {
+                                    w / 2.
+                                } else {
+                                    t.radius.xs
+                                }))),
+                        );
                     },
                 )
                 .size_full(),
@@ -923,6 +939,7 @@ impl Render for Picker {
             .w(px(t.metrics.color_picker_width))
             .p(px(t.space.md))
             .bg(rgb(t.colors.floating))
+            .font_family(pm_design::TEXT_FONT)
             .text_color(rgb(t.colors.text))
             .text_size(px(t.typography.body))
             .corner(&t, t.metrics.popover_radius)
