@@ -767,7 +767,7 @@ impl Kernel {
     pub(crate) fn mark_save_point(
         &mut self,
         id: &str,
-        document: &Document,
+        document: &std::sync::Arc<Document>,
         revision: u64,
     ) -> Result<(), KernelFailure> {
         let (Some(slot), Some(durability)) = (self.slots.get_mut(id), &self.durability) else {
@@ -776,19 +776,36 @@ impl Kernel {
         let Some(journal) = &mut slot.journal else {
             return Ok(());
         };
-        let hash = document.canonical_hash().unwrap_or_default();
+        // The base a reopen reads: keys stored without ids named by place.
+        let hash = model::reopened_hash(document)
+            .or_else(|| document.canonical_hash())
+            .unwrap_or_default();
         let project = &slot.project;
         let history = project.store().history().identity();
+        let state = || {
+            let store = project.store();
+            CheckpointState {
+                revision: store.revision(),
+                document: store.current().clone(),
+                history: store.history().snapshot(),
+                workspace: project.workspace().clone(),
+            }
+        };
+        // A reopen of the file names keys stored without ids by place; once
+        // this session moved some, its ids differ, and recovery must replay
+        // from a checkpoint holding this session's ids, durable before the
+        // save can publish, never from the save point onto that reopen.
+        let current = project.store().current();
+        if model::reopened_hash(current).is_some_and(|h| Some(h) != current.canonical_hash()) {
+            journal.checkpoint_now(durability, state()).map_err(|e| {
+                KernelFailure::Storage(format!(
+                    "Not saved: the recovery journal could not record the save ({e}). \
+                     The file was not changed; your work is still open."
+                ))
+            })?;
+        }
         journal
-            .mark_save(durability, &hash, &history, revision, || {
-                let store = project.store();
-                CheckpointState {
-                    revision: store.revision(),
-                    document: store.current().clone(),
-                    history: store.history().snapshot(),
-                    workspace: project.workspace().clone(),
-                }
-            })
+            .mark_save(durability, &hash, &history, revision, state)
             .map_err(|e| {
                 KernelFailure::Storage(format!(
                     "Not saved: the recovery journal could not record the save ({e}). \
@@ -818,7 +835,7 @@ impl Kernel {
         // next open does not read (the project opens as a copy each time)
         // is not that base: checkpoint now, continuing from the session
         // before it until the checkpoint lands (PM-360).
-        let base_is_read_back = self.sessions.get(id).is_none_or(|s| match &s.destination {
+        let mut base_is_read_back = self.sessions.get(id).is_none_or(|s| match &s.destination {
             crate::session::Destination::Library(slot) => *slot == s.journal_id,
             _ => true,
         });
@@ -845,12 +862,18 @@ impl Kernel {
             .ok_or_else(|| KernelFailure::NoProject(id.into()))?;
         // The document's own hash: computed once per state and kept (the
         // save point asked for it already), never recomputed here.
+        let current = slot.project.store().current();
+        // Keys stored without ids are named by place when the base is read
+        // back; once a session moved some, its names differ from that read,
+        // so it continues from a checkpoint as for a base it does not read.
+        let reopened = model::reopened_hash(current);
+        if let Some(reopened) = &reopened
+            && Some(reopened) != current.canonical_hash().as_ref()
+        {
+            base_is_read_back = false;
+        }
         let hash = library_hash.unwrap_or_else(|| {
-            slot.project
-                .store()
-                .current()
-                .canonical_hash()
-                .unwrap_or_default()
+            reopened.unwrap_or_else(|| current.canonical_hash().unwrap_or_default())
         });
         if let (Some(d), Some(dir)) = (&self.durability, dir) {
             if let Some(j) = &slot.journal {

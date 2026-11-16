@@ -739,7 +739,8 @@ pub(crate) fn from_container(
     let raw_history = fields.remove("history");
     let workspace = fields.remove("ws");
     normalize_compositions(&mut project);
-    let canonical = canonical_project(project);
+    let mut canonical = canonical_project(project);
+    crate::model::name_keys_without_ids(&mut canonical);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
     let (retained_history, history) = pm_model::parallel::join(
         || {

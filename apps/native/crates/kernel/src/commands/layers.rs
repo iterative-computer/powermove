@@ -1329,7 +1329,7 @@ fn strip_number(name: &str, _all: bool) -> &str {
 
 /// Every key of every channel gets a fresh id (`renew` in `PM.cloneLayer`).
 pub(crate) fn renew_keys(layer: &mut Value) {
-    for (_, path) in channels::all(layer) {
+    for (_, path) in channels::keyed(layer) {
         if let Some(prop) = channels::get_mut(layer, &path)
             && let Some(keys) = prop
                 .as_object_mut()
