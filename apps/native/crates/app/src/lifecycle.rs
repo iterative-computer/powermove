@@ -79,10 +79,12 @@ fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Dur
         _ => Some(None),
     }
 }
-/// Whether a quit has begun and was not cancelled: its questions may be up,
-/// or it may be waiting on a stage (Keep Waiting keeps it going).
+/// Whether a quit has begun and was not cancelled: its questions may be up
+/// (the running-export one comes before the quit starts), or it may be
+/// waiting on a stage (Keep Waiting keeps it going).
 pub(crate) fn quitting(cx: &App) -> bool {
-    cx.try_global::<QuitCoordinator>().is_some_and(|q| q.quitting)
+    cx.try_global::<QuitCoordinator>()
+        .is_some_and(|q| q.quitting || q.asking_exports)
 }
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
