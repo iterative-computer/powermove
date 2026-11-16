@@ -811,10 +811,11 @@ impl GizmoSurface {
         let b = self.effects_picker_bounds(self.host.frame(self.bounds, cx)?)?;
         Some(
             deferred(
-                anchored()
-                    .position(b.origin)
-                    .snap_to_window()
-                    .child(picker.clone()),
+                anchored().position(b.origin).snap_to_window().child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(picker.clone()),
+                ),
             )
             .priority(3)
             .into_any_element(),
