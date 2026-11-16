@@ -2957,7 +2957,11 @@ impl TimelineSurface {
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let mut rows: Vec<serde_json::Value> = items
             .iter()
-            .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
+            .map(|i| match i.id {
+                pm_panel_timeline::MenuItem::SEPARATOR => serde_json::json!({"separator":true}),
+                pm_panel_timeline::MenuItem::HEADER => serde_json::json!({"header":true,"label":i.label}),
+                _ => serde_json::json!({"id":i.id,"label":i.label,"disabled":!i.enabled,"checked":i.checked}),
+            })
             .collect();
         let camera_index = ids.len() + 1;
         if matches!(context, MenuContext::Empty) {

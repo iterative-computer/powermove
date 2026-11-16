@@ -847,3 +847,39 @@ fn the_transform_box_scales_times_values_and_speeds() {
         "clamped to a frame from the anchor key"
     );
 }
+
+/// The keyframe menu checks the ease the chosen keys have: every preset the
+/// menu offers reads back by name after Set Easing writes it (v1's
+/// `Ease.nameOf` of the handles), and a held key has none.
+#[test]
+fn every_menu_preset_reads_back_by_name() {
+    use pm_kernel::commands::keyframes::ease_preset;
+    let mut s = store();
+    for name in [
+        "linear", "easeIn", "easeOut", "easeInOut", "swish", "power", "expoOut", "backOut", "snap",
+        "glide",
+    ] {
+        run(
+            &mut s,
+            kc(KeyframeCommand::SetEasing {
+                key_ids: vec!["k1".into(), "k2".into()],
+                curve: EaseSpec::Preset(name.into()),
+            }),
+        );
+        let k = keys(&s, "anim", "opacity");
+        assert_eq!(ease_preset(&k, 0), Some(name), "first key, {name}");
+        assert_eq!(ease_preset(&k, 1), Some(name), "second key, {name}");
+    }
+    // v1's stored handles (a legacy track) are named as they are.
+    let legacy = at(&layer(&s, "legacy"), &["p", "rotation", "kf"])
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(ease_preset(&legacy, 0), Some("easeIn"));
+    let mut held = keys(&s, "anim", "opacity");
+    held[0]
+        .as_object_mut()
+        .unwrap()
+        .insert("outInterp", Value::String("hold".into()));
+    assert_eq!(ease_preset(&held, 0), None);
+}

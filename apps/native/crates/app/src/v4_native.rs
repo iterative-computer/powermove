@@ -115,6 +115,14 @@ fn append_menu(
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             continue;
         }
+        // A section's title (the keyframe menu's "Keyframe"): no action.
+        if option.get("header") == Some(&Value::Bool(true)) {
+            let title = NSString::from_str(option.get("label").and_then(Value::as_str).unwrap_or(""));
+            let item: Retained<NSMenuItem> =
+                unsafe { msg_send![objc2::class!(NSMenuItem), sectionHeaderWithTitle: &*title] };
+            menu.addItem(&item);
+            continue;
+        }
         let label = option
             .get("label")
             .and_then(Value::as_str)

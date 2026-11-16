@@ -569,7 +569,7 @@ fn a_property_rows_name_offers_its_lane_menu(cx: &mut TestAppContext) {
                 .collect()
         })
         .unwrap_or_default();
-    for label in ["Add Keyframe", "Paste Keyframes", "Separate Dimensions"] {
+    for label in ["Add Keyframe Here", "Paste Keyframes Here", "Separate Dimensions"] {
         assert!(labels.iter().any(|l| l == label), "{labels:?}");
     }
 }
@@ -2361,7 +2361,7 @@ fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) 
     assert!(
         s.recorder.menus.borrow()[0]
             .iter()
-            .any(|i| i["label"] == "Add Marker")
+            .any(|i| i["label"] == "Add Marker Here")
     );
     s.undo(cx);
     assert_eq!(markers(&s), 0);
