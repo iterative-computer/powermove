@@ -1103,6 +1103,26 @@ const SHAPE_SEGMENT: isize = 5;
 /// A tool segment's width, and the room AppKit's menu indicator takes in one.
 const TOOL_SEGMENT: f64 = 34.;
 const TOOL_MENU_INDICATOR: f64 = 12.;
+/// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
+/// item's tag), symbol, label.
+const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
+    ("agent", "sparkles", "Agent"),
+    ("export", "square.and.arrow.up", "Export"),
+    ("panelLibrary", "square.grid.2x2", "Panels"),
+    ("settings", "gearshape", "Settings"),
+];
+#[cfg(test)]
+mod toolbar_tag_tests {
+    /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
+    /// one without would stop the window from opening.
+    #[test]
+    fn every_toolbar_button_has_a_slot() {
+        assert!(super::TOOLBAR.contains(&"home"));
+        for (name, ..) in super::TOOLBAR_BUTTONS {
+            assert!(super::TOOLBAR.contains(&name), "{name}");
+        }
+    }
+}
 const TOOLBAR: [&str; 8] = [
     "home",
     "title",
@@ -2316,13 +2336,9 @@ impl ToolbarDelegate {
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
-        let (sym, label) = match name.as_str() {
-            "agent" => ("sparkles", "Agent"),
-            "export" => ("square.and.arrow.up", "Export"),
-            "panelLibrary" => ("square.grid.2x2", "Panels"),
-            "settings" => ("gearshape", "Settings"),
-            _ => return None,
-        };
+        let &(_, sym, label) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|(n, ..)| *n == name.as_str())?;
         item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
