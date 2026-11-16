@@ -26,7 +26,6 @@ export interface SurfaceProps {
   onFocus?: (event: SurfaceEvent) => void;
   onBlur?: (event: SurfaceEvent) => void;
   onPointerDown?: (event: SurfaceEvent) => void;
-  onPointerDownCapture?: (event: SurfaceEvent) => void;
   title?: string;
   metadata?: Record<string, Json>;
   control?: string;
@@ -56,8 +55,7 @@ export interface SurfaceProps {
     | "pulldown"
     | "band"
     | "code"
-    | "plate"
-    | "glass";
+    | "plate";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
   /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports

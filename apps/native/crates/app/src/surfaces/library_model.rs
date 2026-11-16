@@ -113,7 +113,7 @@ impl Row {
     /// file's name, as a Mac document does, so projects made from files
     /// tell apart.
     pub fn title(&self) -> String {
-        self.file_title().unwrap_or_else(|| self.name.clone())
+        original_name(self.file_title().unwrap_or_else(|| self.name.clone()))
     }
     fn file_title(&self) -> Option<String> {
         let default = self.name == "Untitled"
@@ -414,4 +414,30 @@ pub enum Failure {
     UnsavedWork,
     /// Rename refused: the project is a file, renamed by opening it.
     RenameByOpening,
+}
+
+/// A copy of a copy was named "X — Native — Native" (each copy added the
+/// suffix, fixed since): such a chain shows as the original name. One
+/// " — Native" is a real copy's name and stays.
+pub(crate) fn original_name(name: String) -> String {
+    const COPY: &str = " — Native";
+    let mut base = name.as_str();
+    let mut copies = 0;
+    while let Some(rest) = base.strip_suffix(COPY) {
+        base = rest;
+        copies += 1;
+    }
+    if copies >= 2 { base.to_owned() } else { name }
+}
+#[cfg(test)]
+mod original_name_tests {
+    #[test]
+    fn a_chain_of_copy_suffixes_shows_as_the_original_name() {
+        let n = |s: &str| super::original_name(s.to_owned());
+        assert_eq!(n("Run6 — Name — Native — Native"), "Run6 — Name");
+        assert_eq!(n("Accept — Native — Native — Native"), "Accept");
+        assert_eq!(n("cut — Native"), "cut — Native", "one copy keeps its name");
+        assert_eq!(n("Paper"), "Paper");
+        assert_eq!(n("A — Native — Native 2"), "A — Native — Native 2");
+    }
 }

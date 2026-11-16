@@ -799,6 +799,16 @@ impl NativeTextSlot {
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
     }
+    /// Whether the field has the keyboard now (AppKit's first responder is
+    /// it or its field editor), not only asked to take it.
+    pub fn has_keyboard(&self) -> bool {
+        match &self.state.editor {
+            Editor::Field(v) => v.currentEditor().is_some(),
+            Editor::Multiline(v) => v.window().and_then(|w| w.firstResponder()).is_some_and(|r| {
+                std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(v) as *const AnyObject)
+            }),
+        }
+    }
     pub fn native_view(&self) -> &NSView {
         self.state.editor.view()
     }

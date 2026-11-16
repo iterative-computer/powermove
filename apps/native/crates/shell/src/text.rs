@@ -300,6 +300,10 @@ impl TextField {
         self.value = value.into();
         cx.notify();
     }
+    /// Whether the field has the keyboard now, not only asked to take it.
+    pub fn has_keyboard(&self) -> bool {
+        self.slot.has_keyboard()
+    }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
         self.slot.begin_editing();
         cx.notify();

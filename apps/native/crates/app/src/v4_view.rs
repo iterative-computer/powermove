@@ -582,6 +582,9 @@ impl SurfaceView {
             .borrow_mut()
             .blocks
             .retain(|id, _| self.prepared.node(*id).is_some());
+        // Where rows were is the old tree's (a search moved them up); their
+        // heights stay good guesses. Rows left out by old tops never showed.
+        self.cull.forget_tops();
         self.settle_disclosures();
         {
             let _span = crate::diag::span("panel.reconcile");
@@ -1702,6 +1705,10 @@ impl SurfaceView {
     /// appears or changes, so a search button that opens its field puts the
     /// caret in it and typed letters never fire shortcuts on the way (PM-402).
     fn follow_focus_request(&mut self, cx: &mut Context<Self>) {
+        // A text field or a search field (a native control) the request names.
+        let takes_text = |v: &Self, id: &Id, cx: &App| {
+            v.fields.contains_key(id) || v.controls.get(id).is_some_and(|c| c.read(cx).is_search())
+        };
         let request = self
             .publication
             .surface
@@ -1713,18 +1720,40 @@ impl SurfaceView {
                 self.prepared
                     .semantics
                     .get(*r)
-                    .is_some_and(|id| self.fields.contains_key(id))
+                    .is_some_and(|id| takes_text(self, id, cx))
             })
             .map(str::to_owned);
         if request == self.focus_requested {
             return;
         }
         self.focus_requested = request.clone();
-        let field = request
-            .and_then(|r| self.prepared.semantics.get(&r).copied())
-            .and_then(|id| self.fields.get(&id).cloned());
-        if let Some(field) = field {
+        let Some(id) = request.and_then(|r| self.prepared.semantics.get(&r).copied()) else {
+            return;
+        };
+        // What the person types from now on is for this field, even before it
+        // has the keyboard (pm_shell::typing).
+        pm_shell::typing::expect();
+        if let Some(field) = self.fields.get(&id).cloned() {
             field.update(cx, |f, cx| f.begin_editing(cx));
+        } else if let Some(control) = self.controls.get(&id) {
+            control.read(cx).focus();
+        }
+        self.typing_ready(cx);
+    }
+    /// The field a focus request named has the keyboard: what was typed for
+    /// it while it came reaches it now.
+    fn typing_ready(&self, cx: &App) {
+        let Some(id) = self
+            .focus_requested
+            .as_ref()
+            .and_then(|r| self.prepared.semantics.get(r))
+        else {
+            return;
+        };
+        let ready = self.controls.get(id).is_some_and(|c| c.read(cx).focused())
+            || self.fields.get(id).is_some_and(|f| f.read(cx).has_keyboard());
+        if ready {
+            pm_shell::typing::field_ready();
         }
     }
     /// The text field `semantic` lets go of the keyboard (the editor has it).
@@ -4496,6 +4525,9 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_requested.is_some() && pm_shell::typing::expecting() {
+            self.typing_ready(cx);
+        }
         // A drag let go over nothing that took it ends here.
         if self.dragging.is_some() && !cx.has_active_drag() {
             let view = cx.entity().downgrade();

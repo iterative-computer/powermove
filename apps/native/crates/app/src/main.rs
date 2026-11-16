@@ -289,6 +289,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(debug_assertions))]
     let _ = lane_flags;
+    diag::trace_unhide();
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
@@ -415,6 +416,11 @@ fn main() -> Result<()> {
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     notifications::install(cx);
+                    // Background work (the background render) waits while the
+                    // person works: every press in an editor and every key.
+                    pm_shell::input::on_input(pm_engine_service::jobs::note_input);
+                    cx.observe_keystrokes(|_, _, _| pm_engine_service::jobs::note_input())
+                        .detach();
                     panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();

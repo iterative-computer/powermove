@@ -10,6 +10,8 @@
 //! `--media=FILE` adds an asset-id to source-path JSON map (linked media);
 //! `--playback-only` reports playback and skips the seek/skim phases;
 //! `--skim=SPEED` sets the skim sweep's media seconds per second (1);
+//! `--drag=1` drags the playhead as the app does (after the other phases);
+//! `--drag-first=1` drags it once right after the first frame, cold;
 //! `--fill=DIR` first renders the played range into a disk render cache in
 //! `DIR` (Render Selection's child) and reports its bytes and read cost.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
@@ -200,6 +202,83 @@ fn diag_mark(phase: &str, service: &EngineService) {
         .push(json!({"phase":phase,"decode":counters,"usage":usage,"lease":lease}));
 }
 
+/// One playhead drag as the app sends it: a scrub every 4 ms (250 Hz
+/// pointer) moving `fps` frames a second for `total` seconds forward from
+/// `scrub_from` (`back`: from `span` frames on, toward it), never waiting
+/// for a frame. The distinct pictures completed during it and how long each
+/// position took to appear.
+#[allow(clippy::too_many_arguments)]
+fn drag_pass(
+    viewer: &pm_engine_service::Viewer,
+    font_service: &mut pm_text::host::FontService,
+    fonts: &pm_text::host::FontBroker,
+    scrub_from: i64,
+    frame: i64,
+    span: i64,
+    fps: f64,
+    total: f64,
+    back: bool,
+    hz: f64,
+) -> anyhow::Result<serde_json::Value> {
+    let stale_before = viewer.status().stale_rejections;
+    let window_start = pm_engine_service::trace::now();
+    let started = Instant::now();
+    let mut asked: std::collections::HashMap<i64, Instant> = Default::default();
+    let mut shown: Vec<(f64, i64, bool)> = Vec::new();
+    let mut lat = Vec::new();
+    // How long the scrub call itself takes (the app's main thread makes it).
+    let mut calls = Vec::new();
+    let mut last_seq = None;
+    let mut next_event = started;
+    while started.elapsed().as_secs_f64() < total + 0.5 {
+        pm_text::host::serve(font_service, fonts.take_asks());
+        let now = Instant::now();
+        if now >= next_event && started.elapsed().as_secs_f64() < total {
+            let k = ((started.elapsed().as_secs_f64() * fps) as i64).min(span);
+            let k = if back { span - k } else { k };
+            let at = Ticks::new(scrub_from + k * frame)?;
+            asked.entry(at.get()).or_insert(now);
+            let call = Instant::now();
+            viewer.scrub(at)?;
+            calls.push(call.elapsed().as_secs_f64() * 1000.);
+            next_event = now + Duration::from_millis(4);
+        }
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        if let Some(f) = viewer.status().frame
+            && f.completion_host_seconds.is_some()
+            && last_seq != Some((f.stamp.sequence, f.time.get()))
+        {
+            last_seq = Some((f.stamp.sequence, f.time.get()));
+            let t = started.elapsed().as_secs_f64();
+            if shown.last().is_none_or(|s| s.1 != f.time.get()) {
+                shown.push((t, f.time.get(), f.stand_ins));
+                if let Some(a) = asked.get(&f.time.get()) {
+                    lat.push(a.elapsed().as_secs_f64() * 1000.);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_micros(250));
+    }
+    lat.sort_by(f64::total_cmp);
+    calls.sort_by(f64::total_cmp);
+    let during: Vec<_> = shown.iter().filter(|s| s.0 < total).collect();
+    let mut gaps: Vec<f64> = during
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0) * 1000.)
+        .collect();
+    gaps.sort_by(f64::total_cmp);
+    let stand = during.iter().filter(|s| s.2).count();
+    Ok(json!({"fps":fps,"seconds":total,"positions_asked":asked.len(),
+        "distinct_shown_during":during.len(),"distinct_per_s":during.len() as f64 / total,
+        "exact_per_s":(during.len() - stand) as f64 / total,
+        "stand_ins_shown":stand,
+        "stale_rejections":viewer.status().stale_rejections - stale_before,
+        "position_to_picture_ms":{"n":lat.len(),"p50":percentile(&lat,0.5),"p95":percentile(&lat,0.95)},
+        "longest_gap_ms":gaps.last(),
+        "scrub_call_ms":{"p50":percentile(&calls,0.5),"p99":percentile(&calls,0.99),"max":calls.last()},
+        "trace_window":[window_start, pm_engine_service::trace::now()]}))
+}
+
 pub fn run() -> anyhow::Result<()> {
     let _scratch = Scratch;
     let hz: f64 = arg("hz", "120").parse()?;
@@ -280,6 +359,22 @@ pub fn run() -> anyhow::Result<()> {
         (0. ..duration).contains(&from),
         "--from is outside the composition"
     );
+    // Benchmark-only `--drag-first=1`: the first drag of a session, right
+    // after the first frame (nothing played, sought or skimmed yet): what a
+    // person's first scrub waits for.
+    let drag_first = if arg("drag-first", "0") == "1" {
+        let frame = rate
+            .exact_frame_ticks()
+            .unwrap_or(pm_protocol::common::TICKS_PER_SECOND / 30);
+        let fps: f64 = arg("drag-fps", "120").parse()?;
+        let span = ((2. * fps) as i64).min(comp_frames(duration, rate).max(1) - 1);
+        let scrub_from = (from * pm_protocol::common::TICKS_PER_SECOND as f64) as i64 / frame * frame;
+        diag_mark("drag_first", &service);
+        println!("PHASE drag_first");
+        drag_pass(&viewer, &mut font_service, &fonts, scrub_from, frame, span, fps, 2., false, hz)?
+    } else {
+        serde_json::Value::Null
+    };
     // `--loop=SECONDS` plays a shorter range over and over for the whole run
     // (memory over a long playback); by default the range is the run.
     let span: f64 = arg("loop", &seconds.to_string()).parse()?;
@@ -614,55 +709,8 @@ pub fn run() -> anyhow::Result<()> {
             let name = if back { "drag_back" } else { "drag" };
             diag_mark(name, &service);
             println!("PHASE {name}");
-            let stale_before = viewer.status().stale_rejections;
-            let started = Instant::now();
-            let mut asked: std::collections::HashMap<i64, Instant> = Default::default();
-            let mut shown: Vec<(f64, i64, bool)> = Vec::new();
-            let mut lat = Vec::new();
-            let mut last_seq = None;
-            let mut next_event = started;
-            while started.elapsed().as_secs_f64() < total + 0.5 {
-                pm_text::host::serve(&mut font_service, fonts.take_asks());
-                let now = Instant::now();
-                if now >= next_event && started.elapsed().as_secs_f64() < total {
-                    let k = ((started.elapsed().as_secs_f64() * fps) as i64).min(span);
-                    let k = if back { span - k } else { k };
-                    let at = Ticks::new(scrub_from + k * frame)?;
-                    asked.entry(at.get()).or_insert(now);
-                    viewer.scrub(at)?;
-                    next_event = now + Duration::from_millis(4);
-                }
-                viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
-                if let Some(f) = viewer.status().frame
-                    && f.completion_host_seconds.is_some()
-                    && last_seq != Some((f.stamp.sequence, f.time.get()))
-                {
-                    last_seq = Some((f.stamp.sequence, f.time.get()));
-                    let t = started.elapsed().as_secs_f64();
-                    if shown.last().is_none_or(|s| s.1 != f.time.get()) {
-                        shown.push((t, f.time.get(), f.stand_ins));
-                        if let Some(a) = asked.get(&f.time.get()) {
-                            lat.push(a.elapsed().as_secs_f64() * 1000.);
-                        }
-                    }
-                }
-                std::thread::sleep(Duration::from_micros(250));
-            }
-            lat.sort_by(f64::total_cmp);
-            let during: Vec<_> = shown.iter().filter(|s| s.0 < total).collect();
-            let mut gaps: Vec<f64> = during
-                .windows(2)
-                .map(|w| (w[1].0 - w[0].0) * 1000.)
-                .collect();
-            gaps.sort_by(f64::total_cmp);
-            let stand = during.iter().filter(|s| s.2).count();
-            out.insert(name.into(), json!({"fps":fps,"seconds":total,"positions_asked":asked.len(),
-                "distinct_shown_during":during.len(),"distinct_per_s":during.len() as f64 / total,
-                "exact_per_s":(during.len() - stand) as f64 / total,
-                "stand_ins_shown":stand,
-                "stale_rejections":viewer.status().stale_rejections - stale_before,
-                "position_to_picture_ms":{"n":lat.len(),"p50":percentile(&lat,0.5),"p95":percentile(&lat,0.95)},
-                "longest_gap_ms":gaps.last()}));
+            let pass = drag_pass(&viewer, &mut font_service, &fonts, scrub_from, frame, span, fps, total, back, hz)?;
+            out.insert(name.into(), pass);
         }
         // The allowance returns after a drag: footprint and cache bytes 3 s on.
         diag_mark("drag_after", &service);
@@ -772,7 +820,7 @@ pub fn run() -> anyhow::Result<()> {
             "stuck":{"seek":stuck.len(),"scrub_forward":gate_sweeps[0].1,"scrub_back":gate_sweeps[1].1,"scrub_cached":gate_sweeps[2].1},
             "settle":settle_report,"exact_capture":exact_frames},
         "skim_ms":{"counts":skim_counts,"speed":skim_speed,"forward":summary(&skim_forward),"back":summary(&skim_back)},"fill":fill,
-        "drag":drag,"diag":DIAG.lock().unwrap().clone(),"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
+        "drag":drag,"drag_first":drag_first,"diag":DIAG.lock().unwrap().clone(),"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
         arg("report", "/tmp/es2-service-offscreen.json"),

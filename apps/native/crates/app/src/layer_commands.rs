@@ -1955,12 +1955,7 @@ pub fn palette_layers(published: &Published) -> Vec<(String, String)> {
     published
         .snapshot
         .root()
-        .map(|root| {
-            list_layers(root, None)
-                .into_iter()
-                .map(|l| (l.id, l.name))
-                .collect()
-        })
+        .map(|root| pm_kernel::model::layer_names(root, None))
         .unwrap_or_default()
 }
 
