@@ -1363,7 +1363,7 @@ fn footprint<'d>(
                     let size = step
                         .params
                         .iter()
-                        .find_map(|param| (param.key == "size").then_some(param.value));
+                        .find_map(|param| (param.key == "size").then_some(param.value.clone()));
                     let block = match size {
                         Some(pm_render::effects::plan::Binding::Float(value)) => value.max(1.0),
                         _ => 1.0,

@@ -3035,6 +3035,11 @@ fn selecting_in_viewer_claims_canvas_keyboard_focus(cx: &mut TestAppContext) {
     assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }
 
+fn gradient_test_layer(p: &pm_kernel::Published) -> pm_model::Value {
+    let root = p.snapshot.root().unwrap();
+    let loc = pm_kernel::model::find_layer(root, "l0").unwrap();
+    pm_kernel::model::layer_at(root, &loc).unwrap().to_value()
+}
 fn gradient_handle_project(animated: bool) -> String {
     let mut p: serde_json::Value = serde_json::from_str(&project()).unwrap();
     let keys = if animated {
@@ -3050,15 +3055,7 @@ fn gradient_handle_project(animated: bool) -> String {
 #[gpui::test]
 fn gradient_handle_drag_is_one_undo_and_keys_animated_params(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &gradient_handle_project(true));
-    let before = s
-        .rig
-        .kernel
-        .published(PROJECT)
-        .unwrap()
-        .snapshot
-        .root()
-        .unwrap()
-        .to_value();
+    let before = gradient_test_layer(&s.rig.kernel.published(PROJECT).unwrap());
     let points = s.surface.read_with(&s.vcx, |s, _| s.effect_points());
     assert_eq!(points.len(), 2);
     let at = s.point_of(points[0]);
@@ -3072,8 +3069,8 @@ fn gradient_handle_drag_is_one_undo_and_keys_animated_params(cx: &mut TestAppCon
             .as_f64(),
         Some(35.)
     );
-    let root = p.snapshot.root().unwrap().to_value();
-    let keys = root.get("layers").unwrap().as_array().unwrap()[0]
+    let layer = gradient_test_layer(&p);
+    let keys = layer
         .get("fx")
         .unwrap()
         .as_array()
@@ -3088,17 +3085,10 @@ fn gradient_handle_drag_is_one_undo_and_keys_animated_params(cx: &mut TestAppCon
         .unwrap();
     assert_eq!(keys.len(), 2);
     s.undo(cx);
-    let after = s
-        .rig
-        .kernel
-        .published(PROJECT)
-        .unwrap()
-        .snapshot
-        .root()
-        .unwrap()
-        .to_value();
-    assert_eq!(before.get("layers"), after.get("layers"));
+    let after = gradient_test_layer(&s.rig.kernel.published(PROJECT).unwrap());
+    assert_eq!(before, after);
 }
+
 #[gpui::test]
 fn agent_shader_handle_drives_its_uniform(cx: &mut TestAppContext) {
     let mut project: serde_json::Value = serde_json::from_str(&project()).unwrap();
@@ -3222,8 +3212,8 @@ fn gradient_stop_drag_moves_along_line_and_is_one_keyframed_undo(cx: &mut TestAp
     );
     assert!((stop_values(&s)[1].position - 0.75).abs() < 1e-6);
     let p = s.rig.kernel.published(PROJECT).unwrap();
-    let root = p.snapshot.root().unwrap().to_value();
-    let keys = root.get("layers").unwrap().as_array().unwrap()[0]
+    let layer = gradient_test_layer(&p);
+    let keys = layer
         .get("fx")
         .unwrap()
         .as_array()
