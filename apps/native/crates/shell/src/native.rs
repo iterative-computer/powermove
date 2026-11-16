@@ -1868,6 +1868,13 @@ fn route(number: isize, name: String) {
 }
 /// After a relaunch: the window with session id `id` (the one that was in
 /// front) comes forward, its tab the one its group shows.
+/// The session id of the editor window in front (the key window, or the tab
+/// its group shows), if an editor window is key.
+pub fn front_window_id() -> Option<u64> {
+    let mtm = MainThreadMarker::new()?;
+    let key = NSApplication::sharedApplication(mtm).keyWindow()?;
+    WINDOW_IDS.with(|m| m.borrow().get(&key.windowNumber()).copied())
+}
 /// The session ids of the editor windows open now.
 pub fn live_window_ids() -> Vec<u64> {
     WINDOW_IDS.with(|m| m.borrow().values().copied().filter(|id| *id != 0).collect())
@@ -4684,9 +4691,31 @@ impl Host {
         gpui_macos::composition::publish_accessibility(&self.gpui, order);
         (moved || native).into()
     }
+    /// Where the window stands. A tab the group is not showing keeps the
+    /// frame it had when it was last shown: its group's frame is the shown
+    /// tab's, so a relaunch puts the group where it was (PM-292).
     pub fn frame(&self) -> [f64; 4] {
-        let f = self.window.frame();
+        let shown = unsafe {
+            let group: *mut AnyObject = msg_send![&*self.window, tabGroup];
+            let window: *mut NSWindow = if group.is_null() {
+                std::ptr::null_mut()
+            } else {
+                msg_send![group, selectedWindow]
+            };
+            window.as_ref().map(|w| w.frame())
+        };
+        let f = shown.unwrap_or_else(|| self.window.frame());
         [f.origin.x, f.origin.y, f.size.width, f.size.height]
+    }
+    /// The other tabs of this window's group record their state again (the
+    /// group moved or changed size: they share its frame).
+    pub fn persist_other_tabs(&self) {
+        let own = self.window.windowNumber();
+        for tab in tab_windows(&self.window) {
+            if tab.windowNumber() != own {
+                route(tab.windowNumber(), "persistSession".into());
+            }
+        }
     }
     pub fn is_fullscreen(&self) -> bool {
         self.window

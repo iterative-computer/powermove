@@ -499,7 +499,8 @@ impl Editor {
         let (Some(path), Some(state)) = (self.session_path.clone(), self.window_state()) else {
             return;
         };
-        let key = self.host.as_ref().is_some_and(|h| h.borrow().is_key());
+        let key = !crate::session::quitting()
+            && self.host.as_ref().is_some_and(|h| h.borrow().is_key());
         crate::session::write(&path, crate::session::Change::Upsert { state, key });
     }
     /// Removes this window from the session (the user closed it).
@@ -523,6 +524,10 @@ impl Editor {
             let _ = this.update(cx, |v, _| {
                 v.session_pending = false;
                 v.persist_session();
+                // A group moves as one: its other tabs take the new frame.
+                if let Some(h) = &v.host {
+                    h.borrow().persist_other_tabs();
+                }
             });
         })
         .detach();
