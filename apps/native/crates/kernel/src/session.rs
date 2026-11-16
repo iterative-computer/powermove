@@ -231,6 +231,11 @@ impl Prepared {
 enum RecoveryMode {
     Legacy,
     Ask,
+    /// Quit compaction, with nobody to ask: as `Ask`, but a project that
+    /// would not open as itself, or has nothing to fold in, is not opened at
+    /// all (`Changed(false)`), so nothing is written for it; its journal
+    /// waits for the next open's question.
+    Fold,
     Decide(RecoveryDecision, String),
 }
 pub(crate) struct PendingSave {
@@ -1603,44 +1608,28 @@ impl Kernel {
                     continue;
                 }
             };
-            // Asked first, with nobody here to answer. Only a journal that
-            // replays whole is folded in. One this build cannot replay, or
-            // whose end is missing, is the person's to decide at the next
-            // open: the project is not opened at all, so nothing saves its
-            // older slot and nothing removes the journal as saved.
+            // Asked first, with nobody here to answer. Only work that replays
+            // whole onto this project, opened as itself, is folded in.
+            // Anything else (a journal this build cannot replay or whose end
+            // is missing, work whose base changed, a project that would open
+            // as a copy) is the person's to decide at the next open: the
+            // project is not opened, so no copy or recovered entry is made,
+            // nothing saves its older slot and its journal stays (run 16: a
+            // quit made "Recovered" and "Native" entries on its own).
             let opened =
-                match self.open_session_mode(id.clone(), source.clone(), None, RecoveryMode::Ask) {
+                match self.open_session_mode(id.clone(), source.clone(), None, RecoveryMode::Fold) {
                     Ok(ShellReply::RecoveryRequired { ticket, recovery }) => {
                         self.pending_recovery.remove(&ticket);
-                        if !matches!(
-                            recovery,
-                            RecoveryResult::Recovered { truncated: false }
-                                | RecoveryResult::OfferCopy {
-                                    truncated: false,
-                                    ..
-                                }
-                        ) {
+                        if !matches!(recovery, RecoveryResult::Recovered { truncated: false }) {
                             continue;
                         }
                         self.open_session(id, source, None)
                     }
-                    // Nothing to recover: it is open.
-                    opened => opened,
+                    _ => continue,
                 };
-            let Ok(ShellReply::Opened {
-                session, recovery, ..
-            }) = opened
-            else {
+            let Ok(ShellReply::Opened { session, .. }) = opened else {
                 continue;
             };
-            if let RecoveryResult::OfferCopy { project, .. } = recovery {
-                recovery_copies.push(project);
-            }
-            if let Destination::Library(slot) = &self.sessions[&session.project].destination
-                && slot != &session.project
-            {
-                recovery_copies.push(slot.clone());
-            }
             // A close that fails leaves the session to the library's
             // release, which defers it (journal kept).
             if let Ok(ShellReply::Closed { recovery_copy }) = self.shell(ShellCall::Close(session))
@@ -1867,6 +1856,9 @@ impl Kernel {
                         }
                     }
                 }
+                if matches!(mode, RecoveryMode::Fold) && decision != OpenDecision::Writable {
+                    return Ok(ShellReply::Changed(false));
+                }
                 // The copy made the last time this project could not open as
                 // itself holds the person's saved work since: the same
                 // project, unchanged, opens that copy again, never another
@@ -1928,6 +1920,9 @@ impl Kernel {
                 };
                 decision = pre.decision;
                 lock = pre.lock;
+                if matches!(mode, RecoveryMode::Fold) && decision != OpenDecision::Writable {
+                    return Ok(ShellReply::Changed(false));
+                }
                 let left_aside = pre.settled;
                 let mut pre_opened = pre.opened;
                 if decision == OpenDecision::Writable {
@@ -2109,7 +2104,7 @@ impl Kernel {
             );
             // A journal of an older base can also end where the file is now
             // (a save that could not start a new journal before the kill).
-            if matches!(mode, RecoveryMode::Ask)
+            if matches!(mode, RecoveryMode::Ask | RecoveryMode::Fold)
                 && let Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } = &recovered
                 && !r.truncated
                 && r.document.canonical_hash().as_deref() == Some(&base)
@@ -2168,7 +2163,12 @@ impl Kernel {
                 Recovery::Nothing => format!("{base}:none"),
             }
         );
-        if matches!(mode, RecoveryMode::Ask) && !matches!(recovered, Recovery::Nothing) {
+        if matches!(mode, RecoveryMode::Fold) && matches!(recovered, Recovery::Nothing) {
+            return Ok(ShellReply::Changed(false));
+        }
+        if matches!(mode, RecoveryMode::Ask | RecoveryMode::Fold)
+            && !matches!(recovered, Recovery::Nothing)
+        {
             let recovery = match (&recovered, &from_other) {
                 (Recovery::Recovered(r), Some((_, name))) => RecoveryResult::FromOtherFile {
                     name: name.clone(),
@@ -2961,13 +2961,16 @@ impl Kernel {
         hash: &str,
     ) -> Option<String> {
         let store = self.library.as_ref()?.store();
-        let same_library = |recorded: &str| {
-            let recorded = std::path::Path::new(recorded);
-            recorded == library
-                || recorded
-                    .canonicalize()
-                    .is_ok_and(|r| library.canonicalize().is_ok_and(|l| l == r))
+        // A library is named by its profile or by its store folder (quit
+        // compaction names the store): the same store is the same library.
+        // Taken literally, every open of a project whose file is offline made
+        // one more "— Native" copy instead of the one it made before.
+        let store_of = |p: &std::path::Path| {
+            let dir = LibraryStore::open(p).dir().to_path_buf();
+            dir.canonicalize().unwrap_or(dir)
         };
+        let library = store_of(library);
+        let same_library = |recorded: &str| store_of(std::path::Path::new(recorded)) == library;
         let mut rows = store.projects().ok()?;
         rows.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
         rows.into_iter().map(|row| row.id).find(|id| {

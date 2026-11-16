@@ -1349,3 +1349,159 @@ fn a_body_saved_in_the_trash_names_its_row_and_takes_off_a_renames_mark() {
     };
     assert_eq!(name(&k, &session.project), "C");
 }
+
+/// Quit compaction folds in only work that replays onto its project opened
+/// as itself; anything else is left in its journal for the next open's
+/// question, and no entry is made on its own (acceptance run 16: a quit made
+/// "— Recovered" and "— Native" entries for a project killed earlier).
+#[test]
+fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
+    let library = |root: &Path| pm_kernel::library::LibraryStore::open(root);
+    let rows = |root: &Path| {
+        library(root)
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id, r.name))
+            .collect::<Vec<_>>()
+    };
+    let prepare = |k: &mut Kernel, root: &Path| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "film".into(),
+            source: SessionSource::Library {
+                profile: root.to_path_buf(),
+                project: "film".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    // A saved project with work a killed session left: widened to 640.
+    let killed = |name: &str| {
+        let root = TempDir::new(name);
+        pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
+            .unwrap()
+            .save_project(
+                "film",
+                {
+                    let mut p = value();
+                    p.as_object_mut().unwrap().insert("id", Value::from("film"));
+                    p
+                },
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            )
+            .unwrap();
+        {
+            let mut k = kernel(&root.0);
+            let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
+                panic!("not opened");
+            };
+            widen(&mut k, &session.project, 640.);
+            k.durability_barrier().unwrap();
+        }
+        root
+    };
+    let quit = |root: &Path| {
+        let mut k = kernel(root);
+        k.shell(ShellCall::PrepareQuit).unwrap();
+    };
+
+    // Work that replays onto the project as itself is folded in.
+    let root = killed("quit-folds");
+    quit(&root.0);
+    assert_eq!(rows(&root.0), vec![("film".to_owned(), "Base".to_owned())]);
+    let mut k = kernel(&root.0);
+    let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
+        panic!("folded work asks nothing");
+    };
+    assert_eq!(width(&k, &session.project), 640.);
+    drop(k);
+
+    // Its file is offline (it would open as a copy), or its saved project
+    // changed under the work (it would go to a recovered copy): the quit
+    // leaves it, and the next open asks.
+    for (case, change) in [
+        ("quit-offline", "file"),
+        ("quit-base-changed", "body"),
+    ] {
+        let root = killed(case);
+        {
+            let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
+                .unwrap();
+            if change == "file" {
+                let meta = pm_model::json::parse(
+                    r#"{"file":{"path":"/nonexistent/powermove-offline.pmv"}}"#,
+                )
+                .unwrap();
+                w.set("projectMeta.film", meta).unwrap();
+            } else {
+                let mut p = value();
+                let m = p.as_object_mut().unwrap();
+                m.insert("id", Value::from("film"));
+                m.insert("name", Value::from("Changed"));
+                w.save_project("film", p, Value::Null, Value::Null, Value::Null)
+                    .unwrap();
+            }
+            w.flush().unwrap();
+        }
+        let before = rows(&root.0);
+        quit(&root.0);
+        assert_eq!(rows(&root.0), before, "{case}: no entry made on its own");
+        let mut k = kernel(&root.0);
+        assert!(
+            matches!(prepare(&mut k, &root.0), ShellReply::RecoveryRequired { .. }),
+            "{case}: the next open asks"
+        );
+    }
+}
+
+/// A project whose file is offline opens as a copy, and opening it again
+/// unchanged opens that copy, however the library is named (its profile, or
+/// its store folder as quit compaction names it): never one more copy.
+#[test]
+fn an_offline_projects_copy_is_reopened_however_its_library_is_named() {
+    let root = TempDir::new("offline-copy");
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        let mut p = value();
+        p.as_object_mut().unwrap().insert("id", Value::from("film"));
+        w.save_project("film", p, Value::Null, Value::Null, Value::Null)
+            .unwrap();
+        w.set(
+            "projectMeta.film",
+            pm_model::json::parse(r#"{"file":{"path":"/nonexistent/powermove-offline.pmv"}}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        w.flush().unwrap();
+    }
+    let count = || {
+        pm_kernel::library::LibraryStore::open(&root.0)
+            .projects()
+            .unwrap()
+            .len()
+    };
+    let store = pm_kernel::library::LibraryStore::open(&root.0).dir().to_path_buf();
+    let mut k = kernel(&root.0);
+    for (round, profile) in [root.0.clone(), store.clone(), root.0.clone()].into_iter().enumerate() {
+        let ShellReply::Opened { session, .. } = k
+            .shell(ShellCall::PrepareOpen {
+                id: format!("open{round}"),
+                source: SessionSource::Library {
+                    profile,
+                    project: "film".into(),
+                },
+                electron_profile: None,
+            })
+            .unwrap()
+        else {
+            panic!("not opened");
+        };
+        k.shell(ShellCall::Close(session)).unwrap();
+        k.durability_barrier().unwrap();
+        assert_eq!(count(), 2, "round {round}: the project and its one copy");
+    }
+}
