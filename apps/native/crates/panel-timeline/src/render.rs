@@ -956,7 +956,7 @@ impl Scene {
             "rect",
             Rect::new(
                 v.layer_column - m.border as f64,
-                -reach,
+                0. - reach,
                 m.border as f64,
                 v.height + reach * 2.,
             ),
