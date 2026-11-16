@@ -136,8 +136,10 @@ fn running_exports(
 /// quitting sooner killed the worker with that file still on disk.
 const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The longest a close waits to store the viewer's last picture
-/// (`Controller::store_last_frame`).
-const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// (`Controller::store_last_frame`): a first render of a heavy project took
+/// 4.7 s (Paper, Deep Glow). Only a close whose picture differs from the one
+/// stored (another time or revision since the last save) renders at all.
+const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Whether every export in `stopping` has ended (cancelled, failed or done).
 fn exports_ended(
     tasks: &[pm_promedia::tasks::Task],

@@ -427,23 +427,32 @@ impl Controller {
         cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<()>> {
         if self.settling.is_some() || self.awaiting_extension_effects() {
+            crate::diag::line(serde_json::json!({"last_frame": "loading"}));
             return None;
         }
-        let project = self.session.as_ref()?.project.clone();
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            crate::diag::line(serde_json::json!({"last_frame": "no project"}));
+            return None;
+        };
         let published = self.kernel.published(&project)?;
         let time = self.time();
         let mark = crate::poster::last_frame_mark(published.revision(), time);
         if crate::poster::last_frame_current(&self.profile, &project, &mark) {
             return None;
         }
-        let renderer = crate::mcp_services::frame_renderer(
+        let renderer = match crate::mcp_services::frame_renderer(
             self.kernel.clone(),
             project.clone(),
             self.profile.clone(),
             self.job_overrides.clone(),
             crate::mcp_services::Capture::Poster,
-        )
-        .ok()?;
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                crate::diag::line(serde_json::json!({"last_frame": "no renderer", "error": error.to_string()}));
+                return None;
+            }
+        };
         let (size, _) = crate::poster::frame_of(&published);
         let profile = self.profile.clone();
         let (done, heard) = async_channel::bounded(1);
@@ -459,9 +468,12 @@ impl Controller {
         }
         cx.background_executor()
             .spawn(async move {
-                crate::poster::write_last_frame(
+                let started = std::time::Instant::now();
+                let stored = crate::poster::write_last_frame(
                     &renderer, published, &profile, &project, time, size, &mark,
                 );
+                crate::diag::line(serde_json::json!({"last_frame": if stored { "stored" } else { "failed" },
+                    "time": time, "ms": started.elapsed().as_secs_f64() * 1000.}));
                 let _ = done.try_send(());
             })
             .detach();

@@ -150,21 +150,18 @@ impl Placeholder {
     fn over(viewer: &metal::MetalLayer, poster: &std::path::Path, doc_id: u64) -> Option<Self> {
         let path = objc2_foundation::NSString::from_str(&poster.to_string_lossy());
         let image = objc2_app_kit::NSImage::initWithContentsOfFile(
-            objc2_app_kit::NSImage::alloc(),
+            <objc2_app_kit::NSImage as objc2::AnyThread>::alloc(),
             &path,
         )?;
         unsafe {
-            let cg: *mut AnyObject = msg_send![&*image, CGImageForProposedRect: std::ptr::null_mut::<NSRect>(), context: std::ptr::null_mut::<AnyObject>(), hints: std::ptr::null_mut::<AnyObject>()];
-            if cg.is_null() {
-                return None;
-            }
             let layer: Retained<AnyObject> =
                 Retained::from_raw(msg_send![objc2::class!(CALayer), new])?;
-            let parent = viewer.as_ptr() as *mut AnyObject;
+            let parent = foreign_types::ForeignType::as_ptr(viewer) as *mut AnyObject;
             let bounds: NSRect = msg_send![parent, bounds];
             let _: () = msg_send![objc2::class!(CATransaction), begin];
             let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
-            let _: () = msg_send![&*layer, setContents: cg];
+            // A layer on macOS takes an NSImage as its contents.
+            let _: () = msg_send![&*layer, setContents: &*image];
             let _: () = msg_send![&*layer, setContentsGravity: objc2_quartz_core::kCAGravityResizeAspect];
             let _: () = msg_send![&*layer, setFrame: bounds];
             // Width and height follow the viewer (kCALayerWidthSizable | kCALayerHeightSizable).

@@ -248,6 +248,25 @@ mod tests {
         out
     }
 
+    /// A last frame is current only for the revision and time it shows; a
+    /// close or save with another one renders it again (PM-384).
+    #[test]
+    fn a_last_frame_is_current_for_its_revision_and_time() {
+        let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+        let mark = last_frame_mark(7, 12.04);
+        assert!(!last_frame_current(&profile, "file-1", &mark), "none stored yet");
+        let (image, stamp) = last_frame_files(&profile, "file-1");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&stamp, &mark).unwrap();
+        assert!(image.ends_with("caches/last-frame/file_1.png"));
+        assert!(last_frame_current(&profile, "file-1", &mark));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04)));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3.)));
+        std::fs::remove_dir_all(&profile).unwrap();
+    }
+
     #[test]
     fn a_flat_frame_shows_nothing_and_a_picture_does() {
         assert!(!has_content(&frame(|_, _| [0, 0, 0, 255])));
