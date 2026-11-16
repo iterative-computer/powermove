@@ -591,3 +591,23 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
     assert_eq!(restored.docks[di].groups[1].size, Some(240.));
     assert_eq!(pm_shell::workspace::write(&restored, &record), record);
 }
+
+#[test]
+fn resetting_a_side_split_updates_fluid_bases_without_moving_its_neighbour() {
+    let t = tokens();
+    let bounds = Rect { x: 0., y: 0., w: 1000., h: 500. };
+    let mut layout = Layout::preset("design");
+    let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+    layout.docks[di].groups = [("a", 400.), ("b", 300.), ("c", 400.)].into_iter().map(|(id, basis)| Group {
+        tabs: vec![id.into()], active: 0, size: None, flex_basis: Some(basis), collapsed: false,
+    }).collect();
+    let before = layout.geometry(bounds, &t);
+    let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
+    assert!(layout.reset_split(divider, bounds, &t));
+    let after = layout.geometry(bounds, &t);
+    let panels: Vec<_> = after.panels.iter().filter(|p| p.dock == di).collect();
+    assert_eq!(panels[0].rect.h, 350.);
+    assert_eq!(panels[1].rect.h, 350.);
+    assert_eq!(panels[2].rect, before.panels.iter().find(|p| p.dock == di && p.group == 2).unwrap().rect);
+    assert!(layout.docks[di].groups.iter().all(|g| g.size.is_none()));
+}

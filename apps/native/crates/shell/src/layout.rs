@@ -1418,18 +1418,9 @@ impl Layout {
         if (upper - a).abs() < 0.5 {
             return false;
         }
-        let d = &mut self.docks[divider.dock];
-        let flexible = d
-            .groups
-            .iter()
-            .position(|g| g.size.is_none())
-            .unwrap_or(d.groups.len() - 1);
-        for (gi, g) in d.groups.iter_mut().enumerate() {
-            g.size = height(gi);
-        }
-        d.groups[i].size = Some(upper);
-        d.groups[i + 1].size = Some(total - upper);
-        d.groups[flexible].size = None;
+        // Use the same adjacent-height update as a drag, including the
+        // transient basis of fluid side panels and fixed neighbours.
+        self.resize(divider, upper - a, bounds, t);
         true
     }
     pub fn reset_dock(&mut self, divider: &Divider) -> bool {
