@@ -618,6 +618,7 @@ impl Controller {
             dir: self.profile.join("caches").join("thumbnails"),
             profile: self.profile.clone(),
             factory: Some(factory),
+            published: self.published.clone(),
             renderer: active.clone().and_then(|project| {
                 crate::mcp_services::frame_renderer(
                     self.kernel.clone(),

@@ -48,6 +48,12 @@ pub enum Component {
     EaseCurve,
     /// A drawing of an easing curve (a preset's thumbnail), not a control.
     EaseThumbnail,
+    /// v1's point pad: a 2D area whose dot is a point parameter's X and Y
+    /// (one grouped binding over the two), dragged to place it.
+    PointPad,
+    /// v1's gradient bar: a gradient's start to end colour, with its
+    /// midpoint (one binding) a diamond dragged along the bar.
+    GradientBar,
 }
 impl Component {
     /// Original kit catalog, retained for consumers that enumerate its frozen recipes.
@@ -89,6 +95,8 @@ impl Component {
         Self::CurveEditor,
         Self::EaseCurve,
         Self::EaseThumbnail,
+        Self::PointPad,
+        Self::GradientBar,
     ];
     pub fn catalog() -> impl Iterator<Item = Self> {
         Self::ALL.iter().chain(Self::ADDITIONS).copied()
@@ -118,6 +126,8 @@ impl Component {
                 | Self::ColorWheel
                 | Self::CurveEditor
                 | Self::EaseCurve
+                | Self::PointPad
+                | Self::GradientBar
         )
     }
     pub fn surface(self) -> Surface {
@@ -166,6 +176,8 @@ pub enum Widget {
     CurveEditor,
     EaseCurve,
     EaseThumbnail,
+    PointPad,
+    GradientBar,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -254,6 +266,8 @@ impl Recipe {
             CurveEditor => Widget::CurveEditor,
             EaseCurve => Widget::EaseCurve,
             EaseThumbnail => Widget::EaseThumbnail,
+            PointPad => Widget::PointPad,
+            GradientBar => Widget::GradientBar,
         };
         let floating = matches!(
             kind,

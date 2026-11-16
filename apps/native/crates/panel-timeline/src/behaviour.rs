@@ -745,7 +745,7 @@ impl TimelineModel {
         });
         Ok(Plan {
             calls: vec![Call::Transact {
-                label: Some("Move layers".into()),
+                label: Some("Move Layers".into()),
                 body: WriteBody::Ops(ops),
                 expected_revision: Some(self.index.revision),
             }],
@@ -819,7 +819,7 @@ impl TimelineModel {
         });
         Ok(Plan {
             calls: vec![Call::Transact {
-                label: Some("Move clips".into()),
+                label: Some("Move Clips".into()),
                 body: WriteBody::Ops(ops),
                 expected_revision: Some(self.index.revision),
             }],

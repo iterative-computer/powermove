@@ -251,10 +251,91 @@ test("a queued action cannot follow an acknowledgement onto a different target",
 test("parity Duplicate Effect menu dispatches the selected effect", async () => {
   const f = await fixture(selected());
   f.kit.api.contextMenu = async (items) => {
-    expect(items.find((item) => item.id === "duplicate")?.label).toBe("Duplicate Effect");
+    expect(items.find((item) => item.id === "duplicate")?.label).toBe(
+      "Duplicate Effect",
+    );
     return "duplicate";
   };
   await f.controller.menu("f1");
-  expect(f.requests).toContainEqual(expect.objectContaining({command: "panel.effect-controls", args: expect.objectContaining({intent: {type: "duplicate", id: "f1"}})}));
+  expect(f.requests).toContainEqual(
+    expect.objectContaining({
+      command: "panel.effect-controls",
+      args: expect.objectContaining({
+        intent: { type: "duplicate", id: "f1" },
+      }),
+    }),
+  );
+  await f.controller.dispose();
+});
+test("a point's pad writes X and Y as one binding, and a gradient's bar its midpoint", async () => {
+  const param = (key: string, value: number | string, extra = {}) => ({
+    id: `{"layer":"a","path":"f1.${key}"}`,
+    effect: "f1",
+    key,
+    label: key,
+    binding: key,
+    value,
+    control:
+      typeof value === "number" ? ("number" as const) : ("color" as const),
+    animated: false,
+    keyAtPlayhead: false,
+    mixed: false,
+    readonly: false,
+    ...extra,
+  });
+  const p = selected();
+  p.count = 4;
+  p.range = [0, 4];
+  p.rows = [
+    p.rows[0],
+    {
+      kind: "point",
+      id: "point:f1:centerX",
+      effect: "f1",
+      group: "point",
+      label: "Center",
+      parameters: [
+        param("centerX", 10, { min: -100, max: 100 }),
+        param("centerY", -20, { min: -100, max: 100 }),
+      ],
+      effectLabel: "Glow",
+      enabled: true,
+    },
+    {
+      kind: "ramp",
+      id: "ramp:f1",
+      effect: "f1",
+      group: "ramp",
+      label: "Gradient",
+      parameters: [
+        param("startColor", "#000000"),
+        param("endColor", "#ffffff"),
+        param("midpoint", 40, { min: 1, max: 99 }),
+      ],
+      effectLabel: "Glow",
+      enabled: true,
+    },
+    p.rows[2],
+  ];
+  const f = await fixture(p);
+  const registered = (
+    f.requests as { type: string; handle?: string; channels?: string[] }[]
+  )
+    .filter((r) => r.type === "binding.register")
+    .map((r) => [r.handle, r.channels?.length]);
+  expect(registered).toContainEqual(["centerX+centerY", 2]);
+  expect(registered).toContainEqual(["midpoint", 1]);
+  const { EffectControls } = await import("../panel");
+  await f.root.render(
+    <EffectControls controller={f.controller} rowHeight={24} />,
+  );
+  const all = [...f.root.host.nodes.values()].map((n) => n.props);
+  const pad = all.find((n) => n["data-pm-component"] === "point-pad")!;
+  expect(pad.binding).toBe("centerX+centerY");
+  expect(pad.value).toEqual([10, -20]);
+  const bar = all.find((n) => n["data-pm-component"] === "gradient-bar")!;
+  expect(bar.binding).toBe("midpoint");
+  expect(bar.value).toBe(40);
+  await f.root.dispose();
   await f.controller.dispose();
 });

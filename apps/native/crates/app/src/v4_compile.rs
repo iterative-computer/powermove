@@ -170,6 +170,20 @@ pub enum Kit {
         curve: [f64; 4],
         thumbnail: bool,
     },
+    /// v1's point pad: the point (X, Y) and its bounds.
+    Pad {
+        point: [f64; 2],
+        min: [f64; 2],
+        max: [f64; 2],
+    },
+    /// v1's gradient bar: its ends (`0xRRGGBB`) and, when it has one, its
+    /// midpoint and the midpoint's range.
+    Ramp {
+        start: u32,
+        end: u32,
+        midpoint: Option<f64>,
+        range: [f64; 2],
+    },
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
@@ -239,6 +253,11 @@ pub struct NodeView {
     /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
     /// its own font, so a changing readout (timecode) never reflows its row.
     pub fixed_width: Option<SharedString>,
+    /// `metadata.fitsLabels`: the node is at least as wide as the widest of
+    /// these texts in its own font plus the room around it (its own
+    /// horizontal padding and `metadata.fitsInsetToken`, its rows' indent),
+    /// so none of a rail's names is cut (the Effects rail, PM-455).
+    pub fits_labels: Option<(Arc<Vec<SharedString>>, f32)>,
     /// `data-pm-slot="body"`: the part of a sheet between its title and its
     /// actions, which gives way while the sheet's height changes.
     pub sheet_body: bool,
@@ -751,6 +770,18 @@ fn compile(
                 .items_center()
                 .min_w(px(t.metrics.value_column))
                 .gap(px(t.metrics.inner_radius));
+            // A row whose panel caps its value column (`valueMostToken`, a
+            // metric) keeps label and control together on a wide panel.
+            let most = node
+                .parent
+                .and_then(|p| surface.node(p))
+                .filter(|row| Component::of(row) == Some(Component::InspectorRow))
+                .and_then(|row| row.props.get("metadata")?.get("valueMostToken")?.as_str())
+                .filter(|name| name.starts_with("metrics."))
+                .and_then(|name| table.number(&serde_json::json!({ "token": name })));
+            if let Some(most) = most {
+                compiled.sheet = compiled.sheet.max_w(px(most));
+            }
             if joined(Some(node.id)) {
                 compiled.sheet = compiled
                     .sheet
@@ -866,6 +897,29 @@ fn compile(
             .and_then(|m| m.get("fixedWidthSample"))
             .and_then(Value::as_str)
             .map(|s| s.to_owned().into()),
+        fits_labels: meta
+            .and_then(|m| m.get("fitsLabels"))
+            .and_then(Value::as_array)
+            .map(|labels| {
+                let style = node.props.get("style");
+                let side = |key: &str| {
+                    style
+                        .and_then(|s| s.get(key))
+                        .and_then(|v| table.number(v))
+                        .unwrap_or(0.)
+                };
+                let inset = meta
+                    .and_then(|m| m.get("fitsInsetToken"))
+                    .and_then(Value::as_str)
+                    .and_then(|name| table.number(&serde_json::json!({ "token": name })))
+                    .unwrap_or(0.);
+                let labels = labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|label| SharedString::from(label.to_owned()))
+                    .collect();
+                (Arc::new(labels), side("paddingLeft") + side("paddingRight") + inset)
+            }),
         local_change: node.listeners.contains_key("change"),
         cancel_change: meta
             .and_then(|m| m.get("cancelChange"))
@@ -1129,6 +1183,28 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 master_strip,
             }
         }
+        Some(component @ (Component::PointPad | Component::GradientBar)) => {
+            let option = |key: &str| node.props.get("metadata").and_then(|m| m.get("pmKit")).and_then(|k| k.get(key));
+            let number = |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
+            if component == Component::PointPad {
+                let n = numbers(value);
+                Kit::Pad {
+                    point: [n.first().copied().unwrap_or(0.), n.get(1).copied().unwrap_or(0.)],
+                    min: [number("minX", -100.), number("minY", -100.)],
+                    max: [number("maxX", 100.), number("maxY", 100.)],
+                }
+            } else {
+                let colour = |key: &str, default: u32| {
+                    option(key).and_then(Value::as_str).and_then(parse_hex).unwrap_or(default)
+                };
+                Kit::Ramp {
+                    start: colour("start", 0x000000),
+                    end: colour("end", 0xffffff),
+                    midpoint: value.and_then(Value::as_f64),
+                    range: [number("min", 0.), number("max", 100.)],
+                }
+            }
+        }
         Some(Component::CurveEditor) => Kit::Curve {
             values: numbers(value),
             channel: node
@@ -1344,6 +1420,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexGrow" => {
                 if n.is_some_and(|n| n > 0.) {
                     e = e.flex_1();
+                } else if n == Some(0.) {
+                    // Takes no spare room (over a kit recipe's `flex_1`).
+                    e = e.flex_grow(0.);
                 }
             }
             "flexShrink" => {
@@ -1357,6 +1436,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexBasis" => {
                 if let Some(v) = len {
                     e = e.flex_basis(Length::from(v));
+                } else if value.as_str() == Some("auto") {
+                    // Its content's width (a rail as wide as its names).
+                    e = e.flex_basis(Length::Auto);
                 }
             }
             "borderRadius" => e = with(e, n, |e, n| e.rounded(px(n))),

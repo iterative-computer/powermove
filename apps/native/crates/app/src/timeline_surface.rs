@@ -2957,11 +2957,40 @@ impl TimelineSurface {
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let mut rows: Vec<serde_json::Value> = items
             .iter()
-            .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
+            .map(|i| match i.id {
+                pm_panel_timeline::MenuItem::SEPARATOR => serde_json::json!({"separator":true}),
+                pm_panel_timeline::MenuItem::HEADER => serde_json::json!({"header":true,"label":i.label}),
+                id => serde_json::json!({"id":id,"label":i.label,"disabled":!i.enabled,"checked":i.checked}),
+            })
             .collect();
-        let camera_index = ids.len() + 1;
+        // Host commands after the timeline's own rows, by the index the menu
+        // numbers them with (submenu rows counted, in order).
+        let mut commands: std::collections::HashMap<usize, String> = Default::default();
+        let mut next = rows.len();
+        let mut host_row = |rows: &mut Vec<serde_json::Value>, row: serde_json::Value| {
+            let at = next;
+            next += 1;
+            if let Some(command) = row["command"].as_str() {
+                commands.insert(at, command.to_owned());
+            }
+            for child in row["children"].as_array().into_iter().flatten() {
+                if let Some(command) = child["command"].as_str() {
+                    commands.insert(next, command.to_owned());
+                }
+                next += 1;
+            }
+            rows.push(row);
+        };
         if matches!(context, MenuContext::Empty) {
-            rows.push(empty_new_menu());
+            host_row(&mut rows, empty_new_menu());
+        }
+        // What v1's extensions added under the ruler and between rows: New
+        // Composition…, Import Captions…, Add 3D Layer.
+        if matches!(context, MenuContext::Empty | MenuContext::Ruler { .. }) {
+            host_row(&mut rows, serde_json::json!({"separator":true}));
+            for row in creation_rows() {
+                host_row(&mut rows, row);
+            }
         }
         let weak = cx.entity().downgrade();
         self.delegate.clone().extension_menu(
@@ -2970,8 +2999,8 @@ impl TimelineSurface {
             window,
             cx,
             Box::new(move |index, cx| {
-                if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
-                    let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
+                if let Some(command) = index.and_then(|i| commands.get(&i)).cloned() {
+                    let _ = weak.update(cx, |s, cx| s.delegate.run(&command, vec![], cx));
                     return;
                 }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
@@ -3012,7 +3041,28 @@ impl TimelineSurface {
                 serde_json::json!({"kind":"layer","layerId":id,"time":time}),
             ),
         ];
-        let rows = delegate.layer_menu_rows(&id, cx);
+        let mut rows = delegate.layer_menu_rows(&id, cx);
+        // v1's layer menu: headed by the layer's name, the creation items
+        // its extensions added after it.
+        if !rows.is_empty() {
+            if let Some(layer) = self.model.index.layer(&id) {
+                rows.insert(0, serde_json::json!({"header": true, "label": layer.name.to_string()}));
+            }
+            rows.push(serde_json::json!({"separator": true}));
+            fn as_ids(row: serde_json::Value) -> serde_json::Value {
+                let mut row = row;
+                if let Some(command) = row.get("command").cloned() {
+                    row["id"] = command;
+                }
+                if let Some(children) = row.get_mut("children").and_then(|c| c.as_array_mut()) {
+                    for child in children.iter_mut() {
+                        *child = as_ids(child.take());
+                    }
+                }
+                row
+            }
+            rows.extend(creation_rows().into_iter().map(as_ids));
+        }
         self.delegate.clone().extension_menu(
             locations,
             rows.clone(),
@@ -5662,6 +5712,23 @@ mod edge_scroll_regression {
 }
 
 pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
+/// v1's creation items in the timeline's menus (its Composition, Captions
+/// and 3D extensions added them): New Composition…, Import Captions…, and
+/// Add 3D Layer with its kinds, as the viewer's menu offers them.
+pub(crate) fn creation_rows() -> Vec<serde_json::Value> {
+    let kinds: Vec<serde_json::Value> = pm_shell::menu::new3d()
+        .into_iter()
+        .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+            Some(kind) => serde_json::json!({"label": i.label, "command": format!("new3d:{kind}")}),
+            None => serde_json::json!({"separator": true}),
+        })
+        .collect();
+    vec![
+        serde_json::json!({"label": "New Composition…", "command": "newComposition"}),
+        serde_json::json!({"label": "Import Captions…", "command": "importCaptions"}),
+        serde_json::json!({"label": "Add 3D Layer", "children": kinds}),
+    ]
+}
 pub(crate) fn empty_new_menu() -> serde_json::Value {
     serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
 }

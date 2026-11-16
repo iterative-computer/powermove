@@ -1833,10 +1833,16 @@ impl GizmoSurface {
     /// (the viewer was drawn again or covered while held). It ends now, as a
     /// release does, so no edit stays open.
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A marquee or a shape or text box being drawn, or a press whose
+        // pick has not answered yet, waits for the release as a drag does.
         let held = self.drag.is_some()
             || self.pen_drag.is_some()
             || self.panning.is_some()
-            || self.rulers.dragging.is_some();
+            || self.rulers.dragging.is_some()
+            || self.marquee.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
+            || self.picking.is_some();
         if held {
             self.on_up(true, Some(window), cx);
         }
@@ -2103,6 +2109,10 @@ impl GizmoSurface {
     #[cfg(test)]
     pub fn idle(&self) -> bool {
         !self.busy && self.queue.is_empty() && self.picks == 0
+    }
+    #[cfg(test)]
+    pub fn marquee_drawn(&self) -> bool {
+        self.marquee.is_some()
     }
     #[cfg(test)]
     pub fn hovered(&self) -> Option<String> {
