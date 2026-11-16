@@ -531,55 +531,20 @@ export function ProjectView(props: ProjectViewProps) {
               </text>
             ) : null}
             {f.state?.overlay ? (
-              <div
-                role="img"
+              <text
                 label={f.state.overlay}
                 metadata={{ progress: f.asset?.[1].progress ?? null }}
                 style={{
+                  ...muted,
                   position: "absolute",
                   left: token("metrics.media_inset"),
                   bottom: token("metrics.media_inset"),
-                  height: token("metrics.media_badge_height"),
-                  paddingLeft: token("metrics.media_inset"),
-                  paddingRight: token("metrics.media_inset"),
-                  gap: token("metrics.media_inset"),
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  borderRadius: token("metrics.inner_radius"),
-                  background: token(
-                    f.cloud
-                      ? "colors.accent"
-                      : f.attention
-                        ? "colors.danger"
-                        : "colors.media_badge",
-                  ),
+                  color: token(trailingInk(f.state, row.selected)),
+                  whiteSpace: "nowrap",
                 }}
               >
-                {f.attention ? (
-                  <text
-                    attr={{
-                      symbol: f.cloud
-                        ? "icloud.and.arrow.down"
-                        : "exclamationmark.triangle.fill",
-                    }}
-                    style={{
-                      color: token("colors.selected_text"),
-                      symbolSize: token("metrics.symbol_inline"),
-                    }}
-                  />
-                ) : null}
-                <text
-                  style={{
-                    fontSize: token("typography.minimum"),
-                    fontWeight: token("typography.medium_weight"),
-                    color: token("colors.selected_text"),
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {f.state.overlay}
-                </text>
-              </div>
+                {f.state.overlay}
+              </text>
             ) : null}
             {f.comp?.open ? (
               <div
@@ -701,9 +666,7 @@ export function ProjectView(props: ProjectViewProps) {
     const hover = !view?.drag && (hovered === itemKey(row.id) || row.focused);
     const actions = hover ? cardActions(row, view!.composition_count) : [];
     const trailing = f.state?.overlay
-      ? f.state.overlay === "Media offline"
-        ? "Missing"
-        : f.state.overlay
+      ? f.state.overlay
       : f.folder
         ? f.folder.items
           ? String(f.folder.items)
@@ -1058,10 +1021,6 @@ export function ProjectView(props: ProjectViewProps) {
           metadata={{ sequence: props.errorSequence ?? 0 }}
           style={{ ...text, color: token("colors.warning") }}
         >
-          <text
-            attr={{ symbol: "exclamationmark.triangle.fill" }}
-            style={{ color: token("colors.warning") }}
-          />
           <text>Project media isn’t updating right now.</text>
         </div>
       )}
