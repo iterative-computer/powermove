@@ -1199,6 +1199,8 @@ impl Controller {
                 if surface.read(cx).culls() {
                     surface.update(cx, |_, cx| cx.notify());
                 }
+                // Its AppKit controls show as pictures until it rests.
+                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
