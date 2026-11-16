@@ -1846,12 +1846,27 @@ fn tab_cap(natural: &[f64], room: f64) -> f64 {
 /// wide as its title asks, up to `TAB_MAX`; short of room the long ones
 /// narrow together down to `TAB_MIN`; past that the strip shows the run that
 /// holds the selected tab, widened to fill what the pull-down leaves.
+#[cfg(test)]
 fn tab_layout(natural: &[f64], selected: usize, room: f64) -> (usize, Vec<f64>, bool) {
+    tab_layout_kept(natural, Some(selected), room, None)
+}
+/// [`tab_layout`] keeping the run where the group's strip last started
+/// (`keep`) while it still holds the selected tab: selecting a tab the strip
+/// shows never swaps the tabs under the pointer (each window of the group
+/// draws its own strip, so without it the run would follow each window's
+/// own selection). Otherwise the run slides only as far as it must. With no
+/// tab selected (Home or a page shows in the window) the run stays put.
+fn tab_layout_kept(
+    natural: &[f64],
+    selected: Option<usize>,
+    room: f64,
+    keep: Option<usize>,
+) -> (usize, Vec<f64>, bool) {
     let count = natural.len();
     if count == 0 {
         return (0, vec![], false);
     }
-    let selected = selected.min(count - 1);
+    let selected = selected.or(keep).unwrap_or(0).min(count - 1);
     let held = |cap: f64, run: &[f64]| run.iter().map(|n| n.min(cap)).collect::<Vec<_>>();
     let cap = tab_cap(natural, room);
     if cap >= TAB_MIN || count == 1 {
@@ -1863,7 +1878,11 @@ fn tab_layout(natural: &[f64], selected: usize, room: f64) -> (usize, Vec<f64>, 
         least[from..=to].iter().sum::<f64>() + (to - from) as f64 * TAB_GAP <= room
     };
     // The run slides only as far as it must to hold the selected tab.
-    let mut start = 0;
+    let mut start = match keep {
+        Some(k) if k > selected => selected,
+        Some(k) => k,
+        None => 0,
+    };
     while start < selected && !fits(start, selected) {
         start += 1;
     }
@@ -1882,6 +1901,12 @@ fn tab_layout(natural: &[f64], selected: usize, room: f64) -> (usize, Vec<f64>, 
 /// synced. Hiding the accessory's controller also gives its height back.
 /// Posted to a window brought forward in its tab group by one of our tabs.
 const TAB_SHOWN: &str = "PMShellTabShown";
+thread_local! {
+    /// Where each tab group's strip run starts (by the group's first window).
+    /// The window of the tab each group's strip run starts with (by the
+    /// group's first window).
+    static STRIP_START: RefCell<HashMap<isize, isize>> = RefCell::new(HashMap::new());
+}
 /// Brings `window` forward in its tab group and tells it so. A window shown
 /// this way while the app is inactive gets no activation, so nothing else
 /// makes it hide AppKit's tab row or draw its own strip for the new state.
@@ -3887,6 +3912,8 @@ impl Host {
                 }
             });
         }
+        // The group, by its first window, whatever shows in its windows.
+        let strip_group = group.iter().map(|w| w.windowNumber()).min().unwrap_or(0);
         // A window with no project is Home, not a project: it is never a tab
         // (no "Home" tab beside the home button, H3).
         let group: Vec<_> = group
@@ -4034,8 +4061,19 @@ impl Host {
         // With more projects than fit at the narrowest width, the strip
         // shows the run that holds the selected one and a pull-down lists
         // them all.
-        let selected = tabs.iter().position(|t| t.selected).unwrap_or(0);
-        let (start, widths, overflow) = tab_layout(&natural, selected, room);
+        let selected = tabs.iter().position(|t| t.selected);
+        // The group's strips share the tab their run starts with (by the
+        // group's first window; by window, as a window still showing Home
+        // is not a tab yet), so the window a tab brings forward, or one
+        // showing Home, shows the same tabs under the pointer.
+        let keep = STRIP_START.with(|s| {
+            let first = *s.borrow().get(&strip_group)?;
+            tabs.iter().position(|t| t.window == first)
+        });
+        let (start, widths, overflow) = tab_layout_kept(&natural, selected, room, keep);
+        if let Some(first) = tabs.get(start) {
+            STRIP_START.with(|s| s.borrow_mut().insert(strip_group, first.window));
+        }
         let mut x = height + TAB_GAP;
         for ((tab, (label, size)), width) in tabs.iter().zip(&labels).skip(start).zip(widths) {
             let title = NSString::from_str(&tab.title);
@@ -4238,7 +4276,8 @@ impl Host {
             more.setImagePosition(NSCellImagePosition::ImageOnly);
             if let Some(menu) = more.menu() {
                 for tab in &tabs {
-                    let row = item(&tab.title, sel!(selectTab:), tab.window);
+                    // Named as the strip names them: alike titles told apart.
+                    let row = item(&tab_label(tab, &tabs).0, sel!(selectTab:), tab.window);
                     row.setState(if tab.selected {
                         NSControlStateValueOn
                     } else {
@@ -7910,6 +7949,27 @@ mod tab_layout_tests {
         // The run slides only as far as it must: the selected tab is its last.
         let (start, widths, _) = tab_layout(&natural, 5, room);
         assert_eq!(start + widths.len(), 6);
+    }
+
+    /// PM-446: a tab the strip shows, selected, leaves the run where it
+    /// stood, so the tabs under the pointer stay; one past either end slides
+    /// the run just far enough to hold it.
+    #[test]
+    fn selecting_a_shown_tab_keeps_the_run_in_place() {
+        use super::tab_layout_kept;
+        let (room, natural) = (366., [150.; 11]);
+        let (first, shown, _) = tab_layout_kept(&natural, Some(5), room, None);
+        assert!(first > 0 && shown.len() > 1);
+        for selected in first..first + shown.len() {
+            assert_eq!(tab_layout_kept(&natural, Some(selected), room, Some(first)).0, first);
+        }
+        assert_eq!(tab_layout_kept(&natural, Some(first - 1), room, Some(first)).0, first - 1);
+        // Home or a page in the window (no tab lit): the run stays.
+        assert_eq!(tab_layout_kept(&natural, None, room, Some(first)).0, first);
+        let next = first + shown.len();
+        let (start, widths, _) = tab_layout_kept(&natural, Some(next), room, Some(first));
+        assert_eq!(start + widths.len() - 1, next, "slides to hold the next tab");
+        assert_eq!(start, first + 1, "by one tab");
     }
 
     #[test]

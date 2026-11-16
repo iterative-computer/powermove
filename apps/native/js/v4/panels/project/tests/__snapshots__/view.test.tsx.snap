@@ -858,7 +858,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
       "actions": [],
       "disabled": false,
       "id": 17,
-      "label": "4 items",
+      "label": "4",
       "multiselectable": false,
       "role": "Label",
       "rowCount": null,
@@ -869,20 +869,9 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
       "actions": [],
       "disabled": false,
       "id": 18,
-      "label": "4 items",
+      "label": "4",
       "multiselectable": false,
       "role": "Label",
-      "rowCount": null,
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "id": 19,
-      "label": null,
-      "multiselectable": false,
-      "role": "GenericContainer",
       "rowCount": null,
       "selected": null,
       "value": null,
@@ -1071,10 +1060,10 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                   "token": "metrics.hit",
                 },
                 "paddingLeft": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingRight": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingTop": {
                   "token": "metrics.gap",
@@ -1090,7 +1079,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                   "count": 1,
                   "itemSize": 160,
                   "metadata": {
-                    "fixedItems": true,
+                    "fixedItems": false,
                   },
                   "range": [
                     0,
@@ -1104,8 +1093,8 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                     {
                       "style": {
                         "display": "flex",
-                        "flexDirection": "row",
-                        "flexGrow": 1,
+                        "flexDirection": "column",
+                        "flexGrow": null,
                         "gap": {
                           "token": "metrics.inset",
                         },
@@ -1137,31 +1126,30 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "alignItems": "center",
+                            "background": null,
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
                             "display": "flex",
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexDirection": "column",
-                            "flexGrow": 1,
-                            "flexShrink": 1,
+                            "flexDirection": "row",
                             "fontSize": {
                               "token": "typography.body",
                             },
                             "gap": {
-                              "token": "metrics.media_inset",
+                              "token": "metrics.gap",
                             },
-                            "minHeight": {
-                              "token": "metrics.hit",
+                            "height": {
+                              "token": "metrics.row",
                             },
-                            "minWidth": {
-                              "token": "metrics.hit",
+                            "paddingLeft": {
+                              "token": "metrics.gap",
                             },
-                            "overflow": "hidden",
-                            "paddingBottom": {
-                              "token": "metrics.inset",
+                            "paddingRight": {
+                              "token": "metrics.gap",
                             },
                           },
                           "tabIndex": -1,
@@ -1178,13 +1166,19 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.control_radius",
+                                  "token": "metrics.inner_radius",
                                 },
                                 "display": "flex",
-                                "flexGrow": 1,
+                                "flexShrink": 0,
+                                "height": {
+                                  "token": "metrics.media_row_thumb_height",
+                                },
                                 "justifyContent": "center",
                                 "overflow": "hidden",
                                 "position": "relative",
+                                "width": {
+                                  "token": "metrics.media_row_thumb_width",
+                                },
                               },
                             },
                             "",
@@ -1200,7 +1194,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.muted",
                                     },
                                     "symbolSize": {
-                                      "token": "metrics.media_folder_glyph",
+                                      "token": "metrics.symbol_inline",
                                     },
                                   },
                                 },
@@ -1213,8 +1207,15 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                             "div",
                             {
                               "style": {
+                                "alignItems": "center",
                                 "display": "flex",
-                                "flexDirection": "column",
+                                "flexDirection": "row",
+                                "flexGrow": 1,
+                                "flexShrink": 1,
+                                "gap": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
                               },
                             },
                             "",
@@ -1245,49 +1246,34 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                   ],
                                 ],
                               ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.muted",
+                                },
+                                "flexShrink": 0,
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
                               [
                                 "text",
-                                {
-                                  "style": {
-                                    "color": {
-                                      "token": "colors.muted",
-                                    },
-                                    "fontSize": {
-                                      "token": "typography.minimum",
-                                    },
-                                    "fontVariantNumeric": "tabular-nums",
-                                    "overflow": "hidden",
-                                    "textOverflow": "ellipsis",
-                                    "whiteSpace": "nowrap",
-                                  },
-                                },
-                                "",
-                                [
-                                  [
-                                    "text",
-                                    {},
-                                    "4 items",
-                                    [],
-                                  ],
-                                ],
+                                {},
+                                "4",
+                                [],
                               ],
                             ],
                           ],
                         ],
-                      ],
-                      [
-                        "div",
-                        {
-                          "style": {
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexGrow": 1,
-                            "flexShrink": 1,
-                          },
-                        },
-                        "",
-                        [],
                       ],
                     ],
                   ],
@@ -2178,17 +2164,6 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
       "selected": null,
       "value": null,
     },
-    {
-      "actions": [],
-      "disabled": false,
-      "id": 19,
-      "label": null,
-      "multiselectable": false,
-      "role": "GenericContainer",
-      "rowCount": null,
-      "selected": null,
-      "value": null,
-    },
   ],
   "focusOrder": [
     6,
@@ -2373,10 +2348,10 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                   "token": "metrics.hit",
                 },
                 "paddingLeft": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingRight": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingTop": {
                   "token": "metrics.gap",
@@ -2392,7 +2367,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                   "count": 1,
                   "itemSize": 160,
                   "metadata": {
-                    "fixedItems": true,
+                    "fixedItems": false,
                   },
                   "range": [
                     0,
@@ -2406,8 +2381,8 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                     {
                       "style": {
                         "display": "flex",
-                        "flexDirection": "row",
-                        "flexGrow": 1,
+                        "flexDirection": "column",
+                        "flexGrow": null,
                         "gap": {
                           "token": "metrics.inset",
                         },
@@ -2439,31 +2414,30 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "alignItems": "center",
+                            "background": null,
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
                             "display": "flex",
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexDirection": "column",
-                            "flexGrow": 1,
-                            "flexShrink": 1,
+                            "flexDirection": "row",
                             "fontSize": {
                               "token": "typography.body",
                             },
                             "gap": {
-                              "token": "metrics.media_inset",
+                              "token": "metrics.gap",
                             },
-                            "minHeight": {
-                              "token": "metrics.hit",
+                            "height": {
+                              "token": "metrics.row",
                             },
-                            "minWidth": {
-                              "token": "metrics.hit",
+                            "paddingLeft": {
+                              "token": "metrics.gap",
                             },
-                            "overflow": "hidden",
-                            "paddingBottom": {
-                              "token": "metrics.inset",
+                            "paddingRight": {
+                              "token": "metrics.gap",
                             },
                           },
                           "tabIndex": -1,
@@ -2480,13 +2454,19 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.control_radius",
+                                  "token": "metrics.inner_radius",
                                 },
                                 "display": "flex",
-                                "flexGrow": 1,
+                                "flexShrink": 0,
+                                "height": {
+                                  "token": "metrics.media_row_thumb_height",
+                                },
                                 "justifyContent": "center",
                                 "overflow": "hidden",
                                 "position": "relative",
+                                "width": {
+                                  "token": "metrics.media_row_thumb_width",
+                                },
                               },
                             },
                             "",
@@ -2502,7 +2482,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.muted",
                                     },
                                     "symbolSize": {
-                                      "token": "metrics.media_folder_glyph",
+                                      "token": "metrics.symbol_inline",
                                     },
                                   },
                                 },
@@ -2515,8 +2495,15 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                             "div",
                             {
                               "style": {
+                                "alignItems": "center",
                                 "display": "flex",
-                                "flexDirection": "column",
+                                "flexDirection": "row",
+                                "flexGrow": 1,
+                                "flexShrink": 1,
+                                "gap": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
                               },
                             },
                             "",
@@ -2547,49 +2534,34 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                   ],
                                 ],
                               ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.muted",
+                                },
+                                "flexShrink": 0,
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
                               [
                                 "text",
-                                {
-                                  "style": {
-                                    "color": {
-                                      "token": "colors.muted",
-                                    },
-                                    "fontSize": {
-                                      "token": "typography.minimum",
-                                    },
-                                    "fontVariantNumeric": "tabular-nums",
-                                    "overflow": "hidden",
-                                    "textOverflow": "ellipsis",
-                                    "whiteSpace": "nowrap",
-                                  },
-                                },
-                                "",
-                                [
-                                  [
-                                    "text",
-                                    {},
-                                    "Syncing…",
-                                    [],
-                                  ],
-                                ],
+                                {},
+                                "Syncing…",
+                                [],
                               ],
                             ],
                           ],
                         ],
-                      ],
-                      [
-                        "div",
-                        {
-                          "style": {
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexGrow": 1,
-                            "flexShrink": 1,
-                          },
-                        },
-                        "",
-                        [],
                       ],
                     ],
                   ],
@@ -3480,17 +3452,6 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
       "selected": null,
       "value": null,
     },
-    {
-      "actions": [],
-      "disabled": false,
-      "id": 19,
-      "label": null,
-      "multiselectable": false,
-      "role": "GenericContainer",
-      "rowCount": null,
-      "selected": null,
-      "value": null,
-    },
   ],
   "focusOrder": [
     6,
@@ -3675,10 +3636,10 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                   "token": "metrics.hit",
                 },
                 "paddingLeft": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingRight": {
-                  "token": "metrics.inset",
+                  "token": "metrics.gap",
                 },
                 "paddingTop": {
                   "token": "metrics.gap",
@@ -3694,7 +3655,7 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                   "count": 1,
                   "itemSize": 160,
                   "metadata": {
-                    "fixedItems": true,
+                    "fixedItems": false,
                   },
                   "range": [
                     0,
@@ -3708,8 +3669,8 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                     {
                       "style": {
                         "display": "flex",
-                        "flexDirection": "row",
-                        "flexGrow": 1,
+                        "flexDirection": "column",
+                        "flexGrow": null,
                         "gap": {
                           "token": "metrics.inset",
                         },
@@ -3741,31 +3702,30 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "alignItems": "center",
+                            "background": null,
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
                             "display": "flex",
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexDirection": "column",
-                            "flexGrow": 1,
-                            "flexShrink": 1,
+                            "flexDirection": "row",
                             "fontSize": {
                               "token": "typography.body",
                             },
                             "gap": {
-                              "token": "metrics.media_inset",
+                              "token": "metrics.gap",
                             },
-                            "minHeight": {
-                              "token": "metrics.hit",
+                            "height": {
+                              "token": "metrics.row",
                             },
-                            "minWidth": {
-                              "token": "metrics.hit",
+                            "paddingLeft": {
+                              "token": "metrics.gap",
                             },
-                            "overflow": "hidden",
-                            "paddingBottom": {
-                              "token": "metrics.inset",
+                            "paddingRight": {
+                              "token": "metrics.gap",
                             },
                           },
                           "tabIndex": -1,
@@ -3782,13 +3742,19 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.control_radius",
+                                  "token": "metrics.inner_radius",
                                 },
                                 "display": "flex",
-                                "flexGrow": 1,
+                                "flexShrink": 0,
+                                "height": {
+                                  "token": "metrics.media_row_thumb_height",
+                                },
                                 "justifyContent": "center",
                                 "overflow": "hidden",
                                 "position": "relative",
+                                "width": {
+                                  "token": "metrics.media_row_thumb_width",
+                                },
                               },
                             },
                             "",
@@ -3804,7 +3770,7 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.muted",
                                     },
                                     "symbolSize": {
-                                      "token": "metrics.media_folder_glyph",
+                                      "token": "metrics.symbol_inline",
                                     },
                                   },
                                 },
@@ -3817,8 +3783,15 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                             "div",
                             {
                               "style": {
+                                "alignItems": "center",
                                 "display": "flex",
-                                "flexDirection": "column",
+                                "flexDirection": "row",
+                                "flexGrow": 1,
+                                "flexShrink": 1,
+                                "gap": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
                               },
                             },
                             "",
@@ -3849,49 +3822,34 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                   ],
                                 ],
                               ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.danger",
+                                },
+                                "flexShrink": 0,
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
                               [
                                 "text",
-                                {
-                                  "style": {
-                                    "color": {
-                                      "token": "colors.danger",
-                                    },
-                                    "fontSize": {
-                                      "token": "typography.minimum",
-                                    },
-                                    "fontVariantNumeric": "tabular-nums",
-                                    "overflow": "hidden",
-                                    "textOverflow": "ellipsis",
-                                    "whiteSpace": "nowrap",
-                                  },
-                                },
-                                "",
-                                [
-                                  [
-                                    "text",
-                                    {},
-                                    "Folder not found",
-                                    [],
-                                  ],
-                                ],
+                                {},
+                                "Folder not found",
+                                [],
                               ],
                             ],
                           ],
                         ],
-                      ],
-                      [
-                        "div",
-                        {
-                          "style": {
-                            "flexBasis": {
-                              "token": "metrics.thumbnail_min",
-                            },
-                            "flexGrow": 1,
-                            "flexShrink": 1,
-                          },
-                        },
-                        "",
-                        [],
                       ],
                     ],
                   ],

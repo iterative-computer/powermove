@@ -233,6 +233,41 @@ pub fn record_id(record: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
 }
+/// Each name in `names` as a menu shows it: one that repeats an earlier name
+/// gets its number ("Design (edited) (2)"), as project tabs and Home's cards
+/// tell alike names apart. Profiles from v1 can hold several workspaces of
+/// one name (v1 forked "Design (edited)" on each edit of a built-in).
+pub fn told_apart(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let before = names[..i].iter().filter(|n| *n == name).count();
+            if before == 0 {
+                name.clone()
+            } else {
+                format!("{name} ({})", before + 1)
+            }
+        })
+        .collect()
+}
+/// A name for a workspace to save that no other of `taken` has: `wanted`,
+/// else `wanted 2`, `wanted 3`, ...
+pub fn free_name(wanted: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == wanted) {
+        return wanted.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{wanted} {n}"))
+        .find(|name| !taken.iter().any(|t| t == name))
+        .expect("a free number")
+}
+/// What Save Workspace offers (v1's): the current name, without v1's
+/// " (edited)", and " copy", free among the workspaces there are.
+pub fn save_name(current: &str, taken: &[String]) -> String {
+    let base = current.strip_suffix(" (edited)").unwrap_or(current);
+    free_name(&format!("{base} copy"), taken)
+}
 pub fn record_name(record: &Value) -> &str {
     record
         .get("name")
@@ -683,6 +718,29 @@ pub enum Write {
     Default(String),
 }
 
+#[cfg(test)]
+mod name_tests {
+    use super::{free_name, save_name, told_apart};
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+    /// Acceptance run 20: the menu listed "Design (edited)" three times.
+    #[test]
+    fn alike_workspace_names_are_told_apart_and_never_saved_twice() {
+        let there = names(&["Default", "Edit", "Design (edited)", "Design (edited)", "Design (edited)"]);
+        assert_eq!(
+            told_apart(&there)[2..],
+            names(&["Design (edited)", "Design (edited) (2)", "Design (edited) (3)"])
+        );
+        assert_eq!(told_apart(&there)[..2], there[..2]);
+        // Save offers v1's name, free among those there are.
+        assert_eq!(save_name("Design (edited)", &there), "Design copy");
+        let more = names(&["Design copy", "Design copy 2"]);
+        assert_eq!(save_name("Design (edited)", &more), "Design copy 3");
+        assert_eq!(free_name("Edit", &there), "Edit 2");
+        assert_eq!(free_name("Mine", &there), "Mine");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

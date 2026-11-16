@@ -124,7 +124,11 @@ visible-row navigation; the snapshots alone do not prove frame-time performance.
   Drag/focus/symbol declarations are inspectable; unsupported native consumption
   is not claimed. NSMenu grouping/recents and OS drag data are platform services.
 - **G6 — Remaining inherited inspector controls.** The kit entry currently has
-  number/text/checkbox/colour/choice controls. Point/fill/font/ramp/custom widgets,
+  number/text/checkbox/colour/choice controls. Parameters are laid out as v1's
+  `parameterLayout` did (`pm_panel_inspector::param_layout`): `…X`/`…Y` pairs are
+  one point row, start/end colours get a gradient bar row, rarely used ones sit
+  under a More row, Amount/Mix last. A point pad and a draggable ramp midpoint,
+  fill/font/custom widgets,
   expression editor/status, property context menus, colour hex composition and
   picker internals need their owning kit/native binding implementations. Unknown
   control metadata displays raw values read-only; the adapter never fabricates

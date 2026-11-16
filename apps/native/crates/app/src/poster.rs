@@ -105,7 +105,16 @@ fn identity() -> String {
         .unwrap_or_default();
     // The poster's own format: posters drawn before offline media was left
     // out (the Media Offline card) are drawn again.
-    format!("{} ({build}) posters 2", crate::updates::current_version())
+    format!("{} ({build}) {FORMAT}", crate::updates::current_version())
+}
+/// The poster format this build draws: offline media left out.
+const FORMAT: &str = "posters 2";
+/// Whether a stored poster is in this build's format: one in an older
+/// format may show the Media Offline card, so it is never shown, only
+/// drawn again.
+pub(crate) fn current_format(stamp_file: &Path) -> bool {
+    std::fs::read_to_string(stamp_file)
+        .is_ok_and(|text| text.lines().nth(2).is_some_and(|by| by.trim().ends_with(FORMAT)))
 }
 /// A stored poster's stamp and the time in the composition it shows. The
 /// stamp is [`STALE`] when another build drew it.
@@ -122,7 +131,7 @@ fn stamp_by(stamp_file: &Path, identity: &str) -> Option<(i64, Option<f64>)> {
 }
 /// Whether a frame shows anything: a flat frame (all black, or one colour
 /// from edge to edge) does not.
-fn has_content(png: &[u8]) -> bool {
+pub(crate) fn has_content(png: &[u8]) -> bool {
     let mut reader = match png::Decoder::new(std::io::Cursor::new(png)).read_info() {
         Ok(reader) => reader,
         Err(_) => return false,
@@ -413,6 +422,21 @@ mod tests {
         assert!(!has_content(b"not a png"));
     }
 
+    #[test]
+    fn only_a_poster_in_this_format_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            super::current_format(&path)
+        };
+        // Older posters (no format, or the first) may hold Media Offline.
+        assert!(!at("a.stamp", "12\n1"));
+        assert!(!at("b.stamp", "12\n1\n0.1.0 (1)"));
+        assert!(at("c.stamp", "12\n1\n0.1.0 (1) posters 2"));
+        assert!(at("d.stamp", "12\n1\n0.2.0 (7) posters 2"), "another build's, same format");
+        assert!(!super::current_format(&dir.path().join("none.stamp")));
+    }
     #[test]
     fn a_poster_is_looked_for_a_third_in_first() {
         let at = times(Some(60.), None);
