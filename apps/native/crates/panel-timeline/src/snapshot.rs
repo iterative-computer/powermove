@@ -338,36 +338,29 @@ impl TimelineIndex {
     /// One stored layer as the timeline reads it.
     fn read_layer(layer: &Node) -> Option<Layer> {
         let id = string(layer.get("id"))?;
-        let owner = id.clone();
         let mut channels = Vec::new();
-        collect_channels(&owner, layer.get("p"), "", &mut channels);
-        collect_direct(&owner, layer.get("d"), "c", &mut channels);
+        collect_channels(layer.get("p"), "", &mut channels);
+        collect_direct(layer.get("d"), "c", &mut channels);
         if let Some(NodeKind::Array(effects)) = layer.get("fx").map(Node::kind) {
             for effect in effects.iter() {
                 if let Some(id) = string(effect.get("id")) {
-                    collect_channels(&owner, effect.get("p"), &id, &mut channels);
-                    collect_channels(
-                        &owner,
-                        effect.get("on"),
-                        &format!("{id}.$enabled"),
-                        &mut channels,
-                    );
+                    collect_channels(effect.get("p"), &id, &mut channels);
+                    collect_channels(effect.get("on"), &format!("{id}.$enabled"), &mut channels);
                 }
             }
         }
         if let Some(NodeKind::Array(masks)) = layer.get("masks").map(Node::kind) {
             for mask in masks.iter() {
                 if let Some(id) = string(mask.get("id")) {
-                    collect_direct(&owner, mask.get("p"), &format!("m.{id}"), &mut channels);
+                    collect_direct(mask.get("p"), &format!("m.{id}"), &mut channels);
                     for field in ["shape", "mode", "on"] {
                         collect_channels(
-                            &owner,
                             mask.get(field),
                             &format!("m.{id}.{field}"),
                             &mut channels,
                         );
                     }
-                    collect_path(&owner, mask.get("path"), &format!("mp.{id}"), &mut channels);
+                    collect_path(mask.get("path"), &format!("mp.{id}"), &mut channels);
                 }
             }
         }
@@ -377,28 +370,17 @@ impl TimelineIndex {
             ("blend", "l.blend"),
             ("mblur", "l.mblur"),
         ] {
-            collect_channels(&owner, layer.get(field), path, &mut channels);
+            collect_channels(layer.get(field), path, &mut channels);
         }
         let content = layer.get("d");
         if string(layer.get("type")).as_deref() == Some("shader") {
-            collect_direct(
-                &owner,
-                content.and_then(|d| d.get("uniforms")),
-                "u",
-                &mut channels,
-            );
+            collect_direct(content.and_then(|d| d.get("uniforms")), "u", &mut channels);
         }
         if string(layer.get("type")).as_deref() == Some("extension") {
-            collect_direct(
-                &owner,
-                content.and_then(|d| d.get("params")),
-                "x",
-                &mut channels,
-            );
+            collect_direct(content.and_then(|d| d.get("params")), "x", &mut channels);
         }
         for field in ["transitionIn", "transitionOut"] {
             collect_direct(
-                &owner,
                 layer.get(field).and_then(|t| t.get("p")),
                 &format!("{field}.p"),
                 &mut channels,
@@ -406,18 +388,13 @@ impl TimelineIndex {
         }
         for path in array(content.and_then(|d| d.get("paths"))) {
             if let Some(id) = string(path.get("id")) {
-                collect_path(&owner, Some(path), &format!("g.{id}"), &mut channels);
+                collect_path(Some(path), &format!("g.{id}"), &mut channels);
             }
         }
         for (field, prefix) in [("animators", "ta"), ("styles", "ts")] {
             for item in array(content.and_then(|d| d.get(field))) {
                 if let Some(id) = string(item.get("id")) {
-                    collect_direct(
-                        &owner,
-                        item.get("p"),
-                        &format!("{prefix}.{id}"),
-                        &mut channels,
-                    );
+                    collect_direct(item.get("p"), &format!("{prefix}.{id}"), &mut channels);
                 }
             }
         }
@@ -427,15 +404,9 @@ impl TimelineIndex {
         for (field, prefix) in [("objects", "o"), ("lights", "light")] {
             for item in array(scene.and_then(|s| s.get(field))) {
                 if let Some(id) = string(item.get("id")) {
-                    collect_direct(
-                        &owner,
-                        item.get("p"),
-                        &format!("{prefix}.{id}"),
-                        &mut channels,
-                    );
+                    collect_direct(item.get("p"), &format!("{prefix}.{id}"), &mut channels);
                     if field == "objects" {
                         collect_direct(
-                            &owner,
                             item.get("material").and_then(|m| m.get("p")),
                             &format!("o.{id}.m"),
                             &mut channels,
@@ -446,7 +417,6 @@ impl TimelineIndex {
         }
         for field in ["camera", "environment"] {
             collect_direct(
-                &owner,
                 scene.and_then(|s| s.get(field)).and_then(|n| n.get("p")),
                 field,
                 &mut channels,
@@ -658,10 +628,7 @@ impl TimelineIndex {
             .collect()
     }
 }
-/// The channels under `node`. A key stored without an id (v1 writes a shape
-/// path's vertex keys so) gets [`pm_kernel::model::derived_key_id`], from
-/// `layer`, the channel and its place in the track: never stored.
-fn collect_channels(layer: &str, node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
+fn collect_channels(node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
     let Some(node) = node else {
         return;
     };
@@ -671,12 +638,9 @@ fn collect_channels(layer: &str, node: Option<&Node>, prefix: &str, out: &mut Ve
             let keys = match node.get("kf").map(Node::kind) {
                 Some(NodeKind::Array(keys)) => keys
                     .iter()
-                    .enumerate()
-                    .filter_map(|(index, key)| {
+                    .filter_map(|key| {
                         Some(Key {
-                            id: string(key.get("i")).unwrap_or_else(|| {
-                                pm_kernel::model::derived_key_id(layer, &path, index)
-                            }),
+                            id: string(key.get("i"))?,
                             time: number(key.get("t"))?,
                             value: key.get("v").map(Node::to_value).unwrap_or(Value::Null),
                             stored: key.clone(),
@@ -729,7 +693,7 @@ fn array(node: Option<&Node>) -> &[Node] {
         _ => &[],
     }
 }
-fn collect_direct(layer: &str, node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
+fn collect_direct(node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
     if let Some(NodeKind::Object(fields)) = node.map(Node::kind) {
         for (key, child) in fields.iter() {
             if child.get("kf").is_some() && child.get("v").is_some() {
@@ -738,16 +702,16 @@ fn collect_direct(layer: &str, node: Option<&Node>, prefix: &str, out: &mut Vec<
                 } else {
                     format!("{prefix}.{}", key.to_string_lossy())
                 };
-                collect_channels(layer, Some(child), &path, out);
+                collect_channels(Some(child), &path, out);
             }
         }
     }
 }
-fn collect_path(layer: &str, path: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
-    collect_direct(layer, path.and_then(|p| p.get("p")), prefix, out);
+fn collect_path(path: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
+    collect_direct(path.and_then(|p| p.get("p")), prefix, out);
     for vertex in array(path.and_then(|p| p.get("vertices"))) {
         if let Some(id) = string(vertex.get("id")) {
-            collect_direct(layer, vertex.get("p"), &format!("{prefix}.v.{id}"), out);
+            collect_direct(vertex.get("p"), &format!("{prefix}.v.{id}"), out);
         }
     }
 }

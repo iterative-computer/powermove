@@ -2596,9 +2596,9 @@ fn ruler_menu_groups_marker_work_area_and_the_switch() {
     );
     assert_eq!(menu[1].id, MenuItem::SEPARATOR);
 }
-/// PM-462: v1.2.0 stores a shape path's vertex keys without ids. The index
-/// shows them under derived ids, a click selects one, a nudge moves it, and
-/// the document stores it without an id again.
+/// PM-462: v1.2.0 stores a shape path's vertex keys without ids. The
+/// kernel names them on read; the timeline shows them, a click selects one,
+/// a nudge moves it, and it keeps its id.
 #[test]
 fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     let key = |t: f64, v: f64| {
@@ -2620,22 +2620,22 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
         .iter()
         .map(|k| k.id.clone())
         .collect();
-    let derived = |i| pm_kernel::model::derived_key_id("s", channel, i);
-    assert_eq!(ids, [derived(0), derived(1)]);
+    let named = |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
+    assert_eq!(ids, [named(0), named(1)]);
     assert_eq!(c.model.track_channels("s", "g.outline.v.v0.y")[0].keys.len(), 1);
     let calls = c
         .model
-        .select_keys("s", channel, &[derived(1)], false, false)
+        .select_keys("s", channel, &[named(1)], false, false)
         .unwrap();
     for call in calls {
         block_on(c.call(call)).unwrap();
     }
-    assert_eq!(c.model.selection.keys(), [derived(1)]);
+    assert_eq!(c.model.selection.keys(), [named(1)]);
     command(&mut c, "nudgeKeyframes", 0.);
     c.sync().unwrap();
     let keys = &c.model.track_channels("s", channel)[0].keys;
     assert_eq!(keys.len(), 2);
+    assert_eq!(keys[1].id, named(1));
     assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
-    assert!(keys.iter().all(|k| k.stored.get("i").is_none()), "stored without ids");
-    assert_eq!(c.model.selection.keys(), [derived(1)]);
+    assert_eq!(c.model.selection.keys(), [named(1)]);
 }

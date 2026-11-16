@@ -273,45 +273,9 @@ pub fn group_ancestors<'a>(comp: &'a Node, layer: &'a Node) -> Vec<&'a Node> {
     out
 }
 
-/// The id of a key stored without one (v1 writes a shape path's vertex keys
-/// so): derived, never stored, from its layer, its channel (v1's name:
-/// `g.<path>.v.<vertex>.<x|y>`) and its place in the track, so the same key
-/// has the same id on every open of the same file. The timeline, selection
-/// and every keyframe command use it as they use a stored id; nothing writes
-/// it into the document.
-pub fn derived_key_id(layer: &str, channel: &str, index: usize) -> String {
-    format!("~{layer}~{channel}~{index}")
-}
-/// `(layer, channel, index)` of a [`derived_key_id`].
-pub fn parse_derived_key_id(id: &str) -> Option<(&str, &str, usize)> {
-    let rest = id.strip_prefix('~')?;
-    let (head, index) = rest.rsplit_once('~')?;
-    let (layer, channel) = head.split_once('~')?;
-    Some((layer, channel, index.parse().ok()?))
-}
-
 /// Every keyframe id (`i`) under the layers of a composition: any object
 /// with a `kf` array counts as a channel (layer, effect, mask and transition
 /// channels alike).
-/// Whether a [`derived_key_id`] names a key stored without an id in the
-/// project.
-pub fn derived_key_exists(root: &Node, id: &str) -> bool {
-    let Some((layer_id, channel, index)) = parse_derived_key_id(id) else {
-        return false;
-    };
-    let Some(layer) = find_layer(root, layer_id).and_then(|loc| layer_at(root, &loc)) else {
-        return false;
-    };
-    let layer = layer.to_value();
-    crate::commands::channels::find(&layer, channel)
-        .and_then(|path| crate::commands::channels::get(&layer, &path).cloned())
-        .is_some_and(|prop| {
-            crate::commands::track::keys_of(&prop)
-                .get(index)
-                .is_some_and(|k| k.get("i").is_none())
-        })
-}
-
 pub fn keyframe_ids(comp: &Node, out: &mut std::collections::HashSet<String>) {
     fn walk(node: &Node, out: &mut std::collections::HashSet<String>) {
         match node.kind() {
@@ -511,9 +475,201 @@ pub fn to_canonical(project: pm_model::Value) -> pm_model::Value {
         }
         _ => false,
     };
-    if already {
+    let mut project = if already {
         project
     } else {
         pm_model::canonical::canonical_project(project)
+    };
+    name_keys_without_ids(&mut project);
+    project
+}
+
+// ── keys stored without ids ────────────────────────────────────────────────
+//
+// v1.2.0 stores a shape path's vertex keys without the `i` every other key
+// has. When a project is read, such a key is given an id derived from its
+// composition, layer, property path and place in its track, so the same key
+// has the same id on every open of the same file. It lives on the key for
+// the session (a moved key keeps it) and is taken off whenever the project
+// is written ([`strip_derived_key_ids`], [`without_derived_key_ids`]): the
+// file keeps v1's form. The timeline, selection, every keyframe command and
+// undo use it as any id.
+
+/// The id a key stored without one is given (see above).
+pub fn derived_key_id(comp: &str, layer: &str, path: &str, index: usize) -> String {
+    format!("~{comp}~{layer}~{path}~{index}")
+}
+
+/// Whether `id` is a [`derived_key_id`] (never stored).
+pub fn is_derived_key_id(id: &str) -> bool {
+    id.strip_prefix('~')
+        .and_then(|rest| rest.rsplit_once('~'))
+        .is_some_and(|(head, index)| {
+            index.parse::<usize>().is_ok() && head.matches('~').count() >= 2
+        })
+}
+
+/// Gives every key stored without an id in a canonical project its
+/// [`derived_key_id`]. Keys with ids are left alone, so naming twice is
+/// naming once.
+pub fn name_keys_without_ids(project: &mut pm_model::Value) {
+    use pm_model::Value;
+    fn walk(v: &mut Value, comp: &str, layer: &str, path: &mut String) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::Array(keys)) = m.get_mut("kf") {
+                    for (index, key) in keys.iter_mut().enumerate() {
+                        if let Value::Object(k) = key
+                            && k.get("i").is_none()
+                        {
+                            let id = derived_key_id(comp, layer, path, index);
+                            k.insert("i", Value::from(id.as_str()));
+                        }
+                    }
+                }
+                for (name, child) in m.iter_mut() {
+                    if name.as_bytes() == b"kf" {
+                        continue;
+                    }
+                    let len = path.len();
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&name.to_string_lossy());
+                    walk(child, comp, layer, path);
+                    path.truncate(len);
+                }
+            }
+            Value::Array(items) => {
+                for (i, child) in items.iter_mut().enumerate() {
+                    let len = path.len();
+                    // A record is named by its id: the path stays the same
+                    // when a sibling is added or removed before it.
+                    let name = child
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| i.to_string(), str::to_owned);
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&name);
+                    walk(child, comp, layer, path);
+                    path.truncate(len);
+                }
+            }
+            _ => {}
+        }
     }
+    fn layers(list: Option<&mut Value>, comp: &str) {
+        for layer in list
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            let id = layer
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            walk(layer, comp, &id, &mut String::new());
+        }
+    }
+    let Some(root) = project.as_object_mut() else {
+        return;
+    };
+    layers(root.get_mut("layers"), "");
+    if let Some(comps) = root.get_mut("comps").and_then(Value::as_object_mut) {
+        for (id, comp) in comps.iter_mut() {
+            let id = id.to_string_lossy();
+            layers(comp.as_object_mut().and_then(|c| c.get_mut("layers")), &id);
+        }
+    }
+}
+
+/// Takes every [`derived_key_id`] off a project value (stored or
+/// canonical) about to be written.
+pub fn strip_derived_key_ids(project: &mut pm_model::Value) {
+    use pm_model::Value;
+    match project {
+        Value::Object(m) => {
+            if let Some(Value::Array(keys)) = m.get_mut("kf") {
+                for key in keys.iter_mut() {
+                    if let Value::Object(k) = key
+                        && k.get("i").and_then(Value::as_str).is_some_and(is_derived_key_id)
+                    {
+                        k.remove("i");
+                    }
+                }
+            }
+            for (_, child) in m.iter_mut() {
+                strip_derived_key_ids(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_derived_key_ids),
+        _ => {}
+    }
+}
+
+/// The document without its [`derived_key_id`]s, for a save: the same
+/// document when it has none.
+pub fn without_derived_key_ids(
+    document: &std::sync::Arc<pm_model::Document>,
+) -> std::sync::Arc<pm_model::Document> {
+    fn walk(node: &Node, path: &mut Vec<PathPart>, out: &mut Vec<Vec<PathPart>>) {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                if let Some(NodeKind::Array(keys)) = map.get("kf".as_bytes()).map(Node::kind) {
+                    for (index, key) in keys.iter().enumerate() {
+                        if key.get("i").and_then(str_of).is_some_and(is_derived_key_id) {
+                            let mut at = path.clone();
+                            at.extend([
+                                PathPart::Key(JsString::from("kf")),
+                                PathPart::Index(index as f64),
+                                PathPart::Key(JsString::from("i")),
+                            ]);
+                            out.push(at);
+                        }
+                    }
+                }
+                for (name, child) in map.iter() {
+                    if matches!(child.kind(), NodeKind::Object(_) | NodeKind::Array(_)) {
+                        path.push(PathPart::Key(name.clone()));
+                        walk(child, path, out);
+                        path.pop();
+                    }
+                }
+            }
+            NodeKind::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    if matches!(child.kind(), NodeKind::Object(_) | NodeKind::Array(_)) {
+                        path.push(PathPart::Index(i as f64));
+                        walk(child, path, out);
+                        path.pop();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(root) = document.root() else {
+        return document.clone();
+    };
+    let mut deletes = Vec::new();
+    walk(root, &mut Vec::new(), &mut deletes);
+    if deletes.is_empty() {
+        return document.clone();
+    }
+    let ops: Vec<pm_model::Op> = deletes
+        .into_iter()
+        .map(|path| pm_model::Op::Leaf(pm_model::patch::Patch::delete(path)))
+        .collect();
+    let revision = document.revision();
+    let mut stripped = pm_model::Document::from_root(Some(root.clone()), revision);
+    if stripped.apply_ops_at(&ops, revision + 1).is_err() {
+        // Not expected (the paths come from this tree): strip a copy.
+        let mut value = root.to_value();
+        strip_derived_key_ids(&mut value);
+        stripped = pm_model::Document::new(Some(value), revision);
+    }
+    std::sync::Arc::new(stripped)
 }

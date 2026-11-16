@@ -182,8 +182,6 @@ struct Gesture {
     base: Arc<Document>,
     base_token: u64,
     scopes: Vec<Vec<PathPart>>,
-    /// The last step's renames from the start (see [`Staged::renamed`]).
-    renamed: Vec<(String, String)>,
 }
 
 /// A transaction staged on a scratch tree, not yet published.
@@ -196,9 +194,6 @@ struct Staged {
     /// Where each inverse was captured (for the leaf-patch file form).
     scopes: Vec<Vec<PathPart>>,
     changed: bool,
-    /// Keys stored without ids that moved within their track, `(before,
-    /// after)` derived ids: the selection follows them.
-    renamed: Vec<(String, String)>,
 }
 
 /// A durable state change, in order, for the kernel journal
@@ -257,10 +252,6 @@ pub struct DocumentStore {
     /// and open composition it was judged with.
     archive_judged: Arc<std::sync::Mutex<Option<ArchiveJudgment>>>,
     selection: Selection,
-    /// Keys stored without ids that a history step moved within their
-    /// track, `(before, after)` derived ids by the step's record: Undo and
-    /// Redo keep such a key selected (in memory only).
-    key_renames: std::collections::HashMap<u64, Vec<(String, String)>>,
     queries: QueryContext,
     gesture: Option<Gesture>,
     state_token: u64,
@@ -402,7 +393,6 @@ impl DocumentStore {
             history_owned,
             archive_judged: Default::default(),
             selection: Selection::default(),
-            key_renames: Default::default(),
             queries,
             gesture: None,
             state_token: token,
@@ -666,13 +656,6 @@ impl DocumentStore {
             if let Some(comp) = model::comp_node(root, model::open_comp_id(root).as_deref()) {
                 model::keyframe_ids(comp, &mut keys);
             }
-            // A key stored without an id stays selected while its derived id
-            // names one.
-            for id in self.selection.keys() {
-                if model::derived_key_exists(root, id) {
-                    keys.insert(id.clone());
-                }
-            }
             keys
         });
         self.selection.prune(&layers, keys.as_ref())
@@ -822,10 +805,6 @@ impl DocumentStore {
         for item in staged.media {
             self.file.media.insert(item);
         }
-        self.selection.rename_keys(&staged.renamed);
-        if !staged.renamed.is_empty() {
-            self.key_renames.insert(record, staged.renamed);
-        }
         self.publish(staged.document, forward, cause);
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -921,7 +900,6 @@ impl DocumentStore {
             base: self.current.clone(),
             base_token: self.state_token,
             scopes: Vec::new(),
-            renamed: Vec::new(),
         });
         Ok(id)
     }
@@ -952,13 +930,7 @@ impl DocumentStore {
             }
             return Ok(None);
         }
-        let gesture = self.gesture_mut(id)?;
-        gesture.scopes.extend(staged.scopes);
-        gesture.renamed = crate::selection::compose_renames(
-            std::mem::take(&mut gesture.renamed),
-            staged.renamed.clone(),
-        );
-        self.selection.rename_keys(&staged.renamed);
+        self.gesture_mut(id)?.scopes.extend(staged.scopes);
         let revision = staged.document.revision();
         self.publish(
             staged.document,
@@ -993,14 +965,7 @@ impl DocumentStore {
             return Ok(None);
         }
         let step = self.stage_ops(&ops, false)?;
-        let gesture = self.gesture_mut(id)?;
-        gesture.scopes.extend(staged.scopes);
-        // The selection names the keys as the last step left them: back to
-        // the start's names, then this step's.
-        let back = crate::selection::invert_renames(&gesture.renamed);
-        gesture.renamed = staged.renamed.clone();
-        self.selection.rename_keys(&back);
-        self.selection.rename_keys(&staged.renamed);
+        self.gesture_mut(id)?.scopes.extend(staged.scopes);
         let revision = step.document.revision();
         self.publish(
             step.document,
@@ -1039,9 +1004,6 @@ impl DocumentStore {
             None,
             self.revision(),
         );
-        if !gesture.renamed.is_empty() {
-            self.key_renames.insert(record, gesture.renamed);
-        }
         self.history_owned = true;
         self.tap_push();
         self.set_state_token(self.history.state_token());
@@ -1059,8 +1021,6 @@ impl DocumentStore {
         };
         let ops = diff_node_ops(self.current.root(), gesture.base.root());
         let base_token = gesture.base_token;
-        let back = crate::selection::invert_renames(&gesture.renamed);
-        self.selection.rename_keys(&back);
         if !ops.is_empty() {
             let staged = self.stage_ops(&ops, false)?;
             self.publish(
@@ -1101,7 +1061,6 @@ impl DocumentStore {
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
-        let mut renamed = Vec::new();
         let mut presets = crate::commands::properties::Presets::default();
         // Flush before any other command can read or override the animation,
         // and once more at the end, matching runCommands/finishPresets.
@@ -1136,16 +1095,12 @@ impl DocumentStore {
                 (_, Some(c)) => {
                     crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
                 }
-                (Some(c), None) => {
-                    let (ops, moved) = c.plan_renamed(
-                        tree,
-                        origin,
-                        self.runtime_state.as_ref(),
-                        self.text_host.as_ref(),
-                    )?;
-                    renamed = crate::selection::compose_renames(renamed, moved);
-                    ops
-                }
+                (Some(c), None) => c.plan_with_state(
+                    tree,
+                    origin,
+                    self.runtime_state.as_ref(),
+                    self.text_host.as_ref(),
+                )?,
                 (None, None) => Vec::new(),
             };
             for op in ops {
@@ -1193,7 +1148,6 @@ impl DocumentStore {
             inverse,
             scopes,
             changed,
-            renamed,
         })
     }
 
@@ -1232,7 +1186,6 @@ impl DocumentStore {
             inverse,
             scopes: vec![],
             changed,
-            renamed: vec![],
         })
     }
 
@@ -1353,7 +1306,6 @@ impl DocumentStore {
             inverse,
             scopes,
             changed,
-            renamed: vec![],
         })
     }
 
@@ -1629,7 +1581,8 @@ impl DocumentStore {
             doc_id: self.doc_id,
             state_token: self.state_token,
             outside_writes: self.outside_writes,
-            document: self.current.clone(),
+            // Ids given to keys stored without one stay in memory.
+            document: model::without_derived_key_ids(&self.current),
             had_comps: self.file.envelope.had_comps,
             history,
             workspace: self.file.envelope.workspace.clone(),
@@ -2214,17 +2167,11 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let renamed = self.key_renames.get(&record.id).cloned().unwrap_or_default();
-        let (ops, reverse) = self.renaming_keys(
-            &crate::selection::invert_renames(&renamed),
-            |store| {
-                store.history_step(
-                    &record.inverse.to_vec().into(),
-                    &record.forward.to_vec().into(),
-                    ChangeCause::Undo {
-                        label: record.label.clone(),
-                    },
-                )
+        let (ops, reverse) = self.history_step(
+            &record.inverse.to_vec().into(),
+            &record.forward.to_vec().into(),
+            ChangeCause::Undo {
+                label: record.label.clone(),
             },
         )?;
         self.history.mark_undone();
@@ -2264,16 +2211,13 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let renamed = self.key_renames.get(&record.id).cloned().unwrap_or_default();
-        let (ops, reverse) = self.renaming_keys(&renamed, |store| {
-            store.history_step(
-                &record.forward.to_vec().into(),
-                &record.inverse.to_vec().into(),
-                ChangeCause::Redo {
-                    label: record.label.clone(),
-                },
-            )
-        })?;
+        let (ops, reverse) = self.history_step(
+            &record.forward.to_vec().into(),
+            &record.inverse.to_vec().into(),
+            ChangeCause::Redo {
+                label: record.label.clone(),
+            },
+        )?;
         self.history.mark_redone();
         self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
@@ -2284,25 +2228,6 @@ impl DocumentStore {
             reverse,
             label: record.label,
         })
-    }
-
-    /// Runs an Undo or Redo step with the selection's keys renamed first
-    /// (`(before, after)`, see `key_renames`), so the step's pruning finds
-    /// them; a failed step puts the names back.
-    fn renaming_keys<T>(
-        &mut self,
-        renamed: &[(String, String)],
-        step: impl FnOnce(&mut Self) -> Result<T, TransactionError>,
-    ) -> Result<T, TransactionError> {
-        let before = self.selection.clone();
-        self.selection.rename_keys(renamed);
-        let result = step(self);
-        if result.is_err() {
-            self.selection = before;
-        } else if !renamed.is_empty() {
-            self.emit(StoreEvent::SelectionChanged);
-        }
-        result
     }
 
     /// Replaces the selection (a cancelled edit restores the one it began

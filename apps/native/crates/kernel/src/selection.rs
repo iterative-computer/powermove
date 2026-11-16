@@ -156,21 +156,6 @@ impl Selection {
             .collect();
     }
 
-    /// Renames selected keys at once, `(before, after)` (a key stored
-    /// without an id that an edit moved within its track).
-    pub(crate) fn rename_keys(&mut self, renamed: &[(String, String)]) {
-        if renamed.is_empty() {
-            return;
-        }
-        let rename = |id: &mut String| {
-            if let Some((_, after)) = renamed.iter().find(|(before, _)| before == id) {
-                *id = after.clone();
-            }
-        };
-        self.keys.iter_mut().for_each(rename);
-        self.key_layers.iter_mut().for_each(|(_, k)| rename(k));
-    }
-
     pub(crate) fn set_channel(&mut self, channel: Option<String>) {
         self.channel = channel;
     }
@@ -247,35 +232,4 @@ mod tests {
         assert_eq!(s.keys(), ["j"], "k went with layer a");
         assert_eq!(s.key_layers(), [("b".to_owned(), "j".to_owned())]);
     }
-}
-
-/// `first` then `then`, as one list of `(before, after)` key renames.
-pub(crate) fn compose_renames(
-    first: Vec<(String, String)>,
-    then: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    if first.is_empty() {
-        return then;
-    }
-    let mut out: Vec<(String, String)> = first
-        .iter()
-        .map(|(a, b)| {
-            let c = then.iter().find(|(x, _)| x == b).map_or(b, |(_, c)| c);
-            (a.clone(), c.clone())
-        })
-        .collect();
-    out.extend(
-        then.into_iter()
-            .filter(|(x, _)| !first.iter().any(|(_, b)| b == x)),
-    );
-    out.retain(|(a, b)| a != b);
-    out
-}
-
-/// The renames undone.
-pub(crate) fn invert_renames(renamed: &[(String, String)]) -> Vec<(String, String)> {
-    renamed
-        .iter()
-        .map(|(a, b)| (b.clone(), a.clone()))
-        .collect()
 }

@@ -493,13 +493,6 @@ fn edit_tracks(
     if ids.is_empty() {
         return Ok(());
     }
-    // Keys stored without ids, by the (layer, channel) their derived ids
-    // name: those tracks are searched as well.
-    let derived: HashSet<(&str, &str)> = ids
-        .iter()
-        .filter_map(|id| crate::model::parse_derived_key_id(id))
-        .map(|(layer, channel, _)| (layer, channel))
-        .collect();
     // Only a layer holding one of the keys is converted and searched.
     let locs = cx.all_layers();
     let held = {
@@ -507,28 +500,21 @@ fn edit_tracks(
             .iter()
             .map(|loc| cx.layer_node(loc))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut held = crate::model::holding_keys(&nodes, &|i| ids.contains(i));
-        for (node, held) in nodes.iter().zip(held.iter_mut()) {
-            if let Some(id) = node.get("id").and_then(crate::model::str_of)
-                && derived.iter().any(|(layer, _)| *layer == id)
-            {
-                *held += 1;
-            }
-        }
-        held
+        crate::model::holding_keys(&nodes, &|i| ids.contains(i))
     };
     for (loc, held) in locs.into_iter().zip(held) {
         if held == 0 {
             continue;
         }
         let layer = cx.layer_node(&loc)?.to_value();
-        let layer_id = values::text(&layer, "id").unwrap_or_default().to_owned();
         let hits: Vec<(String, Vec<Step>)> = channels::keyed(&layer)
             .into_iter()
-            .filter(|(channel, path)| {
+            .filter(|(_, path)| {
                 channels::get(&layer, path).is_some_and(|p| {
-                    track::keys_of(p).iter().enumerate().any(|(index, k)| {
-                        ids.contains(track::ident(k, &layer_id, channel, index).as_str())
+                    track::keys_of(p).iter().any(|k| {
+                        k.get("i")
+                            .and_then(Value::as_str)
+                            .is_some_and(|i| ids.contains(i))
                     })
                 })
             })
@@ -536,19 +522,13 @@ fn edit_tracks(
         if hits.is_empty() {
             continue;
         }
+        let layer_id = values::text(&layer, "id").unwrap_or_default().to_owned();
         cx.check_lock(&loc, &layer_id)?;
         let snapshot = layer.clone();
         let mut layer = layer;
         for (channel, path) in hits {
             let prop = channels::get_mut(&mut layer, &path).expect("found");
-            // A key stored without an id is addressed by its derived id for
-            // the edit and stored without one again.
-            let named = track::name_keys(prop, &layer_id, &channel);
             f(&snapshot, prop, &channel)?;
-            if named {
-                let moved = track::unname_keys(prop, &layer_id, &channel);
-                cx.renamed.extend(moved);
-            }
         }
         cx.put_layer(&loc, layer)?;
     }
@@ -816,13 +796,16 @@ fn move_keys(cx: &mut Cx<'_>, key_ids: &[String], delta: f64) -> Result<(), Comm
         let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = cx.duration(loc.comp_id.as_deref());
-        let layer_id = values::text(&layer, "id").unwrap_or_default();
-        for (channel, path) in channels::keyed(&layer) {
+        for (_, path) in channels::keyed(&layer) {
             let Some(prop) = channels::get(&layer, &path) else {
                 continue;
             };
-            for (index, k) in track::keys_of(prop).iter().enumerate() {
-                if !ids.contains(track::ident(k, layer_id, &channel, index).as_str()) {
+            for k in track::keys_of(prop) {
+                if !k
+                    .get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| ids.contains(i))
+                {
                     continue;
                 }
                 fps.get_or_insert_with(|| track::safe_fps(cx.fps(loc.comp_id.as_deref())));
@@ -1121,7 +1104,7 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
         let this = (loc.clone(), path.clone());
         for other in cx.all_layers() {
             let node = cx.layer_node(&other)?.to_value();
-            for (_, p) in channels::all(&node) {
+            for (_, p) in channels::keyed(&node) {
                 if other == this.0 && p == this.1 {
                     continue;
                 }
@@ -1356,24 +1339,22 @@ fn graph_edit(cx: &mut Cx<'_>, key_ids: &[String], edit: GraphEdit) -> Result<()
         let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = cx.duration(loc.comp_id.as_deref());
-        let layer_id = values::text(&layer, "id").unwrap_or_default();
-        for (channel, path) in channels::keyed(&layer) {
+        for (_, path) in channels::keyed(&layer) {
             let Some(prop) = channels::get(&layer, &path) else {
                 continue;
             };
             let keys = track::keys_of(prop);
-            let id_of = |index: usize, k: &Value| track::ident(k, layer_id, &channel, index);
-            if !keys
-                .iter()
-                .enumerate()
-                .any(|(index, k)| ids.contains(id_of(index, k).as_str()))
-            {
+            if !keys.iter().any(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| ids.contains(i))
+            }) {
                 continue;
             }
             fps.get_or_insert_with(|| track::safe_fps(cx.fps(loc.comp_id.as_deref())));
-            for (index, k) in keys.iter().enumerate() {
+            for k in keys {
                 let t = track::js_number(k.get("t").unwrap_or(&Value::Null));
-                let id = id_of(index, k);
+                let id = track::key_id(k);
                 items.push(GraphItem {
                     property: properties,
                     selected: ids.contains(id.as_str()),

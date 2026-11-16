@@ -1,12 +1,13 @@
-//! PM-462: v1.2.0 stores a shape path's vertex keys without ids. They are
-//! addressed by a derived id (layer, channel, place in the track) that is
-//! never stored: an edit names them, edits, and stores them without ids
-//! again, so v1.2.0 reads the file as it wrote it.
+//! PM-462: v1.2.0 stores a shape path's vertex keys without ids. When a
+//! project is read such a key gets an id derived from its composition,
+//! layer, property path and place in its track (the same on every open). It
+//! stays on the key for the session and is taken off whenever the project is
+//! written, so v1.2.0 reads the file as it wrote it.
 
 mod common;
 
 use common::*;
-use pm_kernel::model::{derived_key_exists, derived_key_id};
+use pm_kernel::model::{derived_key_id, is_derived_key_id};
 use pm_kernel::project_io::{SaveOptions, SaveTarget};
 use pm_kernel::{Command, DocumentStore, KeyframeCommand, Origin};
 use pm_model::canonical::project_of;
@@ -24,45 +25,63 @@ fn project() -> Value {
     let ys = [key(0.0, 5.0), key(2.0, 25.0)].join(",");
     parse(&format!(
         r##"{{"id":"P","name":"Paths","compId":"C1","compName":"Main","w":200,"h":100,"fps":30,"dur":4,"bg":"#000000","assets":{{}},
-        "layers":[{{"id":"L","type":"shape","name":"Outline","from":0,"dur":4,"p":{{}},
+        "layers":[{{"id":"L","type":"shape","name":"Outline","from":0,"dur":4,"p":{{"opacity":{{"v":100,"kf":[{{"t":0,"v":100,"i":"op"}}],"expr":null}}}},
           "d":{{"shape":"path","color":"#ffffff","paths":[{{"id":"outline","p":{{"closed":{{"v":true,"kf":[],"expr":null}}}},
             "vertices":[{{"id":"v0","p":{{"x":{{"v":0,"kf":[{xs}],"expr":null}},"y":{{"v":5,"kf":[{ys}],"expr":null}}}}}}]}}]}}}}]}}"##
     ))
     .unwrap()
 }
 
-const X: &str = "g.outline.v.v0.x";
+const X: &str = "d.paths.outline.vertices.v0.p.x";
 
+fn id(index: usize) -> String {
+    derived_key_id("C1", "L", X, index)
+}
+
+/// The keys of the vertex's `axis` channel in the store.
 fn keys(store: &DocumentStore, axis: &str) -> Vec<Value> {
     let root = store.root().unwrap();
     let loc = pm_kernel::model::find_layer(root, "L").unwrap();
     let layer = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
-    layer
-        .get("d")
-        .unwrap()
-        .get("paths")
-        .unwrap()
-        .as_array()
-        .unwrap()[0]
-        .get("vertices")
-        .unwrap()
-        .as_array()
-        .unwrap()[0]
-        .get("p")
-        .unwrap()
-        .get(axis)
-        .unwrap()
-        .get("kf")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .clone()
+    let path = format!("d.paths.outline.vertices.v0.p.{axis}");
+    lookup(&layer, &path).get("kf").unwrap().as_array().unwrap().clone()
+}
+
+/// `path` (as a derived id names it: records by id) inside `v`.
+fn lookup<'a>(v: &'a Value, path: &str) -> &'a Value {
+    path.split('.').fold(v, |at, step| match at {
+        Value::Array(items) => items
+            .iter()
+            .find(|i| i.get("id").and_then(Value::as_str) == Some(step))
+            .or_else(|| step.parse::<usize>().ok().and_then(|n| items.get(n)))
+            .unwrap(),
+        _ => at.get(step).unwrap(),
+    })
+}
+
+fn lookup_mut<'a>(v: &'a mut Value, path: &str) -> &'a mut Value {
+    path.split('.').fold(v, |at, step| match at {
+        Value::Array(items) => {
+            let n = items
+                .iter()
+                .position(|i| i.get("id").and_then(Value::as_str) == Some(step))
+                .or_else(|| step.parse().ok())
+                .unwrap();
+            &mut items[n]
+        }
+        Value::Object(m) => m.get_mut(step).unwrap(),
+        _ => panic!("{step}"),
+    })
+}
+
+fn ids(keys: &[Value]) -> Vec<String> {
+    keys.iter()
+        .map(|k| k.get("i").and_then(Value::as_str).unwrap().to_owned())
+        .collect()
 }
 
 fn times(keys: &[Value]) -> Vec<f64> {
-    keys.iter()
-        .map(|k| k.get("t").unwrap().as_f64().unwrap())
-        .collect()
+    keys.iter().map(|k| k.get("t").unwrap().as_f64().unwrap()).collect()
 }
 
 fn run(store: &mut DocumentStore, command: KeyframeCommand) {
@@ -72,163 +91,157 @@ fn run(store: &mut DocumentStore, command: KeyframeCommand) {
         .expect("changed");
 }
 
-#[test]
-fn a_key_stored_without_an_id_is_edited_by_its_derived_id_and_stored_without_one() {
-    let mut store = DocumentStore::new_untitled(project());
-    let before = to_canonical_string(&store.root().unwrap().to_value());
-    let middle = derived_key_id("L", X, 1);
-    assert!(derived_key_exists(store.root().unwrap(), &middle));
-    assert!(!derived_key_exists(
-        store.root().unwrap(),
-        &derived_key_id("L", X, 3)
-    ));
+/// The stored project of a file.
+fn stored(path: &std::path::Path) -> Value {
+    let file = std::fs::File::open(path).unwrap();
+    project_of(&read_container(&file, ReadOptions::default()).unwrap().document).clone()
+}
 
-    // Hold: the key changes, no key gains an id.
+/// Every key under the open composition's stored layers (v1's status line
+/// counts these) and those stored without an id.
+fn counts(project: &Value) -> (usize, usize) {
+    fn walk(v: &Value, out: &mut (usize, usize)) {
+        match v {
+            Value::Object(m) => {
+                for (k, child) in m.iter() {
+                    if k.to_string_lossy() == "kf"
+                        && let Some(keys) = child.as_array()
+                    {
+                        out.0 += keys.len();
+                        out.1 += keys.iter().filter(|k| k.get("i").is_none()).count();
+                    }
+                    walk(child, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|c| walk(c, out)),
+            _ => {}
+        }
+    }
+    let mut out = (0, 0);
+    if let Some(layers) = project.get("layers") {
+        walk(layers, &mut out);
+    }
+    out
+}
+
+/// The ids of the open composition's keys in a store.
+fn key_ids(store: &DocumentStore) -> std::collections::HashSet<String> {
+    let root = store.root().unwrap();
+    let comp =
+        pm_kernel::model::comp_node(root, pm_kernel::model::open_comp_id(root).as_deref()).unwrap();
+    let mut ids = std::collections::HashSet::new();
+    pm_kernel::model::keyframe_ids(comp, &mut ids);
+    ids
+}
+
+#[test]
+fn keys_stored_without_ids_are_named_on_read_and_keep_their_names() {
+    let mut store = DocumentStore::new_untitled(project());
+    assert_eq!(ids(&keys(&store, "x")), [id(0), id(1), id(2)]);
+    assert_eq!(
+        ids(&keys(&store, "y")),
+        [
+            derived_key_id("C1", "L", "d.paths.outline.vertices.v0.p.y", 0),
+            derived_key_id("C1", "L", "d.paths.outline.vertices.v0.p.y", 1)
+        ]
+    );
+    assert!(is_derived_key_id(&id(1)) && !is_derived_key_id("op") && !is_derived_key_id("~x"));
+    let before = to_canonical_string(&store.root().unwrap().to_value());
+
+    // Hold, by its id.
     run(
         &mut store,
         KeyframeCommand::SetHold {
-            key_ids: vec![middle.clone()],
+            key_ids: vec![id(1)],
             hold: true,
         },
     );
-    let x = keys(&store, "x");
-    assert_eq!(x[1].get("outInterp").and_then(Value::as_str), Some("hold"));
-    assert!(
-        x.iter()
-            .chain(keys(&store, "y").iter())
-            .all(|k| k.get("i").is_none())
+    assert_eq!(
+        keys(&store, "x")[1].get("outInterp").and_then(Value::as_str),
+        Some("hold")
     );
     store.undo().unwrap();
-    assert_eq!(
-        to_canonical_string(&store.root().unwrap().to_value()),
-        before
-    );
+    assert_eq!(to_canonical_string(&store.root().unwrap().to_value()), before);
 
-    // A move past its neighbour: the key's place changes, and so does its
-    // derived id; the selection follows it.
-    store.select_keys([middle.clone()]);
+    // A move past its neighbour: the key keeps its id, so the selection and
+    // the commands after it still name it.
+    store.select_keys([id(1)]);
     run(
         &mut store,
         KeyframeCommand::Move {
-            key_ids: vec![middle.clone()],
+            key_ids: vec![id(1)],
             delta: 1.5,
         },
     );
     let x = keys(&store, "x");
     assert_eq!(times(&x), [0.0, 2.0, 2.5]);
-    assert_eq!(x[2].get("v").and_then(Value::as_f64), Some(10.0));
-    assert!(x.iter().all(|k| k.get("i").is_none()));
-    assert_eq!(store.selection().keys(), [derived_key_id("L", X, 2)]);
-    // Undo and Redo keep the same key selected.
-    store.undo().unwrap();
-    assert_eq!(store.selection().keys(), [middle.clone()]);
-    store.redo().unwrap();
-    assert_eq!(store.selection().keys(), [derived_key_id("L", X, 2)]);
-    store.undo().unwrap();
-    assert_eq!(store.selection().keys(), [middle.clone()]);
-    assert_eq!(
-        to_canonical_string(&store.root().unwrap().to_value()),
-        before
-    );
-
-    // The value dialog and Delete address it the same way.
+    assert_eq!(ids(&x), [id(0), id(2), id(1)]);
+    assert_eq!(store.selection().keys(), [id(1)]);
     run(
         &mut store,
         KeyframeCommand::Edit {
-            key_id: middle.clone(),
+            key_id: id(1),
             time: None,
             value: Some(Value::from(12.0)),
         },
     );
-    assert_eq!(
-        keys(&store, "x")[1].get("v").and_then(Value::as_f64),
-        Some(12.0)
-    );
+    assert_eq!(keys(&store, "x")[2].get("v").and_then(Value::as_f64), Some(12.0));
+    store.undo().unwrap();
+    store.undo().unwrap();
+    assert_eq!(store.selection().keys(), [id(1)]);
+    assert_eq!(to_canonical_string(&store.root().unwrap().to_value()), before);
+
+    // Delete takes the key and its selection; the neighbours keep theirs.
     run(
         &mut store,
         KeyframeCommand::Delete {
-            key_ids: vec![middle.clone()],
+            key_ids: vec![id(1)],
         },
     );
-    assert_eq!(times(&keys(&store, "x")), [0.0, 2.0]);
-    assert!(keys(&store, "x").iter().all(|k| k.get("i").is_none()));
+    assert_eq!(ids(&keys(&store, "x")), [id(0), id(2)]);
+    assert!(store.selection().keys().is_empty());
 }
 
 #[test]
-fn a_drag_of_a_key_stored_without_an_id_keeps_it_selected_through_every_step() {
-    let mut store = DocumentStore::new_untitled(project());
-    let first = derived_key_id("L", X, 0);
-    store.select_keys([first.clone()]);
-    let gesture = store
-        .begin_gesture("Move Keyframes", Origin::Interface)
-        .unwrap();
-    for (delta, place) in [(1.5, 1), (0.5, 0), (2.5, 2)] {
-        store
-            .update_gesture_from_start(
-                gesture,
-                &[Command::Keyframe(KeyframeCommand::Move {
-                    key_ids: vec![first.clone()],
-                    delta,
-                })],
-            )
-            .unwrap();
-        assert_eq!(
-            store.selection().keys(),
-            [derived_key_id("L", X, place)],
-            "delta {delta}"
-        );
-    }
-    store.cancel_gesture(gesture).unwrap();
-    assert_eq!(store.selection().keys(), [first.clone()]);
-    // Committed, then undone.
-    let gesture = store
-        .begin_gesture("Move Keyframes", Origin::Interface)
-        .unwrap();
-    store
-        .update_gesture_from_start(
-            gesture,
-            &[Command::Keyframe(KeyframeCommand::Move {
-                key_ids: vec![first.clone()],
-                delta: 2.5,
-            })],
-        )
-        .unwrap();
-    store.commit_gesture(gesture).unwrap();
-    assert_eq!(store.selection().keys(), [derived_key_id("L", X, 2)]);
-    store.undo().unwrap();
-    assert_eq!(store.selection().keys(), [first]);
-}
-
-#[test]
-fn a_saved_edit_keeps_every_other_byte_and_keys_without_ids() {
+fn a_saved_file_keeps_keys_without_ids_and_a_reopen_names_them_the_same() {
     let dir = TempDir::new("pathless-keys");
     let path = dir.path("paths.pmv");
-    save_as(&mut DocumentStore::new_untitled(project()), &path).unwrap();
-    edit_one_and_compare(&path, "L", X, 1);
+    let mut store = DocumentStore::new_untitled(project());
+    run(
+        &mut store,
+        KeyframeCommand::Move {
+            key_ids: vec![id(1)],
+            delta: 1.5,
+        },
+    );
+    save_as(&mut store, &path).unwrap();
+    assert_eq!(
+        counts(&stored(&path)),
+        (6, 5),
+        "only the opacity key is stored with an id"
+    );
+    // Read again, the keys are named by where they now stand.
+    let reopened = open_store(&path);
+    assert_eq!(ids(&keys(&reopened, "x")), [id(0), id(1), id(2)]);
+    assert_eq!(times(&keys(&reopened, "x")), [0.0, 2.0, 2.5]);
+    // The store that saved keeps its names.
+    assert_eq!(ids(&keys(&store, "x")), [id(0), id(2), id(1)]);
+    drop(reopened);
+    edit_one_and_compare(&path, &id(1));
 }
 
-/// Opens `path`, edits key `index` of `channel` on `layer` (stored without
-/// an id) through its derived id, saves in place, reopens, and checks the
-/// stored project is the same byte for byte except that key's value.
-fn edit_one_and_compare(path: &std::path::Path, layer: &str, channel: &str, index: usize) {
-    let stored = |path: &std::path::Path| {
-        let file = std::fs::File::open(path).unwrap();
-        project_of(
-            &read_container(&file, ReadOptions::default())
-                .unwrap()
-                .document,
-        )
-        .clone()
-    };
+/// Opens `path`, edits the key `id` (stored without an id) to a new value,
+/// saves in place, reopens, and checks the stored project is the same byte
+/// for byte except that key's value.
+fn edit_one_and_compare(path: &std::path::Path, id: &str) {
     let before = stored(path);
     let mut store = open_store(path);
-    let id = derived_key_id(layer, channel, index);
-    assert!(derived_key_exists(store.root().unwrap(), &id), "{id}");
+    assert!(key_ids(&store).contains(id), "{id}");
     let edited = 123.25;
     run(
         &mut store,
         KeyframeCommand::Edit {
-            key_id: id.clone(),
+            key_id: id.to_owned(),
             time: None,
             value: Some(Value::from(edited)),
         },
@@ -236,19 +249,20 @@ fn edit_one_and_compare(path: &std::path::Path, layer: &str, channel: &str, inde
     common::save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
     drop(store);
     let mut after = stored(path);
-    let reopened = open_store(path);
-    assert!(
-        derived_key_exists(reopened.root().unwrap(), &id),
-        "reopened: {id}"
-    );
+    assert!(key_ids(&open_store(path)).contains(id), "reopened: {id}");
     // The edited key, then everything else.
-    let key = vertex_key(&mut after, layer, channel, index);
-    assert_eq!(key.get("v").and_then(Value::as_f64), Some(edited));
-    assert!(key.get("i").is_none(), "stored without an id");
-    let old = vertex_key(&mut before.clone(), layer, channel, index)
+    let rest = id.strip_prefix('~').unwrap();
+    let (head, index) = rest.rsplit_once('~').unwrap();
+    let (_comp, rest) = head.split_once('~').unwrap();
+    let (layer, property) = rest.split_once('~').unwrap();
+    let index: usize = index.parse().unwrap();
+    let old = stored_key(&mut before.clone(), layer, property, index)
         .get("v")
         .cloned()
         .unwrap();
+    let key = stored_key(&mut after, layer, property, index);
+    assert_eq!(key.get("v").and_then(Value::as_f64), Some(edited));
+    assert!(key.get("i").is_none(), "stored without an id");
     key.as_object_mut().unwrap().insert("v", old);
     // A save already gives a v1 video asset V2's reading of it
     // (`videoColor: "electron"`, see `project_io.rs`); v1.2.0 ignores the
@@ -256,10 +270,43 @@ fn edit_one_and_compare(path: &std::path::Path, layer: &str, channel: &str, inde
     let mut differ = Vec::new();
     differences(&before, &after, &mut String::new(), &mut differ);
     differ.retain(|d| !(d.starts_with(".assets.") && d.ends_with(".videoColor added")));
-    assert!(
-        differ.is_empty(),
-        "changed beyond the edited key: {differ:?}"
-    );
+    assert!(differ.is_empty(), "changed beyond the edited key: {differ:?}");
+}
+
+/// The stored key `index` of `property` on layer `layer`, in any
+/// composition.
+fn stored_key<'a>(
+    project: &'a mut Value,
+    layer: &str,
+    property: &str,
+    index: usize,
+) -> &'a mut Value {
+    let m = project.as_object_mut().unwrap();
+    let mut lists: Vec<&mut Value> = Vec::new();
+    for (k, v) in m.iter_mut() {
+        match k.to_string_lossy().as_str() {
+            "layers" => lists.push(v),
+            "comps" => {
+                for (_, comp) in v.as_object_mut().into_iter().flat_map(|c| c.iter_mut()) {
+                    if let Some(l) = comp.as_object_mut().and_then(|c| c.get_mut("layers")) {
+                        lists.push(l);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let layer = lists
+        .into_iter()
+        .flat_map(|l| l.as_array_mut().unwrap().iter_mut())
+        .find(|l| l.get("id").and_then(Value::as_str) == Some(layer))
+        .unwrap();
+    let kf = lookup_mut(layer, property)
+        .as_object_mut()
+        .unwrap()
+        .get_mut("kf")
+        .unwrap();
+    &mut kf.as_array_mut().unwrap()[index]
 }
 
 /// The paths where `a` and `b` differ (no values: a real project's data
@@ -299,151 +346,10 @@ fn differences(a: &Value, b: &Value, at: &mut String, out: &mut Vec<String>) {
     }
 }
 
-/// The stored key `index` of a vertex channel `g.<path>.v.<vertex>.<axis>`.
-fn vertex_key<'a>(
-    project: &'a mut Value,
-    layer: &str,
-    channel: &str,
-    index: usize,
-) -> &'a mut Value {
-    let rest = channel.strip_prefix("g.").unwrap();
-    let (path_id, rest) = rest.split_once(".v.").unwrap();
-    let (vertex_id, axis) = rest.split_once('.').unwrap();
-    let by_id = |list: &'a mut Value, id: &str| -> &'a mut Value {
-        list.as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
-            .unwrap()
-    };
-    let layer = find_layer_mut(project, layer).unwrap();
-    let path = by_id(
-        layer
-            .as_object_mut()
-            .unwrap()
-            .get_mut("d")
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .get_mut("paths")
-            .unwrap(),
-        path_id,
-    );
-    let vertex = by_id(
-        path.as_object_mut().unwrap().get_mut("vertices").unwrap(),
-        vertex_id,
-    );
-    let kf = vertex
-        .as_object_mut()
-        .unwrap()
-        .get_mut("p")
-        .unwrap()
-        .as_object_mut()
-        .unwrap()
-        .get_mut(axis)
-        .unwrap()
-        .as_object_mut()
-        .unwrap()
-        .get_mut("kf")
-        .unwrap();
-    &mut kf.as_array_mut().unwrap()[index]
-}
-
-/// Every stored layer: the open composition's, then the others'.
-fn layers_mut(project: &mut Value) -> Vec<&mut Value> {
-    let m = project.as_object_mut().unwrap();
-    let mut out = Vec::new();
-    let mut comps = None;
-    for (k, v) in m.iter_mut() {
-        match k.to_string_lossy().as_str() {
-            "layers" => out.extend(v.as_array_mut().unwrap().iter_mut()),
-            "comps" => comps = Some(v),
-            _ => {}
-        }
-    }
-    for (_, comp) in comps
-        .and_then(Value::as_object_mut)
-        .into_iter()
-        .flat_map(|c| c.iter_mut())
-    {
-        if let Some(layers) = comp.as_object_mut().and_then(|c| c.get_mut("layers")) {
-            out.extend(layers.as_array_mut().unwrap().iter_mut());
-        }
-    }
-    out
-}
-
-/// The stored layer `id`, in the open composition or another one.
-fn find_layer_mut<'a>(project: &'a mut Value, id: &str) -> Option<&'a mut Value> {
-    layers_mut(project)
-        .into_iter()
-        .find(|l| l.get("id").and_then(Value::as_str) == Some(id))
-}
-
-/// The keys of the open composition's shape path vertices stored without
-/// an id, as `(layer, channel, index)`.
-fn keys_without_ids(project: &Value) -> Vec<(String, String, usize)> {
-    let mut out = Vec::new();
-    let list = |v: Option<&Value>| v.and_then(Value::as_array).cloned().unwrap_or_default();
-    for layer in list(project.get("layers")) {
-        let layer_id = layer
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        for path in list(layer.get("d").and_then(|d| d.get("paths"))) {
-            let path_id = path
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            for vertex in list(path.get("vertices")) {
-                let vertex_id = vertex.get("id").and_then(Value::as_str).unwrap_or_default();
-                for (axis, prop) in vertex
-                    .get("p")
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flat_map(|p| p.iter())
-                {
-                    for (index, k) in list(prop.get("kf")).iter().enumerate() {
-                        if k.get("i").is_none() {
-                            let channel =
-                                format!("g.{path_id}.v.{vertex_id}.{}", axis.to_string_lossy());
-                            out.push((layer_id.clone(), channel, index));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Every key in the open composition's layers, as v1's status line counts
-/// them (`kf` entries anywhere under a layer).
-fn v1_key_count(project: &Value) -> usize {
-    fn walk(v: &Value) -> usize {
-        match v {
-            Value::Object(m) => m
-                .iter()
-                .map(|(k, child)| {
-                    let own = (k.to_string_lossy() == "kf")
-                        .then(|| child.as_array().map_or(0, Vec::len))
-                        .unwrap_or(0);
-                    own + walk(child)
-                })
-                .sum(),
-            Value::Array(a) => a.iter().map(walk).sum(),
-            _ => 0,
-        }
-    }
-    project.get("layers").map_or(0, walk)
-}
-
 /// The same on a real project, when `PM_PATHLESS_KEYS_PROJECT` names one
-/// (a v1.2.0 file with path vertex keys stored without ids; it is copied,
-/// never written): every key v1 counts is one the kernel can address, and an
-/// edit of one saves everything else byte for byte.
+/// (a v1.2.0 file with keys stored without ids; it is copied, never
+/// written): every key v1 counts has an id, and an edit of one saves
+/// everything else byte for byte.
 #[test]
 fn a_real_project_with_keys_without_ids() {
     let Some(source) = std::env::var_os("PM_PATHLESS_KEYS_PROJECT") else {
@@ -453,35 +359,19 @@ fn a_real_project_with_keys_without_ids() {
     let dir = TempDir::new("pathless-keys-real");
     let path = dir.path("project.pmv");
     std::fs::copy(&source, &path).unwrap();
-    let file = std::fs::File::open(&path).unwrap();
-    let project = project_of(
-        &read_container(&file, ReadOptions::default())
-            .unwrap()
-            .document,
-    )
-    .clone();
-    let without = keys_without_ids(&project);
-    assert!(
-        !without.is_empty(),
-        "the project has no keys stored without ids"
-    );
+    let (count, without) = counts(&stored(&path));
+    assert!(without > 0, "the project has no keys stored without ids");
     let store = open_store(&path);
-    let root = store.root().unwrap();
-    let addressed = without
-        .iter()
-        .filter(|(l, c, i)| derived_key_exists(root, &derived_key_id(l, c, *i)))
-        .count();
-    let count = v1_key_count(&project);
-    eprintln!(
-        "{count} keys as v1 counts them; {} stored without ids",
-        without.len()
-    );
+    let ids = key_ids(&store);
+    let mut derived: Vec<&String> = ids.iter().filter(|i| is_derived_key_id(i)).collect();
+    derived.sort();
+    eprintln!("{count} keys as v1 counts them; {without} stored without ids");
     assert_eq!(
-        addressed,
-        without.len(),
-        "every key without an id is addressed"
+        derived.len(),
+        without,
+        "every key stored without an id is named"
     );
+    let first = derived[0].clone();
     drop(store);
-    let (layer, channel, index) = without[0].clone();
-    edit_one_and_compare(&path, &layer, &channel, index);
+    edit_one_and_compare(&path, &first);
 }
