@@ -962,7 +962,15 @@ impl Drop for ExportHandle {
             let _ = c.wait();
         }
         if let Some(r) = self.reader.take() {
-            let _ = r.join();
+            // A descendant may retain the pipe even after the child exits.
+            // Detach a stuck reader rather than holding application shutdown.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !r.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if r.is_finished() {
+                let _ = r.join();
+            }
         }
     }
 }

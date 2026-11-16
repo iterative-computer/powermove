@@ -157,3 +157,63 @@ pub fn symbol(name: &str, points: f32, weight: Weight, color: u32, window: &Wind
         None => div().flex_none().size(px(points)).into_any_element(),
     }
 }
+
+/// The shared panel identity used by library covers and workspace maps.
+pub fn panel_symbol(id: &str) -> &'static str {
+    match id {
+        "viewer" => "viewfinder",
+        "inspector" => "slider.horizontal.3",
+        "timeline" => "timeline.selection",
+        "project" | "assets" => "folder",
+        "effects" | "fxbrowser" => "wand.and.stars",
+        "effect-controls" | "layer-effects" => "diamond",
+        "agent" => "sparkles",
+        "notes" => "note.text",
+        "perf" => "speedometer",
+        "shader" => "chevron.left.forwardslash.chevron.right",
+        "takes" => "square.stack.3d.up",
+        "workspaces" => "rectangle.3.group",
+        "captions" => "captions.bubble",
+        "mixer" => "speaker.wave.2",
+        "easing" => "point.topleft.down.to.point.bottomright.curvepath",
+        "color" => "paintpalette",
+        "scopes" => "waveform.path.ecg",
+        "gradient" => "circle.lefthalf.filled",
+        _ => "rectangle.on.rectangle",
+    }
+}
+
+/// Extensions may supply an SF Symbol; unrecognised icon formats keep the neutral fallback.
+pub fn panel_symbol_with_manifest<'a>(id: &str, manifest: Option<&'a str>) -> &'a str {
+    let builtin = panel_symbol(id);
+    if builtin != "rectangle.on.rectangle" {
+        return builtin;
+    }
+    manifest
+        .filter(|name| rasterize(name, 14., Weight::Regular, 0, 1.).is_some())
+        .unwrap_or(builtin)
+}
+
+#[cfg(test)]
+mod panel_symbol_tests {
+    #[test]
+    fn builtins_aliases_and_unknown_panels_have_symbols() {
+        assert_eq!(super::panel_symbol("timeline"), "timeline.selection");
+        assert_eq!(
+            super::panel_symbol_with_manifest("timeline", Some("unknown-icon")),
+            "timeline.selection"
+        );
+        assert_eq!(
+            super::panel_symbol_with_manifest("custom", None),
+            "rectangle.on.rectangle"
+        );
+        assert_eq!(
+            super::panel_symbol("assets"),
+            super::panel_symbol("project")
+        );
+        assert_eq!(
+            super::panel_symbol("com.example.custom"),
+            "rectangle.on.rectangle"
+        );
+    }
+}

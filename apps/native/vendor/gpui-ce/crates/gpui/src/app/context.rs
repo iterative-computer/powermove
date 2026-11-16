@@ -458,6 +458,24 @@ impl<'a, T: 'static> Context<'a, T> {
         subscription
     }
 
+    /// Observe modifier changes regardless of which view owns keyboard focus.
+    pub fn observe_window_modifiers(
+        &self,
+        window: &mut Window,
+        mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        let (subscription, activate) = window.modifiers_observers.insert(
+            (),
+            Box::new(move |window, cx| {
+                view.update(cx, |view, cx| callback(view, window, cx))
+                    .is_ok()
+            }),
+        );
+        activate();
+        subscription
+    }
+
     /// Registers a callback to be invoked when the window appearance changes.
     pub fn observe_window_appearance(
         &self,

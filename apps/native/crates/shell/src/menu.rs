@@ -65,13 +65,32 @@ impl Item {
 /// resolved only by the shell's ordered key resolver, so a declined key replays
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
 pub const DISPLAY_ONLY: [&str; 4] = ["Layer", "Timeline", "tools", "view3d"];
+/// Commands that act on the app, not on the window a sheet covers: they stay
+/// in the menu while a sheet is up, as in other Mac apps. Every other command
+/// waits for the sheet. The Edit commands stay for the sheet's own fields
+/// (the shell drops one that no field takes).
+pub const BESIDE_SHEET: [&str; 9] = [
+    "settings",
+    "newWindow",
+    "nextTab",
+    "previousTab",
+    "errorLog",
+    "panelLibrary",
+    "backgroundTasks",
+    "checkForUpdates",
+    "help",
+];
+pub fn runs_beside_sheet(command: &str) -> bool {
+    BESIDE_SHEET.contains(&command) || command.starts_with("context")
+}
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 6] = [
+pub const SUBMENUS: [&str; 7] = [
     "openRecent",
     "workspaces",
     "panels",
     "tools",
     "new3d",
+    "newLayers",
     "view3d",
 ];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
@@ -95,9 +114,25 @@ pub fn tools() -> Vec<Item> {
 /// in the bar's order (command `studio.view`, arguments `[group, value]`).
 /// Empty labels are separators.
 pub fn view3d() -> Vec<Item> {
+    let keymap = crate::keymap::current();
     [
         ("Camera", "look", "camera"),
         ("Free View", "look", "free"),
+        ("", "", ""),
+        // Blender's numpad views (the number row stands in, as Emulate
+        // Numpad), Frame Selected (numpad .) and Align Camera to View.
+        ("Front", "nav", "front"),
+        ("Back", "nav", "back"),
+        ("Right", "nav", "right"),
+        ("Left", "nav", "left"),
+        ("Top", "nav", "top"),
+        ("Bottom", "nav", "bottom"),
+        ("Perspective / Orthographic", "nav", "persp"),
+        ("Roll Left", "nav", "roll-left"),
+        ("Roll Right", "nav", "roll-right"),
+        ("Opposite Side", "nav", "opposite"),
+        ("Frame Selected", "nav", "selected"),
+        ("Align Camera to View", "nav", "camera-to-view"),
         ("", "", ""),
         ("Move", "tool", "move"),
         ("Rotate", "tool", "rotate"),
@@ -106,6 +141,8 @@ pub fn view3d() -> Vec<Item> {
         ("Pan", "tool", "pan"),
         ("Zoom", "tool", "zoom"),
         ("Light", "tool", "light"),
+        ("", "", ""),
+        ("Fly Navigation", "fly", ""),
         ("", "", ""),
         ("Scene Axes", "axes", "scene"),
         ("Object Axes", "axes", "object"),
@@ -124,16 +161,17 @@ pub fn view3d() -> Vec<Item> {
         if label.is_empty() {
             Item::command("", "", "")
         } else {
-            Item {
-                args: vec![json!(group), json!(value)],
-                ..Item::command(label, "studio.view", "")
-            }
+            // Each shows the key the shipped keymap gives it, if any.
+            Item::registered(&keymap, label, "studio.view", json!([group, value]))
         }
     })
     .collect()
 }
-/// Items of Layer ▸ Add 3D Layer (3d-studio.md §7, plus environments) (command `new3d`, argument = kind). Empty labels
-/// are separators. Kinds match pm-panel-studio3d's `new_menu` and `NATURE`.
+/// Direct layer creation actions in Layer ▸ New.
+pub fn new_layers() -> Vec<Item> {
+    vec![Item::command("Camera", "newCamera", "cmd+alt+shift+c")]
+}
+/// Items of Layer ▸ Add 3D Layer. Empty labels are separators.
 pub fn new3d() -> Vec<Item> {
     let item = |label: &str, kind: &str| {
         if label.is_empty() {
@@ -236,6 +274,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 m("save"),
                 m("saveAs"),
+                r("Save Take", "native.saveTake"),
                 sep(),
                 m("import"),
                 Item::command("Import Image Sequence…", "importSequence", ""),
@@ -327,6 +366,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Layer",
             vec![
                 r("New Solid", "newSolid"),
+                Item::command("New", "newLayers", ""),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
                 Item::command("Add 3D Layer", "new3d", ""),
@@ -464,6 +504,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Fit Selected Curves", "graph.fit", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
+                r_args("2D / 3D", "studio.view", json!(["look", "toggle"])),
                 Item::command("3D", "view3d", ""),
                 sep(),
                 Item::command("Show/Hide Sidebar", "toggleSidebar", ""),
@@ -534,9 +575,13 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         )
     };
     vec![
+        ("Project", Item::registered(&keymap, "Add Composition to Timeline", "native.addCompositionToTimeline", json!([]))),
+        ("Project", Item::registered(&keymap, "Add Layer from Asset", "native.addLayerFromAsset", json!([]))),
         view("Show Rulers", "viewer.rulers"),
         view("Show Grid", "viewer.grid"),
         view("Clear Guides", "viewer.clearGuides"),
+        view("Lock/Unlock Guides", "viewer.lockGuides"),
+        view("Toggle Viewer Snapping", "viewer.snapping"),
         view("Show Safe Areas", "viewer.safeAreas"),
         view("Show Guides", "viewer.guides"),
         view("Show RGB", "viewer.showRGB"),
@@ -707,5 +752,48 @@ mod edit_responder_tests {
         assert!(super::owns_text_edit(true, "NSTextView"));
         assert!(!super::owns_text_edit(false, "GPUIView"));
         assert!(!super::owns_text_edit(false, "NSButton"));
+    }
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+    /// Only app-level commands run while a sheet covers the window: every
+    /// one is a real menu command, and nothing that edits, saves, imports,
+    /// opens or closes the project under the sheet is among them.
+    #[test]
+    fn a_sheet_holds_every_command_that_touches_its_window() {
+        let commands: Vec<String> = menus()
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .map(|i| i.command)
+            .collect();
+        for name in BESIDE_SHEET {
+            assert!(commands.iter().any(|c| c == name), "{name}");
+        }
+        for held in [
+            "save",
+            "saveAs",
+            "import",
+            "importFolder",
+            "export",
+            "duplicate",
+            "split",
+            "precompose",
+            "newComposition",
+            "newProject",
+            "open",
+            "openRecent",
+            "closeTab",
+            "closeWindow",
+            "newLayers",
+            "panels",
+            "workspaces",
+            "store",
+            "renameProject",
+        ] {
+            assert!(!runs_beside_sheet(held), "{held}");
+        }
+        assert!(runs_beside_sheet("contextUndo"));
     }
 }

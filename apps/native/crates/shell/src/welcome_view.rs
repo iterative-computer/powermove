@@ -1,13 +1,18 @@
 //! The Welcome window: a standard titled window, title hidden, close button only.
 //! Closing it quits the app; quitting at any point is safe and the next launch resumes.
 use crate::welcome::{self, Frame, Progress, Severity};
+use crate::{
+    kit::{Button, Kit, Recipes},
+    motion::Motion,
+};
 use gpui::{prelude::*, *};
-use pm_design::Tokens;
+use pm_design::{Elevation, Tokens};
 use std::{rc::Rc, time::Instant};
 
 pub type OnAction = Rc<dyn Fn(&str, &mut App)>;
 
 pub struct WelcomeView {
+    motion: Motion<u64>,
     pub tokens: Tokens,
     pub frame: Frame,
     on_action: OnAction,
@@ -25,8 +30,12 @@ pub struct WelcomeView {
     pub clock: Option<f64>,
 }
 impl WelcomeView {
+    fn motion(&mut self) -> &mut Motion<u64> {
+        &mut self.motion
+    }
     pub fn new(tokens: Tokens, frame: Frame, on_action: OnAction, cx: &mut Context<Self>) -> Self {
         Self {
+            motion: Motion::default(),
             tokens,
             frame,
             on_action,
@@ -148,7 +157,7 @@ impl WelcomeView {
     }
     /// The Settings › Project card: one row per step (or folder), title left,
     /// value right, the running step's bar under its row, inset hairlines between.
-    fn steps(&self, time: Option<f64>) -> impl IntoElement + use<> {
+    fn steps(&self, kit: &Kit, time: Option<f64>) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
         let mut card = div()
@@ -188,14 +197,14 @@ impl WelcomeView {
                 row = row.child(self.progress(progress, time));
             }
             if index > 0 {
-                card = card.child(div().ml(px(m.inset)).h(px(m.border)).bg(rgb(c.separator)));
+                card = card.child(kit.separator().ml(px(m.inset)));
             }
             card = card.child(row);
         }
         card
     }
     /// Counts side by side in one card: the figure large, what it counts under it.
-    fn stats(&self) -> impl IntoElement + use<> {
+    fn stats(&self, kit: &Kit) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
         let mut card = div()
@@ -208,13 +217,7 @@ impl WelcomeView {
             .bg(rgb(c.panel));
         for (index, stat) in self.frame.stats.iter().enumerate() {
             if index > 0 {
-                card = card.child(
-                    div()
-                        .flex_none()
-                        .w(px(m.border))
-                        .my(px(t.space.lg))
-                        .bg(rgb(c.separator)),
-                );
+                card = card.child(kit.vertical_separator().my(px(t.space.lg)));
             }
             card = card.child(
                 div()
@@ -331,7 +334,12 @@ impl WelcomeView {
     }
     /// Names in two columns, read down then across, under their heading; the
     /// first few, then Show All.
-    fn names(&self, names: &welcome::Names, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn names(
+        &self,
+        kit: &Kit,
+        names: &welcome::Names,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
         let open = self.names_open || names.names.len() <= names.preview;
@@ -388,23 +396,23 @@ impl WelcomeView {
             };
             // No focus ring, as on every button (owner decision, 2026-11-14).
             card = card.child(
-                div()
-                    .id("welcome-names-toggle")
-                    .debug_selector(|| "welcome-names-toggle".into())
-                    .role(Role::Button)
-                    .aria_label(label.clone())
-                    .aria_expanded(self.names_open)
-                    .tab_index(0)
-                    .h(px(t.space.xxl + t.space.xs))
-                    .flex()
-                    .items_center()
-                    .text_size(px(t.typography.body))
-                    .text_color(rgb(c.accent))
-                    .child(label)
-                    .on_click(cx.listener(|v, _, _, cx| {
-                        v.names_open = !v.names_open;
-                        cx.notify();
-                    })),
+                kit.button(
+                    "welcome-names-toggle",
+                    label,
+                    Button::Quiet,
+                    None,
+                    Some(if self.names_open {
+                        "chevron.up"
+                    } else {
+                        "chevron.down"
+                    }),
+                )
+                .debug_selector(|| "welcome-names-toggle".into())
+                .aria_expanded(self.names_open)
+                .on_click(cx.listener(|v, _, _, cx| {
+                    v.names_open = !v.names_open;
+                    cx.notify();
+                })),
             );
         }
         div()
@@ -414,7 +422,7 @@ impl WelcomeView {
             .child(self.section_title(&names.title))
             .child(card)
     }
-    fn choices(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn choices(&self, kit: &Kit, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
         let mut group = if self.frame.cards {
@@ -448,9 +456,23 @@ impl WelcomeView {
                 item = item
                     .flex_1()
                     .rounded(px(m.group_radius))
-                    .bg(rgb(c.panel))
-                    .border_2()
-                    .border_color(rgb(if selected { c.accent } else { c.panel }));
+                    .relative()
+                    .pt(px(m.inset + m.symbol_panel))
+                    .bg(rgb(if selected { c.raised } else { c.panel }))
+                    .when(selected, |d| {
+                        d.elevated(t, Elevation::Raised).child(
+                            div()
+                                .absolute()
+                                .top(px(t.space.md))
+                                .right(px(t.space.md))
+                                .child(kit.symbol(
+                                    "checkmark.circle.fill",
+                                    m.symbol_panel,
+                                    crate::symbol::Weight::Regular,
+                                    c.secondary,
+                                )),
+                        )
+                    });
                 for line in &choice.lines {
                     item = item.child(
                         div()
@@ -473,7 +495,7 @@ impl WelcomeView {
                 );
             } else {
                 if selected {
-                    item = item.bg(rgb(c.accent_wash));
+                    item = item.bg(rgb(c.raised)).elevated(t, Elevation::Raised);
                 }
                 item = item.child(
                     div()
@@ -497,6 +519,8 @@ impl WelcomeView {
 }
 impl Render for WelcomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
+        let kit = Kit::new(&self.tokens, &self.motion, Self::motion, window, cx);
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let frame = self.frame.clone();
@@ -580,14 +604,15 @@ impl Render for WelcomeView {
             content = content.child(spaced(div()).child(row.child(status.clone())));
         }
         if !frame.stats.is_empty() {
-            content = content.child(spaced(div().flex_none()).child(self.stats()));
+            content = content.child(spaced(div().flex_none()).child(self.stats(&kit)));
         }
         if !frame.steps.is_empty() {
-            content = content
-                .child(spaced(div().flex_none()).child(self.steps(sliding.then(|| self.time()))));
+            content = content.child(
+                spaced(div().flex_none()).child(self.steps(&kit, sliding.then(|| self.time()))),
+            );
         }
         if !frame.choices.is_empty() {
-            content = content.child(self.choices(cx));
+            content = content.child(self.choices(&kit, cx));
         }
         // The rows and the names scroll together in the room left between the
         // header and the buttons; a fade at the bottom says there's more.
@@ -612,7 +637,7 @@ impl Render for WelcomeView {
                 body = body.child(section.child(self.rows(window)));
             }
             if let Some(names) = &frame.names {
-                body = body.child(self.names(names, cx));
+                body = body.child(self.names(&kit, names, cx));
             }
             // More below the fold: measured on the last layout, so ask for
             // one more frame whenever the measure moves.
@@ -849,7 +874,7 @@ fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
             };
             let mask = ContentMask {
                 bounds,
-                fade_out: Default::default(),
+                ..Default::default()
             };
             window.with_content_mask(Some(mask), |window| {
                 const STEPS: usize = 14;
@@ -935,4 +960,45 @@ pub fn open_welcome_window(
             view
         },
     )
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_welcome() {
+    use crate::welcome::{Choice, Names};
+    crate::utility_capture_tests::capture("welcome", |_, cx| {
+        cx.new(|cx| {
+            WelcomeView::new(
+                crate::tokens(),
+                Frame {
+                    title: "Welcome to Powermove".into(),
+                    line: "Choose how to get started.".into(),
+                    cards: true,
+                    chosen: Some("new".into()),
+                    choices: vec![
+                        Choice {
+                            id: "new".into(),
+                            label: "Start Fresh".into(),
+                            detail: None,
+                            lines: vec!["Create a new library".into()],
+                        },
+                        Choice {
+                            id: "import".into(),
+                            label: "Bring Your Work".into(),
+                            detail: None,
+                            lines: vec!["Copy an existing library".into()],
+                        },
+                    ],
+                    names: Some(Names {
+                        title: "Projects".into(),
+                        names: (1..=10).map(|i| format!("Project {i}")).collect(),
+                        preview: 4,
+                    }),
+                    ..Frame::default()
+                },
+                Rc::new(|_, _| {}),
+                cx,
+            )
+        })
+    });
 }

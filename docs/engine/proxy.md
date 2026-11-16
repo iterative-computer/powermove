@@ -78,16 +78,22 @@ ICC profiles use ColorSync. The original frames remain the source for
 ordinary exports. A proxy is a bounded display representation, so negative
 scene values and values beyond the PQ ceiling cannot be retained in it.
 
-The generated-media store keys by full source BLAKE3 plus the complete version-2 recipe.
+The generated-media store keys by full source BLAKE3 plus the complete recipe.
 MOV and metadata use atomic renames; lookup rehashes bytes and refuses an
 incomplete or changed object. `find_for_source` discovers a validated proxy
 after moves, relinks or relaunch without a source pathname. The host supplies
 the cache location. Generation checks available space before starting and
-throughout encoding, pausing below max(20 GiB, 10% of the volume). Playback,
+throughout encoding, pausing below max(5 GiB, 1% of the volume) plus the
+estimated output still to be written. The planning estimate uses the codec
+profile and output pixels per frame plus container overhead, rather than
+the raw RGBA size. Bytes already written are subtracted during encoding.
+Missing automatic previews are queued again when
+an existing project opens. A low-disk pause appears in the media status line
+with the required free space. Playback,
 export and low-disk pauses emit a nonterminal `JobState::Paused` status with
 a reason and resume automatically when the condition clears.
 
-The production guard is never relaxed. Tests that are not about the guard
+The production guard always runs. Tests that are not about the guard
 must not depend on the shared build machine's free space, so the reserve has
 a test-only override, compiled only with pm-proxy's `test-hooks` feature (its
 own and pm-node's tests, and e2e addons built with `build-engine-addon.mjs
@@ -96,7 +102,7 @@ own and pm-node's tests, and e2e addons built with `build-engine-addon.mjs
 `pm_proxy::set_test_disk_reserve` in-process. The proxy e2e specs set it
 (`e2e/helpers/proxy-disk.ts`); the pm-proxy codec tests inject a fixed quota
 through `generate_with_disk_probe`. The dedicated low-disk tests
-(`pm-proxy/tests/disk_pause.rs`, `disk_guard_uses_larger_of_20_gib_and_ten_percent`)
+(`pm-proxy/tests/disk_pause.rs`, `disk_guard_reserves_five_gib_or_one_percent_plus_job_output`)
 drive the guard with simulated free space and assert pause and resume.
 
 `MachineProfile` records GPU p95, disk throughput and power state;

@@ -40,11 +40,21 @@ pub struct Asset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderLink {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FolderSync { Synced, Syncing, NotFound }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: String,
     pub name: String,
     pub parent: Option<String>,
     pub items: usize,
+    pub link: Option<FolderLink>,
+    pub sync: Option<FolderSync>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,6 +154,7 @@ pub struct DownloadProgress {
 
 /// Host adapter must classify the original and proxy separately. No IO in state().
 pub trait MediaRuntime {
+    fn folder_state(&self, _stamp: &Stamp, _id: &str) -> Option<FolderSync> { None }
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState;
     fn composition_poster(&self, _stamp: &Stamp, _composition: &str) -> Option<String> {
         None
@@ -219,6 +230,8 @@ impl Catalog {
                         .into(),
                     parent: text(f, "parent").filter(|s| *s != id).map(str::to_owned),
                     items: 0,
+                    link: f.get("link").and_then(|v| text(v, "path")).map(|path| FolderLink { path: path.into() }),
+                    sync: None,
                 },
             );
         }

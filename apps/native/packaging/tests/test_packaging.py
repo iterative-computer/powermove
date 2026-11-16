@@ -37,9 +37,30 @@ class PackagingTests(unittest.TestCase):
         for helper in package.HELPERS:
             (self.root / helper).write_bytes(self.binary.read_bytes())
             (self.root / helper).chmod(0o755)
+        self.ffmpeg_dir = self.root / "ffmpeg-out"
+        (self.ffmpeg_dir / "bin").mkdir(parents=True)
+        for tool in ("ffmpeg", "ffprobe"):
+            shutil.copy2(self.binary, self.ffmpeg_dir / "bin" / tool)
+        patch.dict(os.environ, {"PM_FFMPEG_DIR": str(self.ffmpeg_dir)}).start()
         self.app = self.root / "Powermove.app"
         self.config = self.root / "updates.json"
         self.config.write_bytes((package.HERE / "update-config.json").read_bytes())
+
+    def test_media_tools_are_bundled_and_relocated(self):
+        with patch.object(package, "macos"), patch.object(package, "run") as run:
+            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12", self.config)
+        for tool in ("ffmpeg", "ffprobe"):
+            target = self.app / "Contents/MacOS" / tool
+            self.assertEqual(target.read_bytes(), self.binary.read_bytes())
+            self.assertTrue(os.access(target, os.X_OK))
+            run.assert_any_call(["install_name_tool", "-rpath", "@executable_path/../lib",
+                "@executable_path/../Frameworks", target])
+            self.assertIn(target, package.nested_code(self.app))
+
+    def test_missing_media_tool_refuses_bundle(self):
+        (self.ffmpeg_dir / "bin/ffprobe").unlink()
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            self.bundle()
 
     def bundle(self, channel="cutover", **kwargs):
         config = json.loads(self.config.read_text())

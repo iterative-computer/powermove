@@ -65,6 +65,13 @@ fn quit_waits_for(
         CloseState::Dirty | CloseState::Clean => None,
     }
 }
+/// Whether a window lets go of its project for a quit signal instead of
+/// holding the quit: one that would ask the person something (`Busy` once
+/// [`quit_waits_for`] has nothing to wait for). Work that ends on its own
+/// (a save, an open) is still waited for.
+fn lets_go_unattended(state: CloseState, terminating: bool) -> bool {
+    terminating && state == CloseState::Busy
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -92,6 +99,8 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"cancelled"}));
+    crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
         ._delegate
         .resolve_quit_events(true);
@@ -168,7 +177,14 @@ fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
     )
 }
 pub fn begin_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"begin"}));
     let q = cx.global_mut::<QuitCoordinator>();
+    if q.terminating {
+        if !q.quitting {
+            start_quit(cx);
+        }
+        return;
+    }
     if q.quitting {
         return ask_quit_now(cx);
     }
@@ -234,11 +250,6 @@ fn start_quit(cx: &mut App) {
     }
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
-    // SIGTERM: nobody is there to answer a Save question. Unsaved work is
-    // archived as Don't Save archives it (recoverable), and the app ends.
-    if q.terminating {
-        q.discard = true;
-    }
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
     let controllers = q.controllers.clone();
@@ -252,7 +263,8 @@ fn start_quit(cx: &mut App) {
     q.queue = questions_first(std::mem::take(&mut q.queue), |weak| {
         asked.contains(&weak.entity_id())
     });
-    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard) else {
+    let unattended = cx.global::<QuitCoordinator>().terminating;
+    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard || unattended) else {
         return next_quit(cx);
     };
     // S002: two or more dirty projects get one question before any per-project sheet.
@@ -449,9 +461,26 @@ fn ask_session_failed(error: &str, cx: &mut App) {
     })
     .detach();
 }
-/// Compacts and releases the library, then quits.
+/// How a quit ends the library's work before releasing it. A quit someone
+/// chose compacts (`PrepareQuit` saves library sessions and folds journals
+/// in). A quit signal (logout, shutdown, a script) has nobody to choose: it
+/// only makes every journal durable (`DurabilityBarrier`), and the release
+/// that follows keeps each open session's journal, so a library project's
+/// saved version stays as it was and its unsaved work is offered at the next
+/// open (Sol's P1, PM-347).
+fn quit_call(signal: bool) -> ShellCall {
+    if signal {
+        ShellCall::DurabilityBarrier
+    } else {
+        ShellCall::PrepareQuit
+    }
+}
+/// Compacts (or, after a quit signal, only flushes) and releases the
+/// library, then quits.
 fn finish_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
     let host = cx.global::<QuitCoordinator>().host.clone();
+    let signal = cx.global::<QuitCoordinator>().terminating;
     for weak in cx.global::<QuitCoordinator>().controllers.clone() {
         let _ = weak.update(cx, |v, cx| {
             v.closing_note = Some("Quitting: writing the project library…".into());
@@ -459,7 +488,15 @@ fn finish_quit(cx: &mut App) {
         });
     }
     cx.spawn(async move |cx| {
-        let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
+        let mut result = match host.kernel.shell(quit_call(signal)).await {
+            // A signal quit compacts nothing: its sessions' journals were
+            // made durable, and the library's release keeps them.
+            Some(Ok(ShellReply::Durable)) => Some(Ok(ShellReply::Compacted {
+                projects: 0,
+                recovery_copies: vec![],
+            })),
+            other => other,
+        };
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // A clean quit leaves library.lock released, not to go stale.
             if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
@@ -468,7 +505,7 @@ fn finish_quit(cx: &mut App) {
         }
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
-            crate::error_log::session_ended().await;
+            crate::error_log::session_ended(signal).await;
         }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
@@ -480,6 +517,8 @@ fn finish_quit(cx: &mut App) {
                     window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
                 }
                 allow_quit(cx);
+                // Restart and Bring In: Powermove opens again once this ends.
+                crate::recent_work::relaunch_if_requested();
                 cx.quit();
             }
             other => {
@@ -551,7 +590,12 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         .push(entity.downgrade());
     entity.update(cx, |v, cx| {
         v.close_window = Some(window.window_handle());
-        cx.observe_window_activation(window, |v, window, _| {
+        cx.observe_window_activation(window, |v, window, cx| {
+            if !window.is_window_active()
+                && let Some(g) = v.builtins.gizmos.clone()
+            {
+                g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            }
             // The key window is where MCP acts.
             if window.is_window_active() {
                 v.mcp.activate_window(v.window_key);
@@ -649,6 +693,7 @@ impl Controller {
             .as_ref()
             .is_some_and(|s| self.kernel.published(&s.project).is_none())
         {
+            self.linked_sync = Default::default();
             self.session = None;
         }
         self.mcp.bind_window(self.window_key, self.session.clone());
@@ -770,6 +815,7 @@ impl Controller {
         .detach();
     }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        crate::diag::line(serde_json::json!({"quit":"request_close", "intent":format!("{intent:?}"), "pending":self.close_pending}));
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
@@ -812,6 +858,7 @@ impl Controller {
             .as_ref()
             .and_then(|s| self.kernel.published(&s.project));
         if p.is_none() {
+            self.linked_sync = Default::default();
             self.session = None;
         }
         // A second Quit's own prompt on this window (Quit Now, while the
@@ -828,6 +875,7 @@ impl Controller {
         let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
+        crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
         let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
             && self.mcp.operation_in_progress();
         if intent == Intent::Quit
@@ -847,6 +895,19 @@ impl Controller {
                 });
             })
             .detach();
+            return;
+        }
+        if intent == Intent::Quit
+            && lets_go_unattended(state, cx.global::<QuitCoordinator>().terminating)
+        {
+            // A quit signal at a window asking a question (a recovery choice,
+            // an edit left open): nobody can answer it, and refusing would
+            // keep the app running through a logout. The window lets go as
+            // after a crash: the journal keeps the work, nothing is saved,
+            // and the next launch asks again.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
             return;
         }
         if quit_now_here
@@ -893,6 +954,18 @@ impl Controller {
             self.complete_close(intent, cx);
             return;
         }
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
+            // SIGTERM (logout, shutdown, a script): nobody can answer a Save
+            // question, and the file is never written without the person's
+            // choice. The window lets go of its project without closing it:
+            // the quit then leaves its unsaved work in the journal and the
+            // file as saved (`ShellCall::PrepareQuit` defers it), and the
+            // next open offers the work, as after a crash.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
         if intent == Intent::Quit && cx.global::<QuitCoordinator>().discard {
             self.discard_and_close(intent, cx);
             return;
@@ -934,6 +1007,7 @@ impl Controller {
             let result = discard_close(&kernel, session).await;
             let _ = this.update(cx, |v, cx| match result {
                 Ok(()) => {
+                    v.linked_sync = Default::default();
                     v.session = None;
                     v.mcp.bind_window(v.window_key, None);
                     v.complete_close(intent, cx);
@@ -954,6 +1028,9 @@ impl Controller {
         .detach();
     }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        if let Some(g) = self.builtins.gizmos.clone() {
+            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+        }
         let kernel = self.kernel.clone();
         let session = self.session.clone();
         // A discarded close has already released its session; its project
@@ -996,6 +1073,7 @@ impl Controller {
                         popout.shutdown();
                     }
                     v.close_studio_panes();
+                    v.linked_sync = Default::default();
                     v.session = None;
                     v.published = None;
                     v.media_refresh.reset();
@@ -1171,6 +1249,13 @@ mod tests {
         // A recovery choice or an alert on screen, an open edit, a stopped
         // project, and a window that can simply close.
         assert_eq!(quit_waits_for(Busy, true, true, false), None);
+        // A quit signal never stops at a question nobody can answer; a
+        // person's Quit still does, and nothing else lets go.
+        assert!(lets_go_unattended(Busy, true));
+        assert!(!lets_go_unattended(Busy, false));
+        for state in [Saving, Clean, Dirty, Stopped] {
+            assert!(!lets_go_unattended(state, true), "{state:?}");
+        }
         assert_eq!(quit_waits_for(Busy, false, false, false), None);
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
@@ -1336,6 +1421,70 @@ mod tests {
             "the unsaved edit is kept for recovery"
         );
         actor.shutdown();
+    }
+
+    /// SIGTERM never writes over the person's file: the window lets go of
+    /// its project unclosed, the quit defers it, the file is as saved and
+    /// the next launch's open of it offers the unsaved work.
+    #[test]
+    fn an_unattended_quit_leaves_the_file_and_the_next_launch_offers_the_work() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unattended.pmv");
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        // The signal quit's steps once the window let go without a Close.
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
+        answer(&k, ShellCall::ReleaseLibrary);
+        actor.shutdown();
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        // The next launch: the work is there to offer.
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
+    }
+
+    /// Sol's P1: a library project (opened from Home, never saved to a
+    /// file) keeps its saved version through a quit signal: no compaction
+    /// saves it, and the next launch offers the unsaved edit. A quit the
+    /// person chose still compacts.
+    #[test]
+    fn a_signal_quit_never_saves_a_library_project_and_offers_its_work() {
+        assert!(matches!(quit_call(false), ShellCall::PrepareQuit));
+        let (dir, actor, _session) = fixture();
+        let k = actor.handle();
+        let slot = dir.path().join("store/project.test.json");
+        let saved = std::fs::read(&slot).expect("the library's saved version");
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
+        answer(&k, ShellCall::ReleaseLibrary);
+        actor.shutdown();
+        assert_eq!(std::fs::read(&slot).unwrap(), saved, "the saved version is as it was");
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
     }
 
     fn edit(k: &KernelHandle) {

@@ -6,6 +6,8 @@ export interface ViewerModel {
   project: string;
   composition: string | null;
   name: string;
+  compositions?: Array<{ id: string; name: string; parents: string[] }>;
+  trail?: { ids: string[]; index: number };
   fit: boolean;
   shownZoom: number;
   quality: "auto" | "1" | "0.5" | "0.25";
@@ -20,6 +22,8 @@ export interface ViewerModel {
     tier: "fast" | "live" | "refine";
     tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
     look?: "camera" | "free";
+    /** Fly navigation is on (Shift+`): the viewer shows its keys. */
+    fly?: boolean;
     /** Handles follow the scene's axes or the object's own. */
     axes?: "scene" | "object";
     /** Panes in the viewer: one, two side by side, or four. */
@@ -207,4 +211,9 @@ export function resolutionTitle(m: ViewerModel) {
   return m.quality === "auto" && effective && effective !== "Full"
     ? `Auto (${effective})`
     : label;
+}
+
+/** Fly controls belong only to an active flight in the free 3D view. */
+export function showsFlyHint(model: ViewerModel, source: boolean): boolean {
+  return !source && model.studio?.look === "free" && model.studio.fly === true;
 }

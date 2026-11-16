@@ -878,9 +878,24 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
                     result.light_worlds.insert(id.clone(), world);
                     result.targets.insert(id, math::apply(&parent, aim));
                 } else if result.camera_id.is_none() {
-                    result.camera_position = Some(math::apply(&world, [0.; 3]));
+                    let position = math::apply(&world, [0.; 3]);
+                    let mut target = math::apply(&parent, aim);
+                    // Auto-Orient Off (a one-node camera): it looks down its own
+                    // −Z, turned by its rotation, and moving it never re-aims it.
+                    // The aim point keeps the point of interest's distance, so
+                    // focus and depth of field read the same.
+                    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
+                        let d = (0..3)
+                            .map(|i| (target[i] - position[i]).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        let forward = normalize([-world[8], -world[9], -world[10]]);
+                        let d = if d.is_finite() && d > 1e-6 { d } else { 10. };
+                        target = [0, 1, 2].map(|i| position[i] + forward[i] * d);
+                    }
+                    result.camera_position = Some(position);
                     result.camera_up = Some(normalize([world[4], world[5], world[6]]));
-                    result.targets.insert(id.clone(), math::apply(&parent, aim));
+                    result.targets.insert(id.clone(), target);
                     result.camera_id = Some(id);
                 }
             }
