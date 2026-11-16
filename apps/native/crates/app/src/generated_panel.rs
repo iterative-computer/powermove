@@ -1477,7 +1477,7 @@ pub(crate) struct AgentBuild {
     pub owner: Option<String>,
 }
 
-pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
+pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &mut Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
     let build = v.agent_panel_builds.get(id)?.clone();
     if build.owner.as_deref().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
         if let Some(state) = v.panel_builds.get_mut(id) {
