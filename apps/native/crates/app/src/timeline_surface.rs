@@ -2486,10 +2486,12 @@ impl TimelineSurface {
     }
     /// The pointer over the tracks: hover, cursor and tooltip follow it; the
     /// skimmer follows it once it shows, and starts only when the pointer
-    /// moved here (a scroll under a resting pointer starts none: the viewer
-    /// keeps the playhead's picture).
+    /// moved from where the timeline last saw it (a scroll under a resting
+    /// pointer starts none: the viewer keeps the playhead's picture). The
+    /// first sight of it, when it comes back over the tracks (a sheet that
+    /// covered them closes over a resting pointer), only notes where it is.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let moved = self.pointer != Some(position);
+        let moved = self.pointer.is_some_and(|seen| seen != position);
         self.pointer = Some(position);
         let (x, y) = self.local(position);
         if moved || self.skimmer.is_some() {

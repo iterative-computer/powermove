@@ -1860,6 +1860,22 @@ fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext)
     assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
     assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
 }
+/// A sheet that covered the tracks closes over a resting pointer (the
+/// Export sheet's buttons lie over the clips): the first sight of the pointer
+/// starts no skim, so the viewer keeps the playhead's picture; moving it does.
+#[gpui::test]
+fn the_pointer_met_again_where_it_rests_starts_no_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    s.vcx
+        .simulate_mouse_move(at + point(px(6.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+}
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays
 /// from the playhead, not from a stale skimmer (review).
@@ -1870,6 +1886,9 @@ fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
     s.idle(cx);
     s.recorder.skimming.set(true);
     let at = s.at(0, 1.0);
+    // Coming over the tracks, then moving there: the skimmer shows.
+    s.vcx
+        .simulate_mouse_move(at - point(px(4.), px(0.)), None, Modifiers::none());
     s.vcx.simulate_mouse_move(at, None, Modifiers::none());
     s.idle(cx);
     let over = |s: &mut Stage| {
