@@ -51,6 +51,17 @@ pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
     };
     SETTLED.notify_all();
 }
+/// The definitions some open window's extensions have settled on: the
+/// profile's installed extensions, as any project open nowhere would load.
+fn settled_resources() -> Option<Resources> {
+    RESOURCES
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .values()
+        .find(|r| !r.pending)
+        .cloned()
+}
 /// The wait for a document's extensions was stopped by who asked (a
 /// cancelled export, a stopped capture).
 #[derive(Debug, PartialEq)]
@@ -271,6 +282,14 @@ impl EngineJobs {
     ) -> AnyResult<Resources> {
         let window = resources_of(published.snapshot.doc_id, wait, stop)
             .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?;
+        // A project open nowhere (Home's poster of its stored version): no
+        // realm can load its extensions, as the kernel does not hold it, so
+        // it draws with the definitions an open window has (the same
+        // installed extensions), else with missing effects bypassed, as the
+        // viewer draws them. Never a minute's wait for a load that cannot be.
+        if window.is_none() && self.kernel.published(&published.project).is_none() {
+            return Ok(settled_resources().unwrap_or_default());
+        }
         if let Some(resources) = window {
             // Retire a worker host once the window owns this document again.
             self.extensions

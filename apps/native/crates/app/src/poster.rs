@@ -144,15 +144,19 @@ pub(crate) fn write(
     let mut first = None;
     let mut chosen = None;
     for time in times(duration, kept) {
-        let Ok(png) = renderer(&FrameRequest {
+        let png = match renderer(&FrameRequest {
             time,
             width: WIDTH,
             height: height.clamp(90, 2 * WIDTH),
             motion_blur: false,
             stop: &never,
             published: published.clone(),
-        }) else {
-            continue;
+        }) {
+            Ok(png) => png,
+            Err(error) => {
+                crate::diag::line(serde_json::json!({"poster": id, "time": time, "render": error.to_string()}));
+                continue;
+            }
         };
         if has_content(&png) {
             chosen = Some((time, png));

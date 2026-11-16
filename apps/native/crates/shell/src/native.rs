@@ -3132,6 +3132,33 @@ impl Host {
                     let control = responder.as_ref().is_some_and(|r| unsafe {
                         msg_send![&**r,isKindOfClass:NSControl::class()]
                     });
+                    // A field the person just opened (PM-402): its letters
+                    // wait for it rather than firing shortcuts.
+                    if e.r#type() == NSEventType::KeyDown {
+                        crate::typing::drop_expired();
+                        let flags = e.modifierFlags();
+                        let text = crate::typing::is_text(
+                            &e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default(),
+                            flags.intersects(
+                                NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+                            ),
+                        );
+                        let retained = || unsafe { Retained::retain(event.as_ptr()).unwrap() };
+                        match crate::typing::decide(text, field, crate::typing::held()) {
+                            crate::typing::Hold::Held => {
+                                crate::typing::hold(retained());
+                                return std::ptr::null_mut();
+                            }
+                            crate::typing::Hold::Release => {
+                                if crate::typing::held() {
+                                    crate::typing::release(Some(retained()));
+                                    return std::ptr::null_mut();
+                                }
+                                crate::typing::release(None);
+                            }
+                            crate::typing::Hold::Pass => {}
+                        }
+                    }
                     if passes_straight(
                         &chord,
                         field,
