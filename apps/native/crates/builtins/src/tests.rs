@@ -1084,8 +1084,12 @@ fn an_export_waiting_to_start_is_cancelled_from_its_panel() {
         seen.borrow(),
         panels.take_errors()
     );
-    // Choosing the destination: the form's Cancel is off.
-    assert!(!press(&panels, "export.cancel"), "Cancel while choosing");
+    // Choosing the destination: the slim progress row and its Cancel are
+    // absent until work can be cancelled. The save panel owns this choice.
+    finish(panels.observe_export(json!({"phase":"choosingDestination"})).unwrap());
+    let choosing = panels.take_publications().into_iter().rfind(|p| p.panel == "export").unwrap();
+    assert!(!choosing.surface.nodes().values().any(|n| n.props.get("id").and_then(Value::as_str) == Some("export.cancel")));
+    *shown.borrow_mut() = Some(choosing);
     assert!(!asked(&panels, "export.cancel", Duration::from_millis(300)));
     // The destination is chosen and the export waits: the coordinator says
     // so before it waits, and Cancel reaches it.
