@@ -76,6 +76,8 @@ pub struct Colors {
     pub accent_text: u32,
     /// Opaque accent tint over `panel`: drop targets, the active snap guide bed.
     pub accent_wash: u32,
+    /// A verified publisher's seal in the Store: the system blue, as v1.2.0's.
+    pub verified: u32,
     pub danger: u32,
     pub warning: u32,
     pub success: u32,
@@ -673,6 +675,7 @@ impl Colors {
                 if dark { 0xff6b1a } else { 0xf0580a },
                 if dark { 0.16 } else { 0.1 },
             ),
+            verified: if dark { 0x0a84ff } else { 0x007aff },
             danger: if dark {
                 oklch(0.68, 0.18, 27.6)
             } else {
@@ -1065,7 +1068,8 @@ impl Tokens {
         colors.secondary: color, colors.muted: color, colors.accent: color,
         colors.timeline_selected: color, colors.timeline_selected_hover: color,
         colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
-        colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
+        colors.accent_text: color, colors.accent_wash: color, colors.verified: color,
+        colors.danger: color,
         colors.warning: color, colors.success: color,
         metrics.gap: size, metrics.inset: size, metrics.panel_radius: size,
         metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,

@@ -76,6 +76,14 @@ impl Outline {
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
     }
+    /// A row's top in the rows' content, when the timeline's scene has it.
+    fn row_top(&self, row: &str) -> Option<f32> {
+        self.scene
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.scroll_for(row))
+            .map(|top| top as f32)
+    }
     /// The first JS row's top in the rows' content (all rows' height).
     fn top(&self, first: &str) -> f32 {
         self.scene
@@ -527,6 +535,9 @@ impl SurfaceView {
         self.table = compiled.table;
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        // Where rows were is the old tree's (a search moved them up); their
+        // heights stay good guesses. Rows left out by old tops never showed.
+        self.cull.forget_tops();
         self.settle_disclosures();
         {
             let _span = crate::diag::span("panel.reconcile");
@@ -927,10 +938,9 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409), Settings' as well; in a
+                    // row's value well it is the small size.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -1257,7 +1267,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -1586,6 +1596,10 @@ impl SurfaceView {
     /// appears or changes, so a search button that opens its field puts the
     /// caret in it and typed letters never fire shortcuts on the way (PM-402).
     fn follow_focus_request(&mut self, cx: &mut Context<Self>) {
+        // A text field or a search field (a native control) the request names.
+        let takes_text = |v: &Self, id: &Id, cx: &App| {
+            v.fields.contains_key(id) || v.controls.get(id).is_some_and(|c| c.read(cx).is_search())
+        };
         let request = self
             .publication
             .surface
@@ -1597,18 +1611,40 @@ impl SurfaceView {
                 self.prepared
                     .semantics
                     .get(*r)
-                    .is_some_and(|id| self.fields.contains_key(id))
+                    .is_some_and(|id| takes_text(self, id, cx))
             })
             .map(str::to_owned);
         if request == self.focus_requested {
             return;
         }
         self.focus_requested = request.clone();
-        let field = request
-            .and_then(|r| self.prepared.semantics.get(&r).copied())
-            .and_then(|id| self.fields.get(&id).cloned());
-        if let Some(field) = field {
+        let Some(id) = request.and_then(|r| self.prepared.semantics.get(&r).copied()) else {
+            return;
+        };
+        // What the person types from now on is for this field, even before it
+        // has the keyboard (pm_shell::typing).
+        pm_shell::typing::expect();
+        if let Some(field) = self.fields.get(&id).cloned() {
             field.update(cx, |f, cx| f.begin_editing(cx));
+        } else if let Some(control) = self.controls.get(&id) {
+            control.read(cx).focus();
+        }
+        self.typing_ready(cx);
+    }
+    /// The field a focus request named has the keyboard: what was typed for
+    /// it while it came reaches it now.
+    fn typing_ready(&self, cx: &App) {
+        let Some(id) = self
+            .focus_requested
+            .as_ref()
+            .and_then(|r| self.prepared.semantics.get(r))
+        else {
+            return;
+        };
+        let ready = self.controls.get(id).is_some_and(|c| c.read(cx).focused())
+            || self.fields.get(id).is_some_and(|f| f.read(cx).has_keyboard());
+        if ready {
+            pm_shell::typing::field_ready();
         }
     }
     /// The text field `semantic` lets go of the keyboard (the editor has it).
@@ -1770,6 +1806,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -1800,8 +1840,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -2371,6 +2418,7 @@ impl SurfaceView {
                 .right(px(0.))
                 .top(px(self.natives.outline.top(first)));
         }
+        element = self.place_outline_row(node, element);
         #[cfg(test)]
         {
             let name = node
@@ -2391,7 +2439,13 @@ impl SurfaceView {
                 .and_then(|m| m.get("rowFloor"))
                 .and_then(Value::as_f64)
                 .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+                .map_or(0., |rows| {
+                    // Rows of a virtual list are its own height.
+                    let row = node
+                        .virtual_window
+                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                    rows as f32 * row
+                });
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -2707,6 +2761,42 @@ impl SurfaceView {
     /// The timeline outline's rows in a layer the surface scrolls: all
     /// rows' height of content at the surface's offset, JS's window of rows
     /// placed at its first row's top.
+    /// Each row of the outline stands at its own row's top in the timeline's
+    /// scene, not after the row before it: the rows' publication lands later
+    /// than the bars (an undo, a redo, a split), and stacked in its own order
+    /// it put every name below the change beside the next layer's bar
+    /// (PM-376). A row the scene no longer has is not drawn. Its own frame,
+    /// out of the recursive render's.
+    #[inline(never)]
+    fn place_outline_row(&self, node: &NodeView, element: Stateful<Div>) -> Stateful<Div> {
+        let Some(first) = node
+            .parent
+            .and_then(|p| self.prepared.node(p))
+            .and_then(|p| p.outline_first.clone())
+        else {
+            return element;
+        };
+        let Some(row) = node
+            .semantic
+            .as_ref()
+            .and_then(|s| s.strip_prefix("timeline:row:"))
+        else {
+            return element;
+        };
+        let outline = &self.natives.outline;
+        // No timeline drawing the bars: the rows' own order stands.
+        if outline.scene.borrow().is_none() {
+            return element;
+        }
+        match outline.row_top(row) {
+            Some(top) => element
+                .absolute()
+                .left(px(0.))
+                .right(px(0.))
+                .top(px(top - outline.top(&first))),
+            None => element.absolute().top(px(0.)).invisible(),
+        }
+    }
     fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
         let outline = &self.natives.outline;
         outline
@@ -3679,7 +3769,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -3719,6 +3809,9 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_requested.is_some() && pm_shell::typing::expecting() {
+            self.typing_ready(cx);
+        }
         // A drag let go over nothing that took it ends here.
         if self.dragging.is_some() && !cx.has_active_drag() {
             let view = cx.entity().downgrade();

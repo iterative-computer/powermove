@@ -162,6 +162,22 @@ impl Drop for Exporting {
     }
 }
 
+/// Every engine's viewer activity, for [`note_input`].
+static ACTIVITIES: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
+/// The person pressed, scrolled or typed somewhere in the app: background
+/// work (the background render) waits until they have been idle a while,
+/// as it does after the viewer draws.
+pub fn note_input() {
+    for activity in ACTIVITIES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        activity.touch();
+    }
+}
+pub(crate) fn watch_activity(activity: &Activity) {
+    ACTIVITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(activity.clone());
+}
 /// The viewer's activity, as exports and cache fills see it: whether it is
 /// drawing or playing now, and an epoch that rises every time it starts, so
 /// an activity shorter than any sampling interval is still seen.
@@ -241,6 +257,12 @@ impl Activity {
             let wait = if busy { poll } else { left.min(poll) };
             quiet = self.quiet.1.wait_timeout(quiet, wait).unwrap().0;
         }
+    }
+    /// Something the person did (a key, a press) while the viewer stays as
+    /// it is: background work waits for it as for the viewer's own activity.
+    pub fn touch(&self) {
+        let _grant = self.quiet.0.lock().unwrap();
+        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
@@ -976,7 +998,26 @@ impl Drop for ExportHandle {
 }
 /// Host binary calls this before initializing GPUI if --engine-job is present.
 /// No window, Node, file transport or mutable kernel authority is created.
+/// A job ends when the app that started it is gone (a quit, a crash, a
+/// signal): it is reparented, and nothing would read what it renders. The
+/// quit's own teardown runs no drops, so it cannot stop a job itself.
+fn end_with_parent() {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    let _ = std::thread::Builder::new()
+        .name("pm-job-parent".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                // SAFETY: as above.
+                if unsafe { libc::getppid() } != parent {
+                    std::process::exit(0);
+                }
+            }
+        });
+}
 pub fn run_child() -> Result<()> {
+    end_with_parent();
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()
@@ -2174,10 +2215,12 @@ fn fill_cache(
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
-    if fill.budget_us.is_some() {
-        // Background work never competes with the app for the CPU.
-        let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
-    }
+    // A background fill runs at the job process's utility class, not the
+    // background band: that band starved it on a busy machine (a tenth of
+    // the frames while the person was idle). It gives way to the person
+    // through the viewer's activity instead: a frame is granted the GPU only
+    // once they have stopped playing, drawing, pressing and typing for a
+    // while (the parent's grant loop), and a Play waits behind one frame.
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {
         doc: doc.clone(),
@@ -2984,6 +3027,18 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
+    }
+    /// A key or a press somewhere in the app is activity for background
+    /// work (it waits as after the viewer draws), without making the viewer
+    /// busy: playback's own waits do not hold on it.
+    #[test]
+    fn input_is_activity_for_background_work() {
+        let activity = Activity::default();
+        watch_activity(&activity);
+        let seen = activity.epoch();
+        note_input();
+        assert!(activity.epoch() > seen, "the scheduler sees new activity");
+        assert!(!activity.busy(), "the viewer is not made busy");
     }
     #[test]
     fn a_cancelled_export_stops_waiting_for_an_extension() {

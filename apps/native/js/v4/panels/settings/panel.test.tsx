@@ -217,7 +217,10 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
             row("extendEdit", "Extend Edit to Playhead", ["E"], {
               recording: true,
             }),
-            row("save", "Save", ["⌘S"], { menu: "File", fixed: true }),
+            row("quit", "Quit Powermove", ["⌘Q"], {
+              menu: "Powermove",
+              fixed: true,
+            }),
             row("prevEdge", "Previous Edge", [], { menu: "Playback" }),
           ],
           conflicts: [
@@ -400,7 +403,7 @@ test("extension row enters details, back returns without clearing search, Delete
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Fixture 0", "list-item").id, "click");
+  await event(root, find(root, "Fixture 0").id, "click");
   expect(f.model.detailId).toBe("fixture-0");
   await render();
   await event(root, find(root, "Delete…", "push-button").id, "click");
@@ -708,7 +711,9 @@ test("every command on Shortcuts arrives in commits the host's 1 MiB argument qu
   expect(Math.max(...sizes)).toBeLessThan(1024 * 1024);
   const groups = root
     .inspect()
-    .nodes.filter((n) => String(n.props.id ?? "").startsWith("settings.shortcut."));
+    .nodes.filter((n) =>
+      String(n.props.id ?? "").startsWith("settings.shortcut."),
+    );
   expect(groups).toHaveLength(400);
   root.dispose();
   model.dispose();

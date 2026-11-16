@@ -55,6 +55,12 @@ const DISK_POLL: Duration = Duration::from_secs(3);
 /// that has not started reading yet.
 const SYNC_LAYOUT_WAIT: Duration = Duration::from_millis(250);
 const SYNC_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(3);
+/// The same without a window (the headless services' page pump): no person
+/// waits on the realm, and a busy machine starts and answers a hidden page
+/// slower than a window's, so a read waits longer rather than draw a layout
+/// the page never measured.
+const HEADLESS_LAYOUT_WAIT: Duration = Duration::from_secs(5);
+const HEADLESS_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(20);
 /// Realm sources the owner holds while the realm's queue is full.
 const MAX_DEFERRED: usize = 4096;
 const TIME_MOVED: u8 = 1;
@@ -334,6 +340,10 @@ pub struct Publication {
 }
 
 struct Shared {
+    /// Set by `ExtensionHost::close` itself: an owner still waiting for
+    /// isolate admission (its boot or the Svelte compiler) stops waiting
+    /// at once, before it could read the queued close.
+    closing: AtomicBool,
     published: Mutex<Published>,
     changed: Condvar,
     /// What the confined helpers registered, in contribution-list form.
@@ -341,6 +351,10 @@ struct Shared {
     sessions: Mutex<BTreeMap<String, StoreSession>>,
     /// The generation whose page is reading batches. Canvases encode only for it.
     reader: AtomicU64,
+    /// Its pages are shown without a window (the headless services' page
+    /// pump): an export waits for its page as in a window, and a layout read
+    /// waits the headless waits.
+    paged: AtomicBool,
     wake: Arc<dyn Fn() + Send + Sync>,
     /// Running exports' realms and their pages.
     exports: Mutex<export::Exports>,
@@ -579,14 +593,18 @@ impl RealmEvents for Arc<Events> {
         // A page still loading (the window just opened) answers once it
         // starts reading; a read answered with nothing would be remembered
         // by the extension as the layout.
-        // Without a window (headless) no page ever comes: only one read waits.
+        // Without a window or a page pump no page ever comes: only one read
+        // waits.
         let reading =
             self.shared.reader.load(Ordering::Acquire) == u64::from(self.writer.generation);
         let missed = self.page_missed.load(Ordering::Acquire);
-        let wait = match (reading, missed) {
-            (false, true) => Duration::ZERO,
-            (false, false) => SYNC_LAYOUT_FIRST_WAIT,
-            (true, _) => SYNC_LAYOUT_WAIT,
+        let headless = self.shared.paged.load(Ordering::Acquire);
+        let wait = match (reading, missed, headless) {
+            (false, true, _) => Duration::ZERO,
+            (false, false, false) => SYNC_LAYOUT_FIRST_WAIT,
+            (false, false, true) => HEADLESS_LAYOUT_FIRST_WAIT,
+            (true, _, false) => SYNC_LAYOUT_WAIT,
+            (true, _, true) => HEADLESS_LAYOUT_WAIT,
         };
         let answer = rx.recv_timeout(wait);
         self.measuring.lock().unwrap().waiting = None;
@@ -851,9 +869,11 @@ impl ExtensionHost {
         let shared = Arc::new(Shared {
             published: Mutex::default(),
             changed: Condvar::new(),
+            closing: AtomicBool::new(false),
             store: Mutex::new(json!({})),
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
+            paged: AtomicBool::new(false),
             wake: config.wake.clone(),
             exports: Mutex::default(),
             effects: Arc::default(),
@@ -1105,6 +1125,12 @@ impl ExtensionHost {
             }
         }
     }
+    /// Something other than a window shows this host's pages (the headless
+    /// services' page pump), so an export's page will come: the export waits
+    /// for it before drawing, as in a window, instead of measuring nothing.
+    pub fn pages_shown_without_a_window(&self) {
+        self.shared.paged.store(true, Ordering::Release);
+    }
     /// Feedback from an export realm's page, on a forwarding thread.
     pub fn export_page_sink(&self, job: &str) -> impl Fn(Value) + Send + 'static + use<> {
         let inbox = self.shared.exports.lock().unwrap().inbox(job);
@@ -1191,6 +1217,9 @@ impl ExtensionHost {
         }
     }
     pub fn close(&mut self) {
+        // Read at once by a boot still waiting for admission (it cannot read
+        // the inbox until its boot returns).
+        self.shared.closing.store(true, Ordering::Release);
         let _ = self.inbox.send(Input::Close);
         if let Some(worker) = self.worker.take() {
             // The owner stops V8 and exits; joined off the main thread.
@@ -1606,7 +1635,8 @@ impl Owner {
                     kernel: self.config.kernel.clone(),
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
-                    pageless: self.config.owner.is_none(),
+                    pageless: self.config.owner.is_none()
+                        && !self.shared.paged.load(Ordering::Acquire),
                     progress,
                 };
                 let spawned = thread::Builder::new()
@@ -2183,7 +2213,8 @@ impl Owner {
         let live = self.realm.take().expect("a live realm to compile in");
         self.confined.clear();
         let records = {
-            let compiler = compile::LazySvelte::new(&live.pool);
+            let shared = self.shared.clone();
+            let compiler = compile::LazySvelte::new(&live.pool).stopped_by(&shared.closing);
             found
                 .iter()
                 .map(|f| {
@@ -2433,6 +2464,12 @@ impl Owner {
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         trace(json!({"realm": "pool"}));
+        // Its turn in the heap account; a window closed meanwhile withdraws it.
+        crate::admitted(&realm, &|| {
+            if self.shared.closing.load(Ordering::Acquire) {
+                realm.close();
+            }
+        })?;
         crate::boot_realm(&realm, &host, "")?;
         *self.transport.lock().unwrap() = Some(host.clone());
         self.router = Some(
@@ -3836,6 +3873,34 @@ mod tests {
     /// A value that has been taken away (its entry removed, its declaration
     /// gone) is gone from the extension's next load: each load replaces what
     /// the realm holds with what the host chose for it, nothing is kept.
+    /// A window closed while its extensions' realm waits its turn for heap
+    /// leaves the queue at once: nothing behind it waits for a dead window.
+    #[test]
+    fn closing_a_window_withdraws_its_start_from_the_admission_queue() {
+        let cage = pm_runtime_v8::Admission::cage();
+        // Less than a window realm's slice left.
+        let held = cage.hold(cage.budget() - cage.used() - 16 * 1024 * 1024).unwrap();
+        let waiting = cage.waiting();
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "waits",
+            &[("index.ts", "export default function(_api: any): void {}")],
+        );
+        let mut fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cage.waiting() <= waiting {
+            assert!(Instant::now() < deadline, "its start waits its turn");
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.host.close();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cage.waiting() > waiting {
+            assert!(Instant::now() < deadline, "closing withdrew it");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(held);
+    }
     #[test]
     fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
         const SECRET: &str = "sk-removed-later";

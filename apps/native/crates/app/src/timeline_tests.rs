@@ -1813,6 +1813,72 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     settle(&mut s);
     assert!(renders(&s) > rendered);
 }
+/// PM-431: the background render reports every frame it stores; a report
+/// that changes no bar the ruler draws draws nothing (the app in front and
+/// untouched stays idle).
+#[gpui::test]
+fn a_render_cache_report_that_moves_no_bar_draws_nothing(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(20), true);
+    s.idle(cx);
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let rendered = renders(&s);
+    for _ in 0..5 {
+        s.surface.update(&mut s.vcx, |t, cx| t.render_bars_changed(cx));
+        s.vcx.run_until_parked();
+    }
+    assert_eq!(renders(&s), rendered);
+}
+/// PM-376: an edit moves the bars at once, and the outline's rows (the
+/// names) are published by the panel's script later. Until that lands each
+/// name stands on its own layer's bar, not after the row before it.
+#[gpui::test]
+fn names_stay_on_their_own_bars_until_the_rows_publication_lands(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let row = |id: &str| format!("[\"layer\",\"{id}\"]");
+    let name_y = |s: &mut Stage, id: &str| {
+        let selector: &'static str = Box::leak(format!("timeline:row:{}", row(id)).into_boxed_str());
+        s.vcx.debug_bounds(selector).map(|b| f32::from(b.origin.y))
+    };
+    let bar_top = |s: &Stage, id: &str| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().unwrap().scroll_for(&row(id)))
+            .unwrap() as f32
+    };
+    let offset = name_y(&mut s, "l2").unwrap() - bar_top(&s, "l2");
+    // Delete the top layer: every bar below moves up a row.
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                        pm_kernel::LayerCommand::Delete {
+                            layer_ids: vec!["l0".into()],
+                        },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    let surface = s.surface.clone();
+    settle(cx, |cx| surface.read_with(cx, |t, _| t.idle()));
+    s.vcx.run_until_parked();
+    // The bars moved; the rows' publication has not been applied yet.
+    for id in ["l1", "l2", "l3"] {
+        assert_eq!(name_y(&mut s, id).unwrap(), bar_top(&s, id) + offset, "{id}");
+    }
+    // Then it lands: the names stay where they are.
+    let l2 = name_y(&mut s, "l2");
+    s.idle(cx);
+    assert_eq!(name_y(&mut s, "l2"), l2);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,

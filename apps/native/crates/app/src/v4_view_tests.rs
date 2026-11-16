@@ -33,6 +33,14 @@ pub(crate) struct Rig {
     pub runtime: Arc<Builtins>,
     _actor: KernelActor,
 }
+/// A test's window outlives the test (GPUI's test app keeps it), and with it
+/// the panel's runtime: its isolates are closed when the test ends, or every
+/// test kept one and the process's heap account filled over the suite.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.runtime.close();
+    }
+}
 /// Three adjacent static strips on one lane, with handles: pro-edit material.
 pub(crate) fn strips_json() -> String {
     let strip = |id: &str, from: f64| {
@@ -62,7 +70,10 @@ pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
         .unwrap();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A mount waits its turn in the process's shared heap account while
+    // other tests' isolates hold it (the whole suite runs in parallel), then
+    // runs: the time in line counts here too.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(result) = ticket.try_take() {
             result.expect("built-in mount");
@@ -570,6 +581,101 @@ fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppCont
     });
     vcx.run_until_parked();
     assert_eq!(last_range(&mut vcx), Some((0, 10)));
+}
+/// PM-447: the Project panel's grid takes its width even when its list was
+/// published again after the tree the window drew (a page, a rename, an
+/// import republish it while a project lands). The width goes to the
+/// current tree; sent to the older one it was refused and never sent again,
+/// and the grid stayed one column of rows under a lit Grid toggle.
+#[gpui::test]
+fn the_project_grid_hears_its_width_from_a_list_published_again(cx: &mut TestAppContext) {
+    let project = |first: &str| {
+        let assets = (0..12)
+            .map(|i| {
+                let name = if i == 0 {
+                    first.to_owned()
+                } else {
+                    format!("Clip {i}")
+                };
+                format!(r#""a{i}":{{"id":"a{i}","kind":"video","dur":10,"name":"{name}"}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r##"{{"id":"integration","name":"Media","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{{assets}}},"comps":{{}},"layers":[]}}"##
+        )
+    };
+    let rig = rig_project("assets", &project("Clip 0"));
+    let rows = |p: &Publication| {
+        p.surface
+            .nodes()
+            .values()
+            .find(|n| n.r#type == "virtual-list")
+            .and_then(|n| n.props.get("count"))
+            .and_then(Value::as_u64)
+    };
+    let older = publication(&rig);
+    // Before its width, the grid is one column: a row for each item (the
+    // twelve clips and the composition).
+    let items = rows(&older).expect("the media list");
+    assert_eq!(items, 13);
+    // A clip is renamed: the panel publishes its list again before the
+    // window has drawn the older tree.
+    let published = rig.kernel.published(PROJECT).unwrap();
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::Restore {
+                    project: pm_model::json::parse(&project("Renamed")).unwrap(),
+                    label: "Rename".into(),
+                    expected_revision: published.revision(),
+                    expected_document: published.snapshot.doc_id,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let newer = std::cell::RefCell::new(vec![]);
+    settle(cx, |_| {
+        newer.borrow_mut().extend(rig.runtime.take_publications());
+        newer.borrow().iter().any(|p| {
+            p.surface
+                .nodes()
+                .values()
+                .any(|n| n.text.contains("Renamed") || format!("{:?}", n.props).contains("Renamed"))
+        })
+    });
+    let (view, mut vcx) = window(cx, &rig, older, Default::default());
+    vcx.run_until_parked();
+    for p in newer.into_inner() {
+        view.update(&mut vcx, |v, cx| v.publish(p, cx));
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        vcx.run_until_parked();
+        let _ = rig.runtime.publish();
+        for p in rig.runtime.take_publications() {
+            view.update(&mut vcx, |v, cx| v.publish(p, cx));
+        }
+        let count = view.read_with(&vcx, |v, _| rows(&v.publication));
+        if count.is_some_and(|c| c < items) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the grid never heard its width: {count:?} rows of one column"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 /// A slot whose height the test sets.
 struct Tall {

@@ -5,6 +5,8 @@ use crate::{
 };
 use gpui::{AnyElement, App, Window};
 use std::{cell::RefCell, rc::Rc};
+/// Ids and names, shared: a list the shell keeps per frame and compares.
+pub type Names = std::sync::Arc<[(String, String)]>;
 
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
@@ -46,12 +48,17 @@ pub trait Integration {
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
-    /// Layer ids and names in the active composition.
-    fn palette_effects(&self, _cx: &App) -> Vec<(String, String)> {
-        Vec::new()
+    /// Effect ids and labels the command palette offers. Asked on every
+    /// frame: answer from a value kept until it changes, never by walking
+    /// the project (the same list returns the same `Arc`, compared by
+    /// pointer).
+    fn palette_effects(&self, _cx: &App) -> Names {
+        Names::default()
     }
-    fn palette_layers(&self, _cx: &App) -> Vec<(String, String)> {
-        Vec::new()
+    /// Layer ids and names in the active composition, kept as
+    /// [`Self::palette_effects`] is.
+    fn palette_layers(&self, _cx: &App) -> Names {
+        Names::default()
     }
     /// Recent projects (library id, name), newest first.
     fn recent(&self, _cx: &App) -> Vec<(String, String)> {
@@ -85,6 +92,11 @@ pub trait Integration {
     fn note(&self, _text: &str, _cx: &mut App) {}
     /// Panels this window's extensions contribute: id and title.
     fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Titles of panels seen before, for a tab whose panel has not
+    /// registered yet (its extension still starting).
+    fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
     /// The workspace's open panels, after any layout change.

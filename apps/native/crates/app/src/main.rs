@@ -52,6 +52,7 @@ mod captions_panel;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
+mod frame_facts;
 #[path = "surfaces/library.rs"]
 mod library_surface;
 mod lifecycle;
@@ -165,59 +166,199 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
     }
 }
 
-/// Whether this is a lane's development bundle (its Info.plist carries
-/// `PMLaneProfile`, which the lane tooling writes) launched without
-/// `--profile`, as macOS reopens apps at login: it then quits at once.
-fn lane_bundle_without_profile(args: &[std::ffi::OsString], info_plist: Option<&str>) -> bool {
-    !args.iter().any(|a| a == "--profile")
-        && info_plist.is_some_and(|plist| plist.contains("<key>PMLaneProfile</key>"))
+/// Why this start is refused, if it is: a build that is not the released
+/// product (a debug build always; a bundle the dev bundler marked with
+/// `PMRequireProfile`, or `PM_NATIVE_REQUIRE_PROFILE=1`, or a lane's older
+/// `PMLaneProfile`) runs only on a profile it was given (`--profile`, or
+/// `PM_NATIVE_PROFILE`), and never on the product's own profiles (the
+/// native one and v1's) under `home`. Started bare (macOS reopening it, an
+/// activation by bundle id) it would open the person's real library.
+/// Children the app starts itself (`--engine-job`, the 3D estimate probe)
+/// and the smoke tools open no profile and pass.
+fn profile_refusal(
+    args: &[std::ffi::OsString],
+    info_plist: Option<&str>,
+    require_env: Option<&std::ffi::OsStr>,
+    profile_env: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    debug: bool,
+) -> Option<String> {
+    if args.first().is_some_and(|a| {
+        a == "--engine-job"
+            || a == "--studio3d-estimate-probe"
+            || a == "--smoke"
+            || a == "--gate-p1-smoke"
+    }) {
+        return None;
+    }
+    let marked = info_plist.is_some_and(|plist| {
+        plist.contains("<key>PMRequireProfile</key>") || plist.contains("<key>PMLaneProfile</key>")
+    });
+    if !(debug || marked || require_env.is_some_and(|v| v == "1")) {
+        return None;
+    }
+    let given = args
+        .iter()
+        .position(|a| a == "--profile")
+        .map(|i| args.get(i + 1).map(PathBuf::from))
+        .unwrap_or_else(|| profile_env.filter(|p| !p.is_empty()).map(PathBuf::from));
+    let Some(given) = given else {
+        return Some(
+            "This development build runs only with --profile <folder>; quitting without opening anything."
+                .into(),
+        );
+    };
+    // The product's profiles, however the path is spelled (a symlink, `..`,
+    // a folder not made yet): `..` and `.` taken first, then the deepest
+    // part that exists read through its links.
+    let resolved = |p: &std::path::Path| {
+        use std::path::Component;
+        let mut plain = PathBuf::new();
+        for part in std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_owned())
+            .components()
+        {
+            match part {
+                Component::ParentDir => {
+                    plain.pop();
+                }
+                Component::CurDir => {}
+                other => plain.push(other),
+            }
+        }
+        let mut rest = vec![];
+        let mut base = plain.as_path();
+        loop {
+            if let Ok(real) = base.canonicalize() {
+                return rest
+                    .iter()
+                    .rev()
+                    .fold(real, |path: PathBuf, part| path.join(part));
+            }
+            match (base.file_name(), base.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_owned());
+                    base = parent;
+                }
+                _ => return plain,
+            }
+        }
+    };
+    let home = home.filter(|h| !h.is_empty()).map(PathBuf::from)?;
+    let product = pm_first_launch::default_paths(&home.join("Library/Application Support"));
+    let mine = resolved(&given);
+    [product.native_profile, product.electron_profile]
+        .iter()
+        .any(|p| resolved(p) == mine)
+        .then(|| {
+            format!(
+                "This development build never opens the product's own profile ({}); quitting.",
+                given.display()
+            )
+        })
 }
 
 #[cfg(test)]
-mod lane_bundle_tests {
-    /// A lane bundle reopened at login (no arguments) quits; launched by
-    /// its lane (with --profile) it runs; an ordinary bundle always runs.
+mod profile_guard_tests {
+    use std::ffi::{OsStr, OsString};
+    fn args(a: &[&str]) -> Vec<OsString> {
+        a.iter().map(OsString::from).collect()
+    }
+    const MARKED: &str = "<dict><key>PMRequireProfile</key><true/></dict>";
+    const PLAIN: &str =
+        "<dict><key>CFBundleIdentifier</key><string>com.powermove.native</string></dict>";
+    /// A marked bundle or a debug build started bare refuses; with its own
+    /// profile it runs; on the product's profiles it refuses; the released
+    /// product (unmarked, release) always runs; the app's own children pass.
     #[test]
-    fn a_lane_bundle_runs_only_with_its_profile() {
-        let lane = "<dict><key>CFBundleIdentifier</key><string>com.powermove.native.dev.media</string>\
-            <key>PMLaneProfile</key><string>/lane/profile</string></dict>";
-        let plain =
-            "<dict><key>CFBundleIdentifier</key><string>com.powermove.native</string></dict>";
-        let args = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
-        assert!(super::lane_bundle_without_profile(&args(&[]), Some(lane)));
-        assert!(super::lane_bundle_without_profile(
-            &args(&["project.pmv"]),
-            Some(lane)
+    fn a_development_build_runs_only_on_a_profile_it_was_given() {
+        let home = tempfile::tempdir().unwrap();
+        let h = Some(home.path().as_os_str());
+        let refuse = |a: &[&str], plist: Option<&str>, debug: bool| {
+            super::profile_refusal(&args(a), plist, None, None, h, debug).is_some()
+        };
+        assert!(refuse(&[], Some(MARKED), false));
+        assert!(refuse(&["project.pmv"], Some(MARKED), false));
+        assert!(refuse(&[], None, true));
+        assert!(refuse(&["--profile"], None, true));
+        assert!(!refuse(
+            &["--profile", "/lane/profile"],
+            Some(MARKED),
+            false
         ));
-        assert!(!super::lane_bundle_without_profile(
-            &args(&["--profile", "/lane/profile", "--draw-occluded", "1"]),
-            Some(lane)
+        assert!(!refuse(
+            &["--powermove-mcp", "--profile", "/lane/profile"],
+            None,
+            true
         ));
-        assert!(!super::lane_bundle_without_profile(&args(&[]), Some(plain)));
-        assert!(!super::lane_bundle_without_profile(&args(&[]), None));
+        assert!(!refuse(&[], Some(PLAIN), false));
+        assert!(!refuse(&[], None, false));
+        assert!(!refuse(&["--engine-job"], Some(MARKED), true));
+        // The environment marks and names a profile as the bundle can.
+        assert!(super::profile_refusal(&[], None, Some(OsStr::new("1")), None, h, false).is_some());
+        assert!(
+            super::profile_refusal(
+                &[],
+                None,
+                Some(OsStr::new("1")),
+                Some(OsStr::new("/lane")),
+                h,
+                false
+            )
+            .is_none()
+        );
+        // The product's native and v1 profiles, spelled any way, refuse.
+        let support = home.path().join("Library/Application Support");
+        std::fs::create_dir_all(support.join("com.zellzoi.powermove.native-beta")).unwrap();
+        let native = support.join("com.zellzoi.powermove.native-beta");
+        let roundabout = support.join("Powermove/../com.zellzoi.powermove.native-beta");
+        let v1 = support.join("Powermove");
+        for p in [&native, &roundabout, &v1] {
+            let a = vec![OsString::from("--profile"), p.clone().into_os_string()];
+            assert!(
+                super::profile_refusal(&a, Some(MARKED), None, None, h, false).is_some(),
+                "{p:?}"
+            );
+            assert!(
+                super::profile_refusal(&a, None, None, None, h, true).is_some(),
+                "{p:?}"
+            );
+        }
+        let link = home.path().join("lane-link");
+        std::os::unix::fs::symlink(&native, &link).unwrap();
+        let a = vec![OsString::from("--profile"), link.into_os_string()];
+        assert!(super::profile_refusal(&a, None, None, None, h, true).is_some());
     }
 }
 
 fn main() -> Result<()> {
-    diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // First, before anything is opened: a development build never starts
+    // without a profile of its own (`profile_refusal`).
+    {
+        let info_plist = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
+            .and_then(|plist| std::fs::read_to_string(plist).ok());
+        if let Some(refusal) = profile_refusal(
+            &args,
+            info_plist.as_deref(),
+            std::env::var_os("PM_NATIVE_REQUIRE_PROFILE").as_deref(),
+            std::env::var_os("PM_NATIVE_PROFILE").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+            cfg!(debug_assertions),
+        ) {
+            eprintln!("{refusal}");
+            std::process::exit(64);
+        }
+    }
+    diag::mark_start();
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
         || args.iter().any(|a| a == "--powermove-mcp")
         || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
     if !headless {
-        // A lane's development bundle runs only when a lane launches it with
-        // its profile; macOS reopening it at login, without its arguments,
-        // must not start it on another profile or put it on screen.
-        let info_plist = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
-            .and_then(|plist| std::fs::read_to_string(plist).ok());
-        if lane_bundle_without_profile(&args, info_plist.as_deref()) {
-            eprintln!("A lane bundle is launched only by its lane, with --profile; quitting.");
-            return Ok(());
-        }
         platform::route_sigterm();
     }
     if args.first().is_some_and(|a| a == "--studio3d-estimate-probe") {
@@ -407,6 +548,11 @@ fn main() -> Result<()> {
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     notifications::install(cx);
+                    // Background work (the background render) waits while the
+                    // person works: every press in an editor and every key.
+                    pm_shell::input::on_input(pm_engine_service::jobs::note_input);
+                    cx.observe_keystrokes(|_, _, _| pm_engine_service::jobs::note_input())
+                        .detach();
                     panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();

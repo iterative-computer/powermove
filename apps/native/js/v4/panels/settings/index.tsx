@@ -450,69 +450,93 @@ function SpeechRow({
 }
 function Extensions({ model, bindings }: SettingsPanelProps) {
   const detail = model.detail;
+  // Its page as every Settings page: named groups, each a card of rows.
   if (detail)
     return (
-      <div role="group" label={detail.name}>
-        <UI.ToolbarItem
-          label="Extensions"
-          metadata={{ symbol: "chevron.left" }}
-          onClick={() => model.closeDetail()}
-        >
-          Extensions
-        </UI.ToolbarItem>
-        <Copy>{detail.name}</Copy>
-        <div role="group" label="About">
-          <text
-            style={{ color: t("colors.text"), fontSize: t("typography.title") }}
+      // Its groups spaced as the page spaces its own.
+      <div
+        role="group"
+        label={detail.name}
+        style={{ ...column, gap: t("metrics.sheet_inset") }}
+      >
+        <div style={{ display: "flex" }}>
+          <UI.ToolbarItem
+            label="Extensions"
+            metadata={{ symbol: "chevron.left" }}
+            onClick={() => model.closeDetail()}
           >
-            About
-          </text>
-          <Copy>{detail.about}</Copy>
+            Extensions
+          </UI.ToolbarItem>
         </div>
-        <div role="group" label="Includes">
-          <text
-            style={{ color: t("colors.text"), fontSize: t("typography.title") }}
-          >
-            Includes
-          </text>
-          {detail.includes.map((entry, i) => (
-            <Copy key={i}>{entry}</Copy>
-          ))}
-        </div>
-        <div role="group" label="Keyboard Shortcuts">
-          <Copy>Keyboard Shortcuts</Copy>
-          {detail.shortcuts.map((entry, i) => (
-            <Copy key={i}>{entry}</Copy>
-          ))}
-        </div>
-        <div role="group" label="Files">
-          <Copy>Files</Copy>
-          {detail.files.map((entry, i) => (
-            <Copy key={i}>{entry}</Copy>
-          ))}
-          <Button
-            label="Show in Finder"
-            disabled={!model.services}
-            onClick={() => {
-              void model.perform({ type: "extension.finder", id: detail.id });
-            }}
-          />
-        </div>
-        {detail.variables.map((row) => (
-          <SettingRow key={row.id} row={row} model={model} />
-        ))}
+        <Group title={detail.name}>
+          <div role="group" label="About" style={describedRow}>
+            <RowCopy title="About" detail={detail.about} />
+          </div>
+          {detail.includes.length > 0 && (
+            <div role="group" label="Includes" style={describedRow}>
+              <RowCopy title="Includes" detail={detail.includes.join("\n")} />
+            </div>
+          )}
+          {detail.shortcuts.length > 0 && (
+            <div role="group" label="Keyboard Shortcuts" style={describedRow}>
+              <RowCopy
+                title="Keyboard Shortcuts"
+                detail={detail.shortcuts.join("\n")}
+              />
+            </div>
+          )}
+          <div role="group" label="Files" style={describedRow}>
+            <RowCopy title="Files" detail={detail.files.join("\n")} />
+            <div style={trailing}>
+              <Button
+                label="Show in Finder"
+                disabled={!model.services}
+                onClick={() => {
+                  void model.perform({
+                    type: "extension.finder",
+                    id: detail.id,
+                  });
+                }}
+              />
+            </div>
+          </div>
+        </Group>
+        {detail.variables.length > 0 && (
+          <Group title="Setup">
+            {detail.variables.map((row) => (
+              <SettingRow key={row.id} row={row} model={model} />
+            ))}
+          </Group>
+        )}
         {detail.canArchive && (
-          <Button
-            label="Delete…"
-            destructive
-            disabled={!model.services || model.pending.has(detail.id)}
-            onClick={() => {
-              void model.perform({ type: "extension.archive", id: detail.id });
-            }}
-          />
+          <Group title="Remove">
+            <div role="group" label="Delete" style={describedRow}>
+              <RowCopy
+                title="Delete Extension"
+                detail="Its files move to the archive in your Powermove profile, and its settings are kept."
+              />
+              <div style={trailing}>
+                <Button
+                  label="Delete…"
+                  destructive
+                  disabled={!model.services || model.pending.has(detail.id)}
+                  onClick={() => {
+                    void model.perform({
+                      type: "extension.archive",
+                      id: detail.id,
+                    });
+                  }}
+                />
+              </div>
+            </div>
+          </Group>
         )}
       </div>
     );
+  const listed =
+    !["loading", "error", "unavailable"].includes(
+      model.publication.extensionsState ?? "",
+    ) && model.extensions.length > 0;
   return (
     <>
       {/* The filter stands on the page's text column, over the list's card. */}
@@ -559,8 +583,14 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         <div
           style={{
             ...column,
-            paddingTop: t("metrics.inset"),
-            paddingBottom: t("metrics.inset"),
+            // The rows stand on the card as every page's; a state's words
+            // keep their room.
+            ...(listed
+              ? {}
+              : {
+                  paddingTop: t("metrics.inset"),
+                  paddingBottom: t("metrics.inset"),
+                }),
           }}
         >
           {model.publication.extensionsState === "loading" ? (
@@ -614,7 +644,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                 // that scrolls them; past that a forty-row list scrolls
                 // itself and shows only what is in view.
                 rowFloor: Math.min(model.extensions.length, 40),
-                rowHeightToken: "metrics.row",
+                rowHeightToken: "metrics.form_row",
                 anchorId: model.anchorId ?? "",
               }}
               onRangeChange={(event) => {
@@ -625,20 +655,68 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                   );
               }}
             >
-              {model.visibleExtensions.map((extension) => (
-                <UI.ListItem
+              {model.visibleExtensions.map((extension, i) => (
+                // A row of the card as every page's: its name, what it is
+                // and where it came from, and the way into its page, with
+                // the card's hairline between two rows.
+                <div
                   key={extension.id}
                   id={`settings.extension.${extension.id}`}
+                  role="listitem"
                   label={extension.name}
-                  selected={false}
-                  onSelect={() => model.viewExtension(extension.id)}
+                  tabIndex={0}
+                  aria-selected={false}
+                  onClick={() => model.viewExtension(extension.id)}
+                  preventDefault={{ keydown: ["Enter", " "] }}
+                  onKeyDown={(e: { key?: string }) => {
+                    if (e.key === "Enter" || e.key === " ")
+                      model.viewExtension(extension.id);
+                  }}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    height: t("metrics.form_row"),
+                    minWidth: t("metrics.hit"),
+                    minHeight: t("metrics.hit"),
+                  }}
                 >
-                  <Copy>{extension.name}</Copy>
-                  <Copy
-                    secondary
-                  >{`${extension.type} · ${extension.source}`}</Copy>
-                  {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
-                </UI.ListItem>
+                  {model.range[0] + i > 0 && <Separator />}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      flexGrow: 1,
+                      gap: t("metrics.gap"),
+                      paddingLeft: t("metrics.inset"),
+                      paddingRight: t("metrics.inset"),
+                    }}
+                  >
+                    <text
+                      style={{
+                        ...text,
+                        fontSize: t("typography.title"),
+                        flexGrow: 1,
+                        flexShrink: 1,
+                        whiteSpace: "nowrap",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {extension.name}
+                    </text>
+                    <text style={{ ...help, flexShrink: 0 }}>
+                      {`${extension.type} · ${extension.source}`}
+                    </text>
+                    <div
+                      metadata={{ symbol: "chevron.right" }}
+                      style={{
+                        color: t("colors.muted"),
+                        symbolSize: t("metrics.symbol_inline"),
+                        flexShrink: 0,
+                      }}
+                    />
+                    {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
+                  </div>
+                </div>
               ))}
             </virtual-list>
           )}
@@ -845,7 +923,11 @@ function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
   if (rest) caps.push(rest);
   return (
     <div
-      style={{ display: "flex", alignItems: "center", gap: t("metrics.pill_inset") }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: t("metrics.pill_inset"),
+      }}
     >
       {caps.map((cap, i) => (
         <div
@@ -874,6 +956,20 @@ function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
     </div>
   );
 }
+/** A command's shortcuts side by side, each its own keycaps, an "or"
+ * between two so their caps never read as one shortcut. */
+function KeyGroups({ list, fixed }: { list: string[]; fixed?: boolean }) {
+  return list.flatMap((keys, i) => [
+    ...(i
+      ? [
+          <text key={`or${i}`} style={{ ...help, color: t("colors.muted") }}>
+            or
+          </text>,
+        ]
+      : []),
+    <Keycaps key={i} keys={keys} fixed={fixed} />,
+  ]);
+}
 /** A command's keys, pressed to take a new one (a menu bar key is shown,
  * not pressed). */
 function ShortcutKeys({
@@ -883,29 +979,29 @@ function ShortcutKeys({
   row: import("./model").ShortcutRow;
   onRecord: () => void;
 }) {
-  // A menu bar command keeps its own key and takes none: dimmed, with
-  // nothing to press (no "None" that reads like an empty, recordable key).
+  // macOS's own items (Hide, Quit) keep their keys: dimmed, with nothing to
+  // press (no "None" that reads like an empty, recordable key).
   if (row.fixed)
     return (
       <div
         role="group"
         label={
           row.keys.length
-            ? `${row.label}: the menu bar's key, not assignable`
+            ? `${row.label}: macOS's key, not assignable`
             : `${row.label}: not assignable`
         }
-        title="Menu bar commands keep their own keys"
+        title="macOS keeps this key"
         style={trailing}
       >
         {row.keys.length ? (
-          row.keys.map((keys, i) => <Keycaps key={i} keys={keys} fixed />)
+          <KeyGroups list={row.keys} fixed />
         ) : (
           <text style={{ ...help, color: t("colors.muted") }}>—</text>
         )}
       </div>
     );
   const shown = row.keys.length ? (
-    row.keys.map((keys, i) => <Keycaps key={i} keys={keys} />)
+    <KeyGroups list={row.keys} />
   ) : (
     <text style={help}>None</text>
   );
@@ -930,7 +1026,7 @@ function Recording({ onCancel }: { onCancel: () => void }) {
   return (
     <button
       tabIndex={0}
-      label="Type a shortcut. Press to stop."
+      label="Type a shortcut. Escape cancels."
       style={{
         display: "flex",
         alignItems: "center",
@@ -1022,7 +1118,19 @@ function Shortcuts({
           : rowStyle
       }
     >
-      <div style={copyColumn}>
+      {/* The command's name takes a click too: it starts listening, as a
+       * click on its keys does (the keys stay the keyboard's target). */}
+      <button
+        tabIndex={-1}
+        label={row.label}
+        disabled={row.fixed}
+        style={{
+          ...copyColumn,
+          minWidth: t("metrics.hit"),
+          minHeight: t("metrics.hit"),
+        }}
+        onClick={() => act("record", row.id)}
+      >
         <div style={titleLine}>
           <text
             style={{
@@ -1034,7 +1142,7 @@ function Shortcuts({
             {row.label}
           </text>
         </div>
-      </div>
+      </button>
       <div style={trailing}>
         {row.changed && !row.fixed && !row.recording ? (
           <Button
@@ -1199,7 +1307,22 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
               alt={project.name}
               style={{ position: "absolute", inset: "fill" }}
             />
-          ) : null}
+          ) : (
+            // No picture yet (a project never shown): its symbol, not a
+            // bare grey box.
+            <div
+              metadata={{ symbol: "film" }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexGrow: 1,
+                height: t("metrics.settings_poster_height"),
+                color: t("colors.muted"),
+                symbolSize: t("metrics.symbol_panel"),
+              }}
+            />
+          )}
         </div>
         <div style={copyColumn}>
           {projects.length > 1 && bindings.project ? (

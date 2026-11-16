@@ -89,8 +89,30 @@ function FormRow(props: {
     />
   );
 }
+/** A card of rows with Settings' hairline between each two (inset both sides). */
 function Group(props: { label: string; children: ComponentChildren }) {
-  return <UI.FormGroup title={props.label}>{props.children}</UI.FormGroup>;
+  const rows = (
+    Array.isArray(props.children) ? props.children.flat() : [props.children]
+  ).filter((row) => row !== null && row !== undefined && row !== false);
+  return (
+    <UI.FormGroup title={props.label}>
+      {rows.flatMap((row, i) =>
+        i === 0 ? [row] : [<Hairline key={`hairline.${i}`} />, row],
+      )}
+    </UI.FormGroup>
+  );
+}
+function Hairline(_: { key?: string }) {
+  return (
+    <div
+      style={{
+        height: token("metrics.border"),
+        marginLeft: token("metrics.inset"),
+        marginRight: token("metrics.inset"),
+        background: token("colors.separator"),
+      }}
+    />
+  );
 }
 /** Native NSButton role metadata is owned by the approved kit. */
 function Action(props: {

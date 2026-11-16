@@ -202,6 +202,8 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
+    /// Every action the View menu can hold; an item's tag is its place here.
+    /// New actions go at the end, so earlier tags stay as they are.
     const ALL: [Action; 39] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),

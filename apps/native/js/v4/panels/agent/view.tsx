@@ -89,20 +89,74 @@ const strong: Style = {
   fontWeight: t("typography.semibold_weight"),
 };
 /** A hairline chip in the code face (`data-pm-variant="code"`), cut in the
- * middle so a path keeps its start and its file name. */
-const chip: Style = {
-  fontSize: t("typography.minimum"),
-  color: t("colors.secondary"),
+ * middle so a path keeps its start and its file name. The box is a `div`:
+ * a text leaf draws no fill or edge. */
+const chipBox: Style = {
+  ...row,
   background: t("colors.fill"),
   borderWidth: t("metrics.border"),
   borderColor: t("colors.hairline"),
   borderRadius: t("metrics.inner_radius"),
   paddingLeft: t("metrics.gap"),
   paddingRight: t("metrics.gap"),
+  ...shrink,
+};
+const chipText: Style = {
+  fontSize: t("typography.minimum"),
+  color: t("colors.secondary"),
   whiteSpace: "nowrap",
   textOverflow: "middle",
   ...shrink,
 };
+function Chip({ children }: { children: string }) {
+  return (
+    <div style={chipBox}>
+      <text data-pm-variant="code" style={chipText}>
+        {children}
+      </text>
+    </div>
+  );
+}
+/** A file a message carried, as the composer showed it before it was
+ * sent: its document symbol and name in the text face (a code chip's
+ * fixed-width face is for code). */
+function FileChip({ name }: { name: string }) {
+  return (
+    <div
+      role="group"
+      label={`${name}, attachment`}
+      style={{
+        ...row,
+        ...shrink,
+        gap: t("metrics.gap"),
+        height: t("metrics.hit"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        background: t("colors.fill"),
+        borderRadius: t("metrics.inner_radius"),
+      }}
+    >
+      <div
+        metadata={{ symbol: "doc" }}
+        style={{
+          color: t("colors.muted"),
+          symbolSize: t("metrics.symbol_inline"),
+          flexShrink: 0,
+        }}
+      />
+      <text
+        style={{
+          ...quiet,
+          ...shrink,
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {name}
+      </text>
+    </div>
+  );
+}
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -154,7 +208,10 @@ function Prose({ text, style = reading }: { text: string; style?: Style }) {
         g.length === 1 ? (
           <ProseBlock key={i} block={g[0]!} style={style} />
         ) : (
-          <div key={i} style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}>
+          <div
+            key={i}
+            style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}
+          >
             {g.map((b, j) => (
               <ProseBlock key={j} block={b} style={style} />
             ))}
@@ -192,7 +249,9 @@ function ProseBlock({
             paddingLeft: b.depth ? t("metrics.agent_gap") : t("metrics.gap"),
           }}
         >
-          <text style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}>
+          <text
+            style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}
+          >
             {b.marker}
           </text>
           <Para runs={b.runs} style={{ ...style, flexGrow: 1 }} />
@@ -541,9 +600,10 @@ function Gate({
       : local
         ? "Bring your own model"
         : `Connect ${name}`;
+  // Signed out is the plain ask (v1.2.0's gate): the reason is for a fault.
   const body = checking
     ? `Checking your ${name} connection.`
-    : n.reason ||
+    : (!n.signedOut && n.reason) ||
       (local
         ? "Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others."
         : `Use your ${name} subscription to power the Powermove agent.`);
@@ -558,29 +618,20 @@ function Gate({
         ...(compact ? {} : { flexGrow: 1, justifyContent: "center" }),
       }}
     >
-      <div
-        role="group"
-        label="Connection provider"
-        style={{ ...row, gap: t("metrics.gap") }}
-      >
-        {s.catalog.providers.map(([id, label]) => (
-          <UI.ToolbarItem
-            key={id}
-            id={`agent-connect-${id}`}
-            label={id === "compatible" ? "API / local" : label}
-            active={id === provider}
-            onClick={() => {
-              if (id !== provider) send({ type: "setProvider", provider: id });
-            }}
-            style={{
-              paddingLeft: t("metrics.text_padding"),
-              paddingRight: t("metrics.text_padding"),
-              borderRadius: t("metrics.control_radius"),
-            }}
-          >
-            {id === "compatible" ? "API / local" : label}
-          </UI.ToolbarItem>
-        ))}
+      {/* v1.2.0's provider switch: the kit's one segmented control. */}
+      <div style={{ ...row, justifyContent: "center" }}>
+        <UI.SegmentedControl
+          id="agent-connect-provider"
+          label="Connection provider"
+          value={provider}
+          options={s.catalog.providers.map(([id, label]) => ({
+            id,
+            label: id === "compatible" ? "API / local" : label,
+          }))}
+          onChange={(id) => {
+            if (id !== provider) send({ type: "setProvider", provider: id });
+          }}
+        />
       </div>
       {fault ? (
         <ErrorNotice
@@ -615,7 +666,7 @@ function Gate({
         </div>
       )}
       {(!local || fault) && (
-        <div style={row}>
+        <div style={{ ...row, justifyContent: "center" }}>
           <button
             role="button"
             label="Connection settings"
@@ -812,9 +863,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <text key={i} data-pm-variant="code" style={chip}>
-                {str(obj(f).name) || "File"}
-              </text>
+              <FileChip key={i} name={str(obj(f).name) || "File"} />
             ))}
           </div>
         )}
@@ -1178,9 +1227,7 @@ function Tools({
           }}
         >
           {r.files.map((f) => (
-            <text key={f} data-pm-variant="code" style={chip}>
-              {f}
-            </text>
+            <Chip key={f}>{f}</Chip>
           ))}
         </div>
       )}
@@ -1302,22 +1349,22 @@ function ToolLine({
       <text style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}>
         {d.label}
       </text>
-      {d.detail && !(open && d.kind === "thought") && (
-        <text
-          style={
-            d.kind === "thought"
-              ? {
-                  ...faint,
-                  ...shrink,
-                  whiteSpace: "nowrap",
-                  textOverflow: "ellipsis",
-                }
-              : chip
-          }
-        >
-          {d.detail}
-        </text>
-      )}
+      {d.detail &&
+        !(open && d.kind === "thought") &&
+        (d.kind === "thought" ? (
+          <text
+            style={{
+              ...faint,
+              ...shrink,
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {d.detail}
+          </text>
+        ) : (
+          <Chip>{d.detail}</Chip>
+        ))}
       <div style={{ flexGrow: 1 }} />
       {word && (
         <text

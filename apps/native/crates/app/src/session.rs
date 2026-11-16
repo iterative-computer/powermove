@@ -76,11 +76,23 @@ pub struct Controller {
     /// bound, then over the viewer until its first frame (`viewer_poster`):
     /// the first picture waits for the open and for the extensions the
     /// project draws with (PM-384).
-    pub(crate) ghost_poster: Option<std::path::PathBuf>,
+    pub(crate) ghost_picture: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Ghost pictures no longer shown, given back to the window's atlas at
+    /// its next draw (`ghost_retire`).
+    pub(crate) ghost_retired: Vec<std::sync::Arc<gpui::RenderImage>>,
     /// The picture the opening project's viewer stands in with until its
     /// first real frame (`playback::Placeholder`); taken when its viewer is
     /// bound.
     pub(crate) viewer_poster: Option<std::path::PathBuf>,
+    /// The picture the viewer shows, kept as the last frame once it holds
+    /// still (`poster::still`).
+    pub(crate) last_frame_watch: crate::poster::StillWatch,
+    /// The opening project's saved workspace, laid out from the moment the
+    /// open is chosen until the project lands with it (PM-384).
+    pub(crate) opening_workspace: Option<pm_model::Value>,
+    /// This window was in front at the last quit and is opening its
+    /// project before the other restored windows (`release_front`).
+    front_restore: bool,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -159,6 +171,9 @@ pub struct Controller {
     pub message: String,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
+    /// What the shell reads from the project on every frame, kept per
+    /// revision (`crate::frame_facts`).
+    pub(crate) frame_facts: crate::frame_facts::FrameFacts,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
     /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
     pub home: bool,
@@ -250,6 +265,10 @@ pub struct Controller {
 }
 /// How long arrow keys rest before a run of nudges becomes its undo step.
 const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
+/// How many tenths of a second a restored window waits for the front one's
+/// first frame (a Recover question there can hold it) before it opens its
+/// own project anyway (PM-384).
+const FRONT_WAIT_LOOKS: u32 = 300;
 
 /// Why a project opened as a copy, in user language (never the enum name):
 /// said when it opens. The window's subtitle keeps saying it
@@ -384,16 +403,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
-    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
-        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    fn palette_effects(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_effects(&c.kernel.state())
     }
-    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
-        self.0
-            .read(cx)
-            .published
-            .as_deref()
-            .map(crate::layer_commands::palette_layers)
-            .unwrap_or_default()
+    fn palette_layers(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_layers(c.published.as_ref())
     }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
@@ -409,6 +425,9 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
+            for picture in v.ghost_retired.drain(..) {
+                w.drop_image(picture).ok();
+            }
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
@@ -500,6 +519,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
+    }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
@@ -594,7 +616,12 @@ impl pm_shell::integration::Integration for Bridge {
         panels::format_facts(c.dimensions, c.rate.to_f64())
     }
     fn status_alert(&self, cx: &App) -> String {
-        panels::offline_summary(self.0.read(cx).offline_count())
+        let c = self.0.read(cx);
+        panels::offline_summary(c.frame_facts.offline(
+            c.published.as_ref(),
+            c.builtins.media_observed,
+            || c.offline_count(),
+        ))
     }
     fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
         self.0.update(cx, |v, cx| v.show_offline_media(cx));
@@ -883,8 +910,12 @@ impl Controller {
             busy: None,
             opening_name: None,
             ghost_aspect: None,
-            ghost_poster: None,
+            ghost_picture: None,
+            ghost_retired: Vec::new(),
             viewer_poster: None,
+            last_frame_watch: Default::default(),
+            opening_workspace: None,
+            front_restore: false,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -934,6 +965,7 @@ impl Controller {
             message: "No project".into(),
             path: None,
             recent: vec![],
+            frame_facts: Default::default(),
             library: None,
             home: false,
             home_visible: false,
@@ -1062,13 +1094,22 @@ impl Controller {
             .set_document_metadata(name, "Opening…", false, None);
         cx.notify();
     }
+    /// The front window's restored project showed its first frame, or its
+    /// open ended without one: the other restored windows open theirs.
+    pub(crate) fn release_front(&mut self) {
+        if std::mem::take(&mut self.front_restore) {
+            pm_shell::set_front_restoring(None);
+        }
+    }
     /// An open that ended without a project: the ghost goes, Home is back.
     pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        self.release_front();
+        self.opening_workspace = None;
         self.opening_name = None;
         self.ghosted.clear();
         self.revealed.clear();
         self.ghost_aspect = None;
-        self.ghost_poster = None;
+        self.ghost_retire();
         self.host
             .borrow()
             .set_document_metadata("Untitled", "", false, None);
@@ -1140,6 +1181,13 @@ impl Controller {
                 .get("restoreWindows")
                 .and_then(pm_model::Value::as_bool)
                 != Some(false);
+        // Its picture stands in from the window's first frame, while the
+        // library is read (PM-384).
+        if keep {
+            self.stage_open(&project);
+        }
+        let front = self.host.borrow().restored_front;
+        self.front_restore = front;
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -1154,16 +1202,43 @@ impl Controller {
                 .find(|row| row.id == project)?;
             Some((row.id, row.name))
         });
-        // Home waits for the answer, so a project that reopens never
-        // flashes Home first.
+        // Home waits for the answer, showing the project's ghost, so a
+        // project that reopens never flashes Home or an empty editor first.
         self.reopening = true;
         cx.spawn(async move |this, cx| {
             let found = found.await;
             let _ = this.update(cx, |v, cx| {
                 v.reopening = false;
+                // The tab shows its project opening, with its picture, from
+                // now: not Home while the tabs before it open (PM-384).
+                if let Some((id, name)) = &found
+                    && v.session.is_none()
+                    && !v.opening
+                {
+                    v.stage_open(id);
+                    v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_none() {
+                    v.ghost_retire();
+                    v.viewer_poster = None;
+                }
+                if found.is_none() {
+                    v.release_front();
+                }
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // The window that was in front opens first, alone, and
+                // shows its first frame; the others wait for it.
+                if !front {
+                    for _ in 0..FRONT_WAIT_LOOKS {
+                        if pm_shell::front_restoring().is_none() {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
+                }
                 // Every restored window reopens its project, one open at a
                 // time (an open holds the project-operation fence): a tab
                 // waits for the one before it instead of giving up.
@@ -1184,9 +1259,13 @@ impl Controller {
                                 profile: v.profile.clone(),
                                 project: id,
                             },
-                            Some(name),
+                            Some(name.clone()),
                             cx,
                         );
+                        // It could not start: the ghost gives way to Home.
+                        if !v.opening && v.session.is_none() && v.opening_name.as_deref() == Some(&name) {
+                            v.end_ghost(cx);
+                        }
                     }
                 });
             }
@@ -1858,16 +1937,7 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        // The picture the viewer last showed stands in the opening viewer
-        // until the project's first real frame; Home's poster where none
-        // was kept.
-        self.ghost_poster = [
-            crate::poster::last_frame_files(&self.profile, &open_id).0,
-            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
-        ]
-        .into_iter()
-        .find(|poster| poster.is_file());
-        self.viewer_poster = self.ghost_poster.clone();
+        self.stage_open(&open_id);
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -1908,6 +1978,30 @@ impl Controller {
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
+    /// The ghost's picture goes (its own frame is retired at the next draw).
+    pub(crate) fn ghost_retire(&mut self) {
+        self.ghost_retired.extend(self.ghost_picture.take());
+    }
+    /// `project` opening: the picture its viewer last showed stands in the
+    /// opening viewer until its first real frame (Home's poster where none
+    /// was kept), and the window lays out its saved workspace (PM-384).
+    pub(crate) fn stage_open(&mut self, project: &str) {
+        let poster = crate::poster::opening_poster(&self.profile, project);
+        // Decoded here, so the ghost shows it from its first frame (a path
+        // loads after it: the frame was empty white at first).
+        self.ghost_retire();
+        self.ghost_picture = poster
+            .as_deref()
+            .and_then(crate::poster::decode)
+            .and_then(|(w, h, rgba)| pm_shell::symbol::picture(w, h, rgba));
+        self.viewer_poster = poster;
+        self.last_frame_watch.shown = None;
+        // Its own panels at their sizes, the viewer's slot included, not
+        // the layout another window saved last (a few kilobytes: read here
+        // so the first frame already has them).
+        self.opening_workspace =
+            pm_kernel::library::LibraryStore::open(&self.profile).saved_workspace(project);
+    }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(
         &mut self,
@@ -1934,6 +2028,9 @@ impl Controller {
             }
             return;
         };
+        if let ShellReply::Opened { session, .. } = &reply {
+            self.stage_open(&session.project);
+        }
         // A library project's saved version is in the library, wherever its file went.
         self.settle_open(
             operation,
@@ -2872,7 +2969,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
-                        v.store_last_frame(None, cx);
+                        v.keep_last_frame(None, cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
@@ -3523,7 +3620,7 @@ impl Controller {
                     cx.notify();
                 }
             },
-            "cancel" | "deselect" if self.importing.is_some() => {
+            "cancelImport" | "cancel" | "deselect" if self.importing.is_some() => {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                 }

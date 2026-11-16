@@ -71,20 +71,24 @@ const PREVIEW: f32 = 1.2;
 /// The plot inside an easing editor's bounds: inset so the knobs at the
 /// edges show whole, over the span `range` shows.
 fn ease_graph(bounds: Bounds<Pixels>, range: (f64, f64), t: &pm_design::Tokens) -> ease::Graph {
-    ease::Graph::new(graph(bounds, t).area, range)
+    let inset = t.metrics.keyframe / 2. + t.metrics.border;
+    ease::Graph::new(inside(bounds, inset), range)
 }
 
 /// The graph inside a curve editor's bounds: inset so points on its edges
 /// show whole.
 pub(super) fn graph(bounds: Bounds<Pixels>, t: &pm_design::Tokens) -> Graph {
-    let inset = px(t.metrics.keyframe / 2. + t.metrics.border);
-    Graph::new(Bounds::new(
+    Graph::new(inside(bounds, grade::curve_inset(t)))
+}
+fn inside(bounds: Bounds<Pixels>, inset: f32) -> Bounds<Pixels> {
+    let inset = px(inset);
+    Bounds::new(
         bounds.origin + point(inset, inset),
         gpui::size(
             (bounds.size.width - inset * 2.).max(px(1.)),
             (bounds.size.height - inset * 2.).max(px(1.)),
         ),
-    ))
+    )
 }
 
 /// A grading control's height for the width it has: a wheel is square
@@ -680,11 +684,12 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn the_graph_is_inset_by_half_a_point() {
+    fn the_graph_is_inset_by_half_a_knob_and_clear_of_the_corners() {
         let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
         let b = Bounds::new(point(px(10.), px(20.)), gpui::size(px(200.), px(100.)));
         let g = graph(b, &t);
-        let inset = t.metrics.keyframe / 2. + t.metrics.border;
+        let inset = grade::curve_inset(&t);
+        assert!(inset > t.metrics.keyframe / 2. + t.metrics.border);
         assert_eq!(
             g.to_point((0., 1.)),
             point(px(10. + inset), px(20. + inset))

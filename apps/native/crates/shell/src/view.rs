@@ -465,16 +465,29 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        self.workspaces
-            .offered()
+        let offered = self.workspaces.offered();
+        let names: Vec<String> = offered
+            .iter()
+            .map(|r| workspace::record_name(r).to_owned())
+            .collect();
+        offered
             .into_iter()
-            .map(|r| {
+            .zip(workspace::told_apart(&names))
+            .map(|(r, name)| {
                 (
                     workspace::record_id(r).unwrap_or_default().to_owned(),
-                    workspace::record_name(r).to_owned(),
+                    name,
                     workspace::is_builtin(r),
                 )
             })
+            .collect()
+    }
+    /// The names of the workspaces there are, as saved.
+    fn workspace_names(&self) -> Vec<String> {
+        self.workspaces
+            .offered()
+            .into_iter()
+            .map(|r| workspace::record_name(r).to_owned())
             .collect()
     }
     /// The active workspace record.
@@ -551,7 +564,12 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        layout::Panels::new(contributed)
+        let remembered = self
+            .integration
+            .as_ref()
+            .map(|i| i.remembered_panel_titles(cx))
+            .unwrap_or_default();
+        layout::Panels::new(contributed).with_remembered(remembered)
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
@@ -659,6 +677,28 @@ impl Editor {
                         })
                         .or_else(|_| self.layout.show_panel(rest, &panels))
                 }
+                _ => self.layout.show_panel(rest, &panels),
+            },
+            // A panel coming back (its extension restarted as the project
+            // opens): in its place, or shown if it had none, but never taking
+            // the showing tab of a stack it is already in (PM-427).
+            ("panel", "restore") => match self.parked.remove(rest) {
+                Some((place, showing)) if self.layout.find(rest).is_none() => {
+                    let mut next = self.layout.clone();
+                    next.show_panel(rest, &panels)
+                        .and_then(|_| next.move_panel_to(rest, place))
+                        .map(|_| {
+                            if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
+                                && next
+                                    .find(rest)
+                                    .is_some_and(|(d, g, _)| (d, g) == (dock, group))
+                            {
+                                next.docks[dock].groups[group].active = tab;
+                            }
+                            self.layout = next
+                        })
+                }
+                _ if self.layout.find(rest).is_some() => Ok(()),
                 _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {
@@ -779,12 +819,16 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow()
-                        .prompt_workspace_name(workspace::record_name(&self.record));
+                    h.borrow().prompt_workspace_name(&workspace::save_name(
+                        workspace::record_name(&self.record),
+                        &self.workspace_names(),
+                    ));
                 }
                 Ok(())
             }
             ("layout", "save") => layout::layout_name(rest).map(|name| {
+                // Never a second workspace of a name already there.
+                let name = workspace::free_name(&name, &self.workspace_names());
                 let mut copy = workspace::write(&self.layout, &self.record);
                 copy["id"] = workspace::new_id().into();
                 copy["name"] = name.clone().into();
@@ -2125,6 +2169,7 @@ impl Render for Editor {
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                crate::input::noted();
                 // A drag still in flight (its release never came) ends where
                 // it showed before this press is handled, never on it.
                 if this.gesture.is_some() {
@@ -2632,6 +2677,17 @@ impl Render for Editor {
                 let mut empty = empty_state(&t, heading, line)
                     .h(px((p.rect.h - m.header).max(0.)))
                     .overflow_hidden();
+                // A panel still on its way (its extension starting): the
+                // loading state under its own title, never an empty body.
+                if coming {
+                    static SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                    let turns = SINCE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+                    empty = empty.child(crate::welcome_view::spinner(
+                        if t.accessibility.reduce_motion { 0. } else { turns },
+                        &t,
+                    ));
+                    w.request_animation_frame();
+                }
                 // Actions run only with an app attached (the bare shell has no importer).
                 if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
                     empty = empty.child(
@@ -3192,6 +3248,16 @@ mod keyboard_tests {
                 }
                 // Asking for a panel still shows it.
                 assert!(v.shell_command("panel:show:ext.pexels", cx));
+                assert_eq!(showing(v), "ext.pexels");
+                // An extension's panel opening again as it restarts (PM-427):
+                // in its stack, it never takes the showing tab, parked or not.
+                for id in ["ext.voice", "inspector"] {
+                    assert!(v.shell_command(&format!("panel:restore:{id}"), cx));
+                    assert_eq!(showing(v), "ext.pexels", "{id} restored in place");
+                }
+                assert!(v.shell_command("panel:park:ext.voice", cx));
+                assert!(v.shell_command("panel:restore:ext.voice", cx));
+                assert!(v.layout.find("ext.voice").is_some(), "back in its place");
                 assert_eq!(showing(v), "ext.pexels");
             })
             .unwrap();
