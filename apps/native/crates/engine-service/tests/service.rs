@@ -1082,3 +1082,95 @@ fn viewer_output_switch_modes_encode_distinct_finite_signals() {
         "peaks below reference white are refused"
     );
 }
+
+/// A viewer's settled picture is copied out of the engine's pool only at
+/// rest. Frames read from a rendered range are settled while playing and
+/// scrubbing too; none of those is copied (each copy is the whole picture,
+/// taken under the state lock). The frame the playhead rests on is.
+#[test]
+fn a_rendered_range_played_or_scrubbed_copies_no_picture() {
+    let service = EngineService::start(pm_gpu::Gpu::new("settled-copy-test").unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let viewer = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&viewer, viewer.stamp().unwrap());
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let start = Instant::now();
+    while disk
+        .start_fill(1., 1.5, exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(20), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(start.elapsed() < Duration::from_secs(120), "{:?}", disk.bars());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let second = Ticks::new(TICKS_PER_SECOND).unwrap();
+    let wait = |what: &str, ok: &dyn Fn(&ViewerStatus) -> bool| {
+        let start = Instant::now();
+        loop {
+            let status = viewer.status();
+            if ok(&status) {
+                return status;
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "{what}: {status:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // At rest on 1 s: its picture is copied.
+    viewer
+        .command(C::Seek {
+            time: second,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    let rested = wait("the rested picture copied", &|s| {
+        s.settled_picture.as_ref().is_some_and(|p| p.time == second)
+    })
+    .settled_copies;
+    // Playing through the rendered range: frames from disk, none copied.
+    viewer
+        .command(C::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let mut settled_playing = 0;
+    let mut last = None;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(400) {
+        let s = viewer.status();
+        if let Some(f) = s.frame.filter(|f| f.moment == Moment::Playing && f.settled)
+            && last != Some(f.time)
+        {
+            last = Some(f.time);
+            settled_playing += 1;
+        }
+        assert_eq!(s.settled_copies, rested, "copied while playing");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(settled_playing > 0, "no frame was read from disk while playing");
+    viewer.command(C::Pause).unwrap();
+    let rested = wait("stopped and rested", &|s| {
+        s.clock
+            .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Stopped)
+    })
+    .settled_copies;
+    // Scrubbing over it: frames from disk, none copied.
+    let frame = TICKS_PER_SECOND / 30;
+    for step in 1..12 {
+        let time = Ticks::new(TICKS_PER_SECOND + step * frame).unwrap();
+        viewer.scrub_at(time, trace::now()).unwrap();
+        let s = wait("the scrubbed frame", &|s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.time == time && f.gpu_ok && f.moment == Moment::Scrub)
+        });
+        assert_eq!(s.settled_copies, rested, "copied while scrubbing (step {step})");
+    }
+    viewer.retire();
+}

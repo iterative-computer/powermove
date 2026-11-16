@@ -471,6 +471,8 @@ pub struct ViewerStatus {
     /// The last settled picture presented, copied out of the engine's pool
     /// ([`Picture`]); kept until another settles.
     pub settled_picture: Option<Picture>,
+    /// How many settled pictures were copied (`settled_picture`).
+    pub settled_copies: u64,
     pub clock: Option<ClockSample>,
     pub levels: Option<AudioLevels>,
     pub error: Option<String>,
@@ -2747,10 +2749,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 });
                 // A newly settled picture is copied out of the pool, once:
                 // the viewer's still (`Picture`), without pinning a surface.
-                if v.status.frame.as_ref().is_some_and(|r| r.settled && r.gpu_ok)
+                // Only at rest: frames read from disk are settled while
+                // playing, scrubbing or skimming too, and each copy is the
+                // whole picture, taken here under the state lock.
+                let resting = f.spec.moment == Moment::Paused
+                    && v.skim.is_none()
+                    && v.stamp == f.stamp
+                    && v.commands.is_empty()
+                    && runtime.get(&f.id).is_some_and(|r| {
+                        !r.scrub && r.transport.rate() == pm_protocol::common::PlaybackRate::STOPPED
+                    });
+                if resting
+                    && v.status.frame.as_ref().is_some_and(|r| r.settled && r.gpu_ok)
                     && v.status.settled_picture.as_ref().is_none_or(|p| p.stamp != f.stamp || p.time != f.spec.time)
                 {
                     v.status.settled_picture = Picture::copy(&f.submission.surface, f.stamp, f.spec.time);
+                    v.status.settled_copies += 1;
                 }
                 // A stale, failed or dropped frame did not answer the input.
                 // Keep its origin through retries; never consume a newer one.
