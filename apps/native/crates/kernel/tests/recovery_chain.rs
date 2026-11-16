@@ -1431,13 +1431,27 @@ fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
     assert_eq!(width(&k, &session.project), 640.);
     drop(k);
 
-    // Its file is offline (it would open as a copy), or its saved project
-    // changed under the work (it would go to a recovered copy): the quit
-    // leaves it, and the next open asks.
-    for (case, change) in [
-        ("quit-offline", "file"),
-        ("quit-base-changed", "body"),
-    ] {
+    // Its file is gone: it is still a project of this library, and its
+    // work is folded into it, as itself; no entry is made.
+    let root = killed("quit-offline");
+    {
+        let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
+            .unwrap();
+        w.set("projectMeta.film", offline_file(&root.0)).unwrap();
+        w.flush().unwrap();
+    }
+    quit(&root.0);
+    assert_eq!(rows(&root.0), vec![("film".to_owned(), "Base".to_owned())]);
+    let mut k = kernel(&root.0);
+    let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
+        panic!("folded work asks nothing");
+    };
+    assert_eq!(width(&k, &session.project), 640.);
+    drop(k);
+
+    // Its saved project changed under the work (it would go to a recovered
+    // copy): the quit leaves it, and the next open asks.
+    for (case, change) in [("quit-base-changed", "body")] {
         let root = killed(case);
         {
             let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
@@ -1465,46 +1479,92 @@ fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
     }
 }
 
-/// A project whose file is offline opens as a copy, and opening it again
-/// unchanged opens that copy, however the library is named (its profile, or
-/// its store folder as quit compaction names it): never one more copy.
+/// Opening a library project whose file is gone, from Home or as a launch
+/// restores its tab (both open it by its library id), opens it as itself:
+/// never a new "— Native" entry, however often and however its library is
+/// named (its profile, or its store folder as a quit and a copy's reopen
+/// name it). A copy an earlier build made for it is reopened instead
+/// (PM-379). PM-361, PM-421.
 #[test]
-fn an_offline_projects_copy_is_reopened_however_its_library_is_named() {
-    let root = TempDir::new("offline-copy");
-    {
+fn an_offline_project_opens_as_itself_and_an_earlier_copy_is_reopened() {
+    let root = TempDir::new("offline-open");
+    let store = pm_kernel::library::LibraryStore::open(&root.0).dir().to_path_buf();
+    let save = |id: &str, meta: Value| {
         let w =
             pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
         let mut p = value();
-        p.as_object_mut().unwrap().insert("id", Value::from("film"));
-        w.save_project("film", p, Value::Null, Value::Null, Value::Null)
-            .unwrap();
-        w.set("projectMeta.film", offline_file(&root.0)).unwrap();
+        p.as_object_mut().unwrap().insert("id", Value::from(id));
+        w.save_project(id, p, Value::Null, Value::Null, meta).unwrap();
         w.flush().unwrap();
-    }
-    let count = || {
+    };
+    let ids = || {
         pm_kernel::library::LibraryStore::open(&root.0)
             .projects()
             .unwrap()
-            .len()
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<std::collections::BTreeSet<_>>()
     };
-    let store = pm_kernel::library::LibraryStore::open(&root.0).dir().to_path_buf();
-    let mut k = kernel(&root.0);
-    for (round, profile) in [root.0.clone(), store.clone(), root.0.clone()].into_iter().enumerate() {
+    let open = |k: &mut Kernel, round: usize, profile: &Path, project: &str| {
         let ShellReply::Opened { session, .. } = k
             .shell(ShellCall::PrepareOpen {
                 id: format!("open{round}"),
                 source: SessionSource::Library {
-                    profile,
-                    project: "film".into(),
+                    profile: profile.to_path_buf(),
+                    project: project.into(),
                 },
                 electron_profile: None,
             })
             .unwrap()
         else {
-            panic!("not opened");
+            panic!("round {round}: not opened");
+        };
+        let slot = match k.session_metadata(&session.project).unwrap().destination {
+            SessionDestination::Library(slot) => slot,
+            other => panic!("round {round}: {other:?}"),
         };
         k.shell(ShellCall::Close(session)).unwrap();
         k.durability_barrier().unwrap();
-        assert_eq!(count(), 2, "round {round}: the project and its one copy");
+        slot
+    };
+    save("film", offline_file(&root.0));
+    // An old copy of another project, opened as its own entry (a restored
+    // tab of a copy: run 17's "Run6 — Native ×5").
+    save("copyfive", offline_file(&root.0));
+    let before = ids();
+    let mut k = kernel(&root.0);
+    for (round, (profile, project)) in [
+        (root.0.clone(), "film"),
+        (store.clone(), "film"),
+        (root.0.clone(), "copyfive"),
+        (store.clone(), "copyfive"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(open(&mut k, round, &profile, project), project, "round {round}: as itself");
+        assert_eq!(ids(), before, "round {round}: no entry made");
+    }
+    drop(k);
+    // A copy an earlier build made of it when its file was gone (recorded
+    // under the store folder's name) is where its work went: it reopens.
+    let hash = pm_kernel::base_hash_of(
+        &pm_kernel::library::LibraryStore::open(&root.0)
+            .load("film")
+            .unwrap()
+            .unwrap()
+            .project,
+    );
+    let record = pm_model::json::parse(&format!(
+        r#"{{"copyOf":{{"entry":"film","library":{},"reason":"OfflineFile","source":{{"hash":"{hash}"}}}}}}"#,
+        pm_model::json::to_canonical_string(&Value::from(store.to_string_lossy().into_owned())),
+    ))
+    .unwrap();
+    save("copyold", record);
+    let before = ids();
+    let mut k = kernel(&root.0);
+    for (round, profile) in [root.0.clone(), store.clone()].into_iter().enumerate() {
+        assert_eq!(open(&mut k, round, &profile, "film"), "copyold", "round {round}: its copy");
+        assert_eq!(ids(), before, "round {round}: no entry made");
     }
 }

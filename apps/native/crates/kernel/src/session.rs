@@ -1772,13 +1772,21 @@ impl Kernel {
                 if policy != OpenDecision::Writable {
                     decision = policy;
                 }
-                if p.session
+                // Its file is gone (an earlier copy's backing file, a file
+                // of the original app's that is not here). A project of this
+                // library still has its body here and opens as itself, into
+                // its own slot: a copy made on its own at each open or
+                // restore was one more Home entry nobody asked for, and the
+                // next open of that copy made another (PM-361, PM-421).
+                // Only a project that can't open as itself anyway is copied.
+                let offline = p
+                    .session
                     .as_ref()
                     .and_then(|m| m.get("file"))
                     .and_then(|f| f.get("path"))
                     .and_then(Value::as_str)
-                    .is_some_and(|p| !std::path::Path::new(p).is_file())
-                {
+                    .is_some_and(|p| !std::path::Path::new(p).is_file());
+                if offline && decision != OpenDecision::Writable {
                     decision = OpenDecision::AsCopy(CopyReason::OfflineFile);
                 }
                 meta = p.session.clone().unwrap_or(meta);
@@ -1855,6 +1863,20 @@ impl Kernel {
                             }
                         }
                     }
+                }
+                // One that an earlier build copied when its file was gone
+                // reopens that copy, where its work since went (PM-379).
+                if offline
+                    && decision == OpenDecision::Writable
+                    && !matches!(mode, RecoveryMode::Fold)
+                    && let Some(copy) = self.copy_of_entry(&profile, &project, &hash)
+                {
+                    return self.reopen_copy(
+                        id,
+                        copy,
+                        OpenDecision::AsCopy(CopyReason::OfflineFile),
+                        mode,
+                    );
                 }
                 if matches!(mode, RecoveryMode::Fold) && decision != OpenDecision::Writable {
                     return Ok(ShellReply::Changed(false));
