@@ -284,7 +284,6 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             if !state.wrapper.isHidden() {
                 state.wrapper.setHidden(true);
                 moved = true;
-                if std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control hide-untargeted"); }
             }
             continue;
         };
@@ -294,7 +293,6 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
             moved |= !unseen;
-            if !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control frame hidden={hidden} was_hidden={}", state.wrapper.isHidden()); }
         }
         if state.control.frame() != local {
             state.control.setFrame(local);
@@ -304,7 +302,6 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             state.attach();
         }
         if state.wrapper.isHidden() != hidden {
-            if std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control show={}", !hidden); }
             state.wrapper.setHidden(hidden);
             moved = true;
             crate::composition_accessibility::changed(key);

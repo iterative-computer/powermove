@@ -219,6 +219,28 @@ mod macos {
             probe::painted(&gpui);
             assert!(!probe::pending(&gpui), "{name}: a kept hidden slot moves nothing");
         }
+        // A multiline editor (a text layer's text in Properties) at rest is
+        // pictured with its text, shown or hidden alike; one being edited
+        // never is.
+        {
+            use gpui_macos::native_text::{NativeTextSlot, TextKind};
+            let text = NativeTextSlot::new(&gpui, TextKind::Multiline, "Text", "Made with Powermove\nline two");
+            let size = NSSize::new(220., 60.);
+            text.stage(rect(10., 200., 220., 60.), clip);
+            probe::painted(&gpui);
+            probe::place(&gpui);
+            let shown = text.picture(size).expect("a picture of the editor");
+            let inked = shown.bgra.chunks(4).filter(|px| px[3] > 0).count();
+            let distinct: std::collections::HashSet<&[u8]> = shown.bgra.chunks(4).collect();
+            assert!(inked > 0 && distinct.len() > 8, "a blank editor picture ({} colours)", distinct.len());
+            text.hide();
+            probe::painted(&gpui);
+            assert!(probe::place(&gpui), "hidden for its picture");
+            let hidden = text.picture(size).expect("a picture while hidden");
+            assert!(hidden.bgra == shown.bgra, "the hidden editor draws as shown");
+            text.begin_editing();
+            assert!(text.picture(size).is_none(), "an editor being edited is never pictured");
+        }
         window.close();
     }
 

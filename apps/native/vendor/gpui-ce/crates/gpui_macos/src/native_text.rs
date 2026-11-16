@@ -1105,7 +1105,7 @@ fn place(key: usize, apply: bool) -> bool {
         }
         let Some((bounds, clip)) = geometry else {
             if !state.wrapper.isHidden() {
-                moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 1 {:?}", state.kind); }
+                moved = true;
                 if apply {
                     state.wrapper.setHidden(true);
                     crate::composition_accessibility::changed(key);
@@ -1119,7 +1119,7 @@ fn place(key: usize, apply: bool) -> bool {
             if let Some((host, indicator)) = &state.caret
                 && !host.isHidden()
             {
-                moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 2 {:?}", state.kind); }
+                moved = true;
                 if apply {
                     indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
                     host.setHidden(true);
@@ -1147,7 +1147,7 @@ fn place(key: usize, apply: bool) -> bool {
             visible.size,
         );
         if state.wrapper.frame() != frame {
-            moved |= !unseen; if apply && !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 3 {:?}", state.kind); }
+            moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
@@ -1161,7 +1161,7 @@ fn place(key: usize, apply: bool) -> bool {
         );
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
-                moved |= !unseen; if apply && !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 4 {:?}", state.kind); }
+                moved |= !unseen;
                 if apply {
                     scroll.setFrame(local);
                 }
@@ -1184,21 +1184,21 @@ fn place(key: usize, apply: bool) -> bool {
                     NSSize::new(STEPPER.0, local.size.height),
                 );
                 if stepper.frame() != at {
-                    moved |= !unseen; if apply && !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 5 {:?}", state.kind); }
+                    moved |= !unseen;
                     if apply {
                         stepper.setFrame(at);
                     }
                 }
             }
             if state.editor.view().frame() != field {
-                moved |= !unseen; if apply && !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 6 {:?}", state.kind); }
+                moved |= !unseen;
                 if apply {
                     state.editor.view().setFrame(field);
                 }
             }
         }
         if state.wrapper.isHidden() != hidden {
-            moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 7 {:?}", state.kind); }
+            moved = true;
             if apply {
                 state.wrapper.setHidden(hidden);
                 crate::composition_accessibility::changed(key);
@@ -1219,14 +1219,14 @@ fn place(key: usize, apply: bool) -> bool {
                     );
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
                     if host.frame() != frame {
-                        moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 8 {:?}", state.kind); }
+                        moved = true;
                         if apply {
                             host.setFrame(frame);
                             indicator.setFrame(NSRect::new(NSPoint::new(0., 0.), rect.size));
                         }
                     }
                     if host.isHidden() == visible {
-                        moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 9 {:?}", state.kind); }
+                        moved = true;
                         if apply {
                             host.setHidden(!visible);
                         }
@@ -1237,7 +1237,7 @@ fn place(key: usize, apply: bool) -> bool {
                 }
                 None => {
                     if !host.isHidden() {
-                        moved = true; if apply && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT text 10 {:?}", state.kind); }
+                        moved = true;
                         if apply {
                             indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
                             host.setHidden(true);
