@@ -24,6 +24,7 @@ mod settle;
 pub use scopes::ScopeResult;
 pub mod studio;
 pub mod surface;
+mod picker_sample;
 pub use surface::{SurfaceQueryKind, SurfaceReply};
 pub mod trace;
 pub mod transport;
@@ -491,6 +492,7 @@ struct View {
     /// diagnostic trace's command-to-frame latency.
     commands_sent: Option<f64>,
     surface_queries: VecDeque<surface::Pending>,
+    picker_samples: VecDeque<picker_sample::Pending>,
     export_estimate: Option<export_estimate::Pending>,
     export_estimate_stamp: Option<Stamp>,
     export_estimate_cancel: Arc<std::sync::atomic::AtomicU64>,
@@ -1716,6 +1718,7 @@ impl EngineService {
                 commands: VecDeque::new(),
                 commands_sent: None,
                 surface_queries: VecDeque::new(),
+                picker_samples: VecDeque::new(),
                 export_estimate: None,
                 export_estimate_stamp: None,
                 export_estimate_cancel: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2813,9 +2816,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
         }
         pass.mark("settled");
-        if !last_was_surface_query && state.views.values().any(|v| !v.surface_queries.is_empty()) {
+        if !last_was_surface_query && state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty())) {
             drop(state);
             surface::run_one(&mut engine, &shared);
+            picker_sample::run_one(&mut engine, &shared);
             last_was_surface_query = true;
             continue;
         }
@@ -3463,7 +3467,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // submissions, and stale results cannot enter the viewer's state.
         if work.is_none() && flights.is_empty()
             && !runtime.values().any(|r| r.transport.running())
-            && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty())
+            && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty() && v.picker_samples.is_empty())
             && state.views.values().any(|v| v.export_estimate.as_ref().is_some_and(export_estimate::Pending::runnable))
         {
             drop(state);
@@ -3983,7 +3987,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Duration::from_secs(3600)
             };
-            let surface_query_waiting = state.views.values().any(|v| !v.surface_queries.is_empty());
+            let surface_query_waiting = state.views.values().any(|v| (!v.surface_queries.is_empty() || !v.picker_samples.is_empty()));
             drop(state);
             let tap = shared.scopes.lock().unwrap().clone();
             let timeout = engine

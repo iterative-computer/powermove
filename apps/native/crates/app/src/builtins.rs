@@ -275,6 +275,51 @@ impl Controller {
                 .borrow_mut()
                 .insert("viewer.gizmos".into(), gizmos.clone().into());
             self.builtins.gizmos = Some(gizmos);
+            let controller = cx.entity().downgrade();
+            *self.builtins.natives.sample_color.borrow_mut() = Some(Rc::new(move |at, cx| {
+                let owner = controller.upgrade().ok_or("Editor closed")?;
+                let v = owner.read(cx);
+                let slot = v
+                    .host
+                    .borrow()
+                    .viewer_rect
+                    .get()
+                    .ok_or("Viewer is not visible")?;
+                let scale = v.view.scale.get();
+                let x = (f64::from(f32::from(at.x) - slot.x)
+                    - (slot.w as f64 - v.dimensions[0] * scale) / 2.
+                    - v.view.shown_pan()[0])
+                    / scale;
+                let y = (f64::from(f32::from(at.y) - slot.y)
+                    - (slot.h as f64 - v.dimensions[1] * scale) / 2.
+                    - v.view.shown_pan()[1])
+                    / scale;
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || x < 0.
+                    || y < 0.
+                    || x >= v.dimensions[0]
+                    || y >= v.dimensions[1]
+                {
+                    return Err("Click inside the composition".into());
+                }
+                let viewer = v.viewer.as_ref().ok_or("Viewer unavailable")?;
+                let time = pm_protocol::common::Ticks::new(
+                    (v.time() * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
+                )
+                .map_err(|e| e.to_string())?;
+                viewer
+                    .sample_color(
+                        time,
+                        pm_protocol::common::Size {
+                            width: v.dimensions[0].round() as u32,
+                            height: v.dimensions[1].round() as u32,
+                        },
+                        [x.floor() as u32, y.floor() as u32],
+                    )
+                    .map_err(|e| e.to_string())
+            }));
+
             let host: Rc<dyn crate::gizmo::Host> =
                 Rc::new(ControllerDelegate(cx.entity().downgrade()));
             let tokens = self.host.borrow().tokens.clone();
