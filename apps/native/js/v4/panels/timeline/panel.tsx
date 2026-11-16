@@ -448,7 +448,7 @@ function Layer({
   // the pointer. Visibility and the parent link always show; Lock shows
   // when set, or under the pointer, keyboard focus or a single selected
   // layer. Shy and Solo stay reachable on each layer row.
-  const focusedSelection = row.selected && useContext(TimelineFocused);
+  const focusedSelection = useContext(TimelineFocused) && row.selected;
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
