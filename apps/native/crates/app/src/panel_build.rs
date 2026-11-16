@@ -1,5 +1,6 @@
 //! Deterministic timing primitives for the Light sketch panel effect.
 //! Times are seconds since the corresponding agent event.
+//! Build lifecycle events are shared by generated and extension panel slots.
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,6 +198,8 @@ mod draw_tests {
 /// Slot-local event clock, retained across GPUI renders.
 #[derive(Clone, Debug)]
 pub struct State {
+    pub explicit: bool,
+    pub planned: std::collections::BTreeSet<usize>,
     pub stage: Stage,
     pub started: std::time::Instant,
     pub changed: std::time::Instant,
@@ -208,7 +211,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let now = std::time::Instant::now();
-        Self { stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
+        Self { explicit: false, planned: Default::default(), stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
     }
 }
 impl State {
@@ -232,6 +235,16 @@ impl State {
     }
     pub fn tick(&mut self) {
         let age = self.changed.elapsed().as_secs_f32();
+        if self.explicit {
+            if self.stage == Stage::Erase || self.stage == Stage::Ready { return; }
+            if (self.stage == Stage::Wake && age >= 0.24) || (self.stage == Stage::Ink && age >= 0.58) || self.stage == Stage::Rest || self.stage == Stage::Sketch {
+                if let Some(row) = self.pending.pop_front() { self.event("commit", row); return; }
+                else if self.complete { self.event("ready", self.row); return; }
+                else if !self.planned.is_empty() && self.stage == Stage::Wake { self.event("plan", *self.planned.first().unwrap()); }
+            }
+            if age >= 2. && self.stage != Stage::Rest && self.pending.is_empty() && !self.complete { self.event("rest", self.row); }
+            return;
+        }
         match self.stage {
             Stage::Wake | Stage::Rest if !self.pending.is_empty() && (self.stage == Stage::Rest || age >= 0.24) => {
                 let row = self.pending.pop_front().unwrap();
@@ -337,5 +350,30 @@ mod reveal_tests {
         assert_eq!(control_alpha(0.28, false), 1.);
         assert_eq!(control_alpha(0.12, true), 0.);
         assert_eq!(control_alpha(0.28, true), 1.);
+    }
+}
+
+#[cfg(test)]
+mod explicit_build_tests {
+    use super::*;
+    fn elapsed(s: &mut State, ms: u64) { s.changed -= std::time::Duration::from_millis(ms); s.tick(); }
+    #[test] fn plans_wait_for_real_commits_and_idle_breathes() {
+        let mut s = State::default(); s.explicit = true; s.planned.insert(0);
+        elapsed(&mut s,241); assert_eq!(s.stage,Stage::Sketch);
+        elapsed(&mut s,2100); assert_eq!(s.stage,Stage::Rest); assert!(s.committed.is_empty());
+        s.pending.push_back(0); s.tick(); assert_eq!(s.stage,Stage::Ink);
+        assert!(s.committed.contains_key(&0));
+    }
+    #[test] fn extension_handoff_waits_for_first_render_and_queued_ink() {
+        let mut s = State::default(); s.explicit = true; s.pending.extend([0,1]);
+        elapsed(&mut s,241); assert_eq!(s.row,0);
+        elapsed(&mut s,581); assert_eq!(s.row,1);
+        elapsed(&mut s,2100); assert_eq!(s.stage,Stage::Rest);
+        s.complete = true; s.tick(); assert_eq!(s.stage,Stage::Ready);
+    }
+    #[test] fn cancel_stops_queued_commits() {
+        let mut s = State::default(); s.explicit = true; s.pending.push_back(0);
+        s.event("cancel",0); elapsed(&mut s,400);
+        assert_eq!(s.stage,Stage::Erase); assert!(s.committed.is_empty());
     }
 }
