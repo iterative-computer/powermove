@@ -472,7 +472,8 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     match (method, path) {
         ("GET", "/v1/store/browse") => json(json!({"sections":[
             {"id":"featured","title":"Featured","items":[listing(GLOW_REPO),listing(NOTES_REPO)]},
-            {"id":"new","title":"New","items":[listing(GLOW_REPO)]}]})),
+            {"id":"new","title":"New","items":[listing(GLOW_REPO)]},
+            {"id":"panels","title":"Panels","items":[listing(NOTES_REPO)]}]})),
         ("GET", "/v1/store/extensions") => {
             let pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
                 .into_owned()
@@ -824,14 +825,14 @@ fn kinds_and_search_narrow_the_catalog() {
     let mut cx = TestAppContext::single();
     let (view, cx) = open(&mut cx, services(&f, true));
     settle(&view, cx, "storefront", |v| ready(&v.shelves));
-    click(cx, "store-section-Panels");
+    click(cx, "store-show-all-panels");
     settle(&view, cx, "panels", |v| {
         v.page == Page::Kind(2) && cx_rows(v) == ["shot-notes"]
     });
-    view.update(cx, |v, cx| {
-        v.set_page(Page::Discover, cx);
-        v.set_query("glow", cx);
-    });
+    // The kind page's title is the way back to Discover.
+    click(cx, "store-title-back");
+    assert_eq!(view.read_with(cx, |v, _| v.page), Page::Discover);
+    view.update(cx, |v, cx| v.set_query("glow", cx));
     settle(&view, cx, "search", |v| cx_rows(v) == ["soft-glow"]);
     assert!(cx.debug_bounds("store-row-soft-glow").is_some());
     view.update(cx, |v, cx| v.set_query("nothing like it", cx));
@@ -862,7 +863,7 @@ fn library_shows_an_update_notice_and_updates_then_uninstall_archives() {
     .unwrap();
     let mut cx = TestAppContext::single();
     let (view, cx) = open(&mut cx, services(&f, true));
-    click(cx, "store-section-Library");
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
     settle(&view, cx, "update notice", |v| {
         matches!(&v.library, crate::store_window::Load::Ready(items)
             if items.len() == 1 && items[0].update.as_ref().is_some_and(|u| u.0 == "1.1.0"))
@@ -926,7 +927,7 @@ fn an_update_answered_with_an_older_signed_release_is_refused_and_keeps_the_inst
     account.lock().unwrap().replay = Some((GLOW_NEW, GLOW_OLD));
     let mut cx = TestAppContext::single();
     let (view, cx) = open(&mut cx, services(&f, true));
-    click(cx, "store-section-Library");
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
     settle(&view, cx, "update notice", |v| {
         matches!(&v.library, crate::store_window::Load::Ready(items)
             if items.len() == 1 && items[0].update.as_ref().is_some_and(|u| u.0 == "1.1.0"))
@@ -990,6 +991,34 @@ fn capture_utility_store() {
                 })
             },
         );
+    }
+    // The Library with an install the Store has an update for, and a kind's page.
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &f.profile.path().canonicalize().unwrap(),
+        "native",
+        &store_install::Request {
+            release: GLOW_OLD,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.0.0",
+        },
+    )
+    .unwrap();
+    for (name, page) in [
+        ("store-library", Page::Library),
+        ("store-panels", Page::Kind(2)),
+    ] {
+        let svc = services(&f, true);
+        crate::utility_capture_tests::capture(name, |_, cx| {
+            cx.new(|cx| {
+                let mut view = StoreWindow::new(svc, pm_shell::tokens(), cx);
+                view.set_page(page, cx);
+                view
+            })
+        });
     }
 }
 
@@ -1091,7 +1120,7 @@ fn let_through(gate: &Gate) {
 fn shelf_titles(v: &StoreWindow) -> Option<Vec<String>> {
     match &v.shelves {
         crate::store_window::Load::Ready(shelves) => {
-            Some(shelves.iter().map(|(title, _)| title.clone()).collect())
+            Some(shelves.iter().map(|shelf| shelf.title.clone()).collect())
         }
         _ => None,
     }
