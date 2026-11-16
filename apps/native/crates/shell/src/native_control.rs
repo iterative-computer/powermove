@@ -303,6 +303,7 @@ impl BuildPixels {
         revision.and_then(|r|self.key.filter(|(key,_)|*key==r)).and(self.image.clone())
     }
     pub(crate) fn captured(&self)->bool {self.image.is_some()}
+    pub(crate) fn attempted(&self,revision:u64)->bool {self.key.is_some_and(|(key,_)|key==revision)}
     pub(crate) fn capture(&mut self,native:&NSView,bounds:Bounds<Pixels>,revision:u64)->bool {
         let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
         let key=(revision,frame);if self.key==Some(key){return false;}
@@ -383,6 +384,9 @@ impl NativeControl {
         }
         self.build=build;
         true
+    }
+    pub fn snapshot_pending(&self)->bool {
+        !self.slot.wrapper().isHidden() && self.build.and_then(|b|b.revision).is_some_and(|r|self.build_pixels.borrow().key.is_none_or(|(key,_)|key!=r))
     }
     /// The width the control fits its title in.
     pub fn width(&self) -> f32 {

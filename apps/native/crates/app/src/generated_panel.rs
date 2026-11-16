@@ -1517,7 +1517,7 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
         content = v.extension_panel(target, rect, cx);
         if content.is_none() { content=v.builtin_panel(target,rect,window,cx); native_tree=content.is_some(); }
         let rendered = if v.extensions.owns_panel(target) { v.extension_build_rendered(target) }
-            else if content.is_some() { true }
+            else if content.is_some() { v.builtins.views.get(target).is_some_and(|view|view.read(cx).panel_build_rendered(cx)) }
             else { section(v, target).is_some() };
         let rendered=if v.extensions.owns_panel(target) {
             if let Some(page)=v.extensions.page_of(target) {
@@ -1548,8 +1548,8 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
                 rendered && capture_done
             } else {rendered}
         } else {rendered};
-        if rendered && build.finishing {
-            if let Some(state) = v.panel_builds.get_mut(id) { state.complete = true; }
+        if build.finishing {
+            if let Some(state) = v.panel_builds.get_mut(id) { state.complete = rendered; }
         }
         if content.is_none() {
             if let Some((_, _, def)) = section(v, target) {

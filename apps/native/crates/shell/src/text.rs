@@ -225,6 +225,10 @@ impl TextField {
     }
     /// A form's field (Settings): AppKit's bordered field is the whole
     /// control, shown at all times; the unit stands beside it.
+    pub fn snapshot_pending(&self)->bool {
+        !matches!(self.kind,TextKind::DenseText|TextKind::DenseNumber|TextKind::Canvas) && self.slot.snapshot_visible()
+            && self.build.and_then(|b|b.revision).is_some_and(|r|!self.build_pixels.borrow().attempted(r))
+    }
     pub fn set_build_snapshot(&mut self,build:Option<crate::native_control::BuildSnapshot>)->bool {
         let build=build.filter(|b|b.ready.unwrap_or(0.)<1. && self.kind!=TextKind::Canvas);
         if self.build==build{return false;}self.build=build;

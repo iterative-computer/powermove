@@ -775,6 +775,7 @@ impl NativeTextSlot {
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
     }
+    pub fn snapshot_visible(&self)->bool {!self.state.wrapper.isHidden()}
     pub fn native_view(&self) -> &NSView {
         self.state.editor.view()
     }

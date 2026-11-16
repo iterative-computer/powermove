@@ -215,6 +215,7 @@ struct Compiled {
 }
 pub struct SurfaceView {
     panel_build: Option<crate::generated_panel::panel_build::State>,
+    build_painted: Cell<u64>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
     table: Arc<TokenTable>,
@@ -330,6 +331,7 @@ impl SurfaceView {
         let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
         let mut this = Self {
             panel_build: None,
+            build_painted: Cell::new(u64::MAX),
             runtime,
             publication,
             table,
@@ -401,6 +403,11 @@ impl SurfaceView {
         }
         let mut rows=Vec::new();walk(self,0,&mut rows);rows
     }
+    pub(crate) fn panel_build_rendered(&self,cx:&App)->bool {
+        self.shown==self.latest && self.build_painted.get()==self.shown
+            && self.controls.iter().all(|(id,c)|self.left_out(*id) || !c.read(cx).snapshot_pending())
+            && self.fields.values().all(|f|!f.read(cx).snapshot_pending())
+    }
     pub(crate) fn set_panel_build(&mut self, state:Option<crate::generated_panel::panel_build::State>,cx:&mut Context<Self>) {
         let state=state.filter(|s|s.resolve(s.now())<1.);
         if let Some(ready)=state.as_ref().filter(|s|s.stage==crate::generated_panel::panel_build::Stage::Ready) {
@@ -424,6 +431,7 @@ impl SurfaceView {
             while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
             let index=row.unwrap_or(fallback);
             let mode=state.as_ref().map(|s| {
+                let index=if s.explicit{index}else{0};
                 let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
                 let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
                 let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
@@ -436,6 +444,7 @@ impl SurfaceView {
             while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
             let index=row.unwrap_or(fallback);
             let mode=state.as_ref().map(|s|{
+                let index=if s.explicit{index}else{0};
                 let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
                 let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
                 let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
@@ -1683,6 +1692,7 @@ impl SurfaceView {
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
+        self.build_painted.set(self.shown);
         for (id, control) in &self.controls {
             // A control whose row is left out stays where it is: hidden.
             if self.left_out(*id) {
@@ -2368,7 +2378,7 @@ impl SurfaceView {
         if let Some(build)=&self.panel_build {
             if id==0 || node.parent==Some(0) {element.style().background=None;}
             if node.component==Some(Component::InspectorRow) {
-                let index=self.build_rows().iter().position(|row|*row==id).unwrap_or(0);
+                let index=if build.explicit{self.build_rows().iter().position(|row|*row==id).unwrap_or(0)}else{0};
                 element=element.filter(crate::generated_panel::dot_filter(Some(build),Some(index),&self.table.tokens))
                     .opacity(crate::generated_panel::control_opacity(Some(build),index,self.table.tokens.accessibility.reduce_motion));
             } else if node.text.is_some() {
