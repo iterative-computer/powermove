@@ -1144,6 +1144,11 @@ impl Controller {
                 .get("restoreWindows")
                 .and_then(pm_model::Value::as_bool)
                 != Some(false);
+        // Its picture stands in from the window's first frame, while the
+        // library is read (PM-384).
+        if keep {
+            self.stage_poster(&project);
+        }
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -1158,8 +1163,8 @@ impl Controller {
                 .find(|row| row.id == project)?;
             Some((row.id, row.name))
         });
-        // Home waits for the answer, so a project that reopens never
-        // flashes Home first.
+        // Home waits for the answer, showing the project's ghost, so a
+        // project that reopens never flashes Home or an empty editor first.
         self.reopening = true;
         cx.spawn(async move |this, cx| {
             let found = found.await;
@@ -1173,6 +1178,9 @@ impl Controller {
                 {
                     v.stage_poster(id);
                     v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_none() {
+                    v.ghost_poster = None;
+                    v.viewer_poster = None;
                 }
                 cx.notify();
             });
