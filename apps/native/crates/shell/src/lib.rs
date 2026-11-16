@@ -59,7 +59,7 @@ pub mod welcome_view;
 pub mod workspace;
 #[cfg(target_os = "macos")]
 pub use macos::open_editor_tab;
-pub use native::{front_restoring, set_front_restoring};
+pub use native::{front_restoring, restore_arranging, set_front_restoring, window_shown};
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{
@@ -71,7 +71,7 @@ pub use native::{
     viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,
     live_window_ids, opens_in_place, project_menu_entries,
     ADD, AgentStatus, Command, FlowchartRow, TaskStatus, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    check_view3d, document_subtitle, flush_typing, native_color, popover_frame, request_close, resize_from_top,
+    check_view3d, document_subtitle, flush_typing, history_titles, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,
 };

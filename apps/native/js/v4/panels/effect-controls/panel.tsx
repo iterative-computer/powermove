@@ -612,7 +612,11 @@ function RampView({
     <div role="group" label={`${row.effectLabel}, ${row.label}`}>
       <UI.InspectorRow
         label={row.label}
-        metadata={{ indentToken: "metrics.tree_indent", valueColumn: "panel" }}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
         style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
         leading={<div role="presentation" style={hit} />}
       >
@@ -675,6 +679,7 @@ function PointView({
           parameter: axes[0].id,
           indentToken: "metrics.tree_indent",
           valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
         }}
         style={{
           color: t(
@@ -811,7 +816,11 @@ function MoreView({
     >
       <UI.InspectorRow
         label="More"
-        metadata={{ indentToken: "metrics.tree_indent", valueColumn: "panel" }}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
         style={{
           color: t(
             locked || !row.enabled ? "colors.muted" : "colors.secondary",
@@ -908,6 +917,7 @@ function SummaryView({
         metadata={{
           indentToken: "metrics.tree_indent",
           valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
         }}
         style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
         leading={<div role="presentation" style={hit} />}
@@ -1076,6 +1086,7 @@ function ParameterView({
           parameter: p.id,
           indentToken: "metrics.tree_indent",
           valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
         }}
         style={{
           color: t(

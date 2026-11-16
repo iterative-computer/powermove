@@ -21,6 +21,8 @@ use std::{
 #[derive(Default)]
 struct Recorder {
     lines: RefCell<Vec<OverlayLine>>,
+    /// The marks sent with them (handles, knob, anchor rings, keyline).
+    marks: RefCell<Vec<crate::gizmo_layer::Mark>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
     navigation: RefCell<Vec<Navigate>>,
@@ -161,6 +163,9 @@ impl Host for Recording {
     ) {
         *self.0.lines.borrow_mut() = lines;
         self.0.placements.borrow_mut().push(at);
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, _: &mut App) {
+        *self.0.marks.borrow_mut() = marks;
     }
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
@@ -365,10 +370,30 @@ impl Stage {
 }
 #[gpui::test]
 fn the_engine_receives_a_box_and_handles_for_the_selection(cx: &mut TestAppContext) {
+    use crate::gizmo_layer::Shape;
     let s = stage(cx);
     let lines = s.recorder.lines.borrow();
-    assert!(lines.len() >= 4 + 8 * 4, "{} lines", lines.len());
+    assert!(lines.len() >= 4, "{} lines", lines.len());
     assert!(lines.iter().all(|l| l.ends.iter().all(|v| v.is_finite())));
+    // viewer-chrome.md: eight accent-filled handles keylined dark, a round
+    // knob on the dark with an accent ring, the anchor's rings, and the
+    // box's dark keyline drawn under its accent line.
+    let marks = s.recorder.marks.borrow();
+    let t = tokens();
+    let accent = {
+        let c = t.colors.accent;
+        [((c >> 16) & 255) as f32 / 255., ((c >> 8) & 255) as f32 / 255., (c & 255) as f32 / 255., 1.]
+    };
+    let squares: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Square).collect();
+    assert_eq!(squares.len(), 8);
+    assert!(squares.iter().all(|m| m.fill == Some(accent) && m.stroke.is_some() && !m.under));
+    assert!(squares.iter().all(|m| m.size == t.metrics.gizmo_handle));
+    let circles: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Circle).collect();
+    assert_eq!(circles.len(), 3, "the knob and the anchor's two rings");
+    assert!(circles.iter().any(|m| m.fill.is_some() && m.stroke == Some(accent)), "the knob");
+    let keylines = marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).count();
+    assert_eq!(keylines, 4);
+    assert!(marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).all(|m| m.under));
 }
 #[gpui::test]
 fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContext) {
@@ -1485,6 +1510,51 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+}
+/// A marquee whose release the viewer never hears (the button came up over
+/// another view) ends when the window reports the release: the rectangle is
+/// gone and it selects what it encloses, as a heard release does.
+#[gpui::test]
+fn a_marquee_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let from = s.point_of([120., 80.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    for step in 1..=4 {
+        let at = from + point(px(40. * step as f32), px(35. * step as f32));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+    // A second report changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
     });
 }
 /// A move that brings the box's right edge within 8 points of the

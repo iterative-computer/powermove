@@ -541,7 +541,17 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        let offered = self.workspaces.offered();
+        // One entry per name: the one this window shows, else its project's,
+        // else the last used (PM-449).
+        let prefer: Vec<&str> = [
+            workspace::record_id(&self.record),
+            self.workspaces.project.as_ref().and_then(workspace::record_id),
+            self.workspaces.current.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let offered = workspace::one_per_name(self.workspaces.offered(), &prefer);
         let names: Vec<String> = offered
             .iter()
             .map(|r| workspace::record_name(r).to_owned())

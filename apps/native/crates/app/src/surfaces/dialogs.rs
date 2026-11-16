@@ -337,20 +337,16 @@ fn resolution_labels() -> Vec<String> {
         .chain(["Custom".to_owned()])
         .collect()
 }
-/// A number as a sheet field shows it: at most three decimals, no trailing zeros.
 /// A number as a field shows it: at most two decimals, none trailing
 /// (`73.53`, `29.97`, `10`). The exact value stays while the text does.
+/// The kit's own reading at two places, so a sheet and a panel field (a
+/// duration in Settings, in Properties) never read the same value apart.
 pub fn number_text(n: f64) -> String {
-    if !n.is_finite() {
-        return n.to_string();
+    crate::v4_compile::NumberFacts {
+        precision: Some(2),
+        ..Default::default()
     }
-    let text = format!("{n:.2}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    if text == "-0" {
-        "0".into()
-    } else {
-        text.into()
-    }
+    .text(n)
 }
 pub const CUT_ONE: &str = "1 layer runs past this duration and stops at the end.";
 pub fn cut_many(n: usize) -> String {

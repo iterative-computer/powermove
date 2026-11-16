@@ -251,6 +251,31 @@ pub fn told_apart(names: &[String]) -> Vec<String> {
         })
         .collect()
 }
+/// The records a menu lists, one per name: v1 forked a "Design (edited)" on
+/// each edit of a built-in, and a list of three alike names says nothing.
+/// Of records that share a name the first of `prefer` (the one this window
+/// shows, its project's, the last used) stays, else the first stored; the
+/// others stay stored (their projects still use them, and the workspace
+/// library still lists them) but are not offered (PM-449).
+pub fn one_per_name<'a>(records: Vec<&'a Value>, prefer: &[&str]) -> Vec<&'a Value> {
+    let rank = |r: &Value| {
+        record_id(r)
+            .and_then(|id| prefer.iter().position(|p| *p == id))
+            .unwrap_or(usize::MAX)
+    };
+    let mut kept: Vec<&'a Value> = Vec::with_capacity(records.len());
+    for record in records {
+        match kept
+            .iter_mut()
+            .find(|k| record_name(k) == record_name(record))
+        {
+            Some(k) if rank(record) < rank(k) => *k = record,
+            Some(_) => {}
+            None => kept.push(record),
+        }
+    }
+    kept
+}
 /// A name for a workspace to save that no other of `taken` has: `wanted`,
 /// else `wanted 2`, `wanted 3`, ...
 pub fn free_name(wanted: &str, taken: &[String]) -> String {
@@ -750,6 +775,26 @@ mod name_tests {
     use super::{free_name, save_name, told_apart};
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
+    }
+    /// Acceptance run 22: the menu offers one "Design (edited)", the one this
+    /// window shows, else its project's, else the last used, else the first.
+    #[test]
+    fn a_menu_offers_one_workspace_per_name() {
+        let r = |id: &str, name: &str| serde_json::json!({"id": id, "name": name});
+        let records = [
+            r("design", "Design"),
+            r("a", "Design (edited)"),
+            r("b", "Design (edited)"),
+            r("c", "Design (edited)"),
+            r("mine", "Mine"),
+        ];
+        let all: Vec<&serde_json::Value> = records.iter().collect();
+        let ids = |kept: Vec<&serde_json::Value>| -> Vec<String> {
+            kept.iter().map(|r| super::record_id(r).unwrap().to_owned()).collect()
+        };
+        assert_eq!(ids(super::one_per_name(all.clone(), &[])), ["design", "a", "mine"]);
+        assert_eq!(ids(super::one_per_name(all.clone(), &["c", "b"])), ["design", "c", "mine"]);
+        assert_eq!(ids(super::one_per_name(all.clone(), &["design", "b"])), ["design", "b", "mine"]);
     }
     /// Acceptance run 20: the menu listed "Design (edited)" three times.
     #[test]

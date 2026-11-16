@@ -89,14 +89,15 @@
 }
 
 /* Links read as links: the accent, a light underline that strengthens on
-   hover (an extension's own colour still wins). */
+   hover (an extension's own colour still wins). The arrow stays over them:
+   the app shows no pointing hand anywhere. */
 :where([data-pm-contribution]) :where(a[href]) {
   color: var(--accent);
   text-decoration-line: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
   text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
-  cursor: pointer;
+  cursor: default;
 }
 :where([data-pm-contribution]) :where(a[href]:hover) {
   text-decoration-color: currentColor;

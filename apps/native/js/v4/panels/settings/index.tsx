@@ -172,6 +172,7 @@ function RowControl({
         min={row.min}
         max={row.max}
         unit={row.unit}
+        precision={row.precision}
         metadata={{ form: true, stepper: STEPPED.has(row.id) }}
         style={{ width: t("metrics.settings_number_field") }}
       />
@@ -714,7 +715,8 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                         flexShrink: 0,
                       }}
                     />
-                    {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
+                    {/* No switch until the extension host can turn one off
+                        (PM-435): it would say off while its work runs on. */}
                   </div>
                 </div>
               ))}

@@ -1998,6 +1998,14 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -2006,21 +2014,22 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -3706,6 +3715,14 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -3714,21 +3731,22 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -5414,6 +5432,14 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -5422,21 +5448,22 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -7119,6 +7146,14 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -7127,21 +7162,22 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -8824,6 +8860,14 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -8832,21 +8876,22 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -9963,6 +10008,13 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -9971,21 +10023,22 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -11604,6 +11657,14 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -11612,21 +11673,22 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -13245,6 +13307,14 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -13253,21 +13323,22 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -14953,6 +15024,14 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -14961,21 +15040,22 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -15696,6 +15776,14 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -15704,21 +15792,22 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -16540,6 +16629,15 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+            "Empty",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -16548,21 +16646,22 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -17638,6 +17737,14 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -17646,21 +17753,22 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -19100,6 +19208,15 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Recent",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -19108,21 +19225,22 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -20447,6 +20565,14 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+            "Stylize",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -20455,21 +20581,22 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -21559,6 +21686,13 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -21567,21 +21701,22 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -23986,6 +24121,13 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "data-pm-component": "list",
         "id": "fxbrowser:scope",
         "label": "Effect categories",
+        "metadata": {
+          "fitsInsetToken": "metrics.gap",
+          "fitsLabels": [
+            "All",
+            "Blur & Sharpen",
+          ],
+        },
         "role": "list",
         "style": {
           "borderColor": {
@@ -23994,21 +24136,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "borderRightWidth": {
             "token": "metrics.border",
           },
+          "flexGrow": 0,
           "flexShrink": 0,
+          "fontSize": {
+            "token": "typography.body",
+          },
           "minHeight": {
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,

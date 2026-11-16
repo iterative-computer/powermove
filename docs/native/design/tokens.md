@@ -194,6 +194,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.track_row` | Timeline layer row | 30 | 30 | 30 | 30 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Least width of an inspector row's value column | 128 | 128 | 128 | 128 |
+| `metrics.value_column_most` | Most width of a capped inspector row's value column (Effect Controls) | 240 | 240 | 240 | 240 |
 | `metrics.viewer_3d_collapse` | Viewer width below which the 3D toolbar becomes one pull-down | 560 | 560 | 560 | 560 |
 | `metrics.viewer_3d_labels` | Minimum viewer width for labels in the 3D toolbar | 860 | 860 | 860 | 860 |
 | `metrics.viewer_ruler` | The viewer's ruler bands | 16 | 16 | 16 | 16 |
