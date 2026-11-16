@@ -216,6 +216,7 @@ fn nested_wheel_hands_off_at_both_edges() {
         cx.run_until_parked();
         let wheel = |dy| {
             ScrollWheelEvent {
+                is_momentum: false,
                 position: point(px(25.), px(25.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                 modifiers: Default::default(),
@@ -497,6 +498,7 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
                     })
                     .unwrap();
                 let event = ScrollWheelEvent {
+                is_momentum: false,
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
                     modifiers: Default::default(),
@@ -531,6 +533,7 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
                 })
                 .unwrap();
             let event = ScrollWheelEvent {
+                is_momentum: false,
                 position: point(px(edge), px(panel.y + 80.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
                 modifiers: Default::default(),
