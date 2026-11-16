@@ -88,6 +88,24 @@ enum WriteMsg {
     Flush(FlushReply),
     Stop,
 }
+/// A body was saved (or its file names the project): its row, in `projects`
+/// or kept in the trash, takes the body's name and loses a rename's mark,
+/// which would otherwise put an older name back over it at the next open.
+fn named_by_body(id: &str, project: &Value, rows: &mut [Value], trash: &mut [Value]) {
+    for row in rows.iter_mut().chain(trash.iter_mut()) {
+        if let Value::Object(row) = row
+            && row.get("id").and_then(Value::as_str) == Some(id)
+        {
+            row.remove(RENAMED);
+            if let Some(name) = project.get("name") {
+                row.insert("name", name.clone());
+            }
+        }
+    }
+}
+/// A Home row's mark: its name is newer than its project's body (a rename
+/// while no window had it open), and an open names the project from it.
+pub const RENAMED: &str = "renamed";
 /// Owned by the kernel. A worker debounces each key for 150 ms. Failed writes
 /// stay pending, and every explicit save/close uses the error-reporting barrier.
 pub struct LibraryWriter {
@@ -250,7 +268,8 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
-        let (rows, trash) = self.entry_rows(id, &project, preserve_trash)?;
+        let (mut rows, mut trash) = self.entry_rows(id, &project, preserve_trash)?;
+        named_by_body(id, &project, &mut rows, &mut trash);
         let mut envelope = Map::new();
         envelope.insert("v", Value::from("1.2.0"));
         envelope.insert("proj", project);
@@ -264,6 +283,27 @@ impl LibraryWriter {
             (format!("projectJournal.{id}"), None),
         ])
     }
+    /// The rename of a project no window has open: its row's name, where the
+    /// row is (in `projects` or the trash) and with its date, marked
+    /// [`RENAMED`]. Its body keeps the name it was saved under until it is
+    /// saved again; an open takes the marked row's
+    /// ([`crate::library::LibraryStore::renamed`]). False when it has no row.
+    pub fn rename_entry(&self, id: &str, name: &str) -> Result<bool, LibraryError> {
+        for key in ["projects", "projectTrash"] {
+            let mut rows = self.rows(key)?;
+            let Some(Value::Object(row)) = rows
+                .iter_mut()
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+            else {
+                continue;
+            };
+            row.insert("name", Value::from(name));
+            row.insert(RENAMED, Value::Bool(true));
+            self.batch(vec![(key.into(), Some(Value::Array(rows)))])?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// The entry of a project whose body is its `.pmv` file: the row and the
     /// metadata that names the file, never a second copy of the project.
     /// `summary` holds the row's `name`, `w` and `h`.
@@ -274,7 +314,8 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
-        let (rows, trash) = self.entry_rows(id, summary, preserve_trash)?;
+        let (mut rows, mut trash) = self.entry_rows(id, summary, preserve_trash)?;
+        named_by_body(id, summary, &mut rows, &mut trash);
         self.batch(vec![
             (format!("projectMeta.{id}"), Some(meta)),
             ("projects".into(), Some(Value::Array(rows))),

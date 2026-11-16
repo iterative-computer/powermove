@@ -7,7 +7,8 @@
 //! the edge instead of an outline, light falling on the top edge that thins
 //! out round the top corners (brightest along the top and corners, never a
 //! band with a visible end), and semibold names (3:1, large-bold text) in a
-//! pale tint of the hue, or a deep shade where a tint cannot hold that. As
+//! pale tint of the hue, or a deep shade where a tint cannot hold that and
+//! on yellow and orange, whose slabs are the reference's bright amber. As
 //! bright and saturated as the owner's reference: each hue as vivid as sRGB
 //! allows. Hover and selection brighten and whiten the rim.
 //!
@@ -209,8 +210,12 @@ impl Tokens {
             (true, true) => 0.06,
             (true, false) => 0.26,
         };
-        let deep = oklch_fit(0.5 + lift, vivid, hue);
-        let body = oklch_fit(0.63 + lift, vivid * 0.9, hue);
+        // Yellow and orange are light hues: the reference's amber slab, a
+        // step brighter, under a dark name.
+        let light_hue = coloured && (35. ..110.).contains(&hue);
+        let (top, foot) = if light_hue { (0.63, 0.74) } else { (0.5, 0.63) };
+        let deep = oklch_fit(top + lift, vivid, hue);
+        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(deep, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
         let under_label = under(body);
@@ -226,15 +231,22 @@ impl Tokens {
                     && crate::color::contrast(name, mix(ground, veil, veil_alpha)) >= NAME_CONTRAST
             })
         };
-        let foreground = (0..=12)
-            .map(|step| oklch_fit(0.85 + step as f32 * 0.01, vivid * 0.4, hue))
-            .find(|name| holds(*name))
-            .or_else(|| {
-                (0..=12)
-                    .map(|step| oklch_fit(0.3 - step as f32 * 0.015, vivid * 0.6, hue))
-                    .find(|name| holds(*name))
-            })
-            .unwrap_or(0xffffff);
+        let pale = || {
+            (0..=12)
+                .map(|step| oklch_fit(0.85 + step as f32 * 0.01, vivid * 0.4, hue))
+                .find(|name| holds(*name))
+        };
+        let shade = || {
+            (0..=18)
+                .map(|step| oklch_fit(0.3 - step as f32 * 0.015, vivid * 0.6, hue))
+                .find(|name| holds(*name))
+        };
+        let foreground = if light_hue {
+            shade().or_else(pale)
+        } else {
+            pale().or_else(shade)
+        }
+        .unwrap_or(0xffffff);
         // The rim's light is the palest tint of the hue; under the pointer
         // it brightens toward white, selected it is white.
         let tint = oklch(0.9, chroma * 0.55, hue);
@@ -267,10 +279,18 @@ impl Tokens {
             foreground,
             // Marks (waveforms) stand on the foot, the body's lightest part:
             // the palest step of the hue that still reads there.
-            primary: (0..=12)
-                .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
-                .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
-                .unwrap_or(0xffffff),
+            // On the light hues' bright foot the marks are a deep shade.
+            primary: if light_hue {
+                (0..=12)
+                    .map(|step| oklch_fit(0.4 - step as f32 * 0.02, vivid * 0.6, hue))
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .unwrap_or(0x000000)
+            } else {
+                (0..=12)
+                    .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .unwrap_or(0xffffff)
+            },
         }
     }
     /// The strip on the light canvas (see the module's note).
