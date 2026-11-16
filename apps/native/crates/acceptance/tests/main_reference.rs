@@ -294,13 +294,47 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
         bare["tools"].as_array().unwrap().len(),
         expected["tools"].as_array().unwrap().len()
     );
+    // Every composition tool adds only the optional `compositionId`; the
+    // checks below see each tool without it.
+    let compositions = [
+        "get_project_state",
+        "apply_commands",
+        "render_frames",
+        "check_project",
+        "select_layers",
+        "edit_layer_strips",
+        "edit_video",
+        "edit_3d",
+        "get_timeline",
+        "get_3d_scene",
+        "export_captions",
+        "export_video",
+        "generate_captions",
+        "import_media_to_timeline",
+    ];
     for tool in bare["tools"].as_array().unwrap() {
-        let actual = expected["tools"]
+        let mut actual = expected["tools"]
             .as_array()
             .unwrap()
             .iter()
             .find(|t| t["name"] == tool["name"])
-            .unwrap();
+            .unwrap()
+            .clone();
+        let target = actual["inputSchema"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("compositionId");
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(target.is_some(), compositions.contains(&name), "{name}");
+        if let Some(target) = target {
+            assert_eq!(target["type"], "string", "{name}");
+            let required = actual["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(!required.contains(&serde_json::json!("compositionId")), "{name}");
+        }
+        let actual = &actual;
         if tool["name"] == "edit_3d" {
             let base = &tool["inputSchema"];
             let studio = &actual["inputSchema"];
