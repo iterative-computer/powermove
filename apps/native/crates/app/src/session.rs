@@ -84,6 +84,9 @@ pub struct Controller {
     /// The picture the viewer shows, kept as the last frame once it holds
     /// still (`poster::still`).
     pub(crate) last_frame_watch: crate::poster::StillWatch,
+    /// This window was in front at the last quit and is opening its
+    /// project before the other restored windows (`release_front`).
+    front_restore: bool,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -253,6 +256,10 @@ pub struct Controller {
 }
 /// How long arrow keys rest before a run of nudges becomes its undo step.
 const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
+/// How many tenths of a second a restored window waits for the front one's
+/// first frame (a Recover question there can hold it) before it opens its
+/// own project anyway (PM-384).
+const FRONT_WAIT_LOOKS: u32 = 300;
 
 /// Why a project opened as a copy, in user language (never the enum name):
 /// said when it opens. The window's subtitle keeps saying it
@@ -889,6 +896,7 @@ impl Controller {
             ghost_poster: None,
             viewer_poster: None,
             last_frame_watch: Default::default(),
+            front_restore: false,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -1066,8 +1074,16 @@ impl Controller {
             .set_document_metadata(name, "Opening…", false, None);
         cx.notify();
     }
+    /// The front window's restored project showed its first frame, or its
+    /// open ended without one: the other restored windows open theirs.
+    pub(crate) fn release_front(&mut self) {
+        if std::mem::take(&mut self.front_restore) {
+            pm_shell::set_front_restoring(None);
+        }
+    }
     /// An open that ended without a project: the ghost goes, Home is back.
     pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        self.release_front();
         self.opening_name = None;
         self.ghosted.clear();
         self.revealed.clear();
@@ -1149,6 +1165,8 @@ impl Controller {
         if keep {
             self.stage_poster(&project);
         }
+        let front = self.host.borrow().restored_front;
+        self.front_restore = front;
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
             let unsaved =
@@ -1182,9 +1200,24 @@ impl Controller {
                     v.ghost_poster = None;
                     v.viewer_poster = None;
                 }
+                if found.is_none() {
+                    v.release_front();
+                }
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // The window that was in front opens first, alone, and
+                // shows its first frame; the others wait for it.
+                if !front {
+                    for _ in 0..FRONT_WAIT_LOOKS {
+                        if pm_shell::front_restoring().is_none() {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                    }
+                }
                 // Every restored window reopens its project, one open at a
                 // time (an open holds the project-operation fence): a tab
                 // waits for the one before it instead of giving up.
@@ -2899,7 +2932,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
-                        v.store_last_frame(None, cx);
+                        v.keep_last_frame(None, cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk

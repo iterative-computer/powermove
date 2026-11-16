@@ -331,6 +331,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tell_presented(status.frame.as_ref());
                 v.watch_still(status.frame.as_ref(), cx);
+                // The front window's restored project is on screen: the
+                // other restored windows open theirs now.
+                if status.frame.as_ref().is_some_and(|f| v.published.as_ref().is_some_and(|p| p.snapshot.doc_id == f.stamp.doc_id)) {
+                    v.release_front();
+                }
                 if placeholder.as_ref().is_some_and(|p| status.frame.as_ref().is_some_and(|f| f.stamp.doc_id == p.doc_id)) {
                     placeholder = None;
                     crate::diag::line(serde_json::json!({"placeholder": "first frame"}));

@@ -1921,6 +1921,17 @@ pub fn front_window_id() -> Option<u64> {
 pub fn live_window_ids() -> Vec<u64> {
     WINDOW_IDS.with(|m| m.borrow().values().copied().filter(|id| *id != 0).collect())
 }
+/// The restored session's front window (its id), while its project has
+/// yet to show its first frame: the other restored windows open theirs
+/// after it, so the one a person sees opens alone (PM-384). 0: none.
+static FRONT_RESTORING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn set_front_restoring(id: Option<u64>) {
+    FRONT_RESTORING.store(id.unwrap_or(0), std::sync::atomic::Ordering::Release);
+}
+/// The front window still opening its restored project, if one is.
+pub fn front_restoring() -> Option<u64> {
+    Some(FRONT_RESTORING.load(std::sync::atomic::Ordering::Acquire)).filter(|id| *id != 0)
+}
 pub fn bring_session_window(id: u64) {
     let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
     let Some(mtm) = MainThreadMarker::new() else {
@@ -2659,6 +2670,10 @@ pub struct Host {
     /// The project this window showed when the app last ran, and whether the
     /// system keeps documents open across quits (NSQuitAlwaysKeepsWindows).
     pub restored_project: Option<(String, bool)>,
+    /// This window was in front when the app last ran: its project opens
+    /// first, the other restored windows' after its first frame
+    /// (`front_restoring`).
+    pub restored_front: bool,
     /// The pages (Settings, the Store) open in this window's strip at the
     /// last quit, which open again behind the project.
     pub restored_pages: Vec<String>,
@@ -2850,6 +2865,7 @@ impl Host {
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
+            restored_front: false,
             restored_pages: Vec::new(),
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
