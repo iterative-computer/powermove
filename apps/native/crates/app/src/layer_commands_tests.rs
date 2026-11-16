@@ -643,7 +643,7 @@ fn viewer_arrow_nudges_use_comp_pixels_for_all_selected_layers_and_key_animation
         let before: Vec<_> = ["a", "b"]
             .map(|id| (evaluate(id, "position.x"), evaluate(id, "position.y")))
             .into();
-        let (command, args) = crate::layer_commands::commands_tests::dispatch(chord);
+        let (command, args) = crate::commands_tests::dispatch(chord);
         assert_eq!(command, "nudgeSelection");
         let p = kernel.published("synthetic").unwrap();
         run(&kernel, command_plan(&command, &args, &p, 1.).unwrap());

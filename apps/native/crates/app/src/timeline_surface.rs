@@ -389,6 +389,13 @@ struct LayerDrop {
     name: String,
 }
 pub struct TimelineSurface {
+    agent_ink: pm_panel_timeline::agent_ink::AgentInk,
+    agent_ink_clock: std::time::Instant,
+    agent_ink_task: Option<Task<()>>,
+    agent_ink_frames: u64,
+    agent_ink_samples: [f64; 64],
+    agent_ink_sample_count: usize,
+
     kernel: KernelHandle,
     project: String,
     tokens: Tokens,
@@ -507,6 +514,12 @@ impl TimelineSurface {
         outline.column.set(layer_column as f32);
         outline.bind_surface(cx.entity().downgrade());
         let mut this = Self {
+            agent_ink: Default::default(),
+            agent_ink_clock: std::time::Instant::now(),
+            agent_ink_task: None,
+            agent_ink_frames: 0,
+            agent_ink_samples: [0.; 64],
+            agent_ink_sample_count: 0,
             kernel: kernel.clone(),
             project: project.clone(),
             tokens: tokens.clone(),
@@ -637,6 +650,67 @@ impl TimelineSurface {
             self.view.column_chosen = true;
             self.outline.column.set(column as f32);
         }
+    }
+    pub fn agent_presence(
+        &mut self,
+        events: Vec<pm_mcp::presence::Presence>,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::agent_ink::{Event, Kind};
+        let now = self.agent_ink_clock.elapsed().as_millis() as u64;
+        for event in events {
+            let kind = match event.kind {
+                pm_mcp::presence::Kind::Focus => Kind::Focus,
+                pm_mcp::presence::Kind::Create => Kind::Create,
+                pm_mcp::presence::Kind::Key => Kind::Key,
+                pm_mcp::presence::Kind::Remove => Kind::Remove,
+                pm_mcp::presence::Kind::Held => Kind::Held,
+                pm_mcp::presence::Kind::Dropped => Kind::Dropped,
+                pm_mcp::presence::Kind::RunEnd => Kind::End,
+                _ => Kind::Set,
+            };
+            self.agent_ink.receive(
+                Event {
+                    layer: event.layer.unwrap_or_default(),
+                    property: event.property,
+                    kind,
+                    times: event.times,
+                },
+                now,
+            );
+        }
+        if self.agent_ink_task.is_none() && self.agent_ink.moving(now) {
+            self.agent_ink_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    let moving = this
+                        .update(cx, |s, cx| {
+                            let now = s.agent_ink_clock.elapsed().as_millis() as u64;
+                            let moving = s.agent_ink.moving(now);
+                            if !moving {
+                                s.agent_ink_task = None;
+                            }
+                            s.agent_ink_frames += 1;
+                            cx.notify();
+                            moving
+                        })
+                        .unwrap_or(false);
+                    if !moving {
+                        break;
+                    }
+                }
+            }));
+        }
+        self.agent_ink_frames += 1;
+        cx.notify();
+    }
+    pub fn agent_ink_metrics(&self) -> serde_json::Value {
+        let mut samples = self.agent_ink_samples;
+        let n = self.agent_ink_sample_count.min(64);
+        samples[..n].sort_by(f64::total_cmp);
+        serde_json::json!({"frames":self.agent_ink_frames,"paint_p95_ms":if n==0 {0.}else{samples[(n-1)*95/100]},"samples":self.agent_ink_sample_count})
     }
     /// A kernel publication landed: follow it on a worker.
     pub fn published(&mut self, cx: &mut Context<Self>) {
@@ -1233,7 +1307,24 @@ impl TimelineSurface {
             let delegate = self.delegate.clone();
             cx.defer(move |cx| delegate.view_moved(cx));
         }
-        self.frame.clone()
+        let frame = self.frame.clone()?;
+        if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) {
+            return Some(frame);
+        }
+        let started = std::time::Instant::now();
+        let mut frame = (*frame).clone();
+        if let Some(scene) = &self.scene {
+            self.agent_ink.paint(
+                &mut frame,
+                scene,
+                &self.tokens,
+                self.agent_ink_clock.elapsed().as_millis() as u64,
+            );
+            self.agent_ink_samples[self.agent_ink_sample_count % 64] =
+                started.elapsed().as_secs_f64() * 1000.;
+            self.agent_ink_sample_count += 1;
+        }
+        Some(Arc::new(frame))
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
     /// `keySelectionActive`, and each visible row's layer with its top and
@@ -1337,7 +1428,8 @@ impl TimelineSurface {
     /// The graph's values at the playhead `time` (v1's dots and readouts on
     /// the head), in window points; none while the graph is not shown.
     pub fn graph_marks(&self, time: f64) -> Vec<graph_render::Mark> {
-        let (Some(area), Some(v), Some(graph)) = (self.graph_area(), self.viewport(), self.graph.as_ref())
+        let (Some(area), Some(v), Some(graph)) =
+            (self.graph_area(), self.viewport(), self.graph.as_ref())
         else {
             return vec![];
         };
@@ -1632,7 +1724,10 @@ impl TimelineSurface {
         // (selection, a drag) goes on from there, without a skimmer. A key, a
         // direction handle or a transform grip under the pointer takes the
         // press as it stands: the playhead stays where it is.
-        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
+        let grabs = self
+            .frame
+            .as_ref()
+            .is_some_and(|f| f.hit_key(x, y, 3.).is_some())
             || self.graph_point_at(x, y);
         if let Some(at) = self.skimmer
             && !grabs
@@ -2634,7 +2729,10 @@ impl TimelineSurface {
                 .iter()
                 .filter_map(|o| {
                     let id = o.id.strip_prefix("graph-key:")?;
-                    let (x, y) = (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+                    let (x, y) = (
+                        o.bounds.x + o.bounds.width / 2.,
+                        o.bounds.y + o.bounds.height / 2.,
+                    );
                     let inside = x >= area.x
                         && x <= area.x + area.width
                         && y >= area.y
@@ -2935,7 +3033,8 @@ impl TimelineSurface {
                     return;
                 }
                 if index == Some(camera_index) && matches!(context, MenuContext::Empty) {
-                    let _ = weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
+                    let _ =
+                        weak.update(cx, |s, cx| s.delegate.run(EMPTY_CAMERA_COMMAND, vec![], cx));
                     return;
                 }
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
@@ -4594,10 +4693,19 @@ impl TimelineSurface {
             );
         }
         let (text, x, y) = self.readout.as_ref()?;
-        Some(div().absolute().left(px(*x as f32 + 14.)).top(px(*y as f32 - 26.))
-            .px(px(self.tokens.metrics.gap)).py(px(2.)).rounded(px(3.))
-            .bg(rgb(self.tokens.colors.accent)).text_color(rgb(0xffffff))
-            .child(text.clone()).into_any_element())
+        Some(
+            div()
+                .absolute()
+                .left(px(*x as f32 + 14.))
+                .top(px(*y as f32 - 26.))
+                .px(px(self.tokens.metrics.gap))
+                .py(px(2.))
+                .rounded(px(3.))
+                .bg(rgb(self.tokens.colors.accent))
+                .text_color(rgb(0xffffff))
+                .child(text.clone())
+                .into_any_element(),
+        )
     }
     /// The skimmer: a hairline of text ink across the ruler and tracks
     /// (the playhead is the accent), with its timecode on the ruler.
@@ -4833,8 +4941,9 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         "clip" => {
             let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
             let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
-            let tint =
-                |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
+            let tint = |rgb: u32, a: f64| {
+                rgba((rgb << 8) | ((a * op.opacity).clamp(0., 1.) * 255.).round() as u32)
+            };
             let radius = px(op.radius as f32).min(area.size.height / 2.);
             let smoothing = t.radius.smoothing;
             let ring = px(number("ringWidth").max(1.) as f32);
@@ -4857,8 +4966,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 PaintQuad::new(area)
                     .background(linear_gradient(
                         180.,
-                        linear_color_stop(tint(hex("top"), op.opacity), 0.),
-                        linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
+                        linear_color_stop(tint(hex("top"), 1.), 0.),
+                        linear_color_stop(tint(hex("bottom"), 1.), 1.),
                     ))
                     .corner_radii(radius)
                     .corner_smoothing(smoothing),
@@ -4893,9 +5002,9 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 area,
                 radius,
                 smoothing,
-                (hex("ring"), number("ringAlpha") as f32),
+                (hex("ring"), (number("ringAlpha") * op.opacity) as f32),
                 ring,
-                (hex("light"), number("lightAlpha") as f32),
+                (hex("light"), (number("lightAlpha") * op.opacity) as f32),
                 window,
             );
         }

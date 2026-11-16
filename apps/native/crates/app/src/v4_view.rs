@@ -600,7 +600,16 @@ impl SurfaceView {
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
-        self.fields.retain(|id, _| live(id));
+        self.fields.retain(|id, _| {
+            if !live(id) {
+                pm_mcp::coedit::touch_field(
+                    self.runtime.project_id(),
+                    &format!("{}/{}", self.publication.panel, id.0),
+                    false,
+                );
+            }
+            live(id)
+        });
         self.focus.retain(|id, _| live(id));
         self.focus_events.retain(|id| live(id));
         self.leases.retain(|id, _| live(id));
@@ -1154,6 +1163,13 @@ impl SurfaceView {
                     }
                     match event {
                         TextEvent::Changed(value) => {
+                            if lease.is_some() {
+                                pm_mcp::coedit::touch_field(
+                                    this.runtime.project_id(),
+                                    &format!("{}/{}", this.publication.panel, id.0),
+                                    true,
+                                );
+                            }
                             if this
                                 .publication
                                 .surface
@@ -1172,6 +1188,11 @@ impl SurfaceView {
                             }
                         }
                         TextEvent::Committed(value) => {
+                            pm_mcp::coedit::touch_field(
+                                this.runtime.project_id(),
+                                &format!("{}/{}", this.publication.panel, id.0),
+                                false,
+                            );
                             let value = if number {
                                 match value.parse::<f64>() {
                                     Ok(n) if n.is_finite() => json!(n),
@@ -1212,6 +1233,11 @@ impl SurfaceView {
                             }
                         }
                         TextEvent::Cancelled => {
+                            pm_mcp::coedit::touch_field(
+                                this.runtime.project_id(),
+                                &format!("{}/{}", this.publication.panel, id.0),
+                                false,
+                            );
                             if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
                                 this.change(id, json!(""), cx);
                             }
@@ -1256,9 +1282,24 @@ impl SurfaceView {
             );
         if let Some(focus) = self.focus.get(&id) {
             let subscription = cx.on_focus(focus, window, move |v, _, cx| {
+                if v.prepared.node(id).is_some_and(|n| n.binding.is_some()) {
+                    pm_mcp::coedit::touch_field(
+                        v.runtime.project_id(),
+                        &format!("{}/{}", v.publication.panel, id.0),
+                        true,
+                    );
+                }
                 if let Some(field) = v.fields.get(&id) {
                     field.update(cx, |f, cx| f.begin_editing(cx));
                 }
+            });
+            self.subscriptions.entry(id).or_default().push(subscription);
+            let subscription = cx.on_blur(focus, window, move |v, _, _| {
+                pm_mcp::coedit::touch_field(
+                    v.runtime.project_id(),
+                    &format!("{}/{}", v.publication.panel, id.0),
+                    false,
+                );
             });
             self.subscriptions.entry(id).or_default().push(subscription);
         }
@@ -4937,4 +4978,15 @@ fn relative_scrub_motion() -> Option<(f64, f64)> {
         }
     }
     None
+}
+impl Drop for SurfaceView {
+    fn drop(&mut self) {
+        for id in self.fields.keys() {
+            pm_mcp::coedit::touch_field(
+                self.runtime.project_id(),
+                &format!("{}/{}", self.publication.panel, id.0),
+                false,
+            );
+        }
+    }
 }

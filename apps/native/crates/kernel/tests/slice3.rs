@@ -962,3 +962,273 @@ fn unsaved_steps_that_end_on_the_saved_document_still_ask() {
         "{reply:?}"
     );
 }
+
+#[test]
+fn coedit_undo_turn_preserves_interleaved_user_edits() {
+    let root = common::TempDir::new("coedit-undo");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    let m = mark(&mut k, agent);
+    edit(&mut k, agent, 80.);
+    edit(&mut k, agent, 70.);
+    let user = Caller::native();
+    call(
+        &mut k,
+        user,
+        Call::Transact {
+            label: Some("Rename".into()),
+            body: vec![Command::SetLayerName {
+                layer_id: "l".into(),
+                name: "Mine".into(),
+            }]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, agent, 60.);
+    let revision = k.project("p").unwrap().store().revision();
+    call(
+        &mut k,
+        agent,
+        HistoryCall::SquashSegments {
+            mark: m,
+            label: "Agent · Animate".into(),
+            expected_revision: revision,
+        },
+    );
+    let reply = call(
+        &mut k,
+        user,
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: false,
+            label: "Undo Agent · Animate".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
+    let layers = document.get("layers").unwrap().as_array().unwrap();
+    assert_eq!(layers[0].get("name"), Some(&Value::from("Mine")));
+    assert_eq!(
+        layers[0].get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(100.))
+    );
+}
+#[test]
+fn coedit_undo_turn_confirms_and_keeps_user_values() {
+    let root = common::TempDir::new("coedit-undo-conflict");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    edit(&mut k, agent, 70.);
+    edit(&mut k, Caller::native(), 33.);
+    let revision = k.project("p").unwrap().store().revision();
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: false,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(matches!(reply, Reply::Workspace(_)), "{reply:?}");
+    assert_eq!(k.project("p").unwrap().store().revision(), revision);
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: true,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: false, .. }),
+        "{reply:?}"
+    );
+    assert_eq!(k.project("p").unwrap().store().revision(), revision);
+}
+
+#[test]
+fn coedit_command_z_during_a_run_skips_agent_steps() {
+    let root = common::TempDir::new("coedit-user-undo");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    call(&mut k, agent, HistoryCall::AgentTurn { active: true });
+    call(
+        &mut k,
+        Caller::native(),
+        Call::Transact {
+            label: Some("Rename".into()),
+            body: vec![Command::SetLayerName {
+                layer_id: "l".into(),
+                name: "Mine".into(),
+            }]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, agent, 70.);
+    let reply = call(&mut k, Caller::native(), HistoryCall::Undo).reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
+    let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
+    assert_eq!(layer.get("name"), Some(&Value::from("Layer")));
+    assert_eq!(
+        layer.get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(70.))
+    );
+}
+
+#[test]
+fn coedit_keep_mine_undoes_independent_values_inside_one_segment() {
+    let root = common::TempDir::new("coedit-partial-inverse");
+    let mut k = kernel(&root.0);
+    new(&mut k);
+    let agent = caller(55);
+    call(
+        &mut k,
+        agent,
+        Call::Transact {
+            label: Some("Agent values".into()),
+            body: vec![
+                Command::SetStaticOpacity {
+                    layer_id: "l".into(),
+                    value: 70.,
+                },
+                Command::SetLayerVisible {
+                    layer_id: "l".into(),
+                    visible: false,
+                },
+            ]
+            .into(),
+            expected_revision: None,
+        },
+    );
+    edit(&mut k, Caller::native(), 33.);
+    let reply = call(
+        &mut k,
+        Caller::native(),
+        HistoryCall::UndoWriter {
+            writer: agent.writer,
+            keep_mine: true,
+            label: "Undo Agent".into(),
+        },
+    )
+    .reply;
+    assert!(
+        matches!(reply, Reply::Applied { changed: true, .. }),
+        "{reply:?}"
+    );
+    let document = pm_model::canonical::realize_project(
+        k.project("p").unwrap().store().root().unwrap().to_value(),
+    );
+    let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
+    assert_eq!(
+        layer.get("p").unwrap().get("opacity").unwrap().get("v"),
+        Some(&Value::Number(33.))
+    );
+    assert_ne!(layer.get("on"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn coedit_turn_finish_during_user_drag_groups_after_commit_or_cancel() {
+    for cancel in [false, true] {
+        let root = common::TempDir::new("coedit-finish-during-drag");
+        let mut k = kernel(&root.0);
+        new(&mut k);
+        let agent = caller(55);
+        let m = mark(&mut k, agent);
+        edit(&mut k, agent, 80.);
+        edit(&mut k, agent, 70.);
+        let user = Caller::native();
+        let Reply::Gesture(gesture) = call(
+            &mut k,
+            user,
+            GestureCall::Begin {
+                label: "My drag".into(),
+            },
+        )
+        .reply
+        else {
+            panic!("expected gesture");
+        };
+        call(
+            &mut k,
+            user,
+            Call::Transact {
+                label: None,
+                body: vec![Command::SetLayerName {
+                    layer_id: "l".into(),
+                    name: "Mine".into(),
+                }]
+                .into(),
+                expected_revision: None,
+            },
+        );
+        let revision = k.project("p").unwrap().store().revision();
+        call(
+            &mut k,
+            agent,
+            HistoryCall::SquashSegments {
+                mark: m,
+                label: "Agent · Animate".into(),
+                expected_revision: revision,
+            },
+        );
+        assert!(k.project("p").unwrap().open_entry().is_some());
+        if cancel {
+            call(&mut k, user, GestureCall::Cancel { gesture });
+        } else {
+            call(&mut k, user, GestureCall::Commit { gesture });
+        }
+        let labels = k.project("p").unwrap().store().history().labels();
+        if cancel {
+            assert_eq!(labels, ["Agent · Animate"]);
+        } else {
+            assert_eq!(labels, ["Agent · Animate", "My drag"]);
+        }
+        let reply = call(
+            &mut k,
+            user,
+            HistoryCall::UndoWriter {
+                writer: agent.writer,
+                keep_mine: false,
+                label: "Undo Agent · Animate".into(),
+            },
+        )
+        .reply;
+        assert!(
+            matches!(reply, Reply::Applied { changed: true, .. }),
+            "{reply:?}"
+        );
+        let document = pm_model::canonical::realize_project(
+            k.project("p").unwrap().store().root().unwrap().to_value(),
+        );
+        let layer = &document.get("layers").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            layer.get("name"),
+            Some(&Value::from(if cancel { "Layer" } else { "Mine" }))
+        );
+        assert_eq!(
+            layer.get("p").unwrap().get("opacity").unwrap().get("v"),
+            Some(&Value::Number(100.))
+        );
+    }
+}

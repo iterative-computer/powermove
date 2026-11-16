@@ -54,7 +54,15 @@ fn at_path<'a>(root: &'a Value, path: &Value) -> Option<&'a Value> {
     Some(v)
 }
 pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
-    let view = host.view(id)?;
+    project_state_at(host, id, a, host.selection(id)?, host.playhead(id))
+}
+pub fn project_state_at(
+    host: &Automation,
+    id: &str,
+    a: &Value,
+    selection: Value,
+    time: f64,
+) -> Result<Value> {
     let p = host.read_document(id)?;
     let original = host.original_view(id)?;
     let original = json_value(
@@ -72,8 +80,7 @@ pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     if compositions.is_empty() {
         compositions.push(json!({"id":original["id"],"name":original["name"],"width":original["w"],"height":original["h"],"fps":original["fps"],"duration":original["dur"],"layerCount":original["layers"].as_array().map_or(0, Vec::len),"open":true}));
     }
-    let selection = host.selection(id)?;
-    let time = host.playhead(id);
+    let view = host.view(id)?;
     let mut result = project_state_with_document(
         p,
         selection,
