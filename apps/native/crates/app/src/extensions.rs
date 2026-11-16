@@ -295,6 +295,12 @@ impl Extensions {
     /// A new panel runtime has none of the old runtime's mounted surfaces.
     pub(crate) fn panel_runtime_changed(&mut self) {
         self.surfaces.clear();
+        self.forks.clear();
+        self.v4_seen = u64::MAX;
+        self.v4_themes_seen = u64::MAX;
+        self.v4_theme_requested = None;
+        self.v4_choices.clear();
+        self.v4_theme_choices.clear();
         self.seen = 0;
     }
     fn palette_choices(&self) -> Vec<Choice> {
@@ -2691,7 +2697,11 @@ mod recovered_runtime_tests {
         // Discovery can publish while Recover is awaiting the person's answer.
         extensions.seen = 7;
         extensions.surfaces.insert("motion-notes".into(), ("Motion Notes".into(), "hash".into()));
+        extensions.forks.insert("custom-timeline".into(), ("timeline".into(), "hash".into()));
         extensions.panel_runtime_changed();
+        assert!(extensions.forks.is_empty());
+        assert_eq!(extensions.v4_seen, u64::MAX);
+        assert_eq!(extensions.v4_themes_seen, u64::MAX);
         assert_eq!(extensions.seen, 0, "the same publication must be applied again");
         assert!(extensions.surfaces.is_empty(), "mounts belonged to the retired runtime");
         assert_ne!(extensions.seen, 7);
