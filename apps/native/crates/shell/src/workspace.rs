@@ -605,8 +605,8 @@ impl Store {
         out
     }
     /// The record a window shows: its project's own workspace, else `preferred`
-    /// (the window's last choice), else the current global workspace, else
-    /// the default for a project without its own workspace.
+    /// (the window's last choice), else the default for a project without its
+    /// own workspace; another window's current layout does not leak into it.
     pub fn active(&self, preferred: Option<&str>) -> Value {
         if let Some(p) = self.project.as_ref().filter(|p| usable(p)) {
             if self.deleted(p) {
@@ -952,7 +952,8 @@ mod workspace_restore_tests {
     fn old_project_falls_back_and_project_snapshots_stay_independent() {
         let mut first = Store { records: seeded(&[]), current: Some("review".into()), project: Some(Value::Null), project_id: Some("one".into()), ..Default::default() };
         let inherited = first.active(None);
-        assert_eq!(record_id(&inherited), Some("review"));
+        assert_eq!(record_id(&inherited), Some("design"));
+        assert_eq!(record_id(&first.active(Some("review"))), Some("review"));
         first.project = Some(inherited.clone());
         let second = Store { project: Some(preset("edit").unwrap()), project_id: Some("two".into()), ..first.clone() };
         first.current = Some("design".into());
