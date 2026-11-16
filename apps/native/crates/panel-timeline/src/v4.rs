@@ -230,12 +230,15 @@ pub async fn dispatch(
                     client.model.key_selection_active = false;
                     client.model.graph_focus = Some((layer_id.clone(), channel.clone()));
                     vec![
-                        pm_kernel::SelectionCall::Layers {
-                            ids: vec![layer_id],
-                            add: m.command() || m.shift,
-                        }
+                        pm_kernel::SelectionCall::Batch(vec![
+                            pm_kernel::SelectionCall::Layers {
+                                ids: vec![layer_id],
+                                add: m.command() || m.shift,
+                            },
+                            pm_kernel::SelectionCall::Channel(Some(channel)),
+                        ])
+                        .user()
                         .into(),
-                        pm_kernel::SelectionCall::Channel(Some(channel)).into(),
                     ]
                 }
             };

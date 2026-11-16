@@ -1823,7 +1823,7 @@ impl GizmoSurface {
                 kernel
                     .call(
                         &project,
-                        Request::new(Caller::native(), SelectionCall::Layers { ids, add }),
+                        Request::new(Caller::native(), SelectionCall::Layers { ids, add }.user()),
                     )
                     .await;
             })

@@ -297,12 +297,15 @@ pub(super) async fn dispatch(
             c.model.graph_focus = Some((layer.into(), path.into()));
             Plan {
                 calls: vec![
-                    SelectionCall::Layers {
-                        ids: vec![layer.into()],
-                        add: false,
-                    }
+                    SelectionCall::Batch(vec![
+                        SelectionCall::Layers {
+                            ids: vec![layer.into()],
+                            add: false,
+                        },
+                        SelectionCall::Channel(Some(path.into())),
+                    ])
+                    .user()
                     .into(),
-                    SelectionCall::Channel(Some(path.into())).into(),
                 ],
                 ..Default::default()
             }

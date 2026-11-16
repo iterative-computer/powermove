@@ -2833,6 +2833,22 @@ fn option_dragging_a_clip_leaves_it_and_places_a_copy(cx: &mut TestAppContext) {
     s.undo(cx);
     assert_eq!(layers(&s).len(), 2, "one Undo step");
     assert_eq!(s.start_of("l1"), before);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        ["l1"]
+    );
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), HistoryCall::Redo))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(layers(&s).len(), 3);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
+        std::slice::from_ref(&copy.id)
+    );
+    s.undo(cx);
     // Without Option the same drag still moves the clip itself.
     s.drag(cx, from, to, Modifiers::none());
     assert_eq!(layers(&s).len(), 2);
