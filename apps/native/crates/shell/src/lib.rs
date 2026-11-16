@@ -66,3 +66,13 @@ pub use native::{
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
     zoom_limit,
 };
+
+// These suites use pure geometry or a headless renderer, never native windows.
+#[cfg(test)]
+extern crate self as pm_shell;
+#[cfg(test)]
+#[path = "../tests/models.rs"]
+mod regression_models;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/dock_scroll.rs"]
+mod regression_dock_scroll;

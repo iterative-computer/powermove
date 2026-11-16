@@ -142,6 +142,21 @@ impl Shared {
                 .event(HostEvent::Failure("compat_applier_stopped"));
             return Ok(Value::Null);
         }
+        if kind == "dock_content" {
+            let payload = &m["payload"];
+            if let (Some(id), Some(height)) = (
+                payload["id"].as_str().filter(|id| id.len() <= 256),
+                payload["height"]
+                    .as_f64()
+                    .filter(|h| h.is_finite() && *h > 0.),
+            ) {
+                self.handler.event(HostEvent::DockContent {
+                    id: id.into(),
+                    height,
+                });
+            }
+            return Ok(Value::Null);
+        }
         if kind == "dock_scroll" || kind == "dock_reveal" {
             let payload = &m["payload"];
             if let Some(id) = payload["id"].as_str().filter(|id| id.len() <= 256) {

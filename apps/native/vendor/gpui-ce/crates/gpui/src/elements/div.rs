@@ -3387,8 +3387,11 @@ impl Interactivity {
                             window.insert_window_control_hitbox(area, hitbox.clone());
                         }
 
-                        self.paint_mouse_listeners(hitbox, element_state.as_mut(), window, cx);
+                        // Bubble listeners run in reverse registration order. Give
+                        // this element's wheel observers their turn before its
+                        // default scrolling consumes the event for ancestors.
                         self.paint_scroll_listener(hitbox, &style, window, cx);
+                        self.paint_mouse_listeners(hitbox, element_state.as_mut(), window, cx);
                     }
 
                     self.paint_keyboard_listeners(window, cx);

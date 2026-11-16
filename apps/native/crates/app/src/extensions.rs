@@ -2229,6 +2229,10 @@ impl Controller {
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::DockContent { id, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockContent:{id}"), vec![json!(height)]),
                     HostEvent::DockScroll { id, delta } => self
                         .host
                         .borrow()

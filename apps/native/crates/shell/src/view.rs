@@ -6,8 +6,16 @@ use crate::{
     workspace,
 };
 use gpui::{prelude::*, *};
+#[cfg(test)]
+use ::core::prelude::v1::test;
 use pm_design::Tokens;
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 /// A tab drag in progress: the layout it started from, the pointer and the
 /// target it would drop on. Escape restores `original`.
@@ -41,10 +49,10 @@ pub struct Editor {
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
     dock_scroll: HashMap<String, f32>,
+    dock_reported_heights: BTreeMap<String, f32>,
+    dock_natural_heights: BTreeMap<String, f32>,
     dock_scroll_max: HashMap<String, f32>,
-    dock_scrolled_at: Option<std::time::Instant>,
     last_scroll_focus: Option<FocusHandle>,
-    scrollbar_task: Option<Task<()>>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -131,10 +139,10 @@ impl Editor {
             host,
             geometry: Geometry::default(),
             dock_scroll: HashMap::new(),
+            dock_reported_heights: BTreeMap::new(),
+            dock_natural_heights: BTreeMap::new(),
             dock_scroll_max: HashMap::new(),
-            dock_scrolled_at: None,
             last_scroll_focus: None,
-            scrollbar_task: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -341,16 +349,7 @@ impl Editor {
             return false;
         }
         self.dock_scroll.insert(id.into(), next);
-        self.dock_scrolled_at = Some(std::time::Instant::now());
         true
-    }
-
-    fn dock_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.notify();
-        self.scrollbar_task = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(950)).await;
-            let _ = this.update(cx, |this, cx| { this.dock_scrolled_at = None; cx.notify(); });
-        }));
     }
 
     /// Save the layout in its workspace record and session.
@@ -850,12 +849,32 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = cmd.name.strip_prefix("dockContent:") {
+            if self.layout.find(id).is_some()
+                && let Some(height) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_f64())
+                    .filter(|h| h.is_finite() && *h > 0.)
+            {
+                let height = height as f32 + self.tokens.metrics.header;
+                if self
+                    .dock_reported_heights
+                    .get(id)
+                    .is_none_or(|old| (*old - height).abs() > 1.)
+                {
+                    self.dock_reported_heights.insert(id.into(), height);
+                    cx.notify();
+                }
+            }
+            return;
+        }
         if let Some(id) = cmd.name.strip_prefix("dockScroll:") {
             if let Some((di, _, _)) = self.layout.find(id) {
                 let dock = self.layout.docks[di].id.clone();
                 let by = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
                 if by.is_finite() && self.scroll_dock(&dock, by) {
-                    self.dock_moved(window, cx);
+                    cx.notify();
                 }
             }
             return;
@@ -884,7 +903,7 @@ impl Editor {
                 };
                 let dock = self.layout.docks[p.dock].id.clone();
                 if by.is_finite() && self.scroll_dock(&dock, by) {
-                    self.dock_moved(window, cx);
+                    cx.notify();
                 }
             }
             return;
@@ -1848,11 +1867,36 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.dock_gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.dock_gap).max(0.),
         };
-        self.geometry = self.layout.geometry_with_maximized(
-            self.dock_bounds,
-            &t,
-            self.maximized_panel.as_deref(),
-        );
+        // Freeze content measurements during a splitter drag, so every delta
+        // uses the same starting geometry. Explicitly resized heights win below.
+        if !matches!(self.gesture, Some(Gesture::Resize(..))) {
+            self.dock_natural_heights = self.dock_reported_heights.clone();
+            for dock in &self.layout.docks {
+                for group in &dock.groups {
+                    let id = group.active();
+                    if let Some(height) = self
+                        .integration
+                        .as_ref()
+                        .and_then(|i| i.natural_panel_height(id, cx))
+                    {
+                        self.dock_natural_heights.insert(id.into(), height);
+                    }
+                }
+            }
+        }
+        self.geometry = if self.maximized_panel.is_some() {
+            self.layout.geometry_with_maximized(
+                self.dock_bounds,
+                &t,
+                self.maximized_panel.as_deref(),
+            )
+        } else {
+            self.layout.geometry_with_panel_heights(
+                self.dock_bounds,
+                &t,
+                &self.dock_natural_heights,
+            )
+        };
         // Keep input/drop geometry in window coordinates, including the column offset.
         for (&di, bounds) in &self.geometry.side_docks {
             let id = &self.layout.docks[di].id;
@@ -1865,6 +1909,9 @@ impl Render for Editor {
                 .fold(bounds.y, f32::max);
             let offset = self.dock_scroll.entry(id.clone()).or_default();
             let maximum = (bottom - bounds.y - bounds.h).max(0.);
+            // Electron ignores a <=1 px range; fractional flex rounding
+            // must not turn a fitting column into a scrollable one.
+            let maximum = if maximum <= 1. { 0. } else { maximum };
             self.dock_scroll_max.insert(id.clone(), maximum);
             *offset = offset.clamp(0., maximum);
             for p in self.geometry.panels.iter_mut().filter(|p| p.dock == di) {
@@ -1922,9 +1969,8 @@ impl Render for Editor {
         }
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
-            a.rect
-                .y
-                .total_cmp(&b.rect.y)
+            (a.rect.y + self.dock_scroll.get(&self.layout.docks[a.dock].id).copied().unwrap_or(0.))
+                .total_cmp(&(b.rect.y + self.dock_scroll.get(&self.layout.docks[b.dock].id).copied().unwrap_or(0.)))
                 .then(a.rect.x.total_cmp(&b.rect.x))
         });
         self.panel_order = ordered
@@ -2013,7 +2059,6 @@ impl Render for Editor {
                     if this.scroll_dock(&id, by) {
                         cx.stop_propagation();
                         cx.notify();
-                        this.dock_moved(window, cx);
                     }
                 }
             }))
@@ -2100,7 +2145,13 @@ impl Render for Editor {
                             }
                             this.resize_live = true;
                             this.layout = original.clone();
-                            this.layout.resize(d, delta, this.dock_bounds, &this.tokens);
+                            this.layout.resize_with_panel_heights(
+                                d,
+                                delta,
+                                this.dock_bounds,
+                                &this.tokens,
+                                &this.dock_natural_heights,
+                            );
                             cx.notify();
                         }
                         Some(Gesture::Panel(drag)) => {
@@ -2168,7 +2219,13 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout.resize(&d, delta, this.dock_bounds, &this.tokens);
+                    this.layout.resize_with_panel_heights(
+                        &d,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
                     this.save();
                     cx.notify();
                 }
@@ -2668,41 +2725,8 @@ impl Render for Editor {
                 root = root.child(panel);
             }
         }
-        let show_scrollbar = !cx.should_auto_hide_scrollbars()
-            || self
-                .dock_scrolled_at
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(900));
-        if show_scrollbar {
-            for (&di, bounds) in &self.geometry.side_docks {
-                let offset = self
-                    .dock_scroll
-                    .get(&self.layout.docks[di].id)
-                    .copied()
-                    .unwrap_or(0.);
-                let bottom = self
-                    .geometry
-                    .panels
-                    .iter()
-                    .filter(|p| p.dock == di)
-                    .map(|p| p.rect.y + p.rect.h + offset)
-                    .fold(bounds.y, f32::max);
-                let content = bottom - bounds.y;
-                if content > bounds.h && bounds.h > 0. {
-                    let length = (bounds.h * bounds.h / content).max(18.).min(bounds.h);
-                    let top = offset / (content - bounds.h) * (bounds.h - length);
-                    root = root.child(
-                        positioned(Rect {
-                            x: bounds.x + bounds.w - 7.,
-                            y: bounds.y + top,
-                            w: 5.,
-                            h: length,
-                        })
-                        .rounded(px(3.))
-                        .bg(tint(c.text, 0.35)),
-                    );
-                }
-            }
-        }
+        // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
+        // momentum still move the column; no idle scrollbar timer is needed.
         self.geometry.tabs = tab_spans;
         if let Some(integration) = &self.integration {
             // Every panel on screen, built-in or an extension's: the viewer
@@ -2815,8 +2839,13 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout
-                        .resize(&key_divider, delta, this.dock_bounds, &this.tokens);
+                    this.layout.resize_with_panel_heights(
+                        &key_divider,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
                     this.save();
                     cx.stop_propagation();
                     cx.notify();
@@ -3720,6 +3749,11 @@ mod tests {
                             } else {
                                 (r.x + across, r.y + at)
                             };
+                            // Scrolling docks keep offscreen dividers in geometry.
+                            if d.group.is_some() && view.read_with(cx, |v, _|
+                                v.geometry.side_docks.get(&d.dock).is_some_and(|clip| !clip.contains(x, y))) {
+                                continue;
+                            }
                             // Where two dividers' grabs cross, either answers.
                             let crossing = dividers
                                 .iter()

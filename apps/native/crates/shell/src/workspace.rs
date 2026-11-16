@@ -293,6 +293,7 @@ pub fn layout(record: &Value) -> Layout {
                     }
                 }
                 _ => groups.push(Group {
+                    flex_basis: if flag("flex") { size(fields.and_then(|o| o.get("size"))) } else { None },
                     tabs: vec![id.to_owned()],
                     active: 0,
                     size: if flag("flex") {
@@ -307,7 +308,7 @@ pub fn layout(record: &Value) -> Layout {
         if groups.is_empty() {
             continue;
         }
-        if groups.iter().all(|g| g.size.is_some()) {
+        if !matches!(d.get("id").and_then(Value::as_str), Some("left" | "right")) && groups.iter().all(|g| g.size.is_some()) {
             groups[0].size = None;
         }
         let mut id = d
@@ -328,6 +329,7 @@ pub fn layout(record: &Value) -> Layout {
     }
     if !seen.contains(VIEWER) {
         let viewer = Group {
+            flex_basis: None,
             tabs: vec![VIEWER.into()],
             active: 0,
             size: None,
@@ -438,7 +440,11 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                     if i == 0 {
                         match g.size {
                             Some(n) => s.insert("size".into(), rounded(n)),
-                            None => s.insert("flex".into(), true.into()),
+                            None => {
+                                s.insert("flex".into(), true.into());
+                                if let Some(basis) = g.flex_basis { s.insert("size".into(), rounded(basis)); }
+                                None
+                            },
                         };
                     } else {
                         s.insert("tabbed".into(), true.into());
