@@ -104,30 +104,62 @@ mod tests {
     #[test]
     fn colour_eyedropper_samples_headless_composition() {
         let source=pm_model::json::parse(r##"{"id":"sample","compId":"c","w":8,"h":8,"fps":30,"dur":1,"bg":"#0A84FF","assets":{},"comps":{},"layers":[]}"##).unwrap();
-        let scene = crate::Scene {
-            doc: Arc::new(pm_model::Document::new(
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(source).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = crate::Snapshot {
+            doc_id: 99,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
                 Some(pm_model::canonical::canonical_project(source)),
                 1,
             )),
-            comp: "c".into(),
-            media: Default::default(),
-            content: 1,
         };
-        let mut headless = crate::Headless::new().unwrap();
-        let pixels = headless
-            .export_reference(
-                &scene,
-                Ticks::ZERO,
-                Size {
+        let service =
+            crate::EngineService::start(pm_gpu::Gpu::new("picker-known-pixel").unwrap()).unwrap();
+        let viewer = service
+            .viewer(crate::ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot,
+                media: Default::default(),
+                output: crate::Output {
                     width: 8,
                     height: 8,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
                 },
-            )
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: None,
+                audio: false,
+            })
             .unwrap();
-        let i = (4 * 8 + 4) * 4;
-        let a = pixels[i + 3];
-        for (actual, byte) in pixels[i..i + 3].iter().zip([10., 132., 255.]) {
-            assert!((actual / a - byte / 255.).abs() < 0.01);
+        let size = Size {
+            width: 8,
+            height: 8,
+        };
+        assert!(viewer.sample_color(Ticks::ZERO, size, [8, 4]).is_err());
+        let inbox = viewer.sample_color(Ticks::ZERO, size, [4, 4]).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let pixel = loop {
+            match inbox.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("sampler closed without a pixel")
+                }
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "composition sampler did not complete"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        for (actual, byte) in pixel[..3].iter().zip([10., 132., 255.]) {
+            assert!((actual - byte / 255.).abs() < 0.01, "{pixel:?}");
         }
+        assert!((pixel[3] - 1.).abs() < 0.0001);
     }
 }
