@@ -172,6 +172,7 @@ function RowControl({
         min={row.min}
         max={row.max}
         unit={row.unit}
+        precision={row.precision}
         metadata={{ form: true, stepper: STEPPED.has(row.id) }}
         style={{ width: t("metrics.settings_number_field") }}
       />

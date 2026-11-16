@@ -86,6 +86,8 @@ export interface Row {
   unit?: string;
   min?: number;
   max?: number;
+  /** Decimal places a number shows (a duration: two, as every field shows one). */
+  precision?: number;
   disabled?: boolean;
   busy?: boolean;
   error?: string;
@@ -245,7 +247,11 @@ export function projectRows(): Row[] {
       max: 240,
       unit: "fps",
     },
-    { ...row("duration", "Composition", "Duration", "number"), unit: "s" },
+    {
+      ...row("duration", "Composition", "Duration", "number"),
+      unit: "s",
+      precision: 2,
+    },
     row(
       "background",
       "Composition",

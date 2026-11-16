@@ -674,6 +674,29 @@ fn settings_project_services_validate_and_publish_only_after_actor_ack() {
     assert_eq!(comp.get("fps").unwrap().to_value().as_f64(), Some(29.97));
 }
 
+/// Settings › Project shows a duration as every duration field does: two
+/// places, so 73.53 s never reads "74 s".
+#[test]
+fn settings_show_a_duration_to_two_places() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend =
+        data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "project.duration")
+        .expect("a duration row");
+    assert_eq!(row["precision"], json!(2), "{row}");
+    assert_eq!(row["unit"], json!("s"), "{row}");
+}
+
 #[test]
 fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
     let actor = actor();
