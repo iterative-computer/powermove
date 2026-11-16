@@ -1592,6 +1592,7 @@ impl MacDomHost {
                 None => unsafe { layer.setMask(None) },
             }
         }
+        drop(panels);
         self.present_snapshots(viewport);
         self.overscan_snapshot(viewport);
         refuse_drags(&self.web);
