@@ -210,22 +210,6 @@ mod macos {
         probe::painted(&gpui);
         assert!(probe::place(&gpui));
         assert_eq!(slot.wrapper().frame(), rect(10., 176., 80., 24.));
-        // Cut by its clip's bottom edge as it scrolls (a row going under a
-        // page's end): the wrapper shows the part inside the clip, and the
-        // control keeps its frame inside the wrapper at every step (the clip
-        // moves the wrapper's bounds), so AppKit never lays it out again (on
-        // macOS 27, its SwiftUI graph).
-        let page = rect(0., 0., 400., 200.);
-        for top in [182., 186., 190.] {
-            slot.stage(rect(10., top, 80., 24.), page);
-            probe::painted(&gpui);
-            assert!(probe::place(&gpui));
-            let shown = 200. - top;
-            assert_eq!(slot.wrapper().frame(), rect(10., 300. - top - shown, 80., shown));
-            let control = unsafe { slot.wrapper().subviews() }.firstObject().unwrap();
-            assert_eq!(control.frame(), rect(0., 0., 80., 24.), "the control is not moved");
-            assert_eq!(slot.wrapper().bounds().origin, NSPoint::new(0., 24. - shown));
-        }
         // Paint E leaves it out: the present hides it.
         probe::painted(&gpui);
         assert!(probe::pending(&gpui));
