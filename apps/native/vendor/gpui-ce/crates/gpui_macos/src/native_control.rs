@@ -279,13 +279,16 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             }
             continue;
         };
+        // P-HIDDEN-MOVES: a wrapper hidden before and after (scrolled out
+        // of its clip) follows its row unseen, with no synchronous present.
+        let unseen = hidden && state.wrapper.isHidden();
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
-            moved = true;
+            moved |= !unseen;
         }
         if state.control.frame() != local {
             state.control.setFrame(local);
-            moved = true;
+            moved |= !unseen;
         }
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {
             state.attach();

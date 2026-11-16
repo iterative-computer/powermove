@@ -19,6 +19,7 @@ fn main() {
     macos::host_rows();
     macos::viewer_slot(mtm);
     macos::pictures(mtm);
+    macos::hidden_moves(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -41,6 +42,70 @@ mod macos {
     use pm_shell::native_control::PopupRows;
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    /// P-HIDDEN-MOVES: a hosted view hidden before and after a frame (a
+    /// dense field at rest, a control scrolled out of its clip) follows its
+    /// row without making the frame a synchronous present; the frame that
+    /// shows it again does.
+    pub fn hidden_moves(mtm: MainThreadMarker) {
+        use gpui_macos::native_text::{NativeTextSlot, TextKind};
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(-20000., -20000., 400., 300.),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
+        content.addSubview(&gpui);
+        let clip = rect(0., 0., 400., 300.);
+        // A dense number field at rest: drawn by GPUI, its editor hidden.
+        let field = NativeTextSlot::new(&gpui, TextKind::DenseNumber, "Width", "128");
+        field.stage(rect(10., 10., 90., 22.), clip);
+        probe::painted(&gpui);
+        probe::place(&gpui);
+        for y in [14., 30., 80., 200.] {
+            field.stage(rect(10., y, 90., 22.), clip);
+            probe::painted(&gpui);
+            assert!(!probe::pending(&gpui), "a field at rest moved at {y}");
+            assert!(!probe::place(&gpui));
+        }
+        // Clicked: its editor shows where the row now is.
+        field.begin_editing();
+        field.stage(rect(10., 200., 90., 22.), clip);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui), "the editor shows");
+        drop(field);
+        // A control below its clip (scrolled out), moving on below it.
+        let button: Retained<NSView> = unsafe {
+            let raw: *mut AnyObject = msg_send![objc2::class!(NSButton), alloc];
+            let raw: *mut NSView = msg_send![raw, initWithFrame: rect(0., 0., 80., 20.)];
+            Retained::from_raw(raw).expect("a button")
+        };
+        let slot = NativeControlSlot::new(&gpui, button);
+        slot.stage(rect(10., 20., 80., 20.), clip);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui), "shown");
+        slot.stage(rect(10., 320., 80., 20.), clip);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui), "hidden as it leaves");
+        for y in [340., 400., 700.] {
+            slot.stage(rect(10., y, 80., 20.), clip);
+            probe::painted(&gpui);
+            assert!(!probe::place(&gpui), "out of its clip, moved at {y}");
+        }
+        slot.stage(rect(10., 100., 80., 20.), clip);
+        probe::painted(&gpui);
+        assert!(probe::place(&gpui), "back in");
+        assert!(!slot.wrapper().isHidden());
+        window.close();
+    }
 
     /// P-SLOT-PICTURE: a control's picture is AppKit's own drawing of it,
     /// taken whether its slot was ever shown or not (a row that scrolls in
