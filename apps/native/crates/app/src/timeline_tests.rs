@@ -2066,6 +2066,66 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
     // release (PM-310: only Properties follows each frame meanwhile).
     assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
+/// PM-310 scrub: a ruler scrub seeks only when the pointer reaches another
+/// frame. Zoomed in, a frame is many points wide and most moves stay in one:
+/// each seek is the viewer's command, the app's tick and the extensions'
+/// time, so a move inside the frame sought sends none.
+#[gpui::test]
+fn a_ruler_scrub_seeks_once_per_frame_it_reaches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let at = s.at(0, 1.);
+    // Zoomed in about the pointer until a frame is several points wide.
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let frame = pps / 30.;
+    assert!(frame >= 8., "a frame is {frame} points");
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let y = px(tokens().metrics.ruler / 2.);
+    let start = origin + point(px(column + 40.), y);
+    s.vcx.simulate_mouse_move(start, None, Modifiers::none());
+    s.vcx.simulate_event(MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.vcx.run_until_parked();
+    let first = s.recorder.seeks.borrow().len();
+    assert!(first >= 1);
+    // Point by point across three frames.
+    let span = (frame * 3.).ceil() as i32;
+    for dx in 1..=span {
+        s.vcx.simulate_mouse_move(
+            start + point(px(dx as f32), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+    }
+    s.vcx.simulate_event(MouseUpEvent {
+        position: start + point(px(span as f32), px(0.)),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    let during = &seeks[first - 1..];
+    assert!(
+        (3..=4).contains(&during.len()),
+        "{span} moves over three frames sought {during:?}"
+    );
+    assert!(during.windows(2).all(|w| w[0] != w[1]), "{during:?}");
+}
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
     let mut s = stage(cx, 2);

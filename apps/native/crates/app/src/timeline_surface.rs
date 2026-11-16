@@ -327,7 +327,8 @@ enum Gesture {
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
     },
-    Scrub(Scrub),
+    /// A ruler scrub and the frame time it last sought.
+    Scrub(Scrub, f64),
     Marquee {
         session: MarqueeSession,
         origin: Point<Pixels>,
@@ -756,7 +757,7 @@ impl TimelineSurface {
             Gesture::Marquee { session, .. } => {
                 self.queue.push_back(Job::Apply(session.cancel()));
             }
-            Gesture::Scrub(_) => self.delegate.scrubbing(false, cx),
+            Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             _ => {}
         }
         cx.notify();
@@ -1750,9 +1751,10 @@ impl TimelineSurface {
                 && let Ok(HostEffect::Seek(time)) =
                     scrub.update(time, event.modifiers.shift, self.snap_radius())
             {
+                let time = frame_time(&self.model, time);
                 self.delegate.scrubbing(true, cx);
-                self.delegate.seek(frame_time(&self.model, time), cx);
-                self.gesture = Gesture::Scrub(scrub);
+                self.delegate.seek(time, cx);
+                self.gesture = Gesture::Scrub(scrub, time);
             }
             return;
         }
@@ -2556,18 +2558,22 @@ impl TimelineSurface {
                 self.queue.push_back(Job::Sample(sample));
                 self.pump(cx);
             }
-            Gesture::Scrub(scrub) => {
+            Gesture::Scrub(scrub, sought) => {
                 let (x, _) = {
                     let at = event.position - self.bounds.origin;
                     (f32::from(at.x) as f64, 0.)
                 };
                 let time = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
                 let radius = self.tokens.metrics.keyframe as f64 / self.view.pps;
+                // Only a move to another frame seeks: zoomed in, many moves
+                // land in one frame, and each seek is the viewer's command,
+                // the app's tick and the extensions' time.
                 if let Ok(HostEffect::Seek(time)) =
                     scrub.update(time, event.modifiers.shift, radius)
+                    && frame_time(&self.model, time) != *sought
                 {
-                    let time = frame_time(&self.model, time);
-                    self.delegate.seek(time, cx);
+                    *sought = frame_time(&self.model, time);
+                    self.delegate.seek(*sought, cx);
                 }
             }
             Gesture::Marquee { at, .. } => {
@@ -2723,7 +2729,7 @@ impl TimelineSurface {
                 self.readout = None;
                 self.queue.push_back(Job::Finish(true))
             }
-            Gesture::Scrub(_) => self.delegate.scrubbing(false, cx),
+            Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             Gesture::Marquee {
                 session,
                 origin,
