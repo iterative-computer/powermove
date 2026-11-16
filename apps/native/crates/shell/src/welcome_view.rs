@@ -874,7 +874,7 @@ fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
             };
             let mask = ContentMask {
                 bounds,
-                fade_out: Default::default(),
+                ..Default::default()
             };
             window.with_content_mask(Some(mask), |window| {
                 const STEPS: usize = 14;

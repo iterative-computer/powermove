@@ -1925,11 +1925,16 @@ impl Render for Editor {
                 let tiles =
                     crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
                 let first = tiles[0];
+                // The first pane is top-left: it has the body's bottom-left
+                // corner when it reaches the bottom, never the bottom-right.
+                let bottom = (first.y + first.h - (r.y + r.h)).abs() < 0.5;
+                h.borrow().viewer_corners.set([bottom, false]);
                 *h.borrow().viewer_tiles.borrow_mut() = tiles;
                 Some(first)
             }
             (Some(h), _) => {
                 h.borrow().viewer_tiles.borrow_mut().clear();
+                h.borrow().viewer_corners.set([true, true]);
                 viewer
             }
             _ => viewer,
@@ -1952,7 +1957,12 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
+        let viewer_corners = self.host.as_ref().map_or([true, true], |h| h.borrow().viewer_corners.get());
         let (ground, ground_alpha) = t.ground();
+        // The native layers in the holes round their bottom corners (the
+        // viewer a border inside its panel, an extension body its inset).
+        let viewer_radius = (m.panel_radius - m.border).max(0.);
+        let body_radius = (m.panel_radius - m.border.max(m.splitter_reach)).max(0.);
         let (line, line_alpha) = t.line();
         // Extension pages sit below GPUI too; their bodies are read at paint
         // time, after this frame's layout has recorded them.
@@ -2008,6 +2018,16 @@ impl Render for Editor {
                                 ))
                                 .background(tint(ground, ground_alpha)),
                             );
+                        }
+                        // The ground also fills what those layers round off.
+                        let fill = tint(ground, ground_alpha);
+                        if let Some(r) = canvas_viewer.filter(|_| native) {
+                            fill_rounded_off(window, r, viewer_radius, viewer_corners, fill);
+                        }
+                        if let Some(bodies) = &native_bodies {
+                            for (_, r) in bodies.borrow().iter() {
+                                fill_rounded_off(window, *r, body_radius, [true, true], fill);
+                            }
                         }
                     },
                 )
@@ -2192,15 +2212,37 @@ impl Render for Editor {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
-                native_bodies.push((
-                    id.to_string(),
-                    Rect {
-                        x: p.rect.x + edge,
-                        y: p.rect.y + m.header,
-                        w: (p.rect.w - edge * 2.).max(0.),
-                        h: (p.rect.h - m.header - edge).max(0.),
-                    },
-                ));
+                let body = Rect {
+                    x: p.rect.x + edge,
+                    y: p.rect.y + m.header,
+                    w: (p.rect.w - edge * 2.).max(0.),
+                    h: (p.rect.h - m.header - edge).max(0.),
+                };
+                native_bodies.push((id.to_string(), body));
+                // The panel's material everywhere around the page (its header
+                // and the edge it leaves the dividers), and in the corners the
+                // page rounds off: one surface, as every other panel.
+                let (whole, fill) = (p.rect, tint(c.panel, t.translucency.panel));
+                let radius = (m.panel_radius - edge).max(0.);
+                panel = panel.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            for r in layout::outside(whole, &[body]) {
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        point(px(r.x), px(r.y)),
+                                        gpui::size(px(r.w), px(r.h)),
+                                    ))
+                                    .background(fill),
+                                );
+                            }
+                            fill_rounded_off(window, body, radius, [true, true], fill);
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                );
             } else if self
                 .integration
                 .as_ref()
@@ -2995,6 +3037,38 @@ impl Render for Editor {
             ),
         )
         .into_any_element()
+    }
+}
+
+/// Paints `color` in what a native layer filling `r` rounds off its bottom
+/// corners (`[left, right]`): continuous corners of `radius`, as the layer's.
+fn fill_rounded_off(window: &mut Window, r: Rect, radius: f32, [left, right]: [bool; 2], color: impl Into<Background> + Copy) {
+    use pm_design::corner::{continuous_corner, fit};
+    let radius = fit(radius as f64, r.w as f64, r.h as f64);
+    if radius <= 0. {
+        return;
+    }
+    let bottom = (r.y + r.h) as f64;
+    let at = |(x, y): (f64, f64)| point(px(x as f32), px(y as f32));
+    for (on, corner, along) in [
+        (left, (r.x as f64, bottom), (1., 0.)),
+        (right, ((r.x + r.w) as f64, bottom), (-1., 0.)),
+    ] {
+        if !on {
+            continue;
+        }
+        let (start, curves) = continuous_corner(corner, along, (0., -1.), radius);
+        let mut path = PathBuilder::fill();
+        path.move_to(at(curves[2][2]));
+        path.line_to(at(corner));
+        path.line_to(at(start));
+        for [a, b, to] in curves {
+            path.cubic_bezier_to(at(to), at(a), at(b));
+        }
+        path.close();
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
     }
 }
 

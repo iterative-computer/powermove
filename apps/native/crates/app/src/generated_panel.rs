@@ -130,7 +130,7 @@ fn build_frame(
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
             let y = (BUILD_HEADER + (state.row as f32 + 0.5) * row_height).min((size[1] - 16.).max(0.));
-            window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
+            window.with_content_mask(Some(ContentMask { bounds, ..Default::default() }), |window| {
 
                 let mut paint = |x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, alpha: f32| {
                     let b = Bounds::new(bounds.origin + point(px(x), px(y)), gpui::size(px(w), px(h)));

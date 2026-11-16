@@ -2472,6 +2472,9 @@ struct SlotGeometry {
     layer: NSRect,
     scale: f64,
     crop: Option<[u32; 4]>,
+    /// The continuous radius of the slot's bottom-left and bottom-right
+    /// corners (zero: square), where it meets its panel's rounded corners.
+    corners: [f64; 2],
 }
 /// The viewer layer's frame in a `slot` points wide and high, for a canvas
 /// zoomed to `canvas` points, centred on the slot and moved by `pan` (points,
@@ -2536,6 +2539,9 @@ pub struct Host {
     /// places the others' views), in content coordinates, top-left origin.
     pub viewer_split: Cell<u8>,
     pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
+    /// Whether the viewer slot's bottom-left and bottom-right corners are its
+    /// panel's (a Studio 3D split's first pane can stop short of one).
+    pub viewer_corners: Cell<[bool; 2]>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
     /// The keyboard moved the focus (Tab) since the last press of a button:
@@ -2745,6 +2751,7 @@ impl Host {
             viewer_rect: Rc::new(Cell::new(None)),
             viewer_split: Cell::new(1),
             viewer_tiles: Rc::default(),
+            viewer_corners: Cell::new([true, true]),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             keyboard_navigated: Cell::new(false),
@@ -4592,11 +4599,17 @@ impl Host {
                 ([r.w as f64, r.h as f64], [0., 0.])
             };
             let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale, pan);
+            // The slot sits a border inside its panel: its corners are the
+            // panel's less that.
+            let m = &self.tokens.metrics;
+            let radius = f64::from((m.panel_radius - m.border).max(0.));
+            let corners = self.viewer_corners.get().map(|on| if on { radius } else { 0. });
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
                 scale,
                 crop,
+                corners,
             }
         })
     }
@@ -4612,6 +4625,7 @@ impl Host {
             if let Some(g) = geometry {
                 viewer_slot::show(&self.viewer, &self.layer, true);
                 self.viewer.setFrame(g.frame);
+                viewer_slot::round(&self.viewer, g.corners);
                 // Without a transform the Metal layer is the view's own backing
                 // layer and AppKit sizes it; framing it here would move it to
                 // the content view's origin (the stray lower-left rectangle).
@@ -7273,6 +7287,25 @@ pub mod viewer_slot {
             let _: () = msg_send![view, setLayer: &*root];
             let _: () = msg_send![&*root, addSublayer: foreign_types::ForeignTypeRef::as_ptr(content) as *mut AnyObject];
         }
+    }
+    /// Masks the slot's layer (the Metal layer, or the clipping root over it)
+    /// to continuous bottom-left and bottom-right corners of these radii:
+    /// the compositor clips the picture, nothing is redrawn for it.
+    pub fn round(view: &NSView, [left, right]: [f64; 2]) {
+        use objc2_quartz_core::CACornerMask;
+        let Some(layer) = view.layer() else { return };
+        let mut corners = CACornerMask::empty();
+        // A view's layer is y up: the bottom corners are its min-y ones.
+        if left > 0. {
+            corners |= CACornerMask::LayerMinXMinYCorner;
+        }
+        if right > 0. {
+            corners |= CACornerMask::LayerMaxXMinYCorner;
+        }
+        layer.setCornerRadius(left.max(right));
+        layer.setMaskedCorners(corners);
+        layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+        layer.setMasksToBounds(true);
     }
     /// Shows or hides the slot. Hiding a view hides its backing layer, and
     /// the content layer is that layer until it is clipped: a slot hidden
