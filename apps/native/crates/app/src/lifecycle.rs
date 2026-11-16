@@ -79,13 +79,8 @@ fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Dur
         _ => Some(None),
     }
 }
-/// Whether a window lets go of its project for a quit signal instead of
-/// holding the quit: one that would ask the person something (`Busy` once
-/// [`quit_waits_for`] has nothing to wait for). Work that ends on its own
-/// (a save, an open) is still waited for.
-fn lets_go_unattended(state: CloseState, terminating: bool) -> bool {
-    terminating && state == CloseState::Busy
-}
+/// The longest a quit signal keeps the process running.
+const SIGNAL_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -520,16 +515,19 @@ fn finish_quit(cx: &mut App) {
             })),
             other => other,
         };
+        crate::diag::line(serde_json::json!({"quit":"library_prepared","ok":matches!(result, Some(Ok(_)))}));
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // A clean quit leaves library.lock released, not to go stale.
             if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
                 result = Some(Err(e));
             }
         }
+        crate::diag::line(serde_json::json!({"quit":"library_released","ok":matches!(result, Some(Ok(_)))}));
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
             crate::error_log::session_ended(signal).await;
         }
+        crate::diag::line(serde_json::json!({"quit":"session_ended"}));
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
@@ -540,6 +538,15 @@ fn finish_quit(cx: &mut App) {
                     window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
                 }
                 allow_quit(cx);
+                if signal {
+                    // Unattended: everything is durable (journals flushed,
+                    // library released, the Error Log marked). AppKit's
+                    // terminate waits behind a sheet still up (a recovery
+                    // question, New Project), so they end first; the normal
+                    // teardown then stops what the app started (engine jobs).
+                    crate::diag::line(serde_json::json!({"quit":"end_sheets"}));
+                    crate::platform::end_all_sheets();
+                }
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
                 cx.quit();
@@ -600,10 +607,36 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         let terminations = crate::platform::terminations();
         cx.spawn(async move |cx| {
             while terminations.recv().await.is_ok() {
-                cx.update(|cx| {
+                let first = cx.update(|cx| {
+                    let first = !cx.global::<QuitCoordinator>().terminating;
                     cx.global_mut::<QuitCoordinator>().terminating = true;
-                    begin_quit(cx)
+                    begin_quit(cx);
+                    first
                 });
+                if first {
+                    // The orderly signal quit ends the process itself within
+                    // a second or two; this bounds it if a kernel step is
+                    // still busy (a long open, a large save), so a logout
+                    // never waits on Powermove. The journals hold the work.
+                    let timer = cx.background_executor().timer(SIGNAL_QUIT_LIMIT);
+                    cx.background_executor()
+                        .spawn(async move {
+                            timer.await;
+                            crate::diag::line(serde_json::json!({"quit":"limit"}));
+                            // `exit` runs no drops: stop the engine jobs this
+                            // app started (its process group, when it leads
+                            // one, as a launched app does) before ending.
+                            // SAFETY: plain process calls; this process
+                            // ignores the SIGTERM it sends itself (blocked).
+                            unsafe {
+                                if libc::getpgrp() == libc::getpid() {
+                                    libc::killpg(libc::getpgrp(), libc::SIGTERM);
+                                }
+                            }
+                            std::process::exit(0);
+                        })
+                        .detach();
+                }
             }
         })
         .detach();
@@ -854,6 +887,24 @@ impl Controller {
     }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         crate::diag::line(serde_json::json!({"quit":"request_close", "intent":format!("{intent:?}"), "pending":self.close_pending}));
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
+            // A quit signal (logout, shutdown, a script) never waits and never
+            // asks: not for a sheet or question on screen, a save, an open,
+            // an export, a close already under way or another window's
+            // operation. Nobody can answer, and waiting kept the app running
+            // through a logout. The window lets go of its project as after a
+            // crash: nothing is saved without the person's choice, the journal
+            // keeps the work (the quit makes it durable), and the next open
+            // offers it.
+            crate::diag::line(serde_json::json!({"quit":"let_go"}));
+            self.close_operation = self.mcp.try_operation();
+            self.close_pending = true;
+            self.mcp.closing.store(true, Ordering::Release);
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
@@ -935,19 +986,6 @@ impl Controller {
             .detach();
             return;
         }
-        if intent == Intent::Quit
-            && lets_go_unattended(state, cx.global::<QuitCoordinator>().terminating)
-        {
-            // A quit signal at a window asking a question (a recovery choice,
-            // an edit left open): nobody can answer it, and refusing would
-            // keep the app running through a logout. The window lets go as
-            // after a crash: the journal keeps the work, nothing is saved,
-            // and the next launch asks again.
-            self.session = None;
-            self.mcp.bind_window(self.window_key, None);
-            self.complete_close(intent, cx);
-            return;
-        }
         if quit_now_here
             && let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
         {
@@ -989,18 +1027,6 @@ impl Controller {
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
-            self.complete_close(intent, cx);
-            return;
-        }
-        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
-            // SIGTERM (logout, shutdown, a script): nobody can answer a Save
-            // question, and the file is never written without the person's
-            // choice. The window lets go of its project without closing it:
-            // the quit then leaves its unsaved work in the journal and the
-            // file as saved (`ShellCall::PrepareQuit` defers it), and the
-            // next open offers the work, as after a crash.
-            self.session = None;
-            self.mcp.bind_window(self.window_key, None);
             self.complete_close(intent, cx);
             return;
         }
@@ -1315,13 +1341,6 @@ mod tests {
         // A recovery choice or an alert on screen, an open edit, a stopped
         // project, and a window that can simply close.
         assert_eq!(quit_waits_for(Busy, true, true, false), None);
-        // A quit signal never stops at a question nobody can answer; a
-        // person's Quit still does, and nothing else lets go.
-        assert!(lets_go_unattended(Busy, true));
-        assert!(!lets_go_unattended(Busy, false));
-        for state in [Saving, Clean, Dirty, Stopped] {
-            assert!(!lets_go_unattended(state, true), "{state:?}");
-        }
         assert_eq!(quit_waits_for(Busy, false, false, false), None);
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);

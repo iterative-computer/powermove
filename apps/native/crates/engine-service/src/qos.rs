@@ -23,6 +23,9 @@ use pm_protocol::error::EngineProcess;
 pub enum JobQos {
     Default,
     Utility,
+    /// Work nobody waits for (the background render): macOS runs it on the
+    /// efficiency cores and only when nothing the person does needs them.
+    Background,
 }
 
 /// Sets the calling thread's class. A thread can only set its own Darwin QoS;
@@ -33,6 +36,7 @@ pub fn set_job_qos(class: JobQos) -> Result<(), String> {
         let native = match class {
             JobQos::Default => libc::qos_class_t::QOS_CLASS_DEFAULT,
             JobQos::Utility => libc::qos_class_t::QOS_CLASS_UTILITY,
+            JobQos::Background => libc::qos_class_t::QOS_CLASS_BACKGROUND,
         };
         // SAFETY: sets the calling thread's QoS class; no pointers involved.
         let status = unsafe { libc::pthread_set_qos_class_self_np(native, 0) };
@@ -81,6 +85,45 @@ where
         let _ = apply_process_qos(process);
         work()
     })
+}
+
+/// Puts the whole process in the background (every thread, those it starts
+/// later too, and its disk reads and writes): for a process that only does
+/// work nobody waits for (a background render's job).
+pub fn background_process() {
+    #[cfg(target_vendor = "apple")]
+    // SAFETY: changes this process's own scheduling band; no pointers.
+    unsafe {
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG);
+    }
+}
+
+/// The calling thread's class, to start helper threads in: macOS gives a new
+/// thread the default class whatever its creator runs at, so a worker
+/// applies this first ([`apply_class`]).
+#[derive(Clone, Copy)]
+pub struct Class(#[cfg(target_vendor = "apple")] libc::qos_class_t);
+pub fn class() -> Class {
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+        let mut priority = 0;
+        // SAFETY: reads the calling thread's class into locals.
+        unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut priority) };
+        Class(class)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    Class()
+}
+/// Gives the calling thread `class` (a no-op for an unspecified class).
+pub fn apply_class(class: Class) {
+    #[cfg(target_vendor = "apple")]
+    if !matches!(class.0, libc::qos_class_t::QOS_CLASS_UNSPECIFIED) {
+        // SAFETY: sets the calling thread's QoS class; no pointers involved.
+        unsafe { libc::pthread_set_qos_class_self_np(class.0, 0) };
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = class;
 }
 
 /// The calling thread's QoS class as text (for status and tests).

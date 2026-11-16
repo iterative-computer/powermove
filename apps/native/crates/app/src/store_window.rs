@@ -200,6 +200,9 @@ pub struct StoreWindow {
     search: Option<Entity<pm_shell::text::TextField>>,
     /// Discover · Library, the system's segmented control (a real window only).
     pages: Option<Entity<NativeControl>>,
+    /// Publish, a pull-down of the extensions made on this Mac (v1.2.0's
+    /// header Publish menu).
+    publish_menu: Option<Entity<NativeControl>>,
     pub focus: FocusHandle,
     pub shelves: Load<Vec<Shelf>>,
     catalog: Catalog,
@@ -252,6 +255,7 @@ impl StoreWindow {
             query: String::new(),
             search: None,
             pages: None,
+            publish_menu: None,
             focus: cx.focus_handle(),
             shelves,
             catalog: Catalog::default(),
@@ -283,7 +287,9 @@ impl StoreWindow {
                 window,
                 cx,
             );
-            field.set_placeholder("Search");
+            field.set_placeholder("Search extensions");
+            field.set_bare(true);
+            field.set_escape_cancels(true);
             field
         });
         cx.subscribe(&field, |v, _, event: &TextEvent, cx| match event {
@@ -332,6 +338,56 @@ impl StoreWindow {
         })
         .detach();
         self.pages = Some(pages);
+        // Publish's sheets attach to the window the Store is in.
+        self.owner = crate::platform::ns_window(window);
+        let (options, empty) = self.publish_rows();
+        let publish = cx.new(|cx| {
+            NativeControl::new(
+                ControlSpec {
+                    kind: Kind::Popup,
+                    pull: true,
+                    label: "Publish",
+                    identifier: "store.publish",
+                    value: &json!("Publish"),
+                    options,
+                    disabled: empty,
+                    default: false,
+                    destructive: false,
+                    inline: false,
+                    quiet: false,
+                    tint: None,
+                    symbol: None,
+                    glass: false,
+                    well: false,
+                },
+                &tokens,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(&publish, |v: &mut Self, _, value: &Value, cx| {
+            if let Some(id) = value.as_str() {
+                v.publish_from_owner(id.to_owned(), cx);
+            }
+        })
+        .detach();
+        self.publish_menu = Some(publish);
+    }
+    /// Publish's rows: each extension made here, by name (its id the value).
+    fn publish_rows(&self) -> (Vec<Value>, bool) {
+        let rows: Vec<Value> = self
+            .yours
+            .iter()
+            .map(|y| json!({"label": y.name, "v": y.id}))
+            .collect();
+        let empty = rows.is_empty();
+        (rows, empty)
+    }
+    fn show_publish_rows(&self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.publish_menu {
+            let (options, empty) = self.publish_rows();
+            menu.update(cx, |m, cx| m.update(&json!("Publish"), &options, empty, cx));
+        }
     }
     /// The segmented control follows the page however it changed.
     fn show_page(&self, cx: &mut Context<Self>) {
@@ -680,6 +736,7 @@ impl StoreWindow {
                 }
                 self.library = Load::Ready(items);
                 self.yours = yours;
+                self.show_publish_rows(cx);
                 if note.is_some() && self.page == Page::Library {
                     self.message = note;
                 }
@@ -730,10 +787,14 @@ impl StoreWindow {
     /// Library › Yours › Publish…: the account and the folder are checked on
     /// a worker, then the publish sheet asks for the version and listing.
     pub fn publish(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
+        self.owner = crate::platform::ns_window(window);
+        self.publish_from_owner(id, cx);
+    }
+    /// Publish… for `id`, its sheet on the window the Store is in.
+    fn publish_from_owner(&mut self, id: String, cx: &mut Context<Self>) {
         if self.busy.is_some() || self.publishing.is_some() {
             return;
         }
-        self.owner = crate::platform::ns_window(window);
         self.busy = Some(id.clone());
         self.message = None;
         let (account, profile) = (self.services.account.clone(), self.services.profile.clone());
@@ -1196,33 +1257,66 @@ impl StoreWindow {
         let symbol = |name: &str, color: u32| {
             pm_shell::symbol::symbol(name, m.symbol_inline, Weight::Semibold, color, window)
         };
-        let action = if self.installed(listing).is_some() {
+        let action_id = format!("store-{place}-{}-action", listing.repo_id);
+        // v1.2.0's corner: + installs at once, the words while it runs, a
+        // tick once it is here. A listing it cannot install plainly (no
+        // release, or a build with no Store key) opens its page instead.
+        let action = if self.busy.as_deref() == Some(listing.repo_id.as_str()) {
             div()
-                .id(SharedString::from(format!(
-                    "store-{place}-{}-action",
-                    listing.repo_id
-                )))
+                .id(SharedString::from(action_id))
+                .flex_none()
+                .px(px(t.space.sm))
+                .text_role(t, Text::Body)
+                .text_color(rgb(c.faint))
+                .child("Installing…")
+                .into_any_element()
+        } else if self.installed(listing).is_some() {
+            div()
+                .id(SharedString::from(action_id))
                 .role(Role::Image)
                 .aria_label("Installed")
                 .flex_none()
-                .size(px(m.hit))
+                .size(px(PLUS))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(symbol("checkmark", c.muted))
+                .child(symbol("checkmark", c.faint))
                 .into_any_element()
         } else {
+            let pick = listing.latest.as_ref().map(|latest| Pick {
+                release: latest.0.clone(),
+                repo: listing.repo_id.clone(),
+                extension: listing.slug.clone(),
+                version: latest.1.clone(),
+                name: listing.name.clone(),
+            });
+            let direct = pick.filter(|_| self.services.source.is_some());
+            let key = kit::key(&action_id);
+            let hover = self.kit().hovered(key);
             self.kit()
-                .icon_button(
-                    format!("store-{place}-{}-action", listing.repo_id),
-                    "plus",
-                    format!("Get: {}", listing.name),
-                    false,
+                .track_hover(
+                    div()
+                        .id(SharedString::from(action_id))
+                        .role(Role::Button)
+                        .aria_label(format!("Install: {}", listing.name))
+                        .flex_none()
+                        .size(px(PLUS))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .corner(t, t.metrics.control_radius)
+                        .bg(rgb(c.floating))
+                        .child(symbol("plus", if hover > 0.5 { c.text } else { c.secondary }))
+                        .when(self.busy.is_some(), |d| self.kit().disabled(d))
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            cx.stop_propagation();
+                            match direct.clone() {
+                                Some(pick) => v.install(pick, cx),
+                                None => v.open_detail(open.clone(), cx),
+                            }
+                        })),
+                    key,
                 )
-                .on_click(cx.listener(move |v, _, _, cx| {
-                    cx.stop_propagation();
-                    v.open_detail(open.clone(), cx)
-                }))
                 .into_any_element()
         };
         let facts = div()
@@ -1237,7 +1331,7 @@ impl StoreWindow {
                         .flex_none()
                         .role(Role::Image)
                         .aria_label("Verified")
-                        .child(symbol("checkmark.seal.fill", c.accent_text)),
+                        .child(symbol("checkmark.seal.fill", c.verified)),
                 )
             });
         // Keyed by repository: two makers' listings may share a slug.
@@ -1326,10 +1420,10 @@ impl StoreWindow {
             .children(trailing)
     }
     /// A quiet text action at a section head's far edge.
-    fn head_action(&self, id: &str, label: &str) -> Stateful<Div> {
+    fn head_action(&self, id: &str, label: &str, trail: Option<&str>) -> Stateful<Div> {
         let id = id.to_owned();
         self.kit()
-            .button(id.clone(), label.to_owned(), Button::Quiet, None, None)
+            .button(id.clone(), label.to_owned(), Button::Quiet, None, trail)
             .debug_selector(move || id.clone())
     }
     /// A section: its head, then what it holds, then the room before the next.
@@ -1368,7 +1462,11 @@ impl StoreWindow {
                             shelf.title.as_str()
                         };
                         let all = kind.map(|i| {
-                            self.head_action(&format!("store-show-all-{}", shelf.id), "Show All")
+                            self.head_action(
+                                &format!("store-show-all-{}", shelf.id),
+                                "Show All",
+                                Some("arrow.right"),
+                            )
                                 .on_click(
                                     cx.listener(move |v, _, _, cx| v.set_page(Page::Kind(i), cx)),
                                 )
@@ -1430,9 +1528,8 @@ impl StoreWindow {
         }
         out
     }
-    /// Home's header row (the same window): the title, the search pill in
-    /// the middle, Discover · Library at the far edge. On a kind's page the
-    /// title is the way back, as v1.2.0's.
+    /// v1.2.0's head: the title (on a kind's page, the way back), then
+    /// Discover · Library, search and Publish.
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = &self.tokens;
         let (c, m, tr) = (&t.colors, &t.metrics, &t.translucency);
@@ -1454,14 +1551,14 @@ impl StoreWindow {
                     Weight::Semibold,
                     c.muted,
                 ))
-                .child(div().text_role(t, Text::Headline).child("Discover"))
+                .child(div().text_role(t, Text::Display).child("Discover"))
                 .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx)))
         } else {
             div()
                 .id("store-heading")
                 .flex_none()
                 .role(Role::Heading)
-                .text_role(t, Text::Headline)
+                .text_role(t, Text::Display)
                 .child("Store")
         };
         let width = f32::from(window.viewport_size().width);
@@ -1473,7 +1570,7 @@ impl StoreWindow {
                 .flex_none()
                 .items_center()
                 .gap(px(t.space.md))
-                .w(px(SEARCH_MAX.min(width - SEARCH_ROOM).max(SEARCH_LEAST)))
+                .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)))
                 .h(px(ACTION))
                 .px(px(t.space.md + t.space.hair))
                 .rounded(px(t.radius.md))
@@ -1512,17 +1609,26 @@ impl StoreWindow {
                 })),
             search_key,
         );
-        let side = || div().flex().flex_1().min_w(px(0.)).items_center();
+        // v1.2.0's head: the title, then one toolbar: Discover · Library
+        // where you are, then search and Publish at the far edge.
         div()
             .flex()
+            .flex_col()
             .flex_none()
-            .items_center()
             .gap(px(t.space.xl))
-            .h(px(HEADER))
-            .mb(px(t.space.lg))
-            .child(side().child(title))
-            .child(search)
-            .child(side().justify_end().children(self.pages.clone()))
+            .mb(px(t.space.section))
+            .child(title)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.md))
+                    .h(px(ACTION))
+                    .children(self.pages.clone())
+                    .child(div().flex_1())
+                    .child(search)
+                    .children(self.publish_menu.clone()),
+            )
     }
     /// Library (S077): what needs you, what the Store installed here and
     /// what was made here, each a section of cards.
@@ -1590,7 +1696,7 @@ impl StoreWindow {
         };
         // Check for Updates heads the first Store section.
         let mut check = (!attention.is_empty() || !calm.is_empty()).then(|| {
-            self.head_action("store-check-updates", "Check for Updates")
+            self.head_action("store-check-updates", "Check for Updates", None)
                 .when(self.busy.is_some(), |d| self.kit().disabled(d))
                 .on_click(cx.listener(|v, _, _, cx| {
                     if v.busy.is_none() {
@@ -1729,7 +1835,7 @@ impl StoreWindow {
                     "checkmark.seal.fill",
                     m.symbol_inline,
                     Weight::Semibold,
-                    c.accent_text,
+                    c.verified,
                     window,
                 ))
         });
@@ -2056,11 +2162,11 @@ impl Render for StoreWindow {
             .min_h(px(0.))
             .overflow_y_scroll()
             // A window of its own keeps the toolbar's height for its buttons.
-            .pt(px(if self.embedded {
-                t.space.md
-            } else {
-                t.metrics.toolbar
-            }))
+            // v1.2.0's page starts 48 pt down; a window of its own also
+            // keeps the toolbar's height for its buttons.
+            .pt(px(t.space.section
+                + t.space.xl
+                + if self.embedded { 0. } else { t.metrics.toolbar }))
             .pb(px(t.space.section * 2.))
             .px(px(t.space.xxl))
             .child(
@@ -2088,10 +2194,10 @@ struct Face<'a> {
     name: &'a str,
     line: Option<(String, u32)>,
 }
-/// Home's header measures, so the two pages of the window line up.
-const HEADER: f32 = 48.;
+/// The header's controls stand this high (v1.2.0's toolbar).
 const ACTION: f32 = 32.;
-const SEARCH_MAX: f32 = 360.;
+/// v1.2.0's search field: 280 pt, narrower in a narrow window.
+const SEARCH: f32 = 280.;
 const SEARCH_ROOM: f32 = 320.;
 const SEARCH_LEAST: f32 = 160.;
 /// v1.2.0's card: 14 pt around a 44 pt tile holding 30 pt of art; one card
@@ -2100,6 +2206,8 @@ const CARD_PAD: f32 = 14.;
 const TILE: f32 = 44.;
 const ART: f32 = 30.;
 const NARROW: f32 = 640.;
+/// The card's corner button (v1.2.0's 30 pt `st-plus`).
+const PLUS: f32 = 30.;
 /// An extension page's art, and the key column of its facts.
 const HERO: f32 = 80.;
 const FACT_KEY: f32 = 120.;

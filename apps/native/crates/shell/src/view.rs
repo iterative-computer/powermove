@@ -661,6 +661,28 @@ impl Editor {
                 }
                 _ => self.layout.show_panel(rest, &panels),
             },
+            // A panel coming back (its extension restarted as the project
+            // opens): in its place, or shown if it had none, but never taking
+            // the showing tab of a stack it is already in (PM-427).
+            ("panel", "restore") => match self.parked.remove(rest) {
+                Some((place, showing)) if self.layout.find(rest).is_none() => {
+                    let mut next = self.layout.clone();
+                    next.show_panel(rest, &panels)
+                        .and_then(|_| next.move_panel_to(rest, place))
+                        .map(|_| {
+                            if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
+                                && next
+                                    .find(rest)
+                                    .is_some_and(|(d, g, _)| (d, g) == (dock, group))
+                            {
+                                next.docks[dock].groups[group].active = tab;
+                            }
+                            self.layout = next
+                        })
+                }
+                _ if self.layout.find(rest).is_some() => Ok(()),
+                _ => self.layout.show_panel(rest, &panels),
+            },
             ("panel", "close") => {
                 // The frame that shows it closed: its feel line (`PM_FEEL_TRACE`).
                 gpui_macos::feel::note_now("panel.close");
@@ -2125,6 +2147,7 @@ impl Render for Editor {
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                crate::input::noted();
                 // A drag still in flight (its release never came) ends where
                 // it showed before this press is handled, never on it.
                 if this.gesture.is_some() {
@@ -3192,6 +3215,16 @@ mod keyboard_tests {
                 }
                 // Asking for a panel still shows it.
                 assert!(v.shell_command("panel:show:ext.pexels", cx));
+                assert_eq!(showing(v), "ext.pexels");
+                // An extension's panel opening again as it restarts (PM-427):
+                // in its stack, it never takes the showing tab, parked or not.
+                for id in ["ext.voice", "inspector"] {
+                    assert!(v.shell_command(&format!("panel:restore:{id}"), cx));
+                    assert_eq!(showing(v), "ext.pexels", "{id} restored in place");
+                }
+                assert!(v.shell_command("panel:park:ext.voice", cx));
+                assert!(v.shell_command("panel:restore:ext.voice", cx));
+                assert!(v.layout.find("ext.voice").is_some(), "back in its place");
                 assert_eq!(showing(v), "ext.pexels");
             })
             .unwrap();
