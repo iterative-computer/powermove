@@ -40,6 +40,7 @@ mod settings;
 pub mod speech;
 mod timeline_easing;
 pub mod virtualization;
+mod wakers;
 /// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
 pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1143,8 +1144,9 @@ impl Builtins {
         carry: Option<AgentCarry>,
     ) -> Result<Self> {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        // Speech model downloads publish Settings › Transcription again.
-        crate::speech::watch(&wake);
+        // Speech model downloads publish Settings › Transcription again, and
+        // the Export sheet's encoder checks the sheet.
+        crate::wakers::watch(&wake);
         let (agent, carried) = match carry.map(AgentCarry::adopt) {
             Some((link, state)) => (link, Some(state)),
             None => Default::default(),

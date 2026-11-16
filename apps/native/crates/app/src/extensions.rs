@@ -151,6 +151,11 @@ pub struct Extensions {
     known_panels: BTreeSet<String>,
     /// Panels whose definition went away while open. They return with it.
     suspended: BTreeSet<String>,
+    /// Suspended panels the shell parked (their extension stayed away past
+    /// `PARK_GRACE`): a later registration shows them again in place.
+    parked: BTreeSet<String>,
+    /// The shell was last told the panels it lists are all in (`panels:ready`).
+    panels_ready: bool,
     open_panels: BTreeSet<String>,
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
@@ -241,6 +246,8 @@ impl Default for Extensions {
             panels: BTreeMap::new(),
             known_panels: BTreeSet::new(),
             suspended: BTreeSet::new(),
+            parked: BTreeSet::new(),
+            panels_ready: false,
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
@@ -1191,6 +1198,9 @@ impl Controller {
             }
         }
         self.extensions.booted |= ready;
+        if self.extensions.booted && self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(true);
+        }
     }
     /// The panel shows once its first commit is accepted; a failure says whose.
     fn await_panel(
@@ -1218,6 +1228,18 @@ impl Controller {
             });
         })
         .detach();
+    }
+    /// Tells the shell whether the extension panels it lists are all in:
+    /// until then a tab whose panel has not registered yet keeps a quiet body
+    /// instead of saying it is unavailable.
+    fn tell_panels_ready(&mut self, ready: bool) {
+        if self.extensions.panels_ready != ready {
+            self.extensions.panels_ready = ready;
+            self.host.borrow().send_command(
+                if ready { "panels:ready" } else { "panels:waiting" },
+                vec![],
+            );
+        }
     }
     fn apply_contributions(
         &mut self,
@@ -1271,19 +1293,52 @@ impl Controller {
         let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
         // As in the shipped app: the workspace keeps a retired panel's place, and
         // it comes back if something registers the id again.
-        let shell = self.host.borrow();
+        // A panel whose extension left the registry (they restart as a
+        // project opens) keeps its place and its stack's showing tab for
+        // `PARK_GRACE`, its body quiet: it is parked only if it stays away,
+        // so the dock never jumps to another tab and back (run 16).
+        let mut vanished = false;
         for id in self.extensions.known_panels.difference(&known) {
             if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
-                self.extensions.suspended.insert(id.clone());
-                shell.send_command(&format!("panel:park:{id}"), vec![]);
+                vanished |= self.extensions.suspended.insert(id.clone());
             }
         }
-        for id in known.intersection(&self.extensions.suspended.clone()) {
-            self.extensions.suspended.remove(id);
-            shell.send_command(&format!("panel:show:{id}"), vec![]);
+        {
+            let shell = self.host.borrow();
+            for id in known.intersection(&self.extensions.suspended.clone()) {
+                self.extensions.suspended.remove(id);
+                if self.extensions.parked.remove(id) {
+                    shell.send_command(&format!("panel:show:{id}"), vec![]);
+                }
+            }
         }
-        drop(shell);
         self.extensions.known_panels = known;
+        if vanished {
+            self.tell_panels_ready(false);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PARK_GRACE).await;
+                let _ = this.update(cx, |v, _| {
+                    let gone: Vec<String> = v
+                        .extensions
+                        .suspended
+                        .iter()
+                        .filter(|id| !v.extensions.known_panels.contains(*id))
+                        .filter(|id| !v.extensions.parked.contains(*id))
+                        .cloned()
+                        .collect();
+                    for id in gone {
+                        v.extensions.parked.insert(id.clone());
+                        v.host
+                            .borrow()
+                            .send_command(&format!("panel:park:{id}"), vec![]);
+                    }
+                    v.tell_panels_ready(v.extensions.booted);
+                });
+            })
+            .detach();
+        } else if self.extensions.suspended.is_empty() {
+            self.tell_panels_ready(self.extensions.booted);
+        }
         let surfaces = self
             .extensions
             .surfaces
@@ -2011,6 +2066,12 @@ impl Controller {
                 let _ = page.borrow().set_native_style(&css, tokens.scheme);
             }
         }));
+        // A body stops short of its panel's sides and bottom (the shell's
+        // native body inset), so its corners are the panel's less that inset.
+        let corner = {
+            let m = &shell.tokens.metrics;
+            f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
+        };
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -2058,6 +2119,7 @@ impl Controller {
                     );
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
+                host.set_corner_radius(corner);
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill.get()));
@@ -2677,3 +2739,7 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
         })
         .collect()
 }
+
+/// How long a panel whose extension left the registry keeps its place before
+/// it is parked (an extension restarting for a project open comes back sooner).
+const PARK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);

@@ -291,7 +291,7 @@ fn opt_out_reset_has_only_valid_unique_custom_properties() {
         assert_eq!(value, "initial");
         assert!(names.insert(name));
     }
-    assert_eq!(names.len(), 65);
+    assert_eq!(names.len(), 72);
 }
 
 #[test]
@@ -327,5 +327,75 @@ fn native_backing_matches_panel_over_window_over_every_backdrop() {
                 }
             }
         }
+    }
+}
+
+/// The field look (fill, height, padding) is for text fields: a checkbox
+/// in an extension panel stays the system checkbox, not a filled box.
+#[test]
+fn system_toggles_and_sliders_never_take_the_field_look() {
+    let l = Tokens::new(Scheme::Light, Accessibility::default());
+    let d = Tokens::new(Scheme::Dark, Accessibility::default());
+    let css = stylesheet(&l, &d);
+    let field = css.find("min-height: var(--pm-ctl-h);").unwrap();
+    let rule = &css[css[..field].rfind('}').unwrap()..field];
+    let input = rule
+        .find("input:not(")
+        .expect("the field rule names its inputs");
+    for kind in ["checkbox", "radio", "range", "color", "file"] {
+        assert!(
+            rule[input..].contains(&format!("[type=\"{kind}\"]")),
+            "{kind}"
+        );
+    }
+    assert!(
+        !rule.contains("  input:where("),
+        "every input took the field look"
+    );
+}
+
+/// Every v1 token the extensions on a migrated profile style with resolves,
+/// in both schemes, and is reset by a `none` opt-out like the rest.
+#[test]
+fn v1_extension_tokens_resolve() {
+    let l = Tokens::new(Scheme::Light, Accessibility::default());
+    let d = Tokens::new(Scheme::Dark, Accessibility::default());
+    let css = stylesheet(&l, &d);
+    let dark = css.find(":root[data-pm-scheme=dark]{").unwrap();
+    let none = css.find(":where([data-pm-style=none]){").unwrap();
+    for name in [
+        "--bg-panel",
+        "--bg-panel-2",
+        "--bg-sunken",
+        "--bg-window",
+        "--bg-field",
+        "--bg-hover",
+        "--line",
+        "--tx",
+        "--tx-2",
+        "--tx-3",
+        "--accent",
+        "--on-accent",
+        "--danger",
+        "--warning",
+        "--f-ui",
+        "--f-mono",
+        "--fs-xs",
+        "--fs-sm",
+        "--fs-md",
+        "--r-base",
+        "--row-h",
+        "--ctl-h",
+        "--dur-2",
+        "--ease",
+    ] {
+        let set = format!("{{{name}:");
+        let set_after = format!(";{name}:");
+        let light = &css[..dark];
+        let dark_part = &css[dark..none];
+        for part in [light, dark_part] {
+            assert!(part.contains(&set) || part.contains(&set_after), "{name}");
+        }
+        assert!(css[none..].contains(&format!("{name}:initial;")), "{name}");
     }
 }

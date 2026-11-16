@@ -65,6 +65,24 @@ impl Item {
 /// resolved only by the shell's ordered key resolver, so a declined key replays
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
 pub const DISPLAY_ONLY: [&str; 4] = ["Layer", "Timeline", "tools", "view3d"];
+/// Commands that act on the app, not on the window a sheet covers: they stay
+/// in the menu while a sheet is up, as in other Mac apps. Every other command
+/// waits for the sheet. The Edit commands stay for the sheet's own fields
+/// (the shell drops one that no field takes).
+pub const BESIDE_SHEET: [&str; 9] = [
+    "settings",
+    "newWindow",
+    "nextTab",
+    "previousTab",
+    "errorLog",
+    "panelLibrary",
+    "backgroundTasks",
+    "checkForUpdates",
+    "help",
+];
+pub fn runs_beside_sheet(command: &str) -> bool {
+    BESIDE_SHEET.contains(&command) || command.starts_with("context")
+}
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
 pub const SUBMENUS: [&str; 7] = [
     "openRecent",
@@ -734,5 +752,48 @@ mod edit_responder_tests {
         assert!(super::owns_text_edit(true, "NSTextView"));
         assert!(!super::owns_text_edit(false, "GPUIView"));
         assert!(!super::owns_text_edit(false, "NSButton"));
+    }
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+    /// Only app-level commands run while a sheet covers the window: every
+    /// one is a real menu command, and nothing that edits, saves, imports,
+    /// opens or closes the project under the sheet is among them.
+    #[test]
+    fn a_sheet_holds_every_command_that_touches_its_window() {
+        let commands: Vec<String> = menus()
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .map(|i| i.command)
+            .collect();
+        for name in BESIDE_SHEET {
+            assert!(commands.iter().any(|c| c == name), "{name}");
+        }
+        for held in [
+            "save",
+            "saveAs",
+            "import",
+            "importFolder",
+            "export",
+            "duplicate",
+            "split",
+            "precompose",
+            "newComposition",
+            "newProject",
+            "open",
+            "openRecent",
+            "closeTab",
+            "closeWindow",
+            "newLayers",
+            "panels",
+            "workspaces",
+            "store",
+            "renameProject",
+        ] {
+            assert!(!runs_beside_sheet(held), "{held}");
+        }
+        assert!(runs_beside_sheet("contextUndo"));
     }
 }
