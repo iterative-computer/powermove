@@ -28,13 +28,13 @@ pub fn matrix(size: [f32; 2], detail: f32, sample: impl Fn([f32; 2]) -> [f32; 4]
                 let center=[x as f32*pitch,y as f32*pitch];
                 let vis=generation_visibility(detail,k,center);
                 if vis<=0. { continue; }
-                let mut s=[0.;4];
+                let mut s=[0_f32;4];
                 for dy in -1..=1 { for dx in -1..=1 {
                     let p=[(center[0]+dx as f32*pitch*0.33).clamp(0.,size[0]),(center[1]+dy as f32*pitch*0.33).clamp(0.,size[1])];
                     let v=sample(p); for i in 0..4 { s[i]+=v[i]/9.; }
                 }}
                 let a=((s[3]-0.04)/0.31).clamp(0.,1.); let a=a*a*(3.-2.*a)*vis;
-                if a>0. { let c=|i| (s[i]/s[3].max(0.001)*255.).clamp(0.,255.) as u32;
+                if a>0. { let c=|i: usize| (s[i]/s[3].max(0.001)*255.).clamp(0.,255.) as u32;
                     dots.push(Dot{center,radius:1.35,alpha:a,color:(c(0)<<16)|(c(1)<<8)|c(2)}); }
             }
         }
