@@ -921,10 +921,11 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
-                    // `data-pm-variant="glass"`: a segmented control in the
-                    // system's capsule at the large size.
-                    glass: crate::v4_compile::variant(node) == Some("glass")
-                        && matches!(kind, crate::v4_control::Kind::Segmented),
+                    // Every segmented control is the kit's one: the system's
+                    // Liquid Glass capsule at the large size (PM-409).
+                    // Settings keeps the plain AppKit control of its pages.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
+                        && self.publication.panel != "settings",
                 },
                 &tokens,
                 window,
