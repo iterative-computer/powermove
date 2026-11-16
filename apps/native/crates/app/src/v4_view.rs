@@ -328,6 +328,7 @@ pub struct SurfaceView {
     pub(crate) grows: bool,
     fit: Cell<f32>,
     natural: Rc<Cell<f32>>,
+    column_natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -404,6 +405,7 @@ impl SurfaceView {
             grows: false,
             fit: Cell::new(0.),
             natural: Rc::new(Cell::new(0.)),
+            column_natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -3918,10 +3920,20 @@ impl Render for SurfaceView {
         let root = if self.grows {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
+            let column_natural = self.column_natural.clone();
+            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let origin = self.origin.clone();
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
                     let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    if (natural.replace(height) - height).abs() > 0.5 {
+                    let demand = scrolls.iter().fold(height, |height, scroll| {
+                        height.max(f32::from(
+                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                        ))
+                    });
+                    let changed = (natural.replace(height) - height).abs() > 0.5;
+                    let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if changed || column_changed {
                         window.refresh();
                     }
                 })
@@ -4363,8 +4375,12 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
-    /// The style of a scrolling body's content (`panel_body`): the panel at
-    /// least `body` tall, and as tall as it last measured.
+    /// Natural content demand includes inner lists before they are clipped.
+    pub(crate) fn natural_body_height(&self) -> f32 {
+        self.natural.get().max(self.column_natural.get())
+    }
+
+    /// The panel fills its body and grows with longer content.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
         gpui::StyleRefinement::default()
             .w_full()

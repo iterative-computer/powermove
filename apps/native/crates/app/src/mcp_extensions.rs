@@ -235,6 +235,9 @@ impl Owner {
         for (key, page) in &mut self.pages {
             for event in page.feedback.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::DockContent { .. }
+                    | HostEvent::DockScroll { .. }
+                    | HostEvent::DockReveal { .. } => (),
                     HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
