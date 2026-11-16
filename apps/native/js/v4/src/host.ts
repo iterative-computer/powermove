@@ -167,6 +167,16 @@ export class Element {
   setAttribute(key: string, value: unknown) {
     if (key.startsWith("pm:")) key = key.slice(3);
     const v = json(value);
+    // A render builds every style object anew: a style equal to the one sent
+    // is not sent again (a long page re-sent all its rows' styles on any
+    // change, past the host's argument quota). Other props keep being sent,
+    // since a repeated value can mean "reset" (a field's text).
+    if (
+      key === "style" &&
+      key in this.props &&
+      JSON.stringify(this.props[key]) === JSON.stringify(v)
+    )
+      return;
     this.props[key] = v;
     this.host.ops.push({ op: "setProps", id: this.id, patch: { [key]: v } });
     if (key === "preventDefault") this.listeners();

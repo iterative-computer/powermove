@@ -260,6 +260,41 @@ fn native_work_stays_and_a_change_on_both_sides_keeps_both() {
     assert_eq!(state(&config).conflicts, conflicts);
 }
 
+/// A Home rename of a closed copy (its row only, marked) is native work: an
+/// edit of the same project in the original app then keeps both versions
+/// instead of replacing the renamed copy (Sol review, PM-385).
+#[test]
+fn a_home_rename_of_a_closed_copy_is_native_work_and_a_later_edit_keeps_both() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    let id = checkpoint(&config).projects["p"].clone();
+    {
+        let writer = LibraryWriter::open(&config.native_profile, DiskFormat::V1_2, None).unwrap();
+        assert!(writer.rename_entry(&id, "Renamed in Native").unwrap());
+    }
+    edit_source(&config, "Edited in the original app");
+
+    delta(&config, |_| Ok(())).unwrap();
+
+    assert_eq!(
+        library(&config).renamed(&id).unwrap().as_deref(),
+        Some("Renamed in Native")
+    );
+    let kept = library(&config)
+        .projects()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id != id)
+        .expect("the original's version is another library project");
+    assert_eq!(name_of(&config, &kept.id), "Edited in the original app");
+    assert!(
+        state(&config)
+            .conflicts
+            .iter()
+            .any(|c| c.kind == ConflictKind::Project)
+    );
+}
+
 #[test]
 fn trash_follows_only_while_the_copy_is_untouched_and_nothing_is_ever_purged() {
     let t = tempdir().unwrap();

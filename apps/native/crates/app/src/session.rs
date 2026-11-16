@@ -161,6 +161,10 @@ pub struct Controller {
     pub(crate) page_drawn: bool,
     /// A restored window is checking whether its project reopens.
     pub(crate) reopening: bool,
+    /// The open running is a window restored at launch: if it fails (the
+    /// project's file is gone, it can't be read) the project is left out of
+    /// the restore without a word, only in the Error Log (PM-392).
+    pub(crate) restoring: bool,
     /// Wakes the playback loop, which places the playhead layers.
     pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
@@ -219,6 +223,8 @@ pub struct Controller {
     /// state revision and keymap value this window's keys follow, and the
     /// page as last built (`stamp` changes with it).
     pub(crate) shortcut_recording: Option<String>,
+    /// The key the recording row asked about (another command had it).
+    pub(crate) shortcut_asked: Option<String>,
     /// First run's Bring My Workspace waits for the project being created.
     pub(crate) workspace_after_open: bool,
     pub(crate) keymap_revision: Option<u64>,
@@ -855,6 +861,7 @@ impl Controller {
             store: None,
             page_drawn: false,
             reopening: false,
+            restoring: false,
             playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
@@ -886,6 +893,7 @@ impl Controller {
             imports: Default::default(),
             importing: None,
             shortcut_recording: None,
+            shortcut_asked: None,
             workspace_after_open: false,
             keymap_revision: None,
             keymap_seen: None,
@@ -1031,6 +1039,16 @@ impl Controller {
     /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
     /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        // The pages open in this window's strip at the last quit open again,
+        // behind the project.
+        let pages = std::mem::take(&mut self.host.borrow_mut().restored_pages);
+        if !pages.is_empty() {
+            for page in &pages {
+                self.pages.open(page);
+            }
+            self.pages.leave();
+            self.sync_pages();
+        }
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
@@ -1080,6 +1098,7 @@ impl Controller {
                 }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
+                        v.restoring = true;
                         v.open_named(
                             SessionSource::Library {
                                 profile: v.profile.clone(),
@@ -1630,8 +1649,23 @@ impl Controller {
         }
         // The viewer's clock lands later (always so for a viewer bound a
         // moment ago, as on open): record the time asked for, so MCP's
-        // playhead and the saved transport never read the old one.
-        let _ = self.write_ui_at(target.unwrap_or_else(|| self.time()));
+        // playhead and the saved transport never read the old one. A ruler
+        // scrub writes it once it ends: each write republishes every panel
+        // that shows the time (PM-310), and the viewer, the playhead and
+        // timecode layers, extensions and Properties follow the scrub as it
+        // goes.
+        let time = target.unwrap_or_else(|| self.time());
+        if self.builtins.scrubbing {
+            self.builtins.scrub_time = Some(time);
+        } else {
+            let _ = self.write_ui_at(time);
+        }
+    }
+    /// A ruler scrub ended: the kernel records where it left the time.
+    pub fn finish_scrub(&mut self) {
+        if let Some(time) = self.builtins.scrub_time.take() {
+            let _ = self.write_ui_at(time);
+        }
     }
     pub fn persist_ui(&self) {
         let _ = self.write_ui();
@@ -1921,6 +1955,7 @@ impl Controller {
                         info,
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
+                        v.restoring = false;
                         // Media resolves on a worker after the project shows.
                         let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
@@ -1935,9 +1970,18 @@ impl Controller {
                         }
                     }
                     // Already open in a window: that window comes forward.
+                    // A restored window whose project another restored
+                    // window holds goes, without taking the front.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
                         v.message = String::new();
-                        v.focus_project(&project, cx);
+                        if std::mem::take(&mut v.restoring) {
+                            if pm_shell::live_window_ids().len() > 1 {
+                                let window = v.host.borrow().window.clone();
+                                cx.defer(move |_| pm_shell::request_close(&window));
+                            }
+                        } else {
+                            v.focus_project(&project, cx);
+                        }
                     }
                     Some(Err(error)) => {
                         v.open_timer
@@ -1945,9 +1989,11 @@ impl Controller {
                         v.report_open_failure(&name, path, &error, cx)
                     }
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.restoring = false;
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
                     other => {
+                        v.restoring = false;
                         v.message = format!("“{name}” couldn’t be opened.");
                         v.errors.borrow_mut().push(
                             "Project",
@@ -2252,6 +2298,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         let Some(file) = path.clone() else {
             return self.report_open_error(name, path, error, cx);
         };
@@ -2381,6 +2430,20 @@ impl Controller {
         })
         .detach();
     }
+    /// A project restored at launch that did not open is left out without
+    /// an alert (its file was deleted or moved since): logged, and its
+    /// window goes when another window is open, else it stays on Home.
+    fn drop_restored(&mut self, name: &str, error: &KernelFailure, cx: &mut Context<Self>) {
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("“{name}” was not reopened: {error}"));
+        self.message = String::new();
+        if pm_shell::live_window_ids().len() > 1 {
+            let window = self.host.borrow().window.clone();
+            cx.defer(move |_| pm_shell::request_close(&window));
+        }
+        cx.notify();
+    }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_error(
         &mut self,
@@ -2389,6 +2452,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
         let failure = open_failure(error);
@@ -2410,6 +2476,39 @@ impl Controller {
         })
         .detach();
     }
+    /// A project opened here has a poster for Home's card from now on, even
+    /// if it is never saved in this app (a save draws a new one): once its
+    /// open has settled and its extensions' effects are in, so the poster
+    /// shows what the project looks like. Off the screen, so a window that
+    /// is not drawing gets one too.
+    fn poster_once_open(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            for _ in 0..120 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let Ok(ready) = this.update(cx, |v, _| {
+                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                    (shown == Some(project.as_str()))
+                        .then(|| v.settling.is_none() && !v.awaiting_extension_effects())
+                }) else {
+                    return;
+                };
+                match ready {
+                    None => return,
+                    Some(false) => {}
+                    Some(true) => {
+                        let _ = this.update(cx, |v, cx| v.write_poster(cx));
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
     fn adopt(
         &mut self,
         session: SessionHandle,
@@ -2425,6 +2524,7 @@ impl Controller {
         self.rows.clear();
         self.keyframes = 0;
         self.session = Some(session);
+        self.poster_once_open(cx);
         self.media_refresh.reset();
         self.thumbs.reset();
         self.media = MediaCatalog::default();
