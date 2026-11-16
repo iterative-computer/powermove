@@ -131,7 +131,7 @@ fn menu_matches_every_w1_equivalent_and_installs_every_command() {
         let command = match e.command.as_str() {
             "hide" => "hide:",
             "hideOthers" => "hideOtherApplications:",
-            "quit" => "terminate:",
+            "quit" => pm_shell::menu::QUIT_ACTION,
             c => c,
         };
         assert!(

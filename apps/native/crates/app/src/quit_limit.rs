@@ -180,8 +180,12 @@ pub fn stop_jobs_and_exit() -> ! {
         if libc::getpgrp() == libc::getpid() {
             libc::killpg(libc::getpgrp(), libc::SIGTERM);
         }
+        // Not `exit`: its handlers (libraries', C++ statics) run on this
+        // thread and can wait forever on a lock the main thread holds in a
+        // long open, so a SIGTERM never ended the app (run 23). What must be
+        // durable is already flushed by the caller.
+        libc::_exit(0)
     }
-    std::process::exit(0);
 }
 
 #[cfg(test)]
@@ -277,10 +281,32 @@ mod tests {
                 });
                 std::thread::sleep(Duration::from_secs(30));
             }
+            // A signal quit while something the process would run at exit
+            // never returns (a library's exit handler waiting on a lock the
+            // busy main thread holds, as during a long open).
+            "signal-exit-handler" => {
+                extern "C" fn never_returns() {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+                // SAFETY: registers a plain C function to run at exit().
+                unsafe { libc::atexit(never_returns) };
+                arm_signal(Duration::from_millis(100), || Ok(()));
+                std::thread::sleep(Duration::from_secs(30));
+            }
             other => panic!("unknown case {other}"),
         }
     }
 
+    /// A quit signal ends the process even when an exit handler would never
+    /// return: its end does not run them (the journals are flushed first).
+    #[test]
+    fn a_signal_ends_the_process_past_an_exit_handler_that_never_returns() {
+        let mut c = child("signal-exit-handler", false);
+        assert!(
+            ended_within(&mut c, Duration::from_secs(3)),
+            "the signal quit waited on an exit handler"
+        );
+    }
     /// A chosen quit that stops making progress asks; it never exits.
     #[test]
     fn a_stalled_chosen_quit_asks_and_does_not_exit() {

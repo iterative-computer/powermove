@@ -54,6 +54,20 @@ fn held_note(intent: Intent, asking: bool) -> &'static str {
         _ => "Finish the active edit, open or recovery decision before closing.",
     }
 }
+/// What holds a quit in a window: the Recover question, the Export sheet, or
+/// another question or sheet on screen; `None`: nothing does.
+fn quit_blocker(recovering: bool, sheet_up: bool, export_open: bool) -> Option<&'static str> {
+    match (recovering, sheet_up, export_open) {
+        (true, ..) => Some("the Recover question"),
+        (_, true, true) => Some("the Export sheet"),
+        (_, true, false) => Some("a question"),
+        _ => None,
+    }
+}
+/// The status line of a window whose sheet or question held a quit.
+fn held_by(what: &str) -> String {
+    format!("Powermove didn’t quit: {what} is open in this window. Answer or close it, then quit again.")
+}
 /// What a Quit waits for at a window that cannot close this moment, when
 /// that is work which ends on its own: a save in flight, a project still
 /// opening, another project operation. The quit goes on when it has ended
@@ -155,6 +169,12 @@ fn cancel_quit(cx: &mut App) {
                 if v.closing_note.take().is_some() {
                     cx.notify();
                 }
+                // Let go of its project for the quit that is now cancelled:
+                // no project, not closing (a later quit is not held by it).
+                if v.closed_for_quit {
+                    v.show_no_project(cx);
+                    cx.notify();
+                }
                 if v.extensions.stopped_for_quit {
                     v.start_extensions(cx);
                 }
@@ -227,7 +247,26 @@ pub fn begin_quit(cx: &mut App) {
     if q.asking_exports {
         return;
     }
+    // A question or sheet on screen (a Recover question, the Export sheet, a
+    // close's Save question) holds the quit before anything closes: that
+    // window comes forward and says what holds it. Closing other windows
+    // first left them closed when the quit then stopped (PM-464).
+    let controllers = q.controllers.clone();
+    let blocker = controllers.iter().filter_map(|weak| weak.upgrade()).find_map(|c| {
+        let what = c.read(cx).quit_blocker()?;
+        Some((c, what))
+    });
+    if let Some((controller, what)) = blocker {
+        controller.update(cx, |v, cx| {
+            v.message = held_by(what);
+            crate::diag::line(serde_json::json!({"quit":"held", "by":what}));
+            v.bring_forward();
+            cx.notify();
+        });
+        return cancel_quit(cx);
+    }
     // An export that is running is asked about before anything closes.
+    let q = cx.global::<QuitCoordinator>();
     let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
     let window = q
         .controllers
@@ -1028,6 +1067,11 @@ impl Controller {
             self.complete_close(intent, cx);
             return;
         }
+        if intent == Intent::Quit && self.closed_for_quit {
+            // Already released for this quit: the quit goes on past it.
+            cx.defer(next_quit);
+            return;
+        }
         if self.close_pending {
             if intent == Intent::Quit {
                 // This window's close is asking (Save, Don't Save) or still
@@ -1238,6 +1282,43 @@ impl Controller {
         })
         .detach();
     }
+    /// The window after its project closed and nothing replaced it: no
+    /// project, not closing.
+    fn show_no_project(&mut self, cx: &mut Context<Self>) {
+        self.mcp.closing.store(false, Ordering::Release);
+        self.close_pending = false;
+        self.closed_for_quit = false;
+        self.closing_note = None;
+        self.home = false;
+        self.start_builtins(cx);
+        let layer = metal::MetalLayer::new();
+        if pm_engine_service::layers::configure_layer(
+            objc2::MainThreadMarker::new().unwrap(),
+            &layer,
+            &self.engine.metal_device(),
+        )
+        .is_ok()
+        {
+            self.host.borrow_mut().replace_viewer_layer(layer);
+            self.main_output.set(None);
+        }
+        self.message = "No project".into();
+        if let Some(shell) = self.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
+        }
+    }
+    /// What on screen in this window holds a quit (a question or a sheet
+    /// only the person can end), named for the status line; notices that
+    /// ask nothing are dismissed instead.
+    fn quit_blocker(&self) -> Option<&'static str> {
+        let window = self.host.borrow().window.clone();
+        let sheet_up = !crate::alert::dismiss_notice(&window);
+        quit_blocker(
+            self.recovery_pending,
+            sheet_up,
+            self.builtins.windows.contains_key("export"),
+        )
+    }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if let Some(g) = self.builtins.gizmos.clone() {
             g.update(cx, |g, cx| g.studio_fly_end(false, cx));
@@ -1363,6 +1444,7 @@ impl Controller {
                     .detach();
                     if intent == Intent::Quit {
                         crate::diag::line(serde_json::json!({"quit":"window_released"}));
+                        v.closed_for_quit = true;
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
                     } else if intent == Intent::Project
@@ -1370,26 +1452,7 @@ impl Controller {
                     {
                         // v1: closing the last project shows Home; the
                         // window stays, its session forgets the project.
-                        v.mcp.closing.store(false, Ordering::Release);
-                        v.close_pending = false;
-                        v.closing_note = None;
-                        v.home = false;
-                        v.start_builtins(cx);
-                        let layer = metal::MetalLayer::new();
-                        if pm_engine_service::layers::configure_layer(
-                            objc2::MainThreadMarker::new().unwrap(),
-                            &layer,
-                            &v.engine.metal_device(),
-                        )
-                        .is_ok()
-                        {
-                            v.host.borrow_mut().replace_viewer_layer(layer);
-                            v.main_output.set(None);
-                        }
-                        v.message = "No project".into();
-                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
-                            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
-                        }
+                        v.show_no_project(cx);
                         // The project this one gave way to opens here.
                         if let Some(next) = v.replace_with.take() {
                             v.apply_pending(next, cx);
@@ -1495,6 +1558,17 @@ mod tests {
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// What holds a quit is named: the Recover question, the Export sheet,
+    /// any other question or sheet; a window with none holds nothing.
+    #[test]
+    fn a_quit_names_the_sheet_that_holds_it() {
+        assert_eq!(quit_blocker(true, true, false), Some("the Recover question"));
+        assert_eq!(quit_blocker(false, true, true), Some("the Export sheet"));
+        assert_eq!(quit_blocker(false, true, false), Some("a question"));
+        assert_eq!(quit_blocker(false, false, true), None);
+        assert_eq!(quit_blocker(false, false, false), None);
+        assert!(held_by("the Export sheet").starts_with("Powermove didn’t quit: the Export sheet"));
     }
     /// A quit a question stops says so in that window, by name: never the
     /// generic close note, never nothing.

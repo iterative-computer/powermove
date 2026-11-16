@@ -219,6 +219,10 @@ pub struct Controller {
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// This window let go of its project for a quit that is still going:
+    /// a quit cancelled later puts it back to no project, never leaving it
+    /// "closing" (every later quit stopped at it, PM-464).
+    pub closed_for_quit: bool,
     /// The project that opens here once this window's project has closed
     /// (one project per window: an open replaces the one shown).
     pub(crate) replace_with: Option<crate::entry::Pending>,
@@ -1048,6 +1052,7 @@ impl Controller {
             poster_revision: None,
             window_key: 0,
             close_pending: false,
+            closed_for_quit: false,
             replace_with: None,
             unprotected: false,
             closing_note: None,
