@@ -42,6 +42,19 @@ const huge = projection(Array.from({ length: 12 }, (_, i) => asset(`a${i}`)));
 huge.page.total = 60_000;
 huge.page.next = 12;
 const cases: [string, Projection | null, Partial<ProjectViewProps>?][] = [
+  ...(["Synced", "Syncing", "NotFound"] as const).flatMap((sync) => {
+    const row = folder();
+    if ("Folder" in row.data) {
+      row.data.Folder.link = { path: "/synthetic/Finder" };
+      row.data.Folder.sync = sync;
+    }
+    const grid = projection([row]);
+    const list = projection([row]);
+    return [
+      [`linked-${sync}-grid`, grid, { viewMode: "grid" }],
+      [`linked-${sync}-list`, list, { viewMode: "list" }],
+    ] as [string, Projection, Partial<ProjectViewProps>][];
+  }),
   ["no-project", null],
   ["empty-project", projection()],
   ["empty-folder", inFolder],
@@ -132,6 +145,14 @@ for (const [state, view, extra] of cases)
       expect(report.wireDiagnostics).toEqual([]);
     }
     const report = reports.at(-1)!;
+    if (state.startsWith("linked-Syncing")) {
+      expect(
+        Object.values(report.nodes).some(
+          // The quiet line says it (no glyph: lists are quiet text).
+          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
+        ),
+      ).toBe(true);
+    }
     expect({
       tree: treeSnapshot(report.nodes),
       ax: report.accessibility,
@@ -732,5 +753,31 @@ test("scrolling inside the rows loaded asks for no new page", async () => {
     [188, 36],
     [208, 36],
   ]);
+  await root.dispose();
+});
+
+test("list video uses its resolved poster resource", async () => {
+  const row = asset();
+  if ("Asset" in row.data) row.data.Asset[1].poster = "poster-video";
+  const { root, commits } = recorder();
+  await root.render(
+    <ProjectView
+      view={projection([row])}
+      input={() => {}}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={layout}
+      viewMode="list"
+      posters={new Map([["poster-video", "thumb/video"]])}
+    />,
+  );
+  const report = replay(commits, projection([row])).at(-1)!;
+  expect(report.accepted).toBe(true);
+  expect(
+    Object.values(report.nodes).some(
+      (node: any) => node.props.resource === "thumb/video",
+    ),
+  ).toBe(true);
   await root.dispose();
 });

@@ -28,6 +28,10 @@ pub struct FreeView {
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub zoom: f64,
+    #[serde(default)]
+    pub ortho: bool,
+    #[serde(default)]
+    pub roll: f64,
 }
 impl FreeView {
     pub fn validate(&self) -> Result<(), String> {
@@ -36,6 +40,7 @@ impl FreeView {
             .iter()
             .chain(self.target.iter())
             .any(|v| !v.is_finite() || v.abs() > 1e6)
+            || !self.roll.is_finite()
             || !self.zoom.is_finite()
             || self.zoom <= 0.
             || self.zoom > 1e6
@@ -59,7 +64,12 @@ impl FreeView {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         if let Some(v) = view {
-            for x in v.eye.iter().chain(v.target.iter()).chain([v.zoom].iter()) {
+            for x in v
+                .eye
+                .iter()
+                .chain(v.target.iter())
+                .chain([v.zoom, v.roll, if v.ortho { 1. } else { 0. }].iter())
+            {
                 x.to_bits().hash(&mut h);
             }
             1u8.hash(&mut h);

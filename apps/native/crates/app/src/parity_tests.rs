@@ -437,6 +437,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     assert_eq!(
         labels(&menu(&desk, "a", 1.)),
         [
+            "Rename…",
             "Duplicate",
             "Group",
             "Simplify Keyframes",
@@ -486,7 +487,8 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     assert_eq!(labels(&menu(&desk, "a", 1.))[4], "Use Bottom Layer as Mask");
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
-    assert_eq!(labels(&menu(&desk, "t", 1.))[4], "Split Text into Layers");
+    // One layer: Rename… leads (v1).
+    assert_eq!(labels(&menu(&desk, "t", 1.))[5], "Split Text into Layers");
     assert_eq!(
         child_labels(&menu(&desk, "t", 1.), "Split Text into Layers"),
         ["By Word", "By Character", "By Line"]
@@ -509,6 +511,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     assert_eq!(
         labels(&menu(&desk, "locked", 1.)),
         [
+            "(Rename…)",
             "(Duplicate)",
             "(Group)",
             "(Simplify Keyframes)",
@@ -587,7 +590,7 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     step("a", &["Hide"], "Hide Layers", &|| {
         assert_eq!(flag("a", "on"), Some(false))
     });
-    assert_eq!(labels(&menu(&desk, "a", 1.))[8], "Show");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[9], "Show");
     step("a", &["Show"], "Show Layers", &|| {
         assert_eq!(flag("a", "on"), Some(true))
     });
@@ -1276,5 +1279,336 @@ fn pasting_a_copied_picture_or_file_makes_a_layer_at_the_playhead_stored_with_th
     assert_eq!(
         read(&desk.published(), &pasted, "Plate.png").as_deref(),
         Some(&*still.to_string_lossy())
+    );
+}
+
+#[test]
+fn project_bins_native_edits_survive_save_reopen_and_history() {
+    use pm_panel_media::{Catalog, Edit};
+    let desk = Desk::new(
+        json!({"id":"bins","compId":"c","w":64,"h":64,"fps":30,"dur":1,"layers":[],"assets":{"a":{"id":"a","name":"A","kind":"image"}}}),
+    );
+    let apply = |edit| {
+        let c = Catalog::published(&desk.published()).unwrap();
+        let ack = c
+            .prepare(edit)
+            .unwrap()
+            .submit(&desk.kernel(), Caller::native())
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    };
+    for edit in [
+        Edit::CreateFolder {
+            id: "outer".into(),
+            name: "Outer".into(),
+            parent: None,
+        },
+        Edit::CreateFolder {
+            id: "inner".into(),
+            name: "Inner".into(),
+            parent: Some("outer".into()),
+        },
+        Edit::RenameFolder {
+            id: "inner".into(),
+            name: "Selects".into(),
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: Some("inner".into()),
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: None,
+        },
+        Edit::Move {
+            assets: vec!["a".into()],
+            folders: vec![],
+            target: Some("inner".into()),
+        },
+        Edit::DeleteFolder { id: "inner".into() },
+    ] {
+        let before = desk.document();
+        apply(edit);
+        let after = desk.document();
+        desk.undo();
+        assert_eq!(desk.document(), before);
+        desk.redo();
+        assert_eq!(desk.document(), after);
+    }
+    let c = Catalog::published(&desk.published()).unwrap();
+    assert_eq!(c.assets["a"].folder.as_deref(), Some("outer"));
+    let reopened = desk.reopened();
+    let saved = Catalog::published(&reopened.published).unwrap();
+    assert_eq!(saved.folders, c.folders);
+    assert_eq!(saved.assets["a"].folder, c.assets["a"].folder);
+}
+
+#[test]
+fn linked_folder_save_reopen_resolves_in_place_without_retained_copy() {
+    let desk = Desk::new(
+        json!({"id":"linked","compId":"c","w":64,"h":64,"fps":30,"dur":1,"layers":[],"assets":{}}),
+    );
+    let root = desk.dir.path().join("Finder");
+    std::fs::create_dir(&root).unwrap();
+    let image = root.join("still.png");
+    std::fs::write(
+        &image,
+        crate::mcp_services::png(&[12, 34, 56, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let panels = pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    panels
+        .link_folders(
+            desk.published().snapshot.doc_id,
+            &[root.clone()],
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    let before = desk.document();
+    let reopened = desk.reopened();
+    let after = reopened.published.snapshot.document.to_value().unwrap();
+    assert_eq!(before.get("assetFolders"), after.get("assetFolders"));
+    assert_eq!(before.get("assets"), after.get("assets"));
+    let asset = after
+        .get("assets")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap()
+        .1;
+    assert!(asset.get("originalVersion").is_none());
+    assert!(asset.get("sourceFile").is_some());
+    let resolution = crate::media::for_session(
+        &reopened.published.snapshot,
+        &reopened.published.media,
+        reopened.published.path.as_deref(),
+        &desk.dir.path().join("cache"),
+    )
+    .unwrap();
+    assert_eq!(
+        resolution.catalog.originals.values().next(),
+        Some(&image.canonicalize().unwrap())
+    );
+    assert!(!desk.dir.path().join("media/retained").exists());
+    std::fs::remove_file(&image).unwrap();
+    let missing = crate::media::for_session(
+        &reopened.published.snapshot,
+        &reopened.published.media,
+        reopened.published.path.as_deref(),
+        &desk.dir.path().join("cache"),
+    )
+    .unwrap();
+    assert!(missing.catalog.originals.is_empty());
+    assert_eq!(
+        reopened
+            .published
+            .snapshot
+            .document
+            .to_value()
+            .unwrap()
+            .get("assets"),
+        after.get("assets")
+    );
+    panels.close();
+}
+
+fn assert_camera_entry(command: &str, args: &[serde_json::Value]) {
+    let desk = Desk::new(project(vec![]));
+    let before = desk.document();
+    desk.run(command, args, 0.);
+    assert_eq!(desk.layers().len(), 1);
+    let ids = desk.selected();
+    assert_eq!(ids.len(), 1);
+    let camera = pm_scene3d::from_model(&layer_of(&desk.published(), &ids[0])).unwrap();
+    assert_eq!(camera["name"], "Camera");
+    assert_eq!(camera["threeD"], true);
+    assert_eq!(camera["d"]["definition"], "powermove.3d.camera");
+    for (key, expected) in [("position.x", 3.), ("position.y", 2.), ("position.z", 6.)] {
+        assert_eq!(camera["p"][key]["v"].as_f64(), Some(expected));
+    }
+    assert_eq!(
+        camera["d"]["data"]["camera"]["p"]["fov"]["v"].as_f64(),
+        Some(45.)
+    );
+    let published = desk.published();
+    let scene = pm_kernel::commands::scene3d::resolve_scene(&published.snapshot, None, 0.).unwrap();
+    assert_eq!(scene.camera_id.as_deref(), Some(ids[0].as_str()));
+    assert!(
+        pm_panel_studio3d::properties::scene_summary(&published)
+            .unwrap()
+            .is_some()
+    );
+    desk.undo();
+    assert!(desk.layers().is_empty());
+    assert_eq!(desk.document(), before);
+}
+#[test]
+fn camera_entry_layer_new() {
+    assert!(
+        pm_shell::menu::menus()
+            .iter()
+            .find(|(label, _)| *label == "Layer")
+            .unwrap()
+            .1
+            .iter()
+            .any(|i| i.label == "New" && i.command == "newLayers")
+    );
+    let row = pm_shell::menu::new_layers()
+        .into_iter()
+        .find(|i| i.label == "Camera")
+        .unwrap();
+    assert_camera_entry(&row.command, &row.args);
+}
+#[test]
+fn camera_entry_toolbar() {
+    let (command, _) = pm_shell::ADD
+        .iter()
+        .find(|(_, label)| *label == "New Camera")
+        .unwrap();
+    assert_camera_entry(command, &[]);
+}
+#[test]
+fn camera_entry_viewer() {
+    let menu = crate::builtins::viewer_new_menu();
+    assert_eq!(menu.label, "New");
+    let row = menu.children.iter().find(|i| i.label == "Camera").unwrap();
+    assert_camera_entry(&row.command, &[]);
+}
+#[test]
+fn camera_entry_timeline() {
+    let menu = crate::timeline_surface::empty_new_menu();
+    assert_eq!(menu["label"], "New");
+    let rows = vec![menu];
+    let row = crate::v4_native::menu_item(&rows, 1).unwrap();
+    assert_eq!(row["label"], "Camera");
+    assert_camera_entry(row["command"].as_str().unwrap(), &[]);
+}
+#[test]
+fn camera_entry_shortcut() {
+    let (command, args) = crate::layer_commands::commands_tests::dispatch("cmd+alt+shift+c");
+    assert_eq!(command, "newCamera");
+    assert_camera_entry(&command, &args);
+}
+
+#[test]
+fn palette_selects_named_layer_and_rejects_missing_layer() {
+    let desk = Desk::new(project(vec![
+        json!({"id":"logo","name":"Logo","type":"solid","dur":10}),
+    ]));
+    assert_eq!(
+        crate::layer_commands::palette_layers(&desk.published()),
+        vec![("logo".into(), "Logo".into())]
+    );
+    let plan = command_plan(
+        "palette.selectLayer",
+        &[json!("logo")],
+        &desk.published(),
+        0.,
+    )
+    .unwrap();
+    desk.call(SelectionCall::Layers {
+        ids: plan.select.unwrap(),
+        add: false,
+    });
+    assert_eq!(desk.selected(), vec!["logo"]);
+    assert!(
+        command_plan(
+            "palette.selectLayer",
+            &[json!("missing")],
+            &desk.published(),
+            0.
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn palette_effect_applies_to_selection_as_one_undo_step() {
+    let desk = Desk::new(project(vec![
+        json!({"id":"a","name":"A","type":"solid","dur":10}),
+        json!({"id":"b","name":"B","type":"solid","dur":10}),
+    ]));
+    assert!(
+        crate::layer_commands::palette_effects(&desk.kernel().state())
+            .contains(&("blur".into(), "Gaussian Blur".into()))
+    );
+    assert!(
+        crate::layer_commands::palette_effect_plan(&desk.published(), "Gaussian Blur", |_| panic!(
+            "no selection"
+        ))
+        .unwrap()
+        .is_none()
+    );
+    desk.call(SelectionCall::Layers {
+        ids: vec!["a".into(), "b".into()],
+        add: false,
+    });
+    // Only the always-mounted viewer is needed; the Effects panel stays closed.
+    let mut runtime =
+        pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    let ticket = runtime.mount("viewer").unwrap();
+    crate::ticket::answer(
+        ticket,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .unwrap()
+    .unwrap();
+    let p = desk.published();
+    let plan = crate::layer_commands::palette_effect_plan(&p, "Gaussian Blur", |id| {
+        runtime.effect_commands("viewer", id, "blur", 0.)
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.label, "Add Gaussian Blur");
+    desk.call(transaction(&plan, Some(p.revision())).unwrap());
+    for id in ["a", "b"] {
+        assert_eq!(
+            layer_of(&desk.published(), id)
+                .get("fx")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    desk.undo();
+    for id in ["a", "b"] {
+        assert!(
+            layer_of(&desk.published(), id)
+                .get("fx")
+                .is_none_or(|fx| fx.as_array().is_some_and(|v| v.is_empty()))
+        );
+    }
+}
+
+#[test]
+fn palette_layers_stay_inside_active_nested_composition() {
+    let desk = Desk::new(json!({
+        "id":"desk", "compId":"nested", "w":640, "h":360, "fps":30, "dur":10, "assets":{},
+        "comps": {
+            "main": {"id":"main", "w":640, "h":360, "fps":30, "dur":10, "layers":[{"id":"outside", "name":"Logo", "type":"solid", "dur":10}]},
+            "nested": {"id":"nested", "w":640, "h":360, "fps":30, "dur":10, "layers":[{"id":"inside", "name":"Logo", "type":"solid", "dur":10}]}
+        }
+    }));
+    assert_eq!(
+        crate::layer_commands::palette_layers(&desk.published()),
+        vec![("inside".into(), "Logo".into())]
+    );
+    assert!(
+        command_plan(
+            "palette.selectLayer",
+            &[json!("outside")],
+            &desk.published(),
+            0.
+        )
+        .is_none()
     );
 }

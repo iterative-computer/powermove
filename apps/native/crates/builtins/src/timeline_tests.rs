@@ -109,13 +109,15 @@ fn joined_position_projection_and_selection_keep_all_subframe_key_identities() {
     );
     let published = actor.handle().published("synthetic").unwrap();
     assert_eq!(published.selection.keys().len(), 2);
-    assert!(
-        publication
-            .surface
-            .nodes()
-            .values()
-            .any(|n| n.text == "320, 180")
-    );
+    for value in ["320", "180"] {
+        assert!(
+            publication
+                .surface
+                .nodes()
+                .values()
+                .any(|n| n.text == value)
+        );
+    }
 }
 
 #[test]
@@ -383,4 +385,31 @@ fn the_graph_intent_sets_the_panels_view_as_asked() {
     assert_eq!(ask(json!({"type":"graph","shown":false})), DopeSheet);
     assert_eq!(ask(json!({"type":"view","view":"Combined"})), Combined);
     assert_eq!(ask(json!({"type":"graph","shown":true})), Combined);
+}
+
+#[test]
+fn timeline_axis_value_typing_changes_only_that_axis() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("timeline").unwrap());
+    finish(
+        panels
+            .timeline_action(json!({"type":"propertyEdit","layer":"a","path":"position.x"}))
+            .unwrap(),
+    );
+    finish(
+        panels
+            .timeline_action(json!({"type":"editDone","value":"123.25"}))
+            .unwrap(),
+    );
+    let p = actor.handle().published("synthetic").unwrap();
+    let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+    assert_eq!(
+        index.channel("a", "position.x").unwrap().value.as_f64(),
+        Some(123.25)
+    );
+    assert_eq!(
+        index.channel("a", "position.y").unwrap().value.as_f64(),
+        Some(180.)
+    );
 }
