@@ -193,6 +193,9 @@ pub struct ViewFrame {
     pub size: [f64; 2],
 }
 pub trait Host: 'static {
+    fn sample_color(&self, _: &App) -> Option<crate::colour_picker::SampleSource> {
+        None
+    }
     fn effect_visible(&self, _: &str, _: &str, _: &App) -> Option<bool> {
         None
     }

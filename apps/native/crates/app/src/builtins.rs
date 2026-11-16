@@ -2392,6 +2392,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
+    fn sample_color(&self, cx: &App) -> Option<crate::colour_picker::SampleSource> {
+        self.0.upgrade()?.read(cx).builtins.natives.sample_color.borrow().clone()
+    }
     fn focus_canvas(&self, window: &mut Window, cx: &mut App) {
         let shell = self.0.upgrade().and_then(|c| c.read(cx).shell.clone());
         if let Some(shell) = shell {

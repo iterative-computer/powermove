@@ -774,7 +774,8 @@ impl GizmoSurface {
         self.effect_picker = Some((i, j));
         let color = Color(self.effect_controls[i].stops[j].color.map(|v| v as f32));
         let tokens = self.tokens.clone();
-        let picker = cx.new(|cx| Picker::new(color, tokens, window, None, cx));
+        let source = self.host.sample_color(cx);
+        let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
         let subscription = cx.subscribe(&picker, |g, entity, event, cx| match event {
             Edit::Begin => {
                 if let Some((i, j)) = g.effect_picker {
