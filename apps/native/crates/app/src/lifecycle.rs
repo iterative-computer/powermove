@@ -537,9 +537,10 @@ fn finish_quit(cx: &mut App) {
                     // Unattended: everything is durable (journals flushed,
                     // library released, the Error Log marked). AppKit's
                     // terminate waits behind a sheet still up (a recovery
-                    // question), so the process ends here.
-                    crate::diag::line(serde_json::json!({"quit":"exit"}));
-                    std::process::exit(0);
+                    // question, New Project), so they end first; the normal
+                    // teardown then stops what the app started (engine jobs).
+                    crate::diag::line(serde_json::json!({"quit":"end_sheets"}));
+                    crate::platform::end_all_sheets();
                 }
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
@@ -617,6 +618,16 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
                         .spawn(async move {
                             timer.await;
                             crate::diag::line(serde_json::json!({"quit":"limit"}));
+                            // `exit` runs no drops: stop the engine jobs this
+                            // app started (its process group, when it leads
+                            // one, as a launched app does) before ending.
+                            // SAFETY: plain process calls; this process
+                            // ignores the SIGTERM it sends itself (blocked).
+                            unsafe {
+                                if libc::getpgrp() == libc::getpid() {
+                                    libc::killpg(libc::getpgrp(), libc::SIGTERM);
+                                }
+                            }
                             std::process::exit(0);
                         })
                         .detach();
