@@ -679,7 +679,13 @@ fn services(f: &Fixture, signed: bool) -> Services {
             Arc::new(move || crate::cloud::Http::new(origin, Box::new(NoVault), profile.clone()))
         },
         profile: f.profile.path().canonicalize().unwrap(),
-        source: signed.then(|| Arc::new(store_install::Source { origin, trust })),
+        source: signed.then(|| {
+            Arc::new(store_install::Source {
+                origin,
+                trust,
+                signed: true,
+            })
+        }),
     }
 }
 struct NoVault;
