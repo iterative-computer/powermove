@@ -319,7 +319,11 @@ export function EffectControls(props: PanelProps) {
                   />
                 ) : row.kind === "spacer" ? (
                   // Under a point row: its pad reaches down into it.
-                  <div key={row.id} role="presentation" />
+                  <div
+                    key={row.id}
+                    role="presentation"
+                    style={{ height: t("metrics.row"), flexShrink: 0 }}
+                  />
                 ) : row.kind === "ramp" ? (
                   <RampView key={row.id} row={row} locked={p.locked} />
                 ) : row.kind === "point" ? (
