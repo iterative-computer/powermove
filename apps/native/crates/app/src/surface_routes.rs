@@ -440,26 +440,43 @@ impl Controller {
         deadline: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<()>> {
+        self.try_keep_last_frame(deadline, cx).1
+    }
+    /// [`Self::keep_last_frame`], saying what came of it (`poster::Kept`).
+    fn try_keep_last_frame(
+        &mut self,
+        deadline: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) -> (crate::poster::Kept, Option<async_channel::Receiver<()>>) {
+        use crate::poster::Kept;
         if self.settling.is_some() || self.awaiting_extension_effects() {
             crate::diag::line(serde_json::json!({"last_frame": "loading"}));
-            return None;
+            return (Kept::NotYet, None);
         }
-        let project = self.session.as_ref()?.project.clone();
-        let doc = self.published.as_ref()?.snapshot.doc_id;
-        let status = self.viewer.as_ref()?.status();
-        let (frame, picture) = (status.frame?, status.settled_picture?);
+        let (Some(session), Some(published), Some(viewer)) =
+            (self.session.as_ref(), self.published.as_ref(), self.viewer.as_ref())
+        else {
+            return (Kept::Nothing, None);
+        };
+        let (project, doc) = (session.project.clone(), published.snapshot.doc_id);
+        let status = viewer.status();
+        let (Some(frame), Some(picture)) = (status.frame, status.settled_picture) else {
+            crate::diag::line(serde_json::json!({"last_frame": "not settled"}));
+            return (Kept::NotYet, None);
+        };
         // This project's own picture (a viewer replaced for another project
         // may still hold the last one's), and of the frame shown now.
         if picture.stamp.doc_id != doc
             || picture.stamp.revision != frame.stamp.revision
             || picture.time != frame.time
         {
-            return None;
+            crate::diag::line(serde_json::json!({"last_frame": "not this frame's"}));
+            return (Kept::NotYet, None);
         }
         let time = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
         let mark = crate::poster::last_frame_mark(picture.stamp.revision, time);
         if crate::poster::last_frame_current(&self.profile, &project, &mark) {
-            return None;
+            return (Kept::Current, None);
         }
         let profile = self.profile.clone();
         let (done, heard) = async_channel::bounded(1);
@@ -482,7 +499,16 @@ impl Controller {
                 let _ = done.try_send(());
             })
             .detach();
-        Some(heard)
+        (Kept::Writing, Some(heard))
+    }
+    /// Keeps the picture now (a save), or, if it is not ready yet, watches
+    /// it until it is.
+    pub(crate) fn keep_or_watch_last_frame(&mut self, cx: &mut Context<Self>) {
+        if self.try_keep_last_frame(None, cx).0 == crate::poster::Kept::NotYet
+            && !std::mem::replace(&mut self.last_frame_watch.watching, true)
+        {
+            self.look_still_after(crate::poster::LAST_FRAME_RETRY, cx);
+        }
     }
     /// The viewer showed `frame`: once its picture has held still
     /// (`poster::still`) it is kept as the project's last frame, so a launch
@@ -505,8 +531,12 @@ impl Controller {
         if std::mem::replace(&mut watch.watching, true) {
             return;
         }
+        self.look_still_after(crate::poster::LAST_FRAME_STILL, cx);
+    }
+    /// The still picture's watch: looks after `wait`, then as `look_still` says.
+    fn look_still_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let mut wait = crate::poster::LAST_FRAME_STILL;
+            let mut wait = wait;
             loop {
                 cx.background_executor().timer(wait).await;
                 match this.update(cx, |v, cx| v.look_still(cx)) {
@@ -528,8 +558,8 @@ impl Controller {
         match crate::poster::still(held, since, watch.writing, busy) {
             crate::poster::Still::Wait(next) => Some(next),
             crate::poster::Still::Store => {
-                self.last_frame_watch.watching = false;
-                if let Some(done) = self.keep_last_frame(None, cx) {
+                let (kept, done) = self.try_keep_last_frame(None, cx);
+                if let Some(done) = done {
                     self.last_frame_watch.writing = true;
                     self.last_frame_watch.stored = Some(now);
                     cx.spawn(async move |this, cx| {
@@ -538,7 +568,12 @@ impl Controller {
                     })
                     .detach();
                 }
-                None
+                // Not ready yet: looked at again until it is kept.
+                let next = crate::poster::look_again(&kept);
+                if next.is_none() {
+                    self.last_frame_watch.watching = false;
+                }
+                next
             }
         }
     }

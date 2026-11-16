@@ -348,6 +348,27 @@ pub(crate) fn still(
         _ => Still::Store,
     }
 }
+/// How soon the watch looks again at a picture it could not keep yet.
+pub(crate) const LAST_FRAME_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// What a try to keep the viewer's picture as the last frame came to.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Kept {
+    /// Being written now.
+    Writing,
+    /// The stored one already shows it.
+    Current,
+    /// Not yet: the project or its effects still load, or the picture has
+    /// not settled on the frame shown.
+    NotYet,
+    /// No project or viewer to keep it from.
+    Nothing,
+}
+/// After a try to keep the picture: when to look again. A picture not ready
+/// yet is looked at again until it is kept, so a kill or a signal quit,
+/// which keep nothing, still find the picture the person last saw (PM-384).
+pub(crate) fn look_again(kept: &Kept) -> Option<std::time::Duration> {
+    (*kept == Kept::NotYet).then_some(LAST_FRAME_RETRY)
+}
 /// The watch over the picture the viewer shows, for the last frame.
 #[derive(Default)]
 pub(crate) struct StillWatch {
@@ -425,6 +446,17 @@ mod tests {
 
     /// A last frame is current only for the revision and time it shows; a
     /// close or save with another one keeps it again (PM-384).
+    /// A picture that could not be kept yet (still loading, not settled on
+    /// the frame shown) is looked at again; one kept, current or with no
+    /// project is not. Before, a watch that found it not ready stopped, and
+    /// a paused project kept nothing until a clean quit (PM-384).
+    #[test]
+    fn a_picture_not_ready_is_looked_at_again_until_kept() {
+        assert_eq!(look_again(&Kept::NotYet), Some(LAST_FRAME_RETRY));
+        for done in [Kept::Writing, Kept::Current, Kept::Nothing] {
+            assert_eq!(look_again(&done), None, "{done:?}");
+        }
+    }
     #[test]
     fn a_last_frame_is_current_for_its_revision_and_time() {
         let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));

@@ -2140,6 +2140,9 @@ impl Controller {
     }
     /// The ghost's picture goes (its own frame is retired at the next draw).
     pub(crate) fn ghost_retire(&mut self) {
+        if self.ghost_picture.is_some() {
+            crate::diag::line(serde_json::json!({"poster": "retired"}));
+        }
         self.ghost_retired.extend(self.ghost_picture.take());
     }
     /// `project` opening: the picture its viewer last showed stands in the
@@ -2162,6 +2165,9 @@ impl Controller {
             .as_deref()
             .and_then(crate::poster::decode)
             .and_then(|(w, h, rgba)| pm_shell::symbol::picture(w, h, rgba));
+        crate::diag::line(serde_json::json!({"poster": "staged", "project": project,
+            "picture": picture, "file": poster.as_ref().map(|p| p.display().to_string()),
+            "decoded": self.ghost_picture.is_some()}));
         self.viewer_poster = poster;
         self.last_frame_watch.shown = None;
         // Its own panels at their sizes, the viewer's slot included, not
@@ -3196,7 +3202,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
-                        v.keep_last_frame(None, cx);
+                        v.keep_or_watch_last_frame(cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
