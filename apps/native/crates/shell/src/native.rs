@@ -150,6 +150,33 @@ fn sheet_up() -> bool {
             .and_then(|n| app.windowWithWindowNumber(n))
             .is_some_and(|w| w.attachedSheet().is_some())
 }
+/// Menu-bar menus whose rows dim when their command cannot run now
+/// (`MenuState::disabled`); every menu dims for a sheet.
+const STATEFUL_MENUS: [&str; 4] = ["Edit", "Composition", "Playback", "View"];
+thread_local! {
+    /// The project's Undo/Redo titles ("Undo New Solid"), kept while a sheet's
+    /// field owns the items, which then read as the field's plain verb.
+    static PROJECT_TITLES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+fn undo_title_for_field(item: &NSMenuItem, name: &str, sheet: bool) {
+    let verb = match name {
+        "contextUndo" => "Undo",
+        "contextRedo" => "Redo",
+        _ => return,
+    };
+    PROJECT_TITLES.with(|t| {
+        let mut t = t.borrow_mut();
+        if sheet {
+            let title = item.title().to_string();
+            if title != verb {
+                t.insert(name.to_owned(), title);
+            }
+            item.setTitle(&NSString::from_str(verb));
+        } else if let Some(title) = t.remove(name) {
+            item.setTitle(&NSString::from_str(&title));
+        }
+    });
+}
 /// Whether a text field in the key window is being edited (a sheet's name
 /// field): its own Undo, Cut, Copy and Paste then have something to act on.
 fn key_field_editing() -> bool {
@@ -703,8 +730,18 @@ define_class!(
                 }
                 // A sheet holds every command that acts on the window under it
                 // (HIG); the app's own and its fields' Edit commands stay.
-                !state.disabled.contains(name)
-                    && (!sheet_up() || menu::runs_beside_sheet(name, key_field_editing()))
+                let sheet = sheet_up();
+                undo_title_for_field(item, name, sheet);
+                let beside = !sheet || menu::runs_beside_sheet(name, key_field_editing());
+                // Menus that dim by state (`STATEFUL_MENUS`); the others only
+                // for a sheet.
+                // SAFETY: the item's own menu, read on the main thread.
+                let stateful = unsafe { item.menu() }.is_some_and(|m| {
+                    let title = m.title().to_string();
+                    STATEFUL_MENUS.contains(&title.as_str())
+                        || menu::DISPLAY_ONLY.contains(&title.as_str())
+                });
+                beside && !(stateful && state.disabled.contains(name))
             } else {
                 true
             }
@@ -6980,13 +7017,10 @@ pub fn install_menus() {
     for (title, items) in menus {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
         // These menus dim a row whose command cannot run now (`validateMenuItem`).
-        submenu.setAutoenablesItems(
-            title == "Edit"
-                || title == "Composition"
-                || title == "Playback"
-                || menu::DISPLAY_ONLY.contains(&title)
-                || title == "View",
-        );
+        // Every menu validates its rows (`validateMenuItem`): those in
+        // `STATEFUL_MENUS` dim a command that cannot run now, and all of
+        // them dim what a sheet holds.
+        submenu.setAutoenablesItems(true);
         if menu::DISPLAY_ONLY.contains(&title) {
             delegate(&submenu, MenuKind::DisplayOnly);
         }
