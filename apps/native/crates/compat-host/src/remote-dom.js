@@ -246,6 +246,38 @@
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
   });
+  // Measure contribution content without running an idle measurement loop.
+  const contributionHeight = (root) => {
+    const origin = root.getBoundingClientRect().top;
+    let height = root.scrollHeight;
+    for (const node of root.querySelectorAll('*')) {
+      const style = getComputedStyle(node);
+      if (style.position === 'fixed' || !['auto', 'scroll'].includes(style.overflowY)) continue;
+      height = Math.max(height, node.getBoundingClientRect().bottom - origin + Math.max(0, node.scrollHeight - node.clientHeight));
+    }
+    return height;
+  };
+  const reportedHeights = new WeakMap();
+  let contentFrame = false;
+  const measureContributions = () => {
+    if (contentFrame) return;
+    contentFrame = true;
+    requestAnimationFrame(() => {
+      contentFrame = false;
+      for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')) {
+        const height = contributionHeight(root);
+        if (height > 0 && Math.abs((reportedHeights.get(root) ?? -1) - height) > 1) {
+          reportedHeights.set(root, height);
+          call({kind:'dock_content',panel:0,payload:{id:root.getAttribute('data-pm-contribution'),height}});
+        }
+      }
+    });
+  };
+  new MutationObserver(measureContributions).observe(document.body, {subtree:true,childList:true,attributes:true,characterData:true});
+  document.addEventListener('load', measureContributions, true);
+  document.fonts?.ready.then(measureContributions);
+  measureContributions();
+  // End contribution content measurement.
   document.addEventListener('scroll', (event) => {
     if (event.target.closest?.('[data-pm-overscan]')) return;
     const root = event.target.closest?.('[data-pm-contribution]');

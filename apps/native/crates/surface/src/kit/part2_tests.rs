@@ -184,6 +184,20 @@ fn current_design_tokens_resolve_without_a_host_table() {
     assert!(!p.diagnostics.iter().any(|d| d.code == "missingDesignToken"));
 }
 #[test]
+fn a_zero_least_size_is_structural_and_other_literals_are_not() {
+    let codes = |style: Value| {
+        let mut s = surface(Component::FormGroup, json!({}));
+        patch(&mut s, json!({ "style": style }));
+        validate_panel(&s, &tokens(), &Layout::new())
+            .into_iter()
+            .filter(|d| d.code == "nonTokenValue")
+            .count()
+    };
+    assert_eq!(codes(json!({"minWidth": 0, "minHeight": 0})), 0);
+    assert_eq!(codes(json!({"minWidth": 12})), 1);
+    assert_eq!(codes(json!({"maxWidth": 0})), 1);
+}
+#[test]
 fn missing_tokens_are_explicit_and_never_replaced_with_literals() {
     let t = tokens();
     let p = Panel::prepare_with_token_table(

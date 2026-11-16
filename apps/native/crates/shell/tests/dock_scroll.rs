@@ -316,3 +316,113 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
             .unwrap();
     });
 }
+
+#[test]
+fn normal_height_content_floors_capture_before_and_after() {
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = context();
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let header = tokens.metrics.header;
+        let window = cx
+            .open_window(size(px(1248.), px(705.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut editor = Editor::new(tokens, None, cx);
+                    editor.layout = Layout::preset("design");
+                    let right = editor
+                        .layout
+                        .docks
+                        .iter_mut()
+                        .find(|d| d.id == "right")
+                        .unwrap();
+                    right.groups = ["inspector", "easing", "fxbrowser"]
+                        .into_iter()
+                        .map(|id| Group {
+                            tabs: vec![id.into()],
+                            active: 0,
+                            size: None,
+                            flex_basis: None,
+                            collapsed: false,
+                        })
+                        .collect();
+                    editor
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let dir = std::path::PathBuf::from(
+            std::env::var("PM_DOCK_CAPTURE_DIR").unwrap_or_else(|_| "/tmp/pm-dock-scroll".into()),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut records = vec![];
+        // The before case recreates .15's 200-point-only sizing, where panel
+        // content demand was not connected to the column. The layout and its
+        // saved sizes stay identical in both captures.
+        for (name, natural) in [
+            ("before", [200., 200., 200.]),
+            ("after", [600., 360., 2000.]),
+        ] {
+            window
+                .update(&mut cx, |editor, w, cx| {
+                    for (id, height) in ["inspector", "easing", "fxbrowser"]
+                        .into_iter()
+                        .zip(natural)
+                    {
+                        editor.command(
+                            Command {
+                                name: format!("dockContent:{id}"),
+                                args: vec![serde_json::json!(height - header)],
+                                token: None,
+                            },
+                            w,
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into())
+                .unwrap()
+                .save(dir.join(format!("dark-705-{name}.png")))
+                .unwrap();
+            let (layout, heights, moves) = window
+                .update(&mut cx, |editor, _, _| {
+                    let heights: Vec<_> = ["inspector", "easing", "fxbrowser"]
+                        .into_iter()
+                        .map(|id| (id, editor.panel_rect(id).unwrap().h))
+                        .collect();
+                    (
+                        editor.layout.clone(),
+                        heights,
+                        editor.scroll_dock("right", 10000.),
+                    )
+                })
+                .unwrap();
+            assert!(
+                layout
+                    .docks
+                    .iter()
+                    .find(|d| d.id == "right")
+                    .unwrap()
+                    .groups
+                    .iter()
+                    .all(|g| g.size.is_none() && g.flex_basis.is_none()),
+                "automatic measurement never changes saved sizing"
+            );
+            assert_eq!(moves, name == "after");
+            assert!(heights.iter().all(|(_, height)| *height >= 200.));
+            records.push(serde_json::json!({"case":name,"window":[1248,705],"natural":natural,"assigned":heights,"column_overflows":moves}));
+        }
+        window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(dir.join("dark-705-after-bottom.png"))
+            .unwrap();
+        std::fs::write(
+            dir.join("normal-height-metrics.json"),
+            serde_json::to_vec_pretty(&records).unwrap(),
+        )
+        .unwrap();
+    });
+}

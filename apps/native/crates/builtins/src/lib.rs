@@ -2,6 +2,7 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+mod presets;
 pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
@@ -305,6 +306,8 @@ struct Broker {
     chrome: Mutex<Option<std::sync::mpsc::Sender<chrome::ChromeEdit>>>,
     /// The app's effect clipboard, given to each panel's inspector model.
     effect_clipboard: Mutex<EffectClipboard>,
+    presets: Mutex<presets::Library>,
+    preset_sheet: Mutex<Option<Value>>,
     /// Set while the window closes: its realms' ends are not removals.
     closing: std::sync::atomic::AtomicBool,
     /// Built-in panels parked while closed (`Builtins::park`).
@@ -1018,6 +1021,17 @@ impl Builtins {
     /// Adding the effect `definition` to `layer` at `time` as the Effects
     /// panel `panel` adds one (its definitions, extensions' included): the
     /// commands of one Undo step.
+    pub fn show_preset_sheet(&self, hint: Value) {
+        *self.broker.preset_sheet.shared() = Some(hint);
+    }
+    pub fn preset_sheet(&self, hint: Value) -> Result<Ticket<Evaluation>> {
+        self.show_preset_sheet(hint);
+        match self.realm_of("fxbrowser") {
+            Ok(realm) => realm.eval("__pmBuiltin.publish()"),
+            Err(Error::Closed) => self.mount_builtin("fxbrowser"),
+            Err(e) => Err(e),
+        }
+    }
     pub fn effect_commands(
         &self,
         panel: &str,
@@ -1031,12 +1045,29 @@ impl Builtins {
         let mut backend = backend.shared();
         backend.sync()?;
         let caller = backend.caller;
-        let request = backend
-            .model
-            .as_mut()
-            .ok_or("Open a project first.")?
-            .add_effect_at(caller, layer, definition, time)
-            .map_err(|e| e.to_string())?;
+        let request = if let Some(id) = definition.strip_prefix("preset:") {
+            let saved = self
+                .broker
+                .presets
+                .shared()
+                .list()
+                .into_iter()
+                .find(|p| p["id"] == id)
+                .ok_or("Preset not found")?;
+            backend
+                .model
+                .as_mut()
+                .ok_or("Open a project first.")?
+                .apply_preset(caller, &data::model(&saved)?, &[layer.into()], time)
+                .map_err(|e| e.to_string())?
+        } else {
+            backend
+                .model
+                .as_mut()
+                .ok_or("Open a project first.")?
+                .add_effect_at(caller, layer, definition, time)
+                .map_err(|e| e.to_string())?
+        };
         match request.call {
             pm_kernel::Call::Transact {
                 body: pm_kernel::WriteBody::Commands(commands),
@@ -1230,6 +1261,8 @@ impl Builtins {
             parked: Default::default(),
             theme_request: Default::default(),
             effect_clipboard: Default::default(),
+            presets: Default::default(),
+            preset_sheet: Default::default(),
             painters: Default::default(),
             chrome: Default::default(),
             closing: Default::default(),
@@ -1730,6 +1763,12 @@ impl Builtins {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.show({section})"))
     }
+    /// Something done in a panel's native chrome (Settings' sidebar and
+    /// search field), for the panel's model.
+    pub fn panel_act(&self, panel: &str, intent: &Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.act({intent})"))
+    }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
     }
@@ -2074,13 +2113,14 @@ impl Broker {
     }
 }
 impl EngineProxy for Broker {
-    /// Request queues are bounded here (256 host, 128 platform), so a
+    /// Request queues and surface staging are bounded here (256 host,
+    /// 128 platform, and the existing surface byte limit), so a
     /// built-in panel awaiting one reply per property row stays within its
     /// task quota. Extensions mounted through this broker stay metered.
     fn metered(&self, generation: &Generation, operation: &str) -> bool {
         let queue = matches!(
             operation,
-            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll" | "surface.chunk"
         );
         !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
     }
@@ -2443,7 +2483,71 @@ impl EngineProxy for Broker {
                 entry.backend.shared().local_fields();
                 Ok(json!({"search":"effects.search", "scope":"effects.scope"}))
             }
-            "effects.registry" => Ok(entry.backend.shared().registry()),
+            "presets.takeSheet" => Ok(self.preset_sheet.shared().take().unwrap_or(Value::Null)),
+            "presets.list" => Ok(json!(self.presets.shared().list())),
+            "presets.action" => self.presets.shared().action(input).map_err(Error::Host),
+            "presets.choices" => {
+                let mut b = entry.backend.shared();
+                b.sync().map_err(Error::Host)?;
+                let m = b.model.as_mut().ok_or(Error::Invalid("No open project"))?;
+                let layer = input["layer"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| m.primary().map(str::to_owned))
+                    .ok_or(Error::Invalid("Select a layer"))?;
+                m.preset_choices(&layer)
+                    .map(|v| data::wire(&v))
+                    .map_err(|e| Error::Host(e.to_string()))
+            }
+            "presets.save" => {
+                let mut b = entry.backend.shared();
+                b.sync().map_err(Error::Host)?;
+                let time = b.native.facts["time"].as_f64().unwrap_or(0.);
+                let m = b.model.as_mut().ok_or(Error::Invalid("No open project"))?;
+                let layer = input["layer"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| m.primary().map(str::to_owned))
+                    .ok_or(Error::Invalid("Select a layer"))?;
+                let strings = |key: &str| {
+                    input[key]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                };
+                let saved = m
+                    .capture_preset_parameters(
+                        &layer,
+                        input["name"].as_str().unwrap_or(""),
+                        &strings("effects"),
+                        &strings("properties"),
+                        input
+                            .get("parameters")
+                            .map(|_| strings("parameters"))
+                            .as_deref(),
+                        input["animated"] == true,
+                        time,
+                    )
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                let saved = data::wire(&saved);
+                self.presets.shared().save(&saved).map_err(Error::Host)?;
+                Ok(saved)
+            }
+            "effects.registry" => {
+                let mut registry = entry.backend.shared().registry();
+                let presets = self.presets.shared().list();
+                entry.backend.shared().presets = presets.clone();
+                for p in presets {
+                    registry["items"].as_array_mut().unwrap().push(json!({"id":format!("preset:{}",p["id"].as_str().unwrap()),"label":p["name"],"group":"My Presets","kind":"preset","installed":true}));
+                }
+                registry["groups"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, json!("My Presets"));
+                Ok(registry)
+            }
             "effects.target" => entry.backend.shared().target().map_err(Error::Host),
             "report" => {
                 self.report(format!("{panel}: {input}"));
@@ -2686,7 +2790,9 @@ impl Builtins {
                 for f in all.values() {
                     for root in &roots {
                         if f.path.starts_with(&all[root].path) {
-                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                            if let Some(state) = folders.get(root).cloned() {
+                                folders.insert(f.id.clone(), state);
+                            }
                         }
                     }
                 }

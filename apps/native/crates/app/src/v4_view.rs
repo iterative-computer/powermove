@@ -102,11 +102,22 @@ impl Outline {
         }
     }
 }
+/// A virtual list's `rangechange` as last sent.
+#[derive(Clone, Copy, PartialEq)]
+struct RangeSent {
+    range: (usize, usize),
+    width: u32,
+    count: usize,
+    published: (usize, usize),
+}
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
 #[path = "v4_grade.rs"]
 mod grade;
+
+#[path = "v4_cull.rs"]
+mod cull;
 
 /// A number field's value after an arrow key: the typed text (else the
 /// field's value) one step up or down, ten with Shift, within its limits.
@@ -137,6 +148,7 @@ struct ScrubDrag {
     id: Id,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
+    motion: pm_surface::kit::NumericMotion,
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
@@ -180,9 +192,12 @@ pub struct SurfaceView {
     pub(crate) prepared: Rc<Prepared>,
     window: AnyWindowHandle,
     appkit: bool,
+    quote_selection: Rc<RefCell<crate::v4_quote::Selection>>,
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// Rows of a long scroller left out of a frame (`v4_cull`).
+    cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
     row_sources: HashMap<Id, (EntityId, Value)>,
     /// Disclosure buttons pressed whose group the script has not yet shown
@@ -218,12 +233,19 @@ pub struct SurfaceView {
     targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
+    wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool)>,
+    wheel_tick: u64,
+    wheel_lifted: bool,
     scrub_ops: VecDeque<ScrubOp>,
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
     /// Each virtual list's width last told to its panel.
-    list_widths: HashMap<Id, f32>,
+    list_widths: HashMap<Id, (f32, f32)>,
+    /// Each virtual list's last `rangechange` (range, width, its geometry):
+    /// a wheel step within the same rows sends nothing, so the panel doesn't
+    /// commit and draw again (PM-311).
+    sent_ranges: HashMap<Id, RangeSent>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -264,10 +286,13 @@ pub struct SurfaceView {
     pub(crate) grows: bool,
     fit: Cell<f32>,
     natural: Rc<Cell<f32>>,
+    column_natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
     pub log: Vec<(Id, String, EventDetail)>,
+    #[cfg(test)]
+    number_edit_request: Option<Id>,
     pub error: Option<String>,
 }
 impl SurfaceView {
@@ -303,8 +328,10 @@ impl SurfaceView {
             window: (*window).window_handle(),
             appkit: HasWindowHandle::window_handle(window).is_ok(),
             natives,
+            quote_selection: Default::default(),
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
             scrolls: BTreeMap::new(),
@@ -325,9 +352,13 @@ impl SurfaceView {
             targets: Default::default(),
             capture: None,
             scrub: None,
+            wheel_scrub: None,
+            wheel_tick: 0,
+            wheel_lifted: false,
             scrub_ops: VecDeque::new(),
             dragging: None,
             list_widths: HashMap::new(),
+            sent_ranges: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -349,10 +380,13 @@ impl SurfaceView {
             grows: false,
             fit: Cell::new(0.),
             natural: Rc::new(Cell::new(0.)),
+            column_natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
             log: vec![],
+            #[cfg(test)]
+            number_edit_request: None,
             error: None,
         };
         this.reconcile(window, cx);
@@ -492,11 +526,30 @@ impl SurfaceView {
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
+            self.wheel_finish(false, cx);
             self.restart();
+        }
+        let quote_owner = self.quote_selection.borrow().owner;
+        if let Some(owner) = quote_owner {
+            let source = |surface: &pm_surface::Surface| {
+                surface
+                    .node(owner)
+                    .and_then(|n| n.props.get("metadata"))
+                    .and_then(|m| m.get("quoteSource"))
+                    .cloned()
+            };
+            if source(&self.publication.surface) != source(&compiled.publication.surface) {
+                // The same row id in another thread is a different source.
+                self.quote_selection.borrow_mut().owner = None;
+            }
         }
         self.table = compiled.table;
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        self.quote_selection
+            .borrow_mut()
+            .blocks
+            .retain(|id, _| self.prepared.node(*id).is_some());
         self.settle_disclosures();
         {
             let _span = crate::diag::span("panel.reconcile");
@@ -522,7 +575,9 @@ impl SurfaceView {
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
+        self.quote_selection = Default::default();
         self.disclosures.clear();
+        self.sent_ranges.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -545,6 +600,7 @@ impl SurfaceView {
         if self.pressed.is_some_and(|id| !live(&id)) {
             self.pressed = None;
         }
+        self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
@@ -600,18 +656,23 @@ impl SurfaceView {
                 .then(|| control_kind(&self.publication.panel, node))
                 .flatten();
             if let Some(kind) = kind {
-                let started = std::time::Instant::now();
-                let existed = self.controls.contains_key(&id);
-                self.mount_control(kind, view, node, lease, window, cx);
-                self.host_rows(id, node, cx);
-                mounts.0 += 1;
-                mounts.1 += started.elapsed();
-                if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
-                    crate::diag::line(
-                        serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
-                        "new": !existed, "options": options_len(node),
-                        "ms": started.elapsed().as_secs_f64() * 1000.}),
-                    );
+                if !self.controls.contains_key(&id) && self.cull_large() && self.in_scroller(id) {
+                    // Made when its row is first built (`v4_cull`).
+                    self.cull.deferred.insert(id, kind);
+                } else {
+                    let started = std::time::Instant::now();
+                    let existed = self.controls.contains_key(&id);
+                    self.mount_control(kind, view, node, lease, window, cx);
+                    self.host_rows(id, node, cx);
+                    mounts.0 += 1;
+                    mounts.1 += started.elapsed();
+                    if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
+                        crate::diag::line(
+                            serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
+                            "new": !existed, "options": options_len(node),
+                            "ms": started.elapsed().as_secs_f64() * 1000.}),
+                        );
+                    }
                 }
                 // A native control is a Tab stop too: the panel draws its
                 // focus ring and forwards its keys (Full Keyboard Access).
@@ -651,7 +712,7 @@ impl SurfaceView {
         // Glyph actions deliver focus to their row as well as pointer hover.
         // Text fields and AppKit form controls keep their existing lifecycle.
         for (&id, handle) in &self.focus {
-            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) { continue; }
+            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) && !surface.node(id).is_some_and(|node| node.props.get("id").and_then(Value::as_str) == Some("timeline:tracks")) { continue; }
             let mut at = Some(id);
             let mut interested = false;
             while let Some(target) = at {
@@ -791,6 +852,21 @@ impl SurfaceView {
                 crate::v4_native::announce(&ns_window, &message);
             }
         }
+    }
+    /// A control whose row is built for the first time (`v4_cull`).
+    fn mount_deferred(
+        &mut self,
+        id: Id,
+        kind: crate::v4_control::Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (prepared, surface) = (self.prepared.clone(), self.publication.surface.clone());
+        let (Some(view), Some(node)) = (prepared.node(id), surface.node(id)) else {
+            return;
+        };
+        self.mount_control(kind, view, node, view.binding.clone(), window, cx);
+        self.host_rows(id, node, cx);
     }
     fn mount_control(
         &mut self,
@@ -1193,11 +1269,15 @@ impl SurfaceView {
         // A field the panel opens on demand (a layer's rename, a typed time)
         // takes the keyboard as it appears, its text selected: typing
         // replaces it, and no shortcut fires on the way.
-        if view.cancel_change {
+        let focus_on_mount = node
+            .props
+            .get("metadata")
+            .is_some_and(|m| m.get("focusOnMount") == Some(&Value::Bool(true)));
+        if view.cancel_change || focus_on_mount {
             field.update(cx, |f, cx| {
                 // Escape closes it unchanged (an AppKit field commits on
                 // Escape unless told otherwise).
-                f.set_escape_cancels(true);
+                f.set_escape_cancels(view.cancel_change);
                 f.begin_editing_selecting_all(cx);
             });
         }
@@ -1348,7 +1428,7 @@ impl SurfaceView {
     }
     /// Development builds: the panel's longest scroller put `points` down
     /// its content, for captures of what lies below the fold.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     pub fn review_scroll_to(&mut self, points: f32, cx: &mut Context<Self>) {
         if let Some(scroll) = self
             .scrolls
@@ -1377,6 +1457,34 @@ impl SurfaceView {
     #[cfg(test)]
     pub fn scrubbing(&self) -> bool {
         self.scrub.is_some()
+    }
+    #[cfg(test)]
+    pub fn wheel_reading(&self) -> Option<f64> {
+        self.scrub_shown.map(|(_, value)| value)
+    }
+    #[cfg(test)]
+    pub fn number_edit_requested(&self, semantic: &str) -> bool {
+        self.number_edit_request == Some(self.prepared.semantics[semantic])
+    }
+    #[cfg(test)]
+    pub fn numeric_facts(&self, semantic: &str) -> crate::v4_compile::NumberFacts {
+        self.prepared
+            .node(self.prepared.semantics[semantic])
+            .unwrap()
+            .number
+            .unwrap()
+    }
+    #[cfg(test)]
+    pub fn number_containing(&self, part: &str) -> Option<String> {
+        self.prepared
+            .nodes
+            .values()
+            .find(|n| {
+                n.number.is_some()
+                    && n.binding.is_some()
+                    && n.semantic.as_deref().is_some_and(|s| s.contains(part))
+            })
+            .and_then(|n| n.semantic.as_ref().map(|s| s.to_string()))
     }
     #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {
@@ -1577,13 +1685,37 @@ impl SurfaceView {
             }
         }
     }
-    /// Re-stage AppKit slots whose cached paint did not run this frame.
-    pub fn keep_native_slots(&self, cx: &App) {
-        for control in self.controls.values() {
-            control.read(cx).keep();
+    /// Whether a native view draws anywhere in the panel.
+    pub(crate) fn has_native(&self) -> bool {
+        self.prepared.nodes.values().any(|n| n.native.is_some())
+    }
+    /// Whether a native view (the timeline, the viewer's gizmos) draws
+    /// inside this node: its content is not drawn by the panel's scene.
+    fn holds_native(&self, id: Id) -> bool {
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            let Some(node) = self.prepared.node(at) else {
+                continue;
+            };
+            if node.native.is_some() {
+                return true;
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        false
+    }
+    /// Re-stage AppKit slots whose cached paint did not run this frame (a
+    /// slot inside a scroll layer follows the layer's offset).
+    pub fn keep_native_slots(&self, window: &Window, cx: &App) {
+        for (id, control) in &self.controls {
+            // A control whose row is left out stays where it is: hidden.
+            if self.left_out(*id) {
+                continue;
+            }
+            control.read(cx).keep(window);
         }
         for field in self.fields.values() {
-            field.read(cx).keep();
+            field.read(cx).keep(window);
         }
     }
     fn run(
@@ -1873,7 +2005,127 @@ impl SurfaceView {
         );
         self.pointer(id, "pointerdown", detail, cx);
     }
-    fn scrub_press(&mut self, id: Id, event: &MouseDownEvent, window: &mut Window) {
+    fn wheel_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if let Some((_, _, bound)) = self.wheel_scrub.take() {
+            if bound {
+                self.scrub_ops.push_back(ScrubOp::Finish(commit));
+                self.scrub_pump(cx);
+            }
+        }
+    }
+    fn wheel_number(
+        &mut self,
+        id: Id,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_surface::kit::{HORIZONTAL_SCRUB_REST, HorizontalScrub};
+        if event.touch_phase == TouchPhase::Started {
+            self.wheel_lifted = false;
+        }
+        if matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.wheel_lifted = true;
+            if self.wheel_scrub.is_some() {
+                window.prevent_default();
+                cx.stop_propagation();
+                if event.touch_phase == TouchPhase::Cancelled {
+                    self.wheel_finish(false, cx);
+                }
+            }
+            return;
+        }
+        let delta = match event.delta {
+            ScrollDelta::Pixels(p) => (-f32::from(p.x) as f64, -f32::from(p.y) as f64),
+            ScrollDelta::Lines(p) => (-p.x as f64 * 16., -p.y as f64 * 16.),
+        };
+        if self.wheel_lifted && matches!(event.delta, ScrollDelta::Pixels(_)) {
+            if delta.0.abs() > delta.1.abs() || self.wheel_scrub.is_some() {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.scrub.is_some() {
+            return;
+        }
+        let Some(node) = self.prepared.node(id) else {
+            return;
+        };
+        let Some(n) = node.number else {
+            return;
+        };
+        if node.disabled
+            || self
+                .fields
+                .get(&id)
+                .is_some_and(|f| f.read(cx).is_editing())
+        {
+            return;
+        }
+        let binding = node.binding.clone().filter(|_| !node.local_change);
+        let active = self
+            .wheel_scrub
+            .as_ref()
+            .filter(|(target, _, _)| *target == id);
+        if !active.map_or_else(
+            || HorizontalScrub::new(n.value).accepts(delta.0, delta.1, event.modifiers.control),
+            |(_, w, _)| w.accepts(delta.0, delta.1, event.modifiers.control),
+        ) {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        if active.is_none() {
+            self.wheel_finish(true, cx);
+            self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
+            if binding.is_some() {
+                self.scrub_ops.push_back(ScrubOp::Begin);
+            }
+        }
+        if delta.0 == 0. {
+            return;
+        }
+        let value = self.wheel_scrub.as_mut().unwrap().1.sample(
+            delta.0,
+            n.step,
+            n.speed,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            (n.min, n.max),
+        );
+        self.scrub_shown = Some((id, value));
+        if let Some(binding) = binding {
+            self.scrub_ops
+                .push_back(ScrubOp::Value(binding, json!(value)));
+            self.scrub_pump(cx);
+        } else {
+            self.change(id, json!(value), cx);
+        }
+        if let Some(field) = self.fields.get(&id) {
+            field.update(cx, |f, cx| f.set_value(&n.text(value), cx));
+        }
+        self.wheel_tick += 1;
+        let tick = self.wheel_tick;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HORIZONTAL_SCRUB_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.wheel_tick == tick {
+                    v.wheel_finish(true, cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn scrub_press(
+        &mut self,
+        id: Id,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.wheel_finish(true, cx);
         let Some(node) = self.prepared.node(id) else {
             return;
         };
@@ -1886,6 +2138,13 @@ impl SurfaceView {
             id,
             start: event.position,
             number,
+            motion: pm_surface::kit::NumericMotion::new(
+                (
+                    f32::from(event.position.x) as f64,
+                    f32::from(event.position.y) as f64,
+                ),
+                number.value,
+            ),
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
@@ -1899,29 +2158,28 @@ impl SurfaceView {
         let Some(drag) = &mut self.scrub else {
             return;
         };
-        let delta = event.position - drag.start;
-        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        let n = drag.number;
+        let Some(value) = drag.motion.sample(
+            (
+                f32::from(event.position.x) as f64,
+                f32::from(event.position.y) as f64,
+            ),
+            relative_scrub_motion(),
+            threshold as f64,
+            n.step,
+            n.speed,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            (n.min, n.max),
+        ) else {
+            return;
+        };
         if !drag.active {
-            if dx.hypot(dy) < threshold {
-                return;
-            }
             drag.active = true;
             if drag.binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Begin);
             }
         }
-        let n = drag.number;
-        let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
-            start: n.value,
-            delta: (dx as f64, dy as f64),
-            step: n.step,
-            speed: n.speed,
-            shift: event.modifiers.shift,
-            alt: event.modifiers.alt,
-            bounds: (n.min, n.max),
-        }) else {
-            return;
-        };
         let id = drag.id;
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
@@ -1952,12 +2210,22 @@ impl SurfaceView {
             }
         } else if drag.grade.is_some() {
             // A press on a grading control that never moved changes nothing.
-        } else if let Some(field) = self.fields.get(&drag.id) {
-            field.update(cx, |f, cx| f.begin_editing(cx));
+        } else if commit {
+            #[cfg(test)]
+            {
+                self.number_edit_request = Some(drag.id);
+            }
+            if let Some(field) = self.fields.get(&drag.id) {
+                field.update(cx, |f, cx| f.begin_editing(cx));
+            }
         }
     }
     /// Escape during a scrub restores the value through the kernel gesture.
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.wheel_scrub.is_some() {
+            self.wheel_finish(false, cx);
+            return true;
+        }
         if self.scrub.is_none() {
             return false;
         }
@@ -2014,7 +2282,7 @@ impl SurfaceView {
                     },
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() {
+                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() {
                     v.scrub_gesture = None;
                     v.scrub_shown = None;
                 }
@@ -2030,6 +2298,22 @@ impl SurfaceView {
         canvas(
             move |bounds, _, _| origin.set(bounds.origin),
             move |_, _, window, _| {
+                let wheel = weak.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = wheel.update(cx, |v, _| {
+                            if event.touch_phase == TouchPhase::Started {
+                                v.wheel_lifted = false;
+                            }
+                            if matches!(
+                                event.touch_phase,
+                                TouchPhase::Ended | TouchPhase::Cancelled
+                            ) {
+                                v.wheel_lifted = true;
+                            }
+                        });
+                    }
+                });
                 let moved = weak.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
@@ -2121,6 +2405,36 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// The keyboard is on a node of this view that hears keys, itself or
+    /// through what holds it (a Project card a click focused, in a grid that
+    /// listens): its Space is its own (Quick Look), not Play.
+    pub fn focused_takes_keys(&self, window: &Window) -> bool {
+        let Some(mut at) = self
+            .focus
+            .iter()
+            .find_map(|(id, focus)| focus.is_focused(window).then_some(*id))
+        else {
+            return false;
+        };
+        while let Some(node) = self.prepared.node(at) {
+            if node.events.key_down {
+                return true;
+            }
+            let Some(parent) = node.parent else { break };
+            at = parent;
+        }
+        false
+    }
+    /// The button came up in the window while a scrub or a captured press of
+    /// this view still waits for it: its own listener never heard the
+    /// release (the panel was drawn again while held). It ends now.
+    pub fn release_unheard(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let held = self.scrub.is_some() || self.capture.is_some();
+        if held {
+            self.release_pointer(window.mouse_position(), 1, Modifiers::none(), cx);
+        }
+        held
+    }
     /// The pressed pointer comes up: a scrub or a grading drag ends (one
     /// Undo step), a captured node hears `pointerup`.
     fn release_pointer(
@@ -2142,6 +2456,237 @@ impl SurfaceView {
             let detail = self.detail(position, Some(capture.button), 0, click_count, modifiers);
             self.pointer(capture.target, "pointerup", detail, cx);
         }
+    }
+    pub(crate) fn copy_selection(&self, window: &Window, cx: &mut App) -> bool {
+        let selected = self.quote_selection.borrow();
+        let Some(owner) = selected.owner else {
+            return false;
+        };
+        if !crate::v4_quote::cite_context(
+            self.publication.panel == "agent",
+            self.focus.get(&owner).is_some_and(|f| f.is_focused(window)),
+            selected.range(),
+        ) {
+            return false;
+        }
+        let text = selected.text(owner);
+        let Some(quote) = text.get(selected.range()) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(quote.to_owned()));
+        true
+    }
+    pub(crate) fn cite_selection(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let selected = self.quote_selection.borrow();
+        let Some(owner) = selected.owner else {
+            return false;
+        };
+        if !crate::v4_quote::cite_context(
+            self.publication.panel == "agent",
+            self.focus.get(&owner).is_some_and(|f| f.is_focused(window)),
+            selected.range(),
+        ) {
+            return false;
+        }
+        drop(selected);
+        self.publish_quote(owner, cx);
+        self.send(
+            owner,
+            "keydown",
+            EventDetail {
+                key: Some(".".into()),
+                meta_key: Some(true),
+                shift_key: Some(true),
+                ..Default::default()
+            },
+            cx,
+        );
+        true
+    }
+    fn quote_owner(&self, mut id: Id) -> Option<Id> {
+        if self.publication.panel != "agent" {
+            return None;
+        }
+        loop {
+            if self
+                .publication
+                .surface
+                .node(id)?
+                .listeners
+                .contains_key("click")
+            {
+                return None;
+            }
+            if self
+                .publication
+                .surface
+                .node(id)?
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("quoteSource"))
+                .is_some()
+            {
+                return Some(id);
+            }
+            id = self.prepared.node(id)?.parent?;
+        }
+    }
+    fn quote_plain<'a>(&'a self, id: Id, display: &'a str) -> &'a str {
+        let mut at = Some(id);
+        while let Some(id) = at {
+            let metadata = self.publication.surface.node(id).and_then(|n| n.props.get("metadata"));
+            if let Some(plain) = metadata.and_then(|m| m.get("quoteText")).and_then(Value::as_str) {
+                return plain;
+            }
+            if metadata.and_then(|m| m.get("quoteSource")).is_some() {
+                break;
+            }
+            at = self.prepared.node(id).and_then(|n| n.parent);
+        }
+        display
+    }
+    fn quote_blocks(&self, root: Id, out: &mut Vec<(Id, String)>) {
+        if self
+            .publication
+            .surface
+            .node(root)
+            .is_some_and(|n| n.listeners.contains_key("click"))
+        {
+            return;
+        }
+        let Some(n) = self.prepared.node(root) else {
+            return;
+        };
+        if let Some(rich) = &n.rich {
+            out.push((root, self.quote_plain(root, &rich.text).to_owned()));
+        } else if let Some(text) = &n.text {
+            out.push((root, self.quote_plain(root, text).to_owned()));
+        }
+        for child in &n.children {
+            self.quote_blocks(*child, out);
+        }
+    }
+    fn quote_range(&self, id: Id) -> Option<std::ops::Range<usize>> {
+        let selected = self.quote_selection.borrow();
+        let block = selected.blocks.get(&id)?;
+        if selected.owner != Some(block.owner) {
+            return None;
+        }
+        let range = selected.range();
+        let node = self.prepared.node(id)?;
+        let current: &str = node
+            .rich
+            .as_ref()
+            .map(|r| r.text.as_ref())
+            .or_else(|| node.text.as_deref())?;
+        let plain = self.quote_plain(id, current);
+        let indices = crate::v4_quote::Indices::new(plain, current);
+        let mut start = range.start.saturating_sub(block.offset).min(plain.len());
+        let mut end = range.end.saturating_sub(block.offset).min(plain.len());
+        while !plain.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !plain.is_char_boundary(end) {
+            end -= 1;
+        }
+        (start < end).then(|| indices.display(start)..indices.display(end))
+    }
+    fn plain_or_quote_text(&self, id: Id, text: &SharedString) -> AnyElement {
+        if self.quote_owner(id).is_some() {
+            self.quote_text(id, StyledText::new(text.clone()), text.to_string())
+        } else {
+            text.clone().into_any_element()
+        }
+    }
+    fn quote_text(&self, id: Id, mut text: StyledText, plain: String) -> AnyElement {
+        let Some(owner) = self.quote_owner(id) else {
+            return text.into_any_element();
+        };
+        if self.prepared.node(id).is_none_or(|n| n.rich.is_none()) {
+            if let Some(range) = self.quote_range(id) {
+                text = text.with_highlights([(
+                    range,
+                    HighlightStyle {
+                        color: Some(gpui::rgb_to_hsla(rgb(self.table.tokens.colors.selected_text))),
+                        ..Default::default()
+                    },
+                )]);
+            }
+        }
+        let mut blocks = Vec::new();
+        self.quote_blocks(owner, &mut blocks);
+        let mut offset = 0;
+        for (block, content) in blocks {
+            if block == id {
+                break;
+            }
+            offset += content.len() + 1;
+        }
+        crate::v4_quote::Selectable {
+            block: crate::v4_quote::Block {
+                owner,
+                offset,
+                indices: crate::v4_quote::Indices::new(self.quote_plain(id, &plain), &plain),
+                text: self.quote_plain(id, &plain).to_owned(),
+                layout: text.layout().clone(),
+            },
+            text,
+            id,
+            selection: self.quote_selection.clone(),
+            color: gpui::rgb_to_hsla(rgb(self.table.tokens.colors.selected_fill)),
+        }
+        .into_any_element()
+    }
+    fn publish_quote(&mut self, owner: Id, cx: &mut Context<Self>) {
+        let selected = self.quote_selection.borrow();
+        let text = selected.text(owner);
+        let range = selected.range();
+        let mut start = range.start.min(text.len());
+        let mut end = range.end.min(text.len());
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let utf16 = (
+            text[..start].encode_utf16().count(),
+            text[..end].encode_utf16().count(),
+        );
+        let position = selected.end_position().and_then(|caret| {
+            let source = self.anchors.borrow().get(&owner).copied()?;
+            let mut viewport = source;
+            let mut ancestor = owner;
+            while let Some(parent) = self.prepared.node(ancestor).and_then(|node| node.parent) {
+                if let Some(scroll) = self.scrolls.get(&parent) {
+                    viewport = scroll.bounds();
+                    break;
+                }
+                ancestor = parent;
+            }
+            Some(crate::v4_quote::pill_origin(
+                caret,
+                source,
+                viewport,
+                size(
+                    px(self.table.tokens.metrics.hit * 2.),
+                    px(self.table.tokens.metrics.hit),
+                ),
+            ))
+        });
+        drop(selected);
+        self.send(
+            owner,
+            "select",
+            EventDetail {
+                value: Some(json!(text)),
+                selection: Some(utf16),
+                x: position.map(|p| f32::from(p.x) as f64),
+                y: position.map(|p| f32::from(p.y) as f64),
+                ..Default::default()
+            },
+            cx,
+        );
     }
     fn element(
         &self,
@@ -2323,6 +2868,26 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
+            // A wheel step only moves the content, in the Project panel: the
+            // one long list the layer made faster (PM-311). Elsewhere it gained
+            // nothing measurable and held hover and AppKit controls a frame
+            // behind the content (PM-389, PM-390). A native view inside draws
+            // on its own and keeps the full redraw. Nor does one whose content
+            // fits it while it leaves rows out (`v4_cull`: a page in a body
+            // that scrolls around it): a step the layer replays carries its
+            // offset past its range until the next layout, showing rows that
+            // are not built. A scroller that scrolls keeps the layer: what it
+            // records past its edges (one viewport) is what the culling builds.
+            let fits = self
+                .scrolls
+                .get(&id)
+                .is_some_and(|s| s.max_offset().y <= px(0.));
+            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+                && !self.holds_native(id)
+                && !(fits && self.culls_in(id))
+            {
+                element = element.scroll_layer();
+            }
             if follows {
                 // `metadata.scrollToken`: a new value goes back to the end
                 // (the panel's Scroll to Latest).
@@ -2387,19 +2952,24 @@ impl SurfaceView {
             // new width as soon as a frame lays it out (measured after
             // layout: a panel maximized or resized draws nothing more until
             // something else does, so a check while rendering saw the size
-            // before and the grid kept its old columns).
+            // before and the grid kept its old columns). A new height asks
+            // for the rows that show now: a list built while its slot was a
+            // row tall kept a page of one row as the slot grew (PM-387).
             let known = self.list_widths.get(&id).copied();
             let view = cx.entity().downgrade();
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let width = f32::from(bounds.size.width);
-                        if width > 0. && known != Some(width) {
+                        let size = (
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                        );
+                        if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
                                 let _ = view.update(cx, |v, cx| {
-                                    if v.list_widths.get(&id) != Some(&width) {
-                                        v.list_widths.insert(id, width);
+                                    if v.list_widths.get(&id) != Some(&size) {
+                                        v.list_widths.insert(id, size);
                                         v.range_change(id, geometry, cx);
                                     }
                                 });
@@ -2461,9 +3031,134 @@ impl SurfaceView {
             // order, as on the web (a segmented control's other segments).
             let tab = node.tab_index.unwrap_or(0);
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
+            element = element.track_focus(focus).tab_index(tab.max(0));
+        }
+        if self.quote_owner(id) == Some(id) {
+            let reveal = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("revealQuote"))
+                .and_then(Value::as_array);
+            let mut selected = self.quote_selection.borrow_mut();
+            if let Some(range) = reveal {
+                let nonce = range.get(2).and_then(Value::as_u64).unwrap_or(0);
+                if selected.reveal_seen != Some((id, nonce)) {
+                    selected.reveal_seen = Some((id, nonce));
+                    let mut blocks = Vec::new();
+                    self.quote_blocks(id, &mut blocks);
+                    let text = blocks
+                        .into_iter()
+                        .map(|(_, text)| text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let byte = |offset: usize| {
+                        text.char_indices()
+                            .scan(0, |units, (i, c)| {
+                                let current = *units;
+                                *units += c.len_utf16();
+                                Some((i, current))
+                            })
+                            .find(|(_, units)| *units >= offset)
+                            .map_or(text.len(), |(i, _)| i)
+                    };
+                    selected.owner = Some(id);
+                    selected.revealed = Some(id);
+                    selected.anchor =
+                        byte(range.first().and_then(Value::as_u64).unwrap_or(0) as usize);
+                    selected.head =
+                        byte(range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize);
+                    let mut child = id;
+                    while let Some(parent) = self.prepared.node(child).and_then(|n| n.parent) {
+                        if let Some(scroll) = self.scrolls.get(&parent) {
+                            if let Some(index) = self
+                                .prepared
+                                .node(parent)
+                                .and_then(|p| p.children.iter().position(|i| *i == child))
+                            {
+                                scroll.scroll_to_item(index);
+                            }
+                        }
+                        child = parent;
+                    }
+                }
+            } else {
+                if selected.revealed == Some(id) {
+                    selected.owner = None;
+                    selected.revealed = None;
+                }
+                if selected.reveal_seen.is_some_and(|(owner, _)| owner == id) {
+                    selected.reveal_seen = None;
+                }
+            }
+            drop(selected);
             element = element
-                .track_focus(focus)
-                .tab_index(tab.max(0));
+                .cursor_text()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        let at = v.quote_selection.borrow().hit(id, event.position);
+                        if let Some(at) = at {
+                            if let Some(focus) = v.focus.get(&id) {
+                                window.focus(focus, cx);
+                            }
+                            let mut selected = v.quote_selection.borrow_mut();
+                            selected.owner = Some(id);
+                            selected.revealed = None;
+                            selected.anchor = at;
+                            selected.head = at;
+                            selected.dragging = true;
+                            if event.click_count == 2 {
+                                let text = selected.text(id);
+                                let word = crate::v4_quote::word_range(&text, at);
+                                selected.anchor = word.start;
+                                selected.head = word.end;
+                                selected.dragging = false;
+                            }
+                            drop(selected);
+                            v.publish_quote(id, cx);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |v, event: &MouseMoveEvent, _, cx| {
+                    let mut selected = v.quote_selection.borrow_mut();
+                    if selected.dragging && selected.owner == Some(id) {
+                        if let Some(at) = selected.hit(id, event.position) {
+                            selected.head = at;
+                        }
+                        drop(selected);
+                        v.publish_quote(id, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.quote_selection.borrow_mut().dragging = false;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(move |v, _, _, cx| {
+                    if v.quote_selection.borrow().owner == Some(id) {
+                        {
+                            let mut selected = v.quote_selection.borrow_mut();
+                            selected.head = selected.anchor;
+                            selected.dragging = false;
+                        }
+                        v.publish_quote(id, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.quote_selection.borrow_mut().dragging = false;
+                        cx.notify();
+                    }),
+                );
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -2556,10 +3251,14 @@ impl SurfaceView {
             self.natives.outline.rows.get()
         } else { (0, usize::MAX) };
         for child in node.children.iter().take(shown.min(end)).skip(start) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
-                        children.push(text.clone().into_any_element());
+                        children.push(self.plain_or_quote_text(c.id, text));
                     }
                 }
                 _ if node.fixed_items => {
@@ -2581,6 +3280,7 @@ impl SurfaceView {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
         }
+        children.extend(self.cull.record(id));
         if let Some(surface) = &node.native
             && let Some(view) = self.natives.views.borrow().get(surface.as_ref())
         {
@@ -2608,6 +3308,7 @@ impl SurfaceView {
     /// A sheet shown in its own window (Export) is the whole window.
     fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {
         node.component == Some(Component::SheetAnchor)
+            && self.publication.panel == "export"
             && window.viewport_size().width <= px(self.table.tokens.metrics.sheet_width_wide + 1.)
     }
     /// An own-window sheet that names its body: the window follows the body's
@@ -3003,13 +3704,18 @@ impl SurfaceView {
             });
         }
         if node.number.is_some() {
-            element = element.cursor_col_resize().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
-                    v.scrub_press(id, event, window);
-                    cx.stop_propagation();
-                }),
-            );
+            element = element
+                .on_scroll_wheel(
+                    cx.listener(move |v, event, window, cx| v.wheel_number(id, event, window, cx)),
+                )
+                .cursor_col_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        v.scrub_press(id, event, window, cx);
+                        cx.stop_propagation();
+                    }),
+                );
         }
         if let Some(layer) = node.timeline_parent_pick.clone() {
             let outline = self.natives.outline.clone();
@@ -3186,9 +3892,10 @@ impl SurfaceView {
         // covers its neighbours.
         if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
+            let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
-                let (title, tokens) = (title.clone(), tokens.clone());
-                cx.new(|_| Tooltip { title, tokens }).into()
+                let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
+                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
             });
         }
         element
@@ -3227,6 +3934,18 @@ impl SurfaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let copy_quote = event.keystroke.modifiers.platform && event.keystroke.key == "c";
+        let cite_quote = event.keystroke.modifiers.platform
+            && event.keystroke.modifiers.shift
+            && matches!(event.keystroke.key.as_str(), "." | ">");
+        if cite_quote && self.cite_selection(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if copy_quote && self.copy_selection(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let key = match event.keystroke.key.as_str() {
             "up" => "ArrowUp",
             "down" => "ArrowDown",
@@ -3269,7 +3988,7 @@ impl SurfaceView {
         window: &Window,
     ) -> Stateful<Div> {
         let t = &self.table.tokens;
-        if self.prepared.anchors.contains(&node.id) {
+        if self.prepared.anchors.contains(&node.id) || self.quote_owner(node.id) == Some(node.id) {
             let (id, anchors) = (node.id, self.anchors.clone());
             element = element.child(
                 canvas(
@@ -3467,10 +4186,14 @@ impl SurfaceView {
             );
         }
         if let Some(text) = &node.text {
-            element = element.child(text.clone());
+            element = element.child(self.plain_or_quote_text(node.id, text));
         }
         if let Some(rich) = &node.rich {
-            element = element.child(rich_text(rich, t));
+            element = element.child(self.quote_text(
+                node.id,
+                rich_text(rich, t, self.quote_range(node.id)),
+                rich.text.to_string(),
+            ));
         }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
@@ -3529,11 +4252,14 @@ impl SurfaceView {
         }
         if node.number.is_some() {
             wrapper = wrapper
+                .on_scroll_wheel(
+                    cx.listener(move |v, event, window, cx| v.wheel_number(id, event, window, cx)),
+                )
                 .cursor_col_resize()
                 .capture_any_mouse_down(cx.listener(
                     move |v, event: &MouseDownEvent, window, cx| {
                         if event.button == MouseButton::Left {
-                            v.scrub_press(id, event, window);
+                            v.scrub_press(id, event, window, cx);
                             cx.stop_propagation();
                         }
                     },
@@ -3625,16 +4351,30 @@ impl SurfaceView {
         let Some(scroll) = self.scrolls.get(&id) else {
             return;
         };
-        let offset = -f32::from(scroll.offset().y) as f64;
         let bounds = scroll.bounds();
         let height = f32::from(bounds.size.height) as f64;
+        // A wheel step can leave the offset past the end until the next
+        // frame clamps it: read it within the list, or the range is empty
+        // and the list shows no rows.
+        let end = (geometry.count as f64 * geometry.item_size - height).max(0.);
+        let offset = (-f32::from(scroll.offset().y) as f64).clamp(0., end);
         if let Ok(range) = geometry.visible(offset, height) {
+            let width = f32::from(bounds.size.width);
+            let sent = RangeSent {
+                range,
+                width: width.to_bits(),
+                count: geometry.count,
+                published: geometry.range,
+            };
+            if self.sent_ranges.insert(id, sent) == Some(sent) {
+                return;
+            }
             self.send(
                 id,
                 "rangechange",
                 EventDetail {
                     range: Some(range),
-                    width: Some(f32::from(bounds.size.width) as f64),
+                    width: Some(width as f64),
                     ..Default::default()
                 },
                 cx,
@@ -3701,15 +4441,26 @@ impl Render for SurfaceView {
         }
         self.presence = presence;
         self.motion.frame(window);
+        self.plan_cull(window, cx);
         let t = &self.table.tokens;
         let root = div().relative().w_full();
         let root = if self.grows {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
+            let column_natural = self.column_natural.clone();
+            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let origin = self.origin.clone();
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
                     let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    if (natural.replace(height) - height).abs() > 0.5 {
+                    let demand = scrolls.iter().fold(height, |height, scroll| {
+                        height.max(f32::from(
+                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                        ))
+                    });
+                    let changed = (natural.replace(height) - height).abs() > 0.5;
+                    let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if changed || column_changed {
                         window.refresh();
                     }
                 })
@@ -3723,14 +4474,45 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.cull.outer_mark())
     }
 }
-struct Tooltip {
+pub(crate) struct Tooltip {
     title: SharedString,
     tokens: pm_design::Tokens,
+    /// The node it describes: its title is read again at each draw, so a
+    /// press that changes it (a disclosure's Expand to Collapse, applied when
+    /// the panel republishes) never leaves the old words up while hovered.
+    source: Option<(WeakEntity<SurfaceView>, Id)>,
+}
+impl Tooltip {
+    /// A tooltip for node `id` of `view`, showing `title` until it changes.
+    pub(crate) fn following(
+        view: WeakEntity<SurfaceView>,
+        id: Id,
+        title: SharedString,
+        tokens: pm_design::Tokens,
+    ) -> Self {
+        Self {
+            title,
+            tokens,
+            source: Some((view, id)),
+        }
+    }
+    /// Its node's title now (the last one, when the node has none left).
+    pub(crate) fn current_title(&mut self, cx: &App) -> SharedString {
+        if let Some(title) = self.source.as_ref().and_then(|(view, id)| {
+            view.upgrade()
+                .and_then(|view| view.read(cx).tooltip_title(*id))
+        }) {
+            self.title = title;
+        }
+        self.title.clone()
+    }
 }
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.current_title(cx);
         let t = &self.tokens;
         // Line 1 names the thing (with its shortcut); an optional line 2,
         // after a newline, says what it does (HIG help tags), in secondary.
@@ -3781,26 +4563,53 @@ pub(crate) fn status_announcements(
 }
 /// A paragraph of styled runs: bold and italic as the system font draws
 /// them, code on a quiet fill, links in the accent's text ink.
-fn rich_text(rich: &crate::v4_compile::Rich, t: &pm_design::Tokens) -> StyledText {
+fn rich_text(
+    rich: &crate::v4_compile::Rich,
+    t: &pm_design::Tokens,
+    selected: Option<std::ops::Range<usize>>,
+) -> StyledText {
     use crate::v4_compile::Rich;
     let ink = |c: u32| gpui::rgb_to_hsla(rgb(c));
-    let highlights = rich.runs.iter().map(|(range, bits)| {
-        let mut style = HighlightStyle::default();
-        if bits & Rich::BOLD != 0 {
-            style.font_weight = Some(FontWeight(t.typography.display_weight));
-        }
-        if bits & Rich::ITALIC != 0 {
-            style.font_style = Some(FontStyle::Italic);
-        }
-        if bits & Rich::CODE != 0 {
-            style.background_color = Some(ink(t.colors.fill));
-            style.color = Some(ink(t.colors.text));
-        }
-        if bits & Rich::LINK != 0 {
-            style.color = Some(ink(t.colors.accent_text));
-        }
-        (range.clone(), style)
-    });
+    let highlights = rich
+        .runs
+        .iter()
+        .map(|(range, bits)| {
+            let mut style = HighlightStyle::default();
+            if bits & Rich::BOLD != 0 {
+                style.font_weight = Some(FontWeight(t.typography.display_weight));
+            }
+            if bits & Rich::ITALIC != 0 {
+                style.font_style = Some(FontStyle::Italic);
+            }
+            if bits & Rich::CODE != 0 {
+                style.background_color = Some(ink(t.colors.fill));
+                style.color = Some(ink(t.colors.text));
+            }
+            if bits & Rich::LINK != 0 {
+                style.color = Some(ink(t.colors.accent_text));
+            }
+            let mut boundaries = vec![range.start, range.end];
+            if let Some(selected) = &selected {
+                for i in [selected.start, selected.end] {
+                    if i > range.start && i < range.end {
+                        boundaries.push(i);
+                    }
+                }
+            }
+            boundaries.sort_unstable();
+            boundaries
+                .windows(2)
+                .map(|pair| {
+                    let mut style = style.clone();
+                    if selected.as_ref().is_some_and(|s| s.contains(&pair[0])) {
+                        style.background_color = Some(ink(t.colors.selected_fill));
+                        style.color = Some(ink(t.colors.selected_text));
+                    }
+                    (pair[0]..pair[1], style)
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten();
     StyledText::new(rich.text.clone()).with_highlights(highlights.collect::<Vec<_>>())
 }
 /// A segmented control's segments as the native control takes them (a label,
@@ -4113,12 +4922,37 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
-    /// The style of a scrolling body's content (`panel_body`): the panel at
-    /// least `body` tall, and as tall as it last measured.
+    /// Natural content demand includes inner lists before they are clipped.
+    pub(crate) fn natural_body_height(&self) -> f32 {
+        self.natural.get().max(self.column_natural.get())
+    }
+
+    /// The panel fills its body and grows with longer content.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
-        self.fit.set(body);
         gpui::StyleRefinement::default()
             .w_full()
-            .h(px(body.max(self.natural.get())))
+            .h(px(self.body_height(body)))
     }
+    /// The panel's height in a body that scrolls: its content, at least
+    /// the body's slot.
+    pub(crate) fn body_height(&self, body: f32) -> f32 {
+        self.fit.set(body);
+        body.max(self.natural.get())
+    }
+}
+
+/// Read the same hardware-relative travel Electron obtains as movementX/Y.
+/// GPUI carries absolute positions only. Query AppKit while dispatching its
+/// current drag event, before any publication can replace the field tree.
+fn relative_scrub_motion() -> Option<(f64, f64)> {
+    #[cfg(not(test))]
+    {
+        use objc2_app_kit::{NSApplication, NSEventType};
+        let event = objc2::MainThreadMarker::new()
+            .and_then(|main| NSApplication::sharedApplication(main).currentEvent())?;
+        if event.r#type() == NSEventType::LeftMouseDragged {
+            return Some((event.deltaX(), event.deltaY()));
+        }
+    }
+    None
 }

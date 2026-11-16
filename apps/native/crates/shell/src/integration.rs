@@ -9,6 +9,10 @@ use std::{cell::RefCell, rc::Rc};
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
     fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
+    /// Last measured natural body plus header height, before column clipping.
+    fn natural_panel_height(&self, _id: &str, _cx: &App) -> Option<f32> {
+        None
+    }
     fn panel(
         &self,
         id: &str,

@@ -1387,11 +1387,13 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
-            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() {
-                self.store.kernel_selection(before, after)
-            } else {
-                None
-            }),
+            HistoryCall::Selection { before, after } => Reply::Entry(
+                if caller.origin == Origin::Interface && self.entry.is_none() {
+                    self.store.kernel_selection(before, after)
+                } else {
+                    None
+                },
+            ),
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,

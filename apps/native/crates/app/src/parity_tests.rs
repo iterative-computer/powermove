@@ -438,6 +438,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "a", 1.)),
         [
             "Rename…",
+            "Save Animation Preset…",
             "Duplicate",
             "Group",
             "Simplify Keyframes",
@@ -484,11 +485,11 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
 
     // Two layers: the lower can be the upper's matte.
     desk.select(&["a", "b"]);
-    assert_eq!(labels(&menu(&desk, "a", 1.))[4], "Use Bottom Layer as Mask");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[5], "Use Bottom Layer as Mask");
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
     // One layer: Rename… leads (v1).
-    assert_eq!(labels(&menu(&desk, "t", 1.))[5], "Split Text into Layers");
+    assert_eq!(labels(&menu(&desk, "t", 1.))[6], "Split Text into Layers");
     assert_eq!(
         child_labels(&menu(&desk, "t", 1.), "Split Text into Layers"),
         ["By Word", "By Character", "By Line"]
@@ -512,6 +513,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "locked", 1.)),
         [
             "(Rename…)",
+            "(Save Animation Preset…)",
             "(Duplicate)",
             "(Group)",
             "(Simplify Keyframes)",
@@ -590,7 +592,7 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     step("a", &["Hide"], "Hide Layers", &|| {
         assert_eq!(flag("a", "on"), Some(false))
     });
-    assert_eq!(labels(&menu(&desk, "a", 1.))[9], "Show");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[10], "Show");
     step("a", &["Show"], "Show Layers", &|| {
         assert_eq!(flag("a", "on"), Some(true))
     });

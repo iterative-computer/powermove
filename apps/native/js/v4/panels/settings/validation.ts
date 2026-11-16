@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll } from "bun:test";
+import { afterAll, beforeAll } from "bun:test";
 import type { Commit } from "../../src/protocol";
 let executable: string | undefined;
 let temporary: string | undefined;
@@ -73,6 +73,8 @@ function nativeAX() {
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   return executable;
 }
+// Build tooling belongs to suite setup, outside the five-second AX assertions.
+beforeAll(() => { nativeAX(); }, 120_000);
 export interface AXNode {
   id: number;
   role: string;

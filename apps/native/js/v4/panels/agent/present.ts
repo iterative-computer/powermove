@@ -215,6 +215,7 @@ export type Status = "running" | "partial" | "error" | "done";
 export interface ToolDetail {
   /** The row the model knows (for Stop on a subagent). */
   rowId: string;
+  sourceId: string;
   kind: "tool" | "thought";
   id: string;
   label: string;
@@ -319,6 +320,7 @@ function groupedToolRow(work: Step[]): ToolsRow {
       if (v.kind === "thought") {
         const live = v.live === true;
         return {
+          sourceId: s.row.id,
           rowId: s.row.commandId,
           kind: "thought",
           id: str(v.id),
@@ -334,6 +336,7 @@ function groupedToolRow(work: Step[]): ToolsRow {
       const thread = obj(v.thread);
       const task = v.task ? obj(v.task) : undefined;
       return {
+        sourceId: s.row.id,
         rowId: s.row.commandId,
         kind: "tool",
         id: str(v.id),

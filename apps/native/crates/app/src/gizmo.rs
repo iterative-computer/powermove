@@ -204,6 +204,8 @@ pub trait Host: 'static {
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
+    /// A canvas press leaves field/control keyboard focus behind.
+    fn focus_canvas(&self, _: &mut Window, _: &mut App) {}
     /// Publish engine-drawn lines, normalized to the composition frame.
     /// The outline and handles, normalized to the composition, and where the
     /// composition sits in the viewer view (`None`: nothing to place them by).
@@ -1229,6 +1231,7 @@ impl GizmoSurface {
             self.finish_text(false, cx);
             tool = Tool::Select;
         }
+        self.host.focus_canvas(window, cx);
         // In a 3D composition the window's Hand and Zoom tools move the
         // editor view (orbit, ⇧ pan; dolly), as they navigate a 2D one.
         let view_tool = (self.studio.active() && matches!(tool, Tool::Hand | Tool::Zoom))
@@ -1570,6 +1573,8 @@ impl GizmoSurface {
             };
             let by = point(px(by.x as f32), px(by.y as f32));
             self.host.navigate(Navigate::Pan(by), cx);
+            // The outline is drawn over the picture: it moves with the view.
+            self.draw(cx);
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -1593,6 +1598,9 @@ impl GizmoSurface {
                 self.space_panned |= self.space_hand;
             }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
+            // The outline is drawn over the picture: it moves with the view
+            // while held, not on release.
+            self.draw(cx);
             return;
         }
         if self.sketch.is_some() || self.text_sketch.is_some() {
@@ -1799,6 +1807,20 @@ impl GizmoSurface {
         } else if let Some(press) = drag.click.filter(|_| commit) {
             self.pick(press, cx);
         }
+    }
+    /// The button came up in the window while a pointer gesture of this
+    /// surface still waits for it: its own listener never heard the release
+    /// (the viewer was drawn again or covered while held). It ends now, as a
+    /// release does, so no edit stays open.
+    pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let held = self.drag.is_some()
+            || self.pen_drag.is_some()
+            || self.panning.is_some()
+            || self.rulers.dragging.is_some();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {

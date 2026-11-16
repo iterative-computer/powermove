@@ -202,6 +202,20 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
             .unwrap();
         *tool = replacement.clone();
     }
+    // Composition targeting is an additive, independently pinned protocol
+    // contract; the frozen v1 transcript and the full wire comparison stay.
+    let source = include_bytes!("../../mcp/fixtures/composition-target-native-catalog.json");
+    assert_eq!(replay::sha256(source), "37292c4c7882d2b0c495724a70e08fa6c7f3a68e3e6b3f8d413fed5f899a1948");
+    let source: Value = serde_json::from_slice(source).unwrap();
+    for name in source["tools"].as_array().unwrap() {
+        let tool = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| &tool["name"] == name)
+            .expect("existing composition-relative tool");
+        tool["inputSchema"]["properties"]["compositionId"] = source["compositionId"].clone();
+    }
     let source = include_bytes!("../../mcp/fixtures/native-tools.json");
     assert_eq!(
         replay::sha256(source),
