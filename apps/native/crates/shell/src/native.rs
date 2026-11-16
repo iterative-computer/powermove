@@ -2010,12 +2010,9 @@ fn select_window_tab(window: &NSWindow) {
         });
         return;
     }
-    unsafe {
-        let group: *mut AnyObject = msg_send![window, tabGroup];
-        if !group.is_null() {
-            let _: () = msg_send![group, setSelectedWindow: window];
-        }
-    }
+    // Through the group's selection that tells the window it is shown, so its
+    // strip highlights the tab its title names (PM-427).
+    show_in_tab_group(window);
     gpui_macos::child_window::present(window, true);
 }
 /// Whether another tab's different title starts and ends as `title` does, so
