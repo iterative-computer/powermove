@@ -284,6 +284,14 @@ impl Inspector {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize),
             options,
+            advanced: p.presentation.get("advanced").and_then(|v| v.as_bool()),
         })
+    }
+    /// The saved definition's layout hints (`ui`: gradient bars, points).
+    pub(crate) fn saved_parameter_ui(&self, effect: &Value) -> Option<serde_json::Value> {
+        self.raw_saved_effect_definition(effect)?
+            .metadata
+            .get("ui")
+            .cloned()
     }
 }
