@@ -986,7 +986,12 @@ fn every_catalog_tool_has_a_body_or_a_documented_refusal() {
     for tool in pm_mcp::catalog::names() {
         if matches!(
             tool.as_str(),
-            "start_session" | "finish_session" | "export_video" | "render_frames"
+            "start_session"
+                | "finish_session"
+                | "export_video"
+                | "render_frames"
+                | "panel_begin"
+                | "panel_build"
         ) {
             continue;
         }
