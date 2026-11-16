@@ -2596,3 +2596,46 @@ fn ruler_menu_groups_marker_work_area_and_the_switch() {
     );
     assert_eq!(menu[1].id, MenuItem::SEPARATOR);
 }
+/// PM-462: v1.2.0 stores a shape path's vertex keys without ids. The
+/// kernel names them on read; the timeline shows them, a click selects one,
+/// a nudge moves it, and it keeps its id.
+#[test]
+fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
+    let key = |t: f64, v: f64| {
+        format!(r#"{{"t":{t},"v":{v},"inInterp":"linear","outInterp":"linear","inEase":{{"speed":0,"influence":16.7}},"outEase":{{"speed":0,"influence":16.7}}}}"#)
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"Paths","w":200,"h":100,"fps":30,"dur":10,"comps":{{}},"assets":{{}},"layers":[
+        {{"id":"s","name":"Outline","type":"shape","from":0,"dur":5,"on":true,"p":{{}},"d":{{"shape":"path","paths":[{{"id":"outline","p":{{}},
+          "vertices":[{{"id":"v0","p":{{"x":{{"v":0,"kf":[{},{}],"expr":null}},"y":{{"v":0,"kf":[{}],"expr":null}}}}}}]}}]}}}}]}}"##,
+        key(0., 0.),
+        key(1., 10.),
+        key(0., 3.)
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    let channel = "g.outline.v.v0.x";
+    let ids: Vec<String> = c.model.track_channels("s", channel)[0]
+        .keys
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    let named = |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
+    assert_eq!(ids, [named(0), named(1)]);
+    assert_eq!(c.model.track_channels("s", "g.outline.v.v0.y")[0].keys.len(), 1);
+    let calls = c
+        .model
+        .select_keys("s", channel, &[named(1)], false, false)
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+    command(&mut c, "nudgeKeyframes", 0.);
+    c.sync().unwrap();
+    let keys = &c.model.track_channels("s", channel)[0].keys;
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[1].id, named(1));
+    assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+}

@@ -1422,6 +1422,11 @@ impl Controller {
         }
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The Export sheet stands over a project in front: never over Home,
+        // whatever asked for it (PM-472).
+        if id == "export" && (self.session.is_none() || self.home_visible) {
+            return;
+        }
         self.start_builtins(cx);
         if id == "settings" {
             // Settings › Media shows the protected folders as they are now,
@@ -2503,6 +2508,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
             E::Seek(time) => v.seek(time),
+            // The empty composition's buttons: the app's own commands.
+            E::Run(name) => v.host.borrow().send_command(&name, vec![]),
+            // Import… from the timeline: File › Import…, at the playhead.
+            E::Import { .. } => v.host.borrow().send_command("import", vec![]),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
@@ -3147,8 +3156,17 @@ impl Render for SurfaceWindow {
                         }
                         let panel = this.panel.clone();
                         let view = this.owner.read(cx).builtins.views.get(&panel).cloned();
-                        if let Some(view) = view {
-                            view.update(cx, |v, cx| v.root_key_down(e, window, cx));
+                        let heard = view
+                            .is_some_and(|view| view.update(cx, |v, cx| v.root_key_down(e, window, cx)));
+                        // Escape closes every sheet: one whose panel has no
+                        // keys of its own (nothing in it yet) is closed here
+                        // (PM-472).
+                        if !heard && PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_export_sheet(cx));
+                            });
                         }
                     },
                 ))

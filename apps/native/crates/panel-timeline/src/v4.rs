@@ -81,6 +81,9 @@ pub fn parse_row(id: &str) -> Result<RowId, Error> {
         _ => Err(Error::InvalidIntent("row id")),
     }
 }
+/// The app commands the timeline's empty state offers (v1's buttons).
+pub const RUN_COMMANDS: [&str; 5] = ["newText", "newShape", "newSolid", "newNull", "import"];
+
 fn string<'a>(v: &'a Value, key: &'static str) -> Result<&'a str, Error> {
     v.get(key)
         .and_then(Value::as_str)
@@ -538,12 +541,30 @@ pub async fn dispatch(
             effects: vec![client.model.import_drop(context.time, None, false)?],
             ..Plan::default()
         },
+        // The empty composition's buttons run the app's own commands, as
+        // v1's did; only these.
+        "run" => {
+            let command = string(intent, "command")?;
+            if !RUN_COMMANDS.contains(&command) {
+                return Err(Error::InvalidIntent("command"));
+            }
+            Plan {
+                effects: vec![HostEffect::Run(command.into())],
+                ..Plan::default()
+            }
+        }
         "tab" => return Err(Error::MissingHost("composition tab closing")),
         // Pointer gestures on tracks run in the native surface, never through V8.
         _ => return Err(Error::InvalidIntent("action")),
     };
     let effects = client.dispatch(plan).await?;
-    if persist && let Err(error) = client.publish_view().await {
+    // Whatever changed the view (a key toggling the mode too) publishes it.
+    let published = if persist {
+        client.publish_view().await
+    } else {
+        client.publish_view_if_changed().await
+    };
+    if let Err(error) = published {
         if let Some(published) = client.kernel.published(&client.project) {
             client.model.restore_ui(&published.ui_state);
         }
