@@ -5,8 +5,8 @@ use gpui::{
 };
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
+    Command,
     layout::{Group, Layout},
-    native::Command,
     view::Editor,
 };
 use std::sync::Arc;
@@ -38,7 +38,6 @@ fn tall(editor: &mut Editor) {
     ]
     .into_iter()
     .map(|tabs| Group {
-        flex_basis: None,
         tabs: tabs.into_iter().map(str::to_owned).collect(),
         active: 0,
         size: Some(400.),
@@ -225,9 +224,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .to_platform_input()
         };
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(-50.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(-50.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
@@ -240,9 +239,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(-50.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(-50.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
@@ -253,9 +252,9 @@ fn nested_wheel_hands_off_at_both_edges() {
             .unwrap();
         cx.capture_screenshot(window.into()).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(wheel(25.), cx);
-            })
-            .unwrap();
+            w.dispatch_event(wheel(25.), cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, _| assert_eq!(v.outer.offset().y, px(-25.)))
@@ -281,7 +280,8 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
             })
             .unwrap();
         cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, _| window.activate()).unwrap();
+        cx.update_window(window.into(), |_, window, _| window.activate())
+            .unwrap();
         cx.run_until_parked();
         // Move through the actual native panel focus handles, one rendered frame each.
         let mut reached_last = false;
@@ -300,11 +300,15 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
                 })
                 .unwrap();
             cx.run_until_parked();
-            reached_last = window.update(&mut cx, |editor, _, _| {
-                let last = editor.panel_rect("fxbrowser").unwrap();
-                last.y + last.h <= 600.
-            }).unwrap();
-            if reached_last { break; }
+            reached_last = window
+                .update(&mut cx, |editor, _, _| {
+                    let last = editor.panel_rect("fxbrowser").unwrap();
+                    last.y + last.h <= 600.
+                })
+                .unwrap();
+            if reached_last {
+                break;
+            }
         }
         assert!(reached_last, "keyboard traversal reveals the final panel");
         window
@@ -339,7 +343,7 @@ fn normal_height_content_floors_capture_before_and_after() {
                             tabs: vec![id.into()],
                             active: 0,
                             size: None,
-                            flex_basis: None,
+
                             collapsed: false,
                         })
                         .collect();
@@ -405,7 +409,7 @@ fn normal_height_content_floors_capture_before_and_after() {
                     .unwrap()
                     .groups
                     .iter()
-                    .all(|g| g.size.is_none() && g.flex_basis.is_none()),
+                    .all(|g| g.size.is_none()),
                 "automatic measurement never changes saved sizing"
             );
             assert_eq!(moves, name == "after");
@@ -424,4 +428,136 @@ fn normal_height_content_floors_capture_before_and_after() {
         )
         .unwrap();
     });
+}
+
+#[test]
+fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
+    for side in ["left", "right"] {
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = context();
+            let window = cx
+                .open_window(size(px(1000.), px(900.)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut editor = Editor::new(
+                            Tokens::new(Scheme::Dark, Accessibility::default()),
+                            None,
+                            cx,
+                        );
+                        tall(&mut editor);
+                        if side == "left" {
+                            let left = editor
+                                .layout
+                                .docks
+                                .iter()
+                                .position(|d| d.id == "left")
+                                .unwrap();
+                            let right = editor
+                                .layout
+                                .docks
+                                .iter()
+                                .position(|d| d.id == "right")
+                                .unwrap();
+                            let groups = editor.layout.docks[left].groups.clone();
+                            editor.layout.docks[left].groups =
+                                editor.layout.docks[right].groups.clone();
+                            editor.layout.docks[right].groups = groups;
+                        }
+                        editor
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let panel = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap()
+                })
+                .unwrap();
+            let gap = Tokens::new(Scheme::Dark, Accessibility::default())
+                .metrics
+                .dock_gap;
+            let edge = if side == "left" {
+                panel.x + panel.w + gap / 2.
+            } else {
+                panel.x - gap / 2.
+            };
+            for (x, y) in [
+                (edge, panel.y + 80.),
+                (panel.x + 30., panel.y + panel.h + gap / 2.),
+            ] {
+                window
+                    .update(&mut cx, |editor, _, cx| {
+                        editor.scroll_dock(side, -10000.);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let before = window
+                    .update(&mut cx, |editor, _, _| {
+                        editor.panel_rect("inspector").unwrap().y
+                    })
+                    .unwrap();
+                let event = ScrollWheelEvent {
+                    position: point(px(x), px(y)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                    modifiers: Default::default(),
+                    touch_phase: Default::default(),
+                }
+                .to_platform_input();
+                cx.update_window(window.into(), |_, w, cx| {
+                    w.dispatch_event(event, cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                let after = window
+                    .update(&mut cx, |editor, _, _| {
+                        editor.panel_rect("inspector").unwrap().y
+                    })
+                    .unwrap();
+                assert!(
+                    after < before,
+                    "wheel over edge or gap moves the whole column at {x},{y}"
+                );
+            }
+            window
+                .update(&mut cx, |editor, _, cx| {
+                    editor.scroll_dock(side, 10000.);
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let before = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap().y
+                })
+                .unwrap();
+            let event = ScrollWheelEvent {
+                position: point(px(edge), px(panel.y + 80.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                modifiers: Default::default(),
+                touch_phase: Default::default(),
+            }
+            .to_platform_input();
+            let result = cx
+                .update_window(window.into(), |_, w, cx| w.dispatch_event(event, cx))
+                .unwrap();
+            cx.run_until_parked();
+            assert!(
+                !result.propagate,
+                "the gutter keeps the wheel at the column limit"
+            );
+            let after = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap().y
+                })
+                .unwrap();
+            assert_eq!(after, before);
+            if let Ok(dir) = std::env::var("PM_DOCK_CAPTURE_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                cx.capture_screenshot(window.into())
+                    .unwrap()
+                    .save(std::path::Path::new(&dir).join(format!("{side}-edge-scroll.png")))
+                    .unwrap();
+            }
+        });
+    }
 }

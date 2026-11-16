@@ -265,6 +265,7 @@ fn size(v: Option<&Value>) -> Option<f32> {
 /// present), and a record without docks shows the viewer alone. Panels no one
 /// provides stay in place; the shell shows a placeholder naming them.
 pub fn layout(record: &Value) -> Layout {
+    let mut flex_bases = std::collections::BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut docks: Vec<Dock> = vec![];
     let specs = record
@@ -274,6 +275,7 @@ pub fn layout(record: &Value) -> Layout {
         .unwrap_or_default();
     for (index, d) in specs.iter().enumerate() {
         let mut groups: Vec<Group> = vec![];
+        let mut group_bases = std::collections::BTreeMap::new();
         for spec in d
             .get("panels")
             .and_then(Value::as_array)
@@ -289,8 +291,13 @@ pub fn layout(record: &Value) -> Layout {
                 _ => continue,
             };
             let flag = |k: &str| fields.is_some_and(|o| o.get(k) == Some(&Value::Bool(true)));
+            if flag("flex") && !flag("tabbed") {
+                if let Some(basis) = size(fields.and_then(|o| o.get("size"))) {
+                    group_bases.insert(groups.len(), basis);
+                }
+            }
             let new_group = || Group {
-                flex_basis: if flag("flex") { size(fields.and_then(|o| o.get("size"))) } else { None },
+
                 tabs: vec![id.to_owned()],
                 active: 0,
                 size: if flag("flex") {
@@ -323,11 +330,18 @@ pub fn layout(record: &Value) -> Layout {
                 _ => groups.push(new_group()),
             }
         }
+        for (index, group) in groups.iter().enumerate() {
+            if let (Some(id), Some(basis)) = (group.tabs.first(), group_bases.get(&index)) {
+                flex_bases.insert(id.clone(), *basis);
+            }
+        }
         groups.retain(|group| !group.tabs.is_empty());
         if groups.is_empty() {
             continue;
         }
-        if !matches!(d.get("id").and_then(Value::as_str), Some("left" | "right")) && groups.iter().all(|g| g.size.is_some()) {
+        if !matches!(d.get("id").and_then(Value::as_str), Some("left" | "right"))
+            && groups.iter().all(|g| g.size.is_some())
+        {
             groups[0].size = None;
         }
         let mut id = d
@@ -348,7 +362,6 @@ pub fn layout(record: &Value) -> Layout {
     }
     if !seen.contains(VIEWER) {
         let viewer = Group {
-            flex_basis: None,
             tabs: vec![VIEWER.into()],
             active: 0,
             size: None,
@@ -380,6 +393,7 @@ pub fn layout(record: &Value) -> Layout {
         }
     }
     Layout {
+        flex_bases,
         version: 1,
         workspace: record_id(record).unwrap_or(FALLBACK).to_owned(),
         docks,
@@ -461,9 +475,11 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                             Some(n) => s.insert("size".into(), rounded(n)),
                             None => {
                                 s.insert("flex".into(), true.into());
-                                if let Some(basis) = g.flex_basis { s.insert("size".into(), rounded(basis)); }
+                                if let Some(basis) = layout.flex_bases.get(&g.tabs[0]).copied() {
+                                    s.insert("size".into(), rounded(basis));
+                                }
                                 None
-                            },
+                            }
                         };
                     } else {
                         s.insert("tabbed".into(), true.into());
@@ -911,11 +927,11 @@ mod workspace_restore_tests {
             let tenths = |n: &mut Option<f32>| {
                 if let Some(v) = n { *v = rounded(*v).as_f64().unwrap() as f32; }
             };
+            for basis in quantized.flex_bases.values_mut() { *basis = rounded(*basis).as_f64().unwrap() as f32; }
             for dock in &mut quantized.docks {
                 tenths(&mut dock.size);
                 for group in &mut dock.groups {
                     tenths(&mut group.size);
-                    tenths(&mut group.flex_basis);
                 }
             }
             assert_eq!(layout(&write(&restored, &record)), quantized);

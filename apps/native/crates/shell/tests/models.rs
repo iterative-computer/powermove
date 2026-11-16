@@ -50,11 +50,7 @@ fn every_preset_and_small_window_is_bounded() {
             for p in g.panels {
                 assert!(p.rect.w >= 0. && p.rect.h >= 0., "{id}");
                 assert!(p.rect.x + p.rect.w <= w + 0.01);
-                if !g.side_docks.contains_key(&p.dock) {
-                    assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
-                } else {
-                    assert!(p.rect.h >= tokens().metrics.header);
-                }
+                assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
             }
         }
     }
@@ -97,7 +93,10 @@ fn keymap_matches_every_w1_cell() {
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
     assert_eq!(bindings.len(), 292);
-    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
+    let camera = bindings
+        .iter()
+        .find(|b| b.id == "native.newCamera")
+        .unwrap();
     assert_eq!(camera.command, "newCamera");
     assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
@@ -505,43 +504,133 @@ fn the_palette_opens_inside_its_key_press_so_no_typing_is_lost() {
     assert!(pm_shell::opens_in_place("palette"));
     assert!(!pm_shell::opens_in_place("save"));
 }
+
+#[test]
+fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
+    let items = menu::view3d();
+    for (group, value) in [
+        ("nav", "left"),
+        ("nav", "right"),
+        ("nav", "bottom"),
+        ("nav", "top"),
+        ("nav", "front"),
+        ("nav", "back"),
+        ("look", "camera"),
+        ("nav", "selected"),
+        ("nav", "persp"),
+        ("nav", "roll-left"),
+        ("nav", "roll-right"),
+    ] {
+        assert!(
+            items.iter().any(|i| i.command == "studio.view"
+                && i.args == vec![serde_json::json!(group), serde_json::json!(value)]),
+            "{group}/{value}"
+        );
+    }
+    let bindings = shipped();
+    let grave = bindings.iter().find(|b| b.chord == "`").unwrap();
+    assert_eq!(grave.command, "maximizePanel");
+    for (chord, value) in [
+        ("numpad5", "persp"),
+        ("5", "persp"),
+        ("shift+numpad4", "roll-left"),
+        ("shift+numpad6", "roll-right"),
+    ] {
+        assert!(bindings.iter().any(|b| b.chord == chord
+            && b.command == "studio.view"
+            && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
+    }
+}
+
 #[test]
 fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
     let t = tokens();
-    let bounds = Rect { x: 0., y: 0., w: 1000., h: 400. };
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1000.,
+        h: 400.,
+    };
     for first in [None, Some(300.)] {
         let mut layout = Layout::preset("design");
-        let di = layout.docks.iter().position(|dock| dock.id == "right").unwrap();
-        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"].into_iter().enumerate().map(|(i, id)| Group {
-            flex_basis: None,
-            tabs: vec![id.into()], active: 0, size: if i == 0 { first } else { Some(300.) }, collapsed: false,
-        }).collect();
-        let before = layout.geometry(bounds, &t);
-        let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
-        let heights = |g: &Geometry| g.panels.iter().filter(|p| p.dock == di).map(|p| p.rect).collect::<Vec<_>>();
+        let di = layout
+            .docks
+            .iter()
+            .position(|dock| dock.id == "right")
+            .unwrap();
+        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| Group {
+                tabs: vec![id.into()],
+                active: 0,
+                size: if i == 0 { first } else { Some(300.) },
+                collapsed: false,
+            })
+            .collect();
+        let before = layout.geometry_with_panel_heights(bounds, &t, &Default::default());
+        let divider = before
+            .dividers
+            .iter()
+            .find(|d| d.dock == di && d.group == Some(0))
+            .unwrap();
+        let heights = |g: &Geometry| {
+            g.panels
+                .iter()
+                .filter(|p| p.dock == di)
+                .map(|p| p.rect)
+                .collect::<Vec<_>>()
+        };
         let original = heights(&before);
-        layout.resize(divider, 40., bounds, &t);
-        let resized = heights(&layout.geometry(bounds, &t));
-        assert_eq!(layout.docks[di].groups[0].size.is_none(), first.is_none(), "resizing preserves fluid sizing");
-        let saved = pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+        layout.resize_with_panel_heights(divider, 40., bounds, &t, &Default::default());
+        let resized = heights(&layout.geometry_with_panel_heights(bounds, &t, &Default::default()));
+        assert_eq!(
+            layout.docks[di].groups[0].size.is_none(),
+            first.is_none(),
+            "resizing preserves fluid sizing"
+        );
+        let saved =
+            pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
         let restored = pm_shell::workspace::layout(&saved);
-        assert_eq!(restored.docks[di].groups.len(), layout.docks[di].groups.len());
-        for (actual, expected) in restored.docks[di].groups.iter().zip(&layout.docks[di].groups) {
+        assert_eq!(
+            restored.docks[di].groups.len(),
+            layout.docks[di].groups.len()
+        );
+        for (actual, expected) in restored.docks[di]
+            .groups
+            .iter()
+            .zip(&layout.docks[di].groups)
+        {
             let mut expected = expected.clone();
-            if let Some(basis) = expected.flex_basis {
-                assert!((actual.flex_basis.unwrap() - basis).abs() <= 0.05, "saved basis keeps workspace precision");
-                expected.flex_basis = actual.flex_basis;
+            if let Some(basis) = layout.flex_bases.get(&expected.tabs[0]).copied() {
+                assert!(
+                    (restored.flex_bases[&actual.tabs[0]] - basis).abs() <= 0.05,
+                    "saved basis keeps workspace precision"
+                );
             }
-            assert_eq!(actual, &expected, "workspace keeps fixed heights and fluid sizing");
+            assert_eq!(
+                actual, &expected,
+                "workspace keeps fixed heights and fluid sizing"
+            );
         }
         assert_eq!(pm_shell::workspace::write(&restored, &saved), saved);
         if first.is_none() {
-            let larger = layout.geometry(Rect { h: 1400., ..bounds }, &t);
-            assert!(heights(&larger)[0].h > resized[0].h, "fluid panel still fills a taller window");
+            let larger = layout.geometry_with_panel_heights(
+                Rect { h: 1400., ..bounds },
+                &t,
+                &Default::default(),
+            );
+            assert!(
+                heights(&larger)[0].h > resized[0].h,
+                "fluid panel still fills a taller window"
+            );
         }
         assert_eq!(resized[0].h, original[0].h + 40.);
         assert_eq!(resized[1].h, original[1].h - 40.);
-        assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
+        assert_eq!(
+            resized[2], original[2],
+            "unrelated fixed panel stays in place and keeps its height"
+        );
     }
 }
 
@@ -562,11 +651,11 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
             tabs: vec![id.into()],
             active: 0,
             size: None,
-            flex_basis: None,
+
             collapsed: false,
         })
         .collect();
-    let geometry = layout.geometry(bounds, &t);
+    let geometry = layout.geometry_with_panel_heights(bounds, &t, &Default::default());
     let viewport = geometry.side_docks[&di];
     let panels: Vec<_> = geometry.panels.iter().filter(|p| p.dock == di).collect();
     assert!(
@@ -613,7 +702,9 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
     );
     assert!(layout.docks[di].groups[0].size.is_none());
     layout.docks[di].groups[1].size = Some(240.);
-    layout.docks[di].groups[1].flex_basis = None;
+    layout
+        .flex_bases
+        .remove(&layout.docks[di].groups[1].tabs[0]);
     assert_eq!(
         side_group_floor(&layout.docks[di].groups[1], bounds.h, &t, Some(5000.)),
         240.
@@ -622,7 +713,12 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
         pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
     let restored = pm_shell::workspace::layout(&record);
     assert!(restored.docks[di].groups[0].size.is_none());
-    assert!((restored.docks[di].groups[0].flex_basis.unwrap() - layout.docks[di].groups[0].flex_basis.unwrap()).abs() <= 0.05);
+    assert!(
+        (restored.flex_bases[&restored.docks[di].groups[0].tabs[0]]
+            - layout.flex_bases[&layout.docks[di].groups[0].tabs[0]])
+            .abs()
+            <= 0.05
+    );
     assert_eq!(restored.docks[di].groups[1].size, Some(240.));
     assert_eq!(pm_shell::workspace::write(&restored, &record), record);
 }
@@ -630,56 +726,118 @@ fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
 #[test]
 fn resetting_a_side_split_updates_fluid_bases_without_moving_its_neighbour() {
     let t = tokens();
-    let bounds = Rect { x: 0., y: 0., w: 1000., h: 500. };
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1000.,
+        h: 500.,
+    };
     let mut layout = Layout::preset("design");
     let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
-    layout.docks[di].groups = [("a", 400.), ("b", 300.), ("c", 400.)].into_iter().map(|(id, basis)| Group {
-        tabs: vec![id.into()], active: 0, size: None, flex_basis: Some(basis), collapsed: false,
-    }).collect();
-    let before = layout.geometry(bounds, &t);
-    let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
-    assert!(layout.reset_split(divider, bounds, &t));
-    let after = layout.geometry(bounds, &t);
+    layout.docks[di].groups = [("a", 400.), ("b", 300.), ("c", 400.)]
+        .into_iter()
+        .map(|(id, basis)| Group {
+            tabs: vec![id.into()],
+            active: 0,
+            size: None,
+            collapsed: false,
+        })
+        .collect();
+    layout.flex_bases = [("a".into(), 400.), ("b".into(), 300.), ("c".into(), 400.)].into();
+    let before = layout.geometry_with_panel_heights(bounds, &t, &Default::default());
+    let divider = before
+        .dividers
+        .iter()
+        .find(|d| d.dock == di && d.group == Some(0))
+        .unwrap();
+    assert!(layout.reset_split_with_panel_heights(divider, bounds, &t, &Default::default()));
+    let after = layout.geometry_with_panel_heights(bounds, &t, &Default::default());
     let panels: Vec<_> = after.panels.iter().filter(|p| p.dock == di).collect();
     assert_eq!(panels[0].rect.h, 350.);
     assert_eq!(panels[1].rect.h, 350.);
-    assert_eq!(panels[2].rect, before.panels.iter().find(|p| p.dock == di && p.group == 2).unwrap().rect);
+    assert_eq!(
+        panels[2].rect,
+        before
+            .panels
+            .iter()
+            .find(|p| p.dock == di && p.group == 2)
+            .unwrap()
+            .rect
+    );
     assert!(layout.docks[di].groups.iter().all(|g| g.size.is_none()));
 }
 
 #[test]
-fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
-    let items = menu::view3d();
-    for (group, value) in [
-        ("nav", "left"),
-        ("nav", "right"),
-        ("nav", "bottom"),
-        ("nav", "top"),
-        ("nav", "front"),
-        ("nav", "back"),
-        ("look", "camera"),
-        ("nav", "selected"),
-        ("nav", "persp"),
-        ("nav", "roll-left"),
-        ("nav", "roll-right"),
-    ] {
-        assert!(
-            items.iter().any(|i| i.command == "studio.view"
-                && i.args == vec![serde_json::json!(group), serde_json::json!(value)]),
-            "{group}/{value}"
-        );
+fn dock_wheel_hit_test_includes_edge_grabs_and_stacked_gaps_only() {
+    let mut geometry = Geometry::default();
+    geometry.side_docks.insert(
+        0,
+        Rect {
+            x: 0.,
+            y: 40.,
+            w: 200.,
+            h: 560.,
+        },
+    );
+    geometry.side_docks.insert(
+        2,
+        Rect {
+            x: 800.,
+            y: 40.,
+            w: 200.,
+            h: 560.,
+        },
+    );
+    geometry.dividers = vec![
+        Divider {
+            dock: 0,
+            group: None,
+            horizontal: false,
+            rect: Rect {
+                x: 200.,
+                y: 40.,
+                w: 10.,
+                h: 560.,
+            },
+        },
+        Divider {
+            dock: 2,
+            group: None,
+            horizontal: false,
+            rect: Rect {
+                x: 790.,
+                y: 40.,
+                w: 10.,
+                h: 560.,
+            },
+        },
+    ];
+    for x in [0., 100., 199., 200., 205., 215.] {
+        assert_eq!(geometry.wheel_dock(x, 300., 6.), Some(0));
     }
-    let bindings = shipped();
-    let grave = bindings.iter().find(|b| b.chord == "`").unwrap();
-    assert_eq!(grave.command, "maximizePanel");
-    for (chord, value) in [
-        ("numpad5", "persp"),
-        ("5", "persp"),
-        ("shift+numpad4", "roll-left"),
-        ("shift+numpad6", "roll-right"),
-    ] {
-        assert!(bindings.iter().any(|b| b.chord == chord
-            && b.command == "studio.view"
-            && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
+    for x in [784., 790., 799., 800., 900., 999.] {
+        assert_eq!(geometry.wheel_dock(x, 300., 6.), Some(2));
     }
+    for (x, y) in [
+        (216., 300.),
+        (783., 300.),
+        (500., 300.),
+        (205., 39.),
+        (205., 600.),
+    ] {
+        assert_eq!(geometry.wheel_dock(x, y, 6.), None);
+    }
+    // A horizontal timeline divider and dividers outside side docks never route.
+    geometry.dividers.push(Divider {
+        dock: 1,
+        group: None,
+        horizontal: true,
+        rect: Rect {
+            x: 216.,
+            y: 600.,
+            w: 568.,
+            h: 10.,
+        },
+    });
+    assert_eq!(geometry.wheel_dock(500., 605., 6.), None);
 }

@@ -409,6 +409,35 @@ pub fn variant(node: &Node) -> Option<&str> {
 pub fn variant_of(surface: &Surface, id: Id) -> Option<&str> {
     surface.node(id).and_then(variant)
 }
+// Frame decoration belongs to the shell; authored controls keep their styling.
+fn native_panel_root(style: &mut serde_json::Map<String, Value>, root: bool) {
+    if root {
+        for key in [
+            "background",
+            "backgroundColor",
+            "border",
+            "borderWidth",
+            "borderColor",
+            "borderTop",
+            "borderBottom",
+            "borderLeft",
+            "borderRight",
+            "borderTopWidth",
+            "borderBottomWidth",
+            "borderLeftWidth",
+            "borderRightWidth",
+            "borderRadius",
+            "boxShadow",
+            "margin",
+            "marginTop",
+            "marginBottom",
+            "marginLeft",
+            "marginRight",
+        ] {
+            style.remove(key);
+        }
+    }
+}
 fn compile(
     surface: &Surface,
     node: &Node,
@@ -419,19 +448,7 @@ fn compile(
     let t = &table.tokens;
     let component = Component::of(node);
     let mut style = surface.computed_style(node.id).unwrap_or_default();
-    // The shell (or the panel's own window) paints the panel material. A panel
-    // root that repeats `colors.panel` would turn the translucent material opaque.
-    let root_fill = ["background", "backgroundColor"].iter().any(|k| {
-        style
-            .get(*k)
-            .and_then(|v| v.get("token"))
-            .and_then(Value::as_str)
-            == Some("colors.panel")
-    });
-    if root_fill && (node.id == 0 || node.parent == Some(0)) {
-        style.remove("background");
-        style.remove("backgroundColor");
-    }
+    native_panel_root(&mut style, node.id == 0 || node.parent == Some(0));
     let hidden = style.get("display").and_then(Value::as_str) == Some("none");
     let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
     // `data-pm-variant="code"`: a command, a path, a tool's output, in the
@@ -1410,6 +1427,20 @@ mod tests {
         assert_eq!(n(1., Some(1)).text(0.004), "0");
     }
 
+    #[::core::prelude::v1::test]
+    fn native_panel_frame_drops_only_root_decoration() {
+        let authored = json!({"background":"#121212", "borderWidth":1, "borderLeft":2, "borderTop":1,
+            "borderRadius":8, "margin":6, "padding":10, "gap":4});
+        let mut root = authored.as_object().unwrap().clone();
+        native_panel_root(&mut root, true);
+        assert_eq!(
+            root,
+            json!({"padding":10,"gap":4}).as_object().unwrap().clone()
+        );
+        let mut control = authored.as_object().unwrap().clone();
+        native_panel_root(&mut control, false);
+        assert_eq!(control, authored.as_object().unwrap().clone());
+    }
     use super::*;
     use serde_json::json;
     #[::core::prelude::v1::test]
