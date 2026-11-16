@@ -2,7 +2,7 @@
 //! thread with no window, activation or Dock icon, so it never takes focus.
 #[cfg(target_os = "macos")]
 mod mac {
-    use objc2::MainThreadMarker;
+    use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
     use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSString};
     use pm_compat_host::*;
@@ -401,6 +401,45 @@ mod mac {
                             web.web_view().registeredDraggedTypes().count(),
                             0,
                             "the loaded page became a drag destination"
+                        );
+                        // PM-294: a panel leaving its slot while the page
+                        // holds the keyboard gives it back to the window's
+                        // own view (the input indicator sat at a hidden
+                        // panel's caret).
+                        let frame = objc2_foundation::NSRect::new(
+                            objc2_foundation::NSPoint::ZERO,
+                            objc2_foundation::NSSize::new(640., 480.),
+                        );
+                        let window = unsafe {
+                            objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer(
+                                objc2_app_kit::NSWindow::alloc(mtm),
+                                frame,
+                                objc2_app_kit::NSWindowStyleMask::Borderless,
+                                objc2_app_kit::NSBackingStoreType::Buffered,
+                                false,
+                            )
+                        };
+                        unsafe { window.setReleasedWhenClosed(false) };
+                        let content = objc2_app_kit::NSView::initWithFrame(
+                            objc2_app_kit::NSView::alloc(mtm),
+                            frame,
+                        );
+                        window.setContentView(Some(&content));
+                        content.addSubview(web.web_view());
+                        let holds = |w: &objc2_app_kit::NSWindow, v: &objc2_app_kit::NSView| {
+                            w.firstResponder().is_some_and(|r| {
+                                std::ptr::eq(
+                                    &*r as *const _ as *const (),
+                                    v as *const _ as *const (),
+                                )
+                            })
+                        };
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        assert!(holds(&window, web.web_view()), "the page took the keyboard");
+                        web.detach(1)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the window's own view has the keyboard back"
                         );
                         web.destroy(1)?;
                         store_view(&app, mtm, &host)?;

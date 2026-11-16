@@ -1011,6 +1011,24 @@ impl MacDomHost {
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
+    /// A panel leaving its slot gives the window back the keyboard if the
+    /// shared page holds it: AppKit draws the text input indicator (the
+    /// input-source badge) at a page's caret while the page is first
+    /// responder, so it stayed where a hidden panel's field was (PM-294).
+    /// The window's own view takes the keys again, as after a click there.
+    fn release_keyboard(&self) {
+        let Some(window) = self.web.window() else {
+            return;
+        };
+        let holds = window.firstResponder().is_some_and(|r| {
+            r.downcast_ref::<NSView>()
+                .is_some_and(|v| v.isDescendantOf(&self.web))
+        });
+        if holds {
+            let content = window.contentView();
+            window.makeFirstResponder(content.as_deref().map(|v| v as &NSResponder));
+        }
+    }
     pub fn present(&mut self, viewport: Rect) -> Result<()> {
         if !viewport.valid() || viewport.x != 0. || viewport.y != 0. {
             return Err(Error::InvalidGeometry);
@@ -1250,6 +1268,7 @@ impl DomPanelHost for MacDomHost {
     }
     fn detach(&mut self, id: PanelId) -> Result<()> {
         self.check(self.generation(), id)?;
+        self.release_keyboard();
         if self.shared.ready.get() {
             self.shared
                 .send(json!({"kind":"slot","panel":id,"slot":Value::Null}))?;
@@ -1262,6 +1281,7 @@ impl DomPanelHost for MacDomHost {
     }
     fn destroy(&mut self, id: PanelId) -> Result<()> {
         self.check(self.generation(), id)?;
+        self.release_keyboard();
         if self.shared.ready.get() {
             self.shared.send(json!({"kind":"destroy","panel":id}))?;
         }
