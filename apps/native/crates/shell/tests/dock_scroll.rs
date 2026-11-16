@@ -498,7 +498,7 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
                     })
                     .unwrap();
                 let event = ScrollWheelEvent {
-                is_momentum: false,
+                    is_momentum: false,
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
                     modifiers: Default::default(),
