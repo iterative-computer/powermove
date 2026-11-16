@@ -339,6 +339,10 @@ pub struct FrameReport {
     pub display_host_seconds: Option<f64>,
     pub completion_host_seconds: Option<f64>,
     pub pixels: Option<Vec<[f64; 3]>>,
+    /// The picture this frame presented as the engine drew it, before the
+    /// display's overlays and clip: held until the next frame, so a still
+    /// of what the viewer shows costs no render ([`Picture::srgb8`]).
+    pub picture: Option<Picture>,
     pub worker_to_completion_ms: Option<f64>,
     pub input_host_seconds: Option<f64>,
     pub audio_host_seconds: Option<f64>,
@@ -352,6 +356,94 @@ pub struct FrameReport {
     /// preview (also one at the composition's own size and Full quality):
     /// whoever takes a viewer's picture for the delivered one asks this.
     pub settled: bool,
+}
+/// A presented frame's picture: the engine's surface for it, held (a held
+/// surface is never drawn into again), in extended linear Display P3.
+#[derive(Clone)]
+pub struct Picture(Arc<pm_gpu::bridge_out::surface::ExportedSurface>);
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Picture({}×{})", self.0.size.width, self.0.size.height)
+    }
+}
+impl Picture {
+    /// The picture as 8-bit sRGB RGBA, opaque over black, box-scaled down
+    /// to at most `max_width` pixels wide, with its width and height.
+    /// Blocking (reads the surface on the CPU): call it off the main
+    /// thread. None for a surface that isn't half-float RGBA.
+    pub fn srgb8(&self, max_width: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let surface = &self.0;
+        if surface.format != pm_protocol::interop::SurfaceFormat::Rgba16Float {
+            return None;
+        }
+        let (w, h) = (surface.size.width as usize, surface.size.height as usize);
+        let row = surface.iosurface.bytes_per_row() as usize;
+        let bytes = surface.iosurface.read();
+        if w == 0 || h == 0 || row < w * 8 || bytes.len() < row * h {
+            return None;
+        }
+        Some(srgb8(w, h, |x, y| {
+            let at = y * row + x * 8;
+            let c = |i: usize| half::f16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]]).to_f32();
+            [c(0), c(1), c(2)]
+        }, max_width as usize))
+    }
+}
+/// Extended linear Display P3 pixels (`at(x, y)`, premultiplied, so over
+/// black as they are) as 8-bit sRGB RGBA, box-scaled to `max_width`.
+fn srgb8(w: usize, h: usize, at: impl Fn(usize, usize) -> [f32; 3], max_width: usize) -> (u32, u32, Vec<u8>) {
+    let step = w.div_ceil(max_width.max(1)).max(1);
+    let (ow, oh) = ((w / step).max(1), (h / step).max(1));
+    // Display P3 to sRGB primaries (both D65), linear.
+    const M: [[f32; 3]; 3] = [
+        [1.224_940_2, -0.224_940_2, 0.],
+        [-0.042_056_955, 1.042_057, 0.],
+        [-0.019_637_555, -0.078_636_05, 1.098_273_6],
+    ];
+    let encode = |v: f32| {
+        let v = v.clamp(0., 1.);
+        let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1. / 2.4) - 0.055 };
+        (e * 255. + 0.5) as u8
+    };
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut sum = [0f32; 3];
+            for y in oy * step..((oy + 1) * step).min(h) {
+                for x in ox * step..((ox + 1) * step).min(w) {
+                    let p = at(x, y);
+                    for i in 0..3 {
+                        sum[i] += if p[i].is_finite() { p[i] } else { 0. };
+                    }
+                }
+            }
+            let n = (step * step) as f32;
+            let p = sum.map(|v| v / n);
+            for m in M {
+                out.push(encode(m[0] * p[0] + m[1] * p[1] + m[2] * p[2]));
+            }
+            out.push(255);
+        }
+    }
+    (ow as u32, oh as u32, out)
+}
+#[cfg(test)]
+mod picture_tests {
+    /// A held picture reads as sRGB: white, black and mid grey keep their
+    /// lightness, a P3-only red clips to sRGB red, and a wide picture is
+    /// box-scaled to the width asked for.
+    #[test]
+    fn a_picture_reads_as_srgb_and_scales_down() {
+        let one = |p: [f32; 3]| super::srgb8(1, 1, |_, _| p, 8).2;
+        assert_eq!(one([1., 1., 1.]), [255, 255, 255, 255]);
+        assert_eq!(one([0., 0., 0.]), [0, 0, 0, 255]);
+        assert_eq!(one([0.18, 0.18, 0.18])[..3], [118, 118, 118]);
+        assert_eq!(one([1., 0., 0.]), [255, 0, 0, 255]);
+        assert_eq!(one([f32::NAN, 4., -1.]), [0, 255, 0, 255]);
+        let (w, h, px) = super::srgb8(4, 2, |x, _| if x % 2 == 0 { [1.; 3] } else { [0.; 3] }, 2);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(px[..3], [188, 188, 188], "a box of white and black is linear half");
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
@@ -1431,7 +1523,11 @@ impl EngineService {
             project_releases: Default::default(),
             wake,
             superseded: Default::default(),
-            interactive: jobs::Activity::default(),
+            interactive: {
+                let interactive = jobs::Activity::default();
+                jobs::watch_activity(&interactive);
+                interactive
+            },
             device: Mutex::new(device),
             scopes: Mutex::new(None),
             disk: render_cache::DiskFrames::default(),
@@ -2492,8 +2588,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A playing frame drawn here (not read from either cache).
                 if t.gpu_ok && !t.cache_hit && t.disk != 2 && f.spec.moment == Moment::Playing {
                     let cost = (t.completed - t.worker_start) * 1000.;
-                    r.auto
-                        .record_play(cost, r.content_frame * 1000., f.spec.scale);
+                    // The GPU's own work: from the render's submission to the
+                    // present pass (any wait for the frame before is in it).
+                    let gpu = ((t.gpu_start - t.render_submitted) * 1000.).max(0.);
+                    r.auto.record_play(
+                        cost,
+                        gpu,
+                        r.content_frame * 1000.,
+                        f.spec.scale,
+                        t.completed,
+                    );
                 }
                 // Frames skipped between two played ones at normal speed
                 // didn't play in real time: background rendering renders
@@ -2620,6 +2724,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     input_host_seconds: f.input,
                     audio_host_seconds: f.audio_host,
                     pixels: readback.map(|_| f.submission.pixels()).or(kept),
+                    picture: Some(Picture(f.submission.surface.clone())),
                 });
                 // A stale, failed or dropped frame did not answer the input.
                 // Keep its origin through retries; never consume a newer one.
@@ -3216,9 +3321,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let quality = if capture {
                 1.
             } else {
+                // A layer being dragged is drawn as sharp as at rest (v1's,
+                // PM-395); only a playhead scrub adapts.
                 v.quality.scale(
                     &r.auto,
-                    if moment == Moment::Scrub && !v.adapt_drags {
+                    if moment == Moment::Scrub && (!v.adapt_drags || v.editing) {
                         Moment::Paused
                     } else {
                         moment
@@ -3232,7 +3339,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // frames keep their policy. (A play waiting for its audio start
             // draws as it is.)
             let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
-            let text_grid = (quality == 1. && moment != Moment::Scrub)
+            let text_grid = (quality == 1. && (moment != Moment::Scrub || v.editing))
                 .then(|| engine.text_grid_scale(&scene, &v.config.output))
                 .flatten();
             let (scale, settled) = if capture {
@@ -5083,6 +5190,37 @@ mod worker_tests {
             "{:?}",
             &drawn()[from..]
         );
+    }
+
+    /// PM-395: a layer being dragged is drawn as sharp as at rest, even on a
+    /// project slower than a refresh (only a playhead scrub draws reduced).
+    #[test]
+    fn a_dragged_layer_is_drawn_as_sharp_as_at_rest() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-drag-sharp").unwrap()).unwrap();
+        let config = shapes_config(None);
+        let snapshot = config.snapshot.clone();
+        let v = service.viewer(config).unwrap();
+        v.adapt_drags(true).unwrap();
+        service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
+        wait_for(&v, "the first picture", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok));
+        v.editing(true).unwrap();
+        let mut dragged = None;
+        for revision in 2..60u64 {
+            v.snapshot(Snapshot {
+                revision,
+                document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), revision)),
+                ..snapshot.clone()
+            })
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(frame) = v.status().frame.filter(|f| f.moment == Moment::Scrub && f.gpu_ok) {
+                dragged = Some(frame);
+                break;
+            }
+        }
+        let frame = dragged.expect("a frame drawn while the layer is dragged");
+        assert!(frame.scale >= 1., "a dragged layer drawn reduced: {frame:?}");
+        v.retire();
     }
 
     /// An edit left resting with its gesture still open (text being typed,

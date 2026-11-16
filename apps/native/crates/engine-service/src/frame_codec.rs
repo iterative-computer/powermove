@@ -60,11 +60,15 @@ pub fn encode(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     // Each stripe coded: its compressed bytes, or (None) its planes as
     // they are when compression would not make them smaller.
     let per = stripes.len().div_ceil(THREADS).max(1);
+    // Its threads run at the caller's class (a background render's stays
+    // in the background).
+    let class = crate::qos::class();
     let coded: Vec<(Vec<u8>, bool)> = std::thread::scope(|s| {
         let workers: Vec<_> = stripes
             .chunks(per)
             .map(|group| {
                 s.spawn(move || {
+                    crate::qos::apply_class(class);
                     let mut planes = Vec::new();
                     group
                         .iter()
@@ -141,11 +145,13 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     let mut parts: Vec<(&mut [u8], Span<'_>)> =
         out.chunks_mut(row * STRIPE_ROWS).zip(spans).collect();
     let per = parts.len().div_ceil(THREADS).max(1);
+    let class = crate::qos::class();
     let ok = std::thread::scope(|s| {
         let workers: Vec<_> = parts
             .chunks_mut(per)
             .map(|group| {
                 s.spawn(move || {
+                    crate::qos::apply_class(class);
                     // A frame on screen waits for this read.
                     crate::qos::set_interactive_qos();
                     let mut planes = Vec::new();

@@ -324,6 +324,28 @@ define_class!(
         }
     }
 );
+/// A composer's lines are `COMPOSER_LEADING` times its type apart (v1's
+/// prompt reads at 1.5), centred in that height: the gap past the font's own
+/// line goes between lines and half of it above the first.
+pub const COMPOSER_LEADING: f64 = 1.5;
+fn composer_leading(v: &NSTextView, points: f64) {
+    use objc2_app_kit::{NSLayoutManager, NSMutableParagraphStyle, NSParagraphStyleAttributeName};
+    let font = NSFont::systemFontOfSize(points);
+    let natural = NSLayoutManager::new().defaultLineHeightForFont(&font);
+    let gap = (points * COMPOSER_LEADING - natural).max(0.);
+    let style = NSMutableParagraphStyle::new();
+    style.setLineSpacing(gap);
+    v.setDefaultParagraphStyle(Some(&style));
+    let mut typing = v.typingAttributes().to_owned();
+    unsafe {
+        let mutable: Retained<objc2_foundation::NSMutableDictionary<objc2_foundation::NSAttributedStringKey, objc2::runtime::AnyObject>> =
+            objc2_foundation::NSMutableDictionary::dictionaryWithDictionary(&typing);
+        mutable.setObject_forKey(&style, ProtocolObject::from_ref(NSParagraphStyleAttributeName));
+        typing = Retained::cast_unchecked(mutable);
+        v.setTypingAttributes(&typing);
+    }
+    v.setTextContainerInset(NSSize::new(4., 3. + gap / 2.));
+}
 pub fn valid_number(value: &str) -> bool {
     value.trim().parse::<f64>().is_ok_and(f64::is_finite)
 }
@@ -582,6 +604,7 @@ impl NativeTextSlot {
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(4., 3.));
             if kind == TextKind::Composer {
+                composer_leading(&v, 13.);
                 // A prompt is not prose to rewrite: no Writing Tools badge
                 // beside the empty field (NSWritingToolsBehaviorNone).
                 unsafe {
@@ -746,7 +769,12 @@ impl NativeTextSlot {
         let font = NSFont::systemFontOfSize(points);
         match &self.state.editor {
             Editor::Field(v) => v.setFont(Some(&font)),
-            Editor::Multiline(v) => v.setFont(Some(&font)),
+            Editor::Multiline(v) => {
+                v.setFont(Some(&font));
+                if self.state.kind == TextKind::Composer {
+                    composer_leading(v, points);
+                }
+            }
         }
     }
     /// Placeholder for single-line fields (AppKit draws it while editing).
@@ -770,6 +798,16 @@ impl NativeTextSlot {
     }
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
+    }
+    /// Whether the field has the keyboard now (AppKit's first responder is
+    /// it or its field editor), not only asked to take it.
+    pub fn has_keyboard(&self) -> bool {
+        match &self.state.editor {
+            Editor::Field(v) => v.currentEditor().is_some(),
+            Editor::Multiline(v) => v.window().and_then(|w| w.firstResponder()).is_some_and(|r| {
+                std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(v) as *const AnyObject)
+            }),
+        }
     }
     pub fn native_view(&self) -> &NSView {
         self.state.editor.view()

@@ -89,20 +89,34 @@ const strong: Style = {
   fontWeight: t("typography.semibold_weight"),
 };
 /** A hairline chip in the code face (`data-pm-variant="code"`), cut in the
- * middle so a path keeps its start and its file name. */
-const chip: Style = {
-  fontSize: t("typography.minimum"),
-  color: t("colors.secondary"),
+ * middle so a path keeps its start and its file name. The box is a `div`:
+ * a text leaf draws no fill or edge. */
+const chipBox: Style = {
+  ...row,
   background: t("colors.fill"),
   borderWidth: t("metrics.border"),
   borderColor: t("colors.hairline"),
   borderRadius: t("metrics.inner_radius"),
   paddingLeft: t("metrics.gap"),
   paddingRight: t("metrics.gap"),
+  ...shrink,
+};
+const chipText: Style = {
+  fontSize: t("typography.minimum"),
+  color: t("colors.secondary"),
   whiteSpace: "nowrap",
   textOverflow: "middle",
   ...shrink,
 };
+function Chip({ children }: { children: string }) {
+  return (
+    <div style={chipBox}>
+      <text data-pm-variant="code" style={chipText}>
+        {children}
+      </text>
+    </div>
+  );
+}
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -141,12 +155,29 @@ function Para({ runs, style }: { runs: Run[]; style?: Style }) {
 }
 /** Markdown as native text: paragraphs, headings, lists, quotes and code. */
 function Prose({ text, style = reading }: { text: string; style?: Style }) {
-  const blocks = markdown(text);
+  // As v1 reads: paragraphs apart, a list's items close together.
+  const groups: Block[][] = [];
+  for (const block of markdown(text)) {
+    const last = groups.at(-1);
+    if (block.kind === "li" && last?.[0]?.kind === "li") last.push(block);
+    else groups.push([block]);
+  }
   return (
-    <div style={{ ...column, ...shrink, gap: t("metrics.text_padding") }}>
-      {blocks.map((b, i) => (
-        <ProseBlock key={i} block={b} style={style} />
-      ))}
+    <div style={{ ...column, ...shrink, gap: t("metrics.inset") }}>
+      {groups.map((g, i) =>
+        g.length === 1 ? (
+          <ProseBlock key={i} block={g[0]!} style={style} />
+        ) : (
+          <div
+            key={i}
+            style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}
+          >
+            {g.map((b, j) => (
+              <ProseBlock key={j} block={b} style={style} />
+            ))}
+          </div>
+        ),
+      )}
     </div>
   );
 }
@@ -178,7 +209,9 @@ function ProseBlock({
             paddingLeft: b.depth ? t("metrics.agent_gap") : t("metrics.gap"),
           }}
         >
-          <text style={{ ...style, color: t("colors.muted"), flexShrink: 0 }}>
+          <text
+            style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}
+          >
             {b.marker}
           </text>
           <Para runs={b.runs} style={{ ...style, flexGrow: 1 }} />
@@ -527,9 +560,10 @@ function Gate({
       : local
         ? "Bring your own model"
         : `Connect ${name}`;
+  // Signed out is the plain ask (v1.2.0's gate): the reason is for a fault.
   const body = checking
     ? `Checking your ${name} connection.`
-    : n.reason ||
+    : (!n.signedOut && n.reason) ||
       (local
         ? "Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others."
         : `Use your ${name} subscription to power the Powermove agent.`);
@@ -544,29 +578,20 @@ function Gate({
         ...(compact ? {} : { flexGrow: 1, justifyContent: "center" }),
       }}
     >
-      <div
-        role="group"
-        label="Connection provider"
-        style={{ ...row, gap: t("metrics.gap") }}
-      >
-        {s.catalog.providers.map(([id, label]) => (
-          <UI.ToolbarItem
-            key={id}
-            id={`agent-connect-${id}`}
-            label={id === "compatible" ? "API / local" : label}
-            active={id === provider}
-            onClick={() => {
-              if (id !== provider) send({ type: "setProvider", provider: id });
-            }}
-            style={{
-              paddingLeft: t("metrics.text_padding"),
-              paddingRight: t("metrics.text_padding"),
-              borderRadius: t("metrics.control_radius"),
-            }}
-          >
-            {id === "compatible" ? "API / local" : label}
-          </UI.ToolbarItem>
-        ))}
+      {/* v1.2.0's provider switch: the kit's one segmented control. */}
+      <div style={{ ...row, justifyContent: "center" }}>
+        <UI.SegmentedControl
+          id="agent-connect-provider"
+          label="Connection provider"
+          value={provider}
+          options={s.catalog.providers.map(([id, label]) => ({
+            id,
+            label: id === "compatible" ? "API / local" : label,
+          }))}
+          onChange={(id) => {
+            if (id !== provider) send({ type: "setProvider", provider: id });
+          }}
+        />
       </div>
       {fault ? (
         <ErrorNotice
@@ -601,7 +626,7 @@ function Gate({
         </div>
       )}
       {(!local || fault) && (
-        <div style={row}>
+        <div style={{ ...row, justifyContent: "center" }}>
           <button
             role="button"
             label="Connection settings"
@@ -798,9 +823,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <text key={i} data-pm-variant="code" style={chip}>
-                {str(obj(f).name) || "File"}
-              </text>
+              <Chip key={i}>{str(obj(f).name) || "File"}</Chip>
             ))}
           </div>
         )}
@@ -1164,9 +1187,7 @@ function Tools({
           }}
         >
           {r.files.map((f) => (
-            <text key={f} data-pm-variant="code" style={chip}>
-              {f}
-            </text>
+            <Chip key={f}>{f}</Chip>
           ))}
         </div>
       )}
@@ -1288,22 +1309,22 @@ function ToolLine({
       <text style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}>
         {d.label}
       </text>
-      {d.detail && !(open && d.kind === "thought") && (
-        <text
-          style={
-            d.kind === "thought"
-              ? {
-                  ...faint,
-                  ...shrink,
-                  whiteSpace: "nowrap",
-                  textOverflow: "ellipsis",
-                }
-              : chip
-          }
-        >
-          {d.detail}
-        </text>
-      )}
+      {d.detail &&
+        !(open && d.kind === "thought") &&
+        (d.kind === "thought" ? (
+          <text
+            style={{
+              ...faint,
+              ...shrink,
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {d.detail}
+          </text>
+        ) : (
+          <Chip>{d.detail}</Chip>
+        ))}
       <div style={{ flexGrow: 1 }} />
       {word && (
         <text
@@ -1874,15 +1895,16 @@ function Composer({
       role="group"
       label="Message composer"
       state={{ dropTarget: n.dropTarget }}
+      // v1's two surfaces: a tray holding the run options, and inset in it
+      // the field with the draft and its actions.
       style={{
         ...column,
         flexShrink: 0,
         gap: t("metrics.gap"),
-        background: t(
-          n.dropTarget ? "colors.accent_wash" : "colors.panel_secondary",
-        ),
+        // A slight lift over the panel, as v1's tray; the field is set into it.
+        background: t("colors.raised"),
         borderRadius: t("metrics.popover_radius"),
-        padding: t("metrics.gap"),
+        padding: t("metrics.composer_tray"),
         marginLeft: t("metrics.text_padding"),
         marginRight: t("metrics.text_padding"),
         marginBottom: t("metrics.text_padding"),
@@ -1895,8 +1917,11 @@ function Composer({
           gap: t("metrics.gap"),
           background: t("colors.floating"),
           borderRadius: t("metrics.panel_radius"),
+          // A quiet hairline edge (v1's, its composer having the keyboard
+          // whenever the panel opens); a drop over the composer rings it in
+          // the accent.
           borderWidth: t("metrics.border"),
-          borderColor: t("colors.hairline"),
+          borderColor: t(n.dropTarget ? "colors.accent" : "colors.hairline"),
           paddingTop: t("metrics.gap"),
           paddingBottom: t("metrics.gap"),
           paddingLeft: t("metrics.gap"),
@@ -2060,6 +2085,17 @@ function Composer({
             style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
             onClick={() => send({ type: "attach" })}
           />
+          {/* v1's: drag a box anywhere over the editor; the agent gets
+              what was under it (the composition there, or the window). */}
+          <UI.ToolbarItem
+            id="agent-pick-region"
+            label="Select part of the screen"
+            title="Select part of the screen for the agent"
+            metadata={{ symbol: "rectangle.dashed" }}
+            disabled={disabled || s.attachments.length >= 6}
+            style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+            onClick={() => send({ type: "pickRegion" })}
+          />
           <div style={{ flexGrow: 1 }} />
           {working && (
             <button
@@ -2108,8 +2144,9 @@ function Composer({
                 height: t("metrics.control"),
                 borderRadius: t("metrics.control_radius"),
                 symbolSize: t("metrics.symbol_panel"),
+                // A quiet square until there is something to send (v1's).
                 background: t(
-                  !disabled && s.sendable ? "colors.accent" : "colors.fill",
+                  !disabled && s.sendable ? "colors.accent" : "colors.raised",
                 ),
                 color: t(
                   !disabled && s.sendable
@@ -2147,6 +2184,8 @@ function Composer({
             id="agent-effort"
             label={`Reasoning effort, ${effortName}`}
             text={effortName}
+            // A qualifier of the model beside it: the quieter step (v1's).
+            tone="colors.muted"
             fixed
             disabled={choicesLocked}
             open={(anchor) =>

@@ -52,6 +52,7 @@ mod captions_panel;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
+mod frame_facts;
 #[path = "surfaces/library.rs"]
 mod library_surface;
 mod lifecycle;
@@ -99,6 +100,7 @@ mod render_frames;
 mod recent_work;
 mod rows;
 mod session;
+mod region_attach;
 mod settings_window;
 mod shader_panel;
 mod shape_tool;
@@ -279,6 +281,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(debug_assertions))]
     let _ = lane_flags;
+    diag::trace_unhide();
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
@@ -357,6 +360,7 @@ fn main() -> Result<()> {
             fonts: jobs_broker,
         });
         mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
+        tools.keep_for_stills();
         {
             let mut automation = tools.automation.lock().unwrap();
             automation.surfaces = Some(Arc::new(bridge));
@@ -404,6 +408,11 @@ fn main() -> Result<()> {
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     notifications::install(cx);
+                    // Background work (the background render) waits while the
+                    // person works: every press in an editor and every key.
+                    pm_shell::input::on_input(pm_engine_service::jobs::note_input);
+                    cx.observe_keystrokes(|_, _, _| pm_engine_service::jobs::note_input())
+                        .detach();
                     panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();

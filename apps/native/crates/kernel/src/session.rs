@@ -380,6 +380,13 @@ pub(crate) struct Session {
     /// id it opened under (a copy made by the open), where the next open of
     /// that project looks for its unsaved work (PM-360).
     pub journal_id: String,
+    /// The backing file association of the library slot this session
+    /// opened and saves back to, when the open did not take that file up
+    /// (it was away): kept named on every save to that slot until a save
+    /// takes media from a file, whatever the session id and whether the
+    /// file is back meanwhile, so its media connect again at a later open
+    /// (Sol review of PM-421).
+    pub kept_file: Option<Value>,
 }
 /// A save that installed its file and could not sync the folder, whole:
 /// what it wrote, and for a Save As where to and the lock taken there. All
@@ -1520,135 +1527,12 @@ impl Kernel {
                 let _ = displaced;
             }
         }
-        let Some(root) = &self.config_journal_root() else {
-            return Ok(ShellReply::Compacted {
-                projects,
-                recovery_copies,
-            });
-        };
-        if !root.exists() {
-            return Ok(ShellReply::Compacted {
-                projects,
-                recovery_copies,
-            });
-        }
-        let entries = std::fs::read_dir(root)
-            .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        let ids: Vec<_> = entries
-            .into_iter()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        for id in ids {
-            if crate::journal::sessions(&root.join(&id)).is_empty() {
-                continue;
-            }
-            if self.sessions.values().any(|s| {
-                s.handle.project == id
-                    || matches!(&s.destination, Destination::Library(slot) if slot == &id)
-            }) {
-                continue;
-            }
-            let file = self.file_entry(&id);
-            if !into_files && file.is_some() {
-                continue;
-            }
-            // A file's entry has no body: the file is the project.
-            let file = file.filter(|path| path.is_file());
-            // From here on the project is one no window has open: its
-            // journal is folded into its slot if that works. Anything that
-            // does not (an unreadable slot or journal, a recovery that needs
-            // the person's decision, a close that fails) leaves the journal
-            // where it is for the next open to offer. It never fails the
-            // quit: a quit refused for a project that is not even open could
-            // be refused forever.
-            let Ok(p) = self
-                .library
-                .as_ref()
-                .ok_or_else(|| failure("Attach a native library before compaction"))?
-                .store()
-                .load(&id)
-            else {
-                continue;
-            };
-            let source = match (p, file) {
-                (_, Some(path)) => SessionSource::File(path),
-                (Some(p), None) => match p
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.get("file"))
-                    .and_then(|f| f.get("path"))
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from)
-                {
-                    Some(path) if path.is_file() => SessionSource::File(path),
-                    _ => SessionSource::Library {
-                        profile: self.library.as_ref().unwrap().store().dir().to_path_buf(),
-                        project: id.clone(),
-                    },
-                },
-                (None, None) => {
-                    // Untitled/crashed work without a slot: materialize a recovery copy.
-                    match self.recover(&id, None, None) {
-                        Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
-                            if let Ok(copy) = self.recovery_copy(r, None) {
-                                recovery_copies.push(copy);
-                                projects += 1;
-                            }
-                        }
-                        Recovery::Nothing | Recovery::Unrecoverable { .. } => {}
-                    }
-                    continue;
-                }
-            };
-            // Asked first, with nobody here to answer. Only a journal that
-            // replays whole is folded in. One this build cannot replay, or
-            // whose end is missing, is the person's to decide at the next
-            // open: the project is not opened at all, so nothing saves its
-            // older slot and nothing removes the journal as saved.
-            let opened =
-                match self.open_session_mode(id.clone(), source.clone(), None, RecoveryMode::Ask) {
-                    Ok(ShellReply::RecoveryRequired { ticket, recovery }) => {
-                        self.pending_recovery.remove(&ticket);
-                        if !matches!(
-                            recovery,
-                            RecoveryResult::Recovered { truncated: false }
-                                | RecoveryResult::OfferCopy {
-                                    truncated: false,
-                                    ..
-                                }
-                        ) {
-                            continue;
-                        }
-                        self.open_session(id, source, None)
-                    }
-                    // Nothing to recover: it is open.
-                    opened => opened,
-                };
-            let Ok(ShellReply::Opened {
-                session, recovery, ..
-            }) = opened
-            else {
-                continue;
-            };
-            if let RecoveryResult::OfferCopy { project, .. } = recovery {
-                recovery_copies.push(project);
-            }
-            if let Destination::Library(slot) = &self.sessions[&session.project].destination
-                && slot != &session.project
-            {
-                recovery_copies.push(slot.clone());
-            }
-            // A close that fails leaves the session to the library's
-            // release, which defers it (journal kept).
-            if let Ok(ShellReply::Closed { recovery_copy }) = self.shell(ShellCall::Close(session))
-            {
-                recovery_copies.extend(recovery_copy);
-                projects += 1;
-            }
-        }
+        // A journal of a project no window has open is work nobody has
+        // chosen to keep: a quit leaves it as it is, for the Recover
+        // question at that project's next open. Only what the person keeps
+        // open, recovered work they accepted included, is saved above.
+        // Folding it in unasked made "— Recovered" and "— Native" entries
+        // on its own (acceptance run 16) and saved edits nobody accepted.
         Ok(ShellReply::Compacted {
             projects,
             recovery_copies,
@@ -1763,7 +1647,13 @@ impl Kernel {
                     if !self.owns_library(&profile) {
                         return Err(failure("The project’s file isn’t available"));
                     }
-                    return self.open_without_file(id, &project);
+                    return self.open_without_file(
+                        id,
+                        &project,
+                        mode,
+                        original_source,
+                        electron_profile,
+                    );
                 };
                 // Renamed while no window had it open: the row has the name.
                 if let Some(name) = reader.renamed(&project).map_err(failure)?
@@ -1783,13 +1673,21 @@ impl Kernel {
                 if policy != OpenDecision::Writable {
                     decision = policy;
                 }
-                if p.session
+                // Its file is gone (an earlier copy's backing file, a file
+                // of the original app's that is not here). A project of this
+                // library still has its body here and opens as itself, into
+                // its own slot: a copy made on its own at each open or
+                // restore was one more Home entry nobody asked for, and the
+                // next open of that copy made another (PM-361, PM-421).
+                // Only a project that can't open as itself anyway is copied.
+                let offline = p
+                    .session
                     .as_ref()
                     .and_then(|m| m.get("file"))
                     .and_then(|f| f.get("path"))
                     .and_then(Value::as_str)
-                    .is_some_and(|p| !std::path::Path::new(p).is_file())
-                {
+                    .is_some_and(|p| !std::path::Path::new(p).is_file());
+                if offline && decision != OpenDecision::Writable {
                     decision = OpenDecision::AsCopy(CopyReason::OfflineFile);
                 }
                 meta = p.session.clone().unwrap_or(meta);
@@ -1866,6 +1764,19 @@ impl Kernel {
                             }
                         }
                     }
+                }
+                // One that an earlier build copied when its file was gone
+                // reopens that copy, where its work since went (PM-379).
+                if offline
+                    && decision == OpenDecision::Writable
+                    && let Some(copy) = self.copy_of_entry(&profile, &project, &hash)
+                {
+                    return self.reopen_copy(
+                        id,
+                        copy,
+                        OpenDecision::AsCopy(CopyReason::OfflineFile),
+                        mode,
+                    );
                 }
                 // The copy made the last time this project could not open as
                 // itself holds the person's saved work since: the same
@@ -2276,6 +2187,16 @@ impl Kernel {
             }
             _ => None,
         };
+        // A slot opened without its backing file (away now), saved back to
+        // that same slot: its association is kept (`Session::kept_file`).
+        let kept_file = match (&source, &destination) {
+            (OpenSource::Library(lib), Destination::Library(slot)) if *slot == lib.id => lib
+                .session
+                .as_ref()
+                .and_then(|m| m.get("file"))
+                .cloned(),
+            _ => None,
+        };
         let setting_aside = matches!(
             choice,
             Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
@@ -2487,6 +2408,7 @@ impl Kernel {
                 pending_save: None,
                 unfinalized: None,
                 journal_id,
+                kept_file,
             },
         );
         // What an open writes to the library (view state, a format upgrade,
@@ -2815,10 +2737,20 @@ impl Kernel {
                 .zip(backing.as_deref())
                 .is_some_and(|(path, backing)| path.starts_with(backing)),
         };
+        // The slot's own backing file, not taken up by this session (it was
+        // away at the open): still named, so its media connect again. Only a
+        // different, new slot (a copy) drops what it inherited.
+        let kept = session
+            .kept_file
+            .clone()
+            .filter(|_| matches!(&session.destination, Destination::Library(d) if d == slot));
         if own_file && p.store().path().is_some() {
             meta = file_metadata(meta, p.store());
         } else if let Value::Object(m) = &mut meta {
-            m.remove("file");
+            match kept {
+                Some(file) => m.insert("file", file),
+                None => m.remove("file"),
+            };
         }
         let writer = self
             .library
@@ -2961,13 +2893,16 @@ impl Kernel {
         hash: &str,
     ) -> Option<String> {
         let store = self.library.as_ref()?.store();
-        let same_library = |recorded: &str| {
-            let recorded = std::path::Path::new(recorded);
-            recorded == library
-                || recorded
-                    .canonicalize()
-                    .is_ok_and(|r| library.canonicalize().is_ok_and(|l| l == r))
+        // A library is named by its profile or by its store folder (quit
+        // compaction names the store): the same store is the same library.
+        // Taken literally, every open of a project whose file is offline made
+        // one more "— Native" copy instead of the one it made before.
+        let store_of = |p: &std::path::Path| {
+            let dir = LibraryStore::open(p).dir().to_path_buf();
+            dir.canonicalize().unwrap_or(dir)
         };
+        let library = store_of(library);
+        let same_library = |recorded: &str| store_of(std::path::Path::new(recorded)) == library;
         let mut rows = store.projects().ok()?;
         rows.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
         rows.into_iter().map(|row| row.id).find(|id| {
@@ -3651,16 +3586,65 @@ impl Kernel {
             path.starts_with(backing) && w.store().read(&format!("project.{id}")).ok()?.is_some();
         (!has_body).then_some(path)
     }
-    /// A closed file entry as a library project, read from its file.
     /// A file entry whose file is gone: its journal's work opens as a
-    /// recovered copy in the library; the entry stays, naming the file.
+    /// recovered copy in the library, as recovery does anywhere else: an
+    /// open that asks gets the Recover question (`RecoveryRequired`), and
+    /// only the person's choice makes the copy or sets the work aside
+    /// (PM-405, Sol review). The entry stays, naming the file.
     fn open_without_file(
         &mut self,
         id: String,
         project: &str,
+        mode: RecoveryMode,
+        source: SessionSource,
+        electron_profile: Option<PathBuf>,
     ) -> Result<ShellReply, KernelFailure> {
-        match self.recover(project, None, None) {
-            Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
+        const GONE: &str = "The project’s file isn’t available";
+        let recovered = self.recover(project, None, None);
+        let r = match recovered {
+            Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => r,
+            Recovery::Unrecoverable { .. } => return Err(failure(
+                "The project’s file isn’t available, and its unsaved changes can’t be replayed without it. They are kept.",
+            )),
+            Recovery::Nothing => return Err(failure(GONE)),
+        };
+        let stamp = format!(
+            "file-only:{}:{}:{}",
+            r.session.display(),
+            r.revision,
+            r.document.canonical_hash().unwrap_or_default()
+        );
+        let choice = match mode {
+            RecoveryMode::Legacy => RecoveryDecision::Recover,
+            RecoveryMode::Ask => {
+                self.pending_recovery.retain(|_, p| p.id != id);
+                let ticket = crate::new_id("recovery-choice");
+                let recovery = RecoveryResult::OfferCopy {
+                    project: id.clone(),
+                    truncated: r.truncated,
+                };
+                self.pending_recovery.insert(
+                    ticket.clone(),
+                    PendingRecovery {
+                        id,
+                        source,
+                        electron_profile,
+                        stamp,
+                        prepared: None,
+                        fresh: Freshness::new(),
+                    },
+                );
+                return Ok(ShellReply::RecoveryRequired { ticket, recovery });
+            }
+            RecoveryMode::Decide(choice, expected) => {
+                if expected != stamp {
+                    return Err(failure("Recovery base changed; prepare the open again"));
+                }
+                choice
+            }
+        };
+        match choice {
+            RecoveryDecision::Recover | RecoveryDecision::OpenAsCopy => {
                 let crashed = r.session.clone();
                 let copy = self.recovery_copy(r, None)?;
                 crate::journal::retire_chain(&crashed);
@@ -3674,10 +3658,12 @@ impl Kernel {
                     None,
                 )
             }
-            Recovery::Unrecoverable { .. } => Err(failure(
-                "The project’s file isn’t available, and its unsaved changes can’t be replayed without it. They are kept.",
-            )),
-            Recovery::Nothing => Err(failure("The project’s file isn’t available")),
+            // Set aside, as a declined recovery is anywhere else; nothing
+            // opens, for the file is not here.
+            RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion => {
+                crate::journal::archive_chain(r.session).map_err(failure)?;
+                Err(failure(GONE))
+            }
         }
     }
     fn file_entry_project(

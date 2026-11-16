@@ -13,8 +13,8 @@
 //! let macOS activate the lane app when his front app left.
 use objc2::{MainThreadMarker, rc::Weak};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDidBecomeActiveNotification, NSNormalWindowLevel, NSWindow,
-    NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSApplication, NSApplicationDidBecomeActiveNotification, NSApplicationDidUnhideNotification,
+    NSNormalWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 use std::{cell::RefCell, ptr::NonNull};
@@ -103,6 +103,54 @@ thread_local! {
     static JOINS: RefCell<Vec<(Weak<NSWindow>, Weak<NSWindow>)>> = const { RefCell::new(Vec::new()) };
     static OBSERVER: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
         const { RefCell::new(None) };
+    /// What waits for the person to show the hidden app again ([`when_shown`]),
+    /// and the observer that runs it then.
+    static ON_SHOWN: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+    static UNHIDE_OBSERVER: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Whether the person hid the app (Hide Powermove, or another app's Hide
+/// Others). Ordering any of its windows in then (`orderFront`, `orderBack`,
+/// a tab group's selection) unhides the whole app: its windows come back over
+/// whatever the person moved on to, unasked (PM-401).
+pub fn app_hidden() -> bool {
+    MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isHidden())
+}
+
+/// Runs `order` (anything that orders one of the app's windows in, or picks
+/// a tab, which orders its window in) now, or, while the app is hidden, once
+/// the person shows it again: only they unhide it.
+pub fn when_shown(order: impl FnOnce() + 'static) {
+    if !app_hidden() {
+        order();
+        return;
+    }
+    ON_SHOWN.with(|o| o.borrow_mut().push(Box::new(order)));
+    UNHIDE_OBSERVER.with(|o| {
+        if o.borrow().is_some() {
+            return;
+        }
+        let block = block2::RcBlock::new(|_: NonNull<NSNotification>| {
+            for order in ON_SHOWN.with(|o| std::mem::take(&mut *o.borrow_mut())) {
+                order();
+            }
+        });
+        let token = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidUnhideNotification),
+                None,
+                None,
+                &block,
+            )
+        };
+        *o.borrow_mut() = Some(token);
+    });
+}
+
+/// How many orderings wait for the hidden app to be shown ([`when_shown`]).
+pub fn waiting_for_shown() -> usize {
+    ON_SHOWN.with(|o| o.borrow().len())
 }
 
 /// Shows a child window only while its app is active. A window an inactive
@@ -228,6 +276,15 @@ pub fn show_pending() {
 /// comes forward only while the app is active, and otherwise appears behind
 /// the other apps' windows, where activating the app finds it.
 pub fn present(window: &NSWindow, key: bool) {
+    if app_hidden() {
+        let window = Weak::from(window);
+        when_shown(move || {
+            if let Some(window) = window.load() {
+                present(&window, key);
+            }
+        });
+        return;
+    }
     if window.hidesOnDeactivate() {
         show(window, key);
     } else if MainThreadMarker::new()

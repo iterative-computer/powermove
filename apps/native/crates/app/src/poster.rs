@@ -31,9 +31,31 @@ pub(crate) fn files(dir: &Path, id: &str) -> (PathBuf, PathBuf) {
         dir.join(format!("{stem}.stamp")),
     )
 }
+/// The last frame `id` showed while it was open, when one is stored, as its
+/// poster (written beside the others, stamped `stamp`): Home shows what the
+/// person last saw rather than drawing it again. Blocking.
+pub(crate) fn adopt_last_frame(profile: &Path, dir: &Path, id: &str, stamp: i64) -> Option<Vec<u8>> {
+    let (last, last_stamp) = last_frame_files(profile, id);
+    let png = std::fs::read(&last).ok()?;
+    let time: f64 = std::fs::read_to_string(&last_stamp)
+        .ok()
+        .and_then(|s| s.lines().nth(1).and_then(|t| t.trim().parse().ok()))
+        .unwrap_or(0.);
+    let (file, stamp_file) = files(dir, id);
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&file, &png).ok()?;
+    std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    let _ = std::fs::remove_file(missing_file(dir, id));
+    Some(png)
+}
+/// Marks a poster that left offline media out (Home's card says so).
+pub(crate) fn missing_file(dir: &Path, id: &str) -> PathBuf {
+    files(dir, id).0.with_extension("missing")
+}
 /// A trashed project's poster is removed; Put Back draws it again when needed.
 pub(crate) fn forget(dir: &Path, id: &str) {
     let (image, stamp) = files(dir, id);
+    let _ = std::fs::remove_file(missing_file(dir, id));
     let _ = std::fs::remove_file(image);
     let _ = std::fs::remove_file(stamp);
 }
@@ -81,7 +103,9 @@ fn identity() -> String {
         .and_then(|v| v.downcast::<objc2_foundation::NSString>().ok())
         .map(|v| v.to_string())
         .unwrap_or_default();
-    format!("{} ({build})", crate::updates::current_version())
+    // The poster's own format: posters drawn before offline media was left
+    // out (the Media Offline card) are drawn again.
+    format!("{} ({build}) posters 2", crate::updates::current_version())
 }
 /// A stored poster's stamp and the time in the composition it shows. The
 /// stamp is [`STALE`] when another build drew it.
@@ -144,15 +168,19 @@ pub(crate) fn write(
     let mut first = None;
     let mut chosen = None;
     for time in times(duration, kept) {
-        let Ok(png) = renderer(&FrameRequest {
+        let png = match renderer(&FrameRequest {
             time,
             width: WIDTH,
             height: height.clamp(90, 2 * WIDTH),
             motion_blur: false,
             stop: &never,
             published: published.clone(),
-        }) else {
-            continue;
+        }) {
+            Ok(png) => png,
+            Err(error) => {
+                crate::diag::line(serde_json::json!({"poster": id, "time": time, "render": error.to_string()}));
+                continue;
+            }
         };
         if has_content(&png) {
             chosen = Some((time, png));
@@ -166,7 +194,130 @@ pub(crate) fn write(
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&file, &png).ok()?;
     std::fs::write(&stamp_file, format!("{stamp}\n{time}\n{}", identity())).ok()?;
+    let missing = missing_file(dir, id);
+    if crate::mcp_services::poster_missed_media(id) {
+        let _ = std::fs::write(&missing, "");
+    } else {
+        let _ = std::fs::remove_file(&missing);
+    }
     Some(png)
+}
+
+/// Width of a stored last frame: it stands in the viewer, larger than a card.
+const LAST_WIDTH: u32 = 1280;
+/// The picture the viewer last showed for a project: copied from the
+/// viewer when its picture holds still, after a save, at a close and
+/// before a chosen quit, kept under the profile
+/// (`caches/last-frame/<project>.png`, its `.stamp` naming the revision and
+/// time it shows). A launch shows it in the viewer until the project's first
+/// real frame (PM-384). Home's card keeps its own poster.
+pub(crate) fn last_frame_files(profile: &Path, id: &str) -> (PathBuf, PathBuf) {
+    files(&profile.join("caches").join("last-frame"), id)
+}
+/// What a last frame shows: the project's revision and the playhead's time,
+/// by this build, and whether it is the settled picture or a preview (which
+/// the settled one replaces).
+pub(crate) fn last_frame_mark(revision: u64, time: f64, settled: bool) -> String {
+    let preview = if settled { "" } else { "\npreview" };
+    format!("{revision}\n{time:.4}\n{}{preview}", identity())
+}
+/// The picture that stands in for `id` while it opens: the frame its viewer
+/// last showed, else its Home card's poster; none when neither was ever
+/// stored (PM-384).
+pub(crate) fn opening_poster(profile: &Path, id: &str) -> Option<PathBuf> {
+    [
+        last_frame_files(profile, id).0,
+        files(&profile.join("caches").join("thumbnails"), id).0,
+    ]
+    .into_iter()
+    .find(|poster| poster.is_file())
+}
+/// How long the viewer's picture must hold still before it is kept as the
+/// last frame: a kill or a signal quit keeps nothing, so the picture a
+/// launch opens on is the last one that held this long.
+pub(crate) const LAST_FRAME_STILL: std::time::Duration = std::time::Duration::from_secs(4);
+/// The least time between two pictures kept that way.
+pub(crate) const LAST_FRAME_GAP: std::time::Duration = std::time::Duration::from_secs(10);
+/// What the still picture's watch does next.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Still {
+    /// Look again after this long.
+    Wait(std::time::Duration),
+    /// Keep it now.
+    Store,
+}
+/// The still picture's watch, given how long the picture has held, how long
+/// since the last one was kept (if one was), whether one is still being
+/// written, and whether the picture is moving or still loading.
+pub(crate) fn still(
+    held: std::time::Duration,
+    since_stored: Option<std::time::Duration>,
+    writing: bool,
+    busy: bool,
+) -> Still {
+    if held < LAST_FRAME_STILL {
+        return Still::Wait(LAST_FRAME_STILL - held);
+    }
+    if writing || busy {
+        return Still::Wait(LAST_FRAME_STILL);
+    }
+    match since_stored {
+        Some(since) if since < LAST_FRAME_GAP => Still::Wait(LAST_FRAME_GAP - since),
+        _ => Still::Store,
+    }
+}
+/// The watch over the picture the viewer shows, for the last frame.
+#[derive(Default)]
+pub(crate) struct StillWatch {
+    /// The picture shown (its revision, time and whether it settled) and
+    /// since when.
+    pub shown: Option<((u64, i64, bool), std::time::Instant)>,
+    /// A watch is waiting for the picture to hold.
+    pub watching: bool,
+    /// A picture is being written.
+    pub writing: bool,
+    /// When the last one was kept.
+    pub stored: Option<std::time::Instant>,
+}
+/// Whether the stored last frame already shows `mark`.
+pub(crate) fn last_frame_current(profile: &Path, id: &str, mark: &str) -> bool {
+    let (image, stamp) = last_frame_files(profile, id);
+    image.is_file() && std::fs::read_to_string(stamp).is_ok_and(|s| s == mark)
+}
+/// Stores `picture`, what the viewer presented, as `id`'s last frame with
+/// `mark`: the engine's held picture read and written, no render. Blocking:
+/// call it off the main thread. Whether it was stored.
+pub(crate) fn write_last_frame(
+    picture: &pm_engine_service::Picture,
+    profile: &Path,
+    id: &str,
+    mark: &str,
+) -> bool {
+    let Some((width, height, rgba)) = picture.srgb8(LAST_WIDTH) else {
+        return false;
+    };
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_compression(png::Compression::Fast);
+        let Ok(mut writer) = encoder.write_header() else {
+            return false;
+        };
+        if writer.write_image_data(&rgba).is_err() {
+            return false;
+        }
+    }
+    let (image, stamp) = last_frame_files(profile, id);
+    let Some(dir) = image.parent() else {
+        return false;
+    };
+    // Written beside and renamed over: a launch never reads half a picture.
+    let partial = image.with_extension("png.partial");
+    std::fs::create_dir_all(dir).is_ok()
+        && std::fs::write(&partial, &png).is_ok()
+        && std::fs::rename(&partial, &image).is_ok()
+        && std::fs::write(&stamp, mark).is_ok()
 }
 
 #[cfg(test)]
@@ -188,6 +339,63 @@ mod tests {
         writer.write_image_data(&pixels).unwrap();
         drop(writer);
         out
+    }
+
+    /// A last frame is current only for the revision and time it shows; a
+    /// close or save with another one keeps it again (PM-384).
+    #[test]
+    fn a_last_frame_is_current_for_its_revision_and_time() {
+        let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+        let mark = last_frame_mark(7, 12.04, true);
+        assert!(!last_frame_current(&profile, "file-1", &mark), "none stored yet");
+        let (image, stamp) = last_frame_files(&profile, "file-1");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&stamp, &mark).unwrap();
+        assert!(image.ends_with("caches/last-frame/file_1.png"));
+        assert!(last_frame_current(&profile, "file-1", &mark));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04, true)));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3., true)));
+        assert!(
+            !last_frame_current(&profile, "file-1", &last_frame_mark(7, 12.04, false)),
+            "a preview is not the settled picture"
+        );
+        std::fs::remove_dir_all(&profile).unwrap();
+    }
+
+    /// An opening project stands in with the frame its viewer last showed,
+    /// else its Home card's picture, never nothing when either exists.
+    #[test]
+    fn an_opening_project_shows_its_last_frame_else_its_home_poster() {
+        let profile = tempfile::tempdir().unwrap();
+        let profile = profile.path();
+        assert_eq!(opening_poster(profile, "file-1"), None, "none ever stored");
+        let (card, _) = files(&profile.join("caches/thumbnails"), "file-1");
+        std::fs::create_dir_all(card.parent().unwrap()).unwrap();
+        std::fs::write(&card, b"png").unwrap();
+        assert_eq!(opening_poster(profile, "file-1"), Some(card.clone()));
+        let (last, _) = last_frame_files(profile, "file-1");
+        std::fs::create_dir_all(last.parent().unwrap()).unwrap();
+        std::fs::write(&last, b"png").unwrap();
+        assert_eq!(opening_poster(profile, "file-1"), Some(last));
+        assert_eq!(opening_poster(profile, "file-2"), None, "another project's is not its");
+    }
+
+    /// A picture that held still is kept, so a launch after a kill or a
+    /// signal quit (which store nothing) opens on it; a moving or loading
+    /// picture waits, and writes stay one at a time and spaced.
+    #[test]
+    fn a_still_picture_is_kept_once_it_holds() {
+        use std::time::Duration;
+        let s = Duration::from_secs;
+        assert_eq!(still(s(1), None, false, false), Still::Wait(s(3)));
+        assert_eq!(still(s(4), None, false, false), Still::Store);
+        assert_eq!(still(s(9), Some(s(60)), false, false), Still::Store);
+        // Playing, settling or waiting on its effects: looked at again.
+        assert_eq!(still(s(9), None, false, true), Still::Wait(LAST_FRAME_STILL));
+        assert_eq!(still(s(9), None, true, false), Still::Wait(LAST_FRAME_STILL));
+        assert_eq!(still(s(9), Some(s(4)), false, false), Still::Wait(s(6)));
     }
 
     #[test]

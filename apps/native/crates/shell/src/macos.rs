@@ -192,6 +192,11 @@ fn restore_session(cx: &mut App) {
         open_editor_window(cx, true, None, None);
         return;
     }
+    // The front window's project opens first; the others' after its first
+    // frame (`native::front_restoring`).
+    if plan.len() > 1 {
+        native::set_front_restoring(front);
+    }
     // The window (or tab group) that was in front opens last, so it lies
     // over the others from the start: separate windows each take the front
     // as they open.
@@ -286,6 +291,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_front = native::front_restoring() == Some(s.id);
                 host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {

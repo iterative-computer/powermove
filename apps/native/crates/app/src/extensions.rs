@@ -188,6 +188,10 @@ pub struct Extensions {
     /// a panel published while the window is open is shown, not left in a menu.
     mounted_once: BTreeSet<String>,
     booted: bool,
+    /// When its extensions last restarted (they do several times as a project
+    /// opens): a panel an extension opens as it starts again only returns to
+    /// its place for a while after, never taking the tab a stack shows.
+    restarted: Option<std::time::Instant>,
     /// The D11 sheet is up for this task.
     unresponsive: Option<u64>,
     /// Quit stopped this window's extensions (a hung one); a cancelled quit
@@ -271,6 +275,7 @@ impl Default for Extensions {
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
             booted: false,
+            restarted: None,
             unresponsive: None,
             stopped_for_quit: false,
             // Until the host says its first load pass is over, an effect the
@@ -694,10 +699,18 @@ impl Controller {
         match request["kind"].as_str() {
             Some("panel") => {
                 let id = request["id"].as_str().unwrap_or_default();
-                let verb = if request["open"] == true {
-                    "show"
-                } else {
-                    "close"
+                // While the project opens, an extension that opens its panel
+                // as it starts (each restart does) puts it in its place only:
+                // the dock shows the tab the person left it on (PM-427).
+                let starting = !self.extensions.booted
+                    || self
+                        .extensions
+                        .restarted
+                        .is_some_and(|at| at.elapsed() < RESTART_SETTLE);
+                let verb = match request["open"] == true {
+                    true if starting => "restore",
+                    true => "show",
+                    false => "close",
                 };
                 self.host
                     .borrow()
@@ -1307,13 +1320,15 @@ impl Controller {
             let shell = self.host.borrow();
             for id in known.intersection(&self.extensions.suspended.clone()) {
                 self.extensions.suspended.remove(id);
+                // Back in its place; the stack keeps the tab it shows.
                 if self.extensions.parked.remove(id) {
-                    shell.send_command(&format!("panel:show:{id}"), vec![]);
+                    shell.send_command(&format!("panel:restore:{id}"), vec![]);
                 }
             }
         }
         self.extensions.known_panels = known;
         if vanished {
+            self.extensions.restarted = Some(std::time::Instant::now());
             self.tell_panels_ready(false);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(PARK_GRACE).await;
@@ -1345,6 +1360,7 @@ impl Controller {
             .iter()
             .map(|(id, (title, _))| (id.clone(), title.clone()));
         let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
+        remember_titles(&self.profile, &contributed);
         self.extensions.contributed = contributed;
         let undo = Choice {
             label: "Undo Extension Change".into(),
@@ -2768,3 +2784,49 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
 /// How long a panel whose extension left the registry keeps its place before
 /// it is parked (an extension restarting for a project open comes back sooner).
 const PARK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long after its extensions restart a window takes their panel opens as
+/// their start-up, not a request to show the panel (PM-427).
+const RESTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The titles of extension panels as they last registered, kept in the
+/// profile: while a project opens, a panel whose extension is still starting
+/// shows its name in its tab (PM-427), not its id. Read once per process.
+fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
+    profile.join("caches").join("panel-titles.json")
+}
+thread_local! {
+    static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
+}
+fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String, String>) -> R) -> R {
+    TITLES.with(|t| {
+        let mut t = t.borrow_mut();
+        let titles = t.get_or_insert_with(|| {
+            std::fs::read(titles_file(profile))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        });
+        f(titles)
+    })
+}
+pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
+    with_titles(profile, |t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
+    let changed = with_titles(profile, |t| {
+        let mut changed = false;
+        for (id, title) in panels {
+            if t.get(id) != Some(title) {
+                t.insert(id.clone(), title.clone());
+                changed = true;
+            }
+        }
+        changed.then(|| serde_json::to_vec(t).ok()).flatten()
+    });
+    if let Some(bytes) = changed {
+        let file = titles_file(profile);
+        let _ = std::fs::create_dir_all(file.parent().unwrap());
+        let _ = std::fs::write(file, bytes);
+    }
+}
+
