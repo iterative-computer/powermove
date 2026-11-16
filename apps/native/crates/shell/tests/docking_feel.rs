@@ -120,12 +120,30 @@ fn every_drop_lands_where_its_preview_showed() {
                             continue;
                         };
                         let mut next = start.clone();
-                        if stack {
-                            next.move_stack_to(source, preview.target).unwrap();
-                        } else {
-                            next.move_panel_to(source, preview.target).unwrap();
-                        }
+                        next.apply_drop(source, &preview, stack).unwrap();
                         assert_ne!(next, start, "{what}: a preview for no change");
+                        // Where the chip said: above or below the panel it
+                        // named, or among its tabs.
+                        let (sd, sg, _) = next.find(source).unwrap();
+                        let named = |d: usize, g: usize| {
+                            let id = start.shown_after(d, g, source, stack).unwrap();
+                            next.find(&id).unwrap()
+                        };
+                        match preview.near {
+                            Near::Above(d, g) => {
+                                let (nd, ng, _) = named(d, g);
+                                assert!(nd == sd && ng == sg + 1, "{what}: not above {:?}", preview.near);
+                            }
+                            Near::Below(d, g) => {
+                                let (nd, ng, _) = named(d, g);
+                                assert!(nd == sd && ng + 1 == sg, "{what}: not below {:?}", preview.near);
+                            }
+                            Near::Tab(d, g) => {
+                                let (nd, ng, _) = named(d, g);
+                                assert!(nd == sd && ng == sg, "{what}: not among its tabs");
+                            }
+                            _ => {}
+                        }
                         sound(&next, bounds, &what);
                         let landed = rect_of(&next, bounds, source);
                         assert!(
@@ -420,10 +438,51 @@ fn the_top_edge_docks_a_band_above_the_columns() {
         for (zone, x, y) in spots(target.rect, &t) {
             if let Some(p) = top.drop_target_for(&g, bounds, (x, y), &t, "inspector", false) {
                 let mut next = top.clone();
-                next.move_panel_to("inspector", p.target).unwrap();
+                next.apply_drop("inspector", &p, false).unwrap();
                 sound(&next, bounds, zone);
                 assert!(close(rect_of(&next, bounds, "inspector"), p.rect), "{zone}");
             }
         }
     }
+}
+
+#[test]
+fn a_double_click_puts_two_panels_back_at_their_heights() {
+    let t = tokens();
+    let mut checked = 0;
+    for bounds in SIZES {
+        let start = Layout::preset("design");
+        let geometry = start.geometry(bounds, &t);
+        for d in geometry.dividers.iter().filter(|d| d.group.is_some()) {
+            let mut l = start.clone();
+            l.resize(d, 60., bounds, &t);
+            let heights = |l: &Layout| {
+                let g = l.geometry(bounds, &t);
+                let i = d.group.unwrap();
+                let h = |gi: usize| {
+                    g.panels
+                        .iter()
+                        .find(|p| (p.dock, p.group) == (d.dock, gi))
+                        .unwrap()
+                        .rect
+                        .h
+                };
+                (h(i), h(i + 1))
+            };
+            if heights(&l) == heights(&start) {
+                continue;
+            }
+            assert!(l.reset_split(d, bounds, &t), "{d:?}");
+            let (a, b) = heights(&l);
+            let (a0, b0) = heights(&start);
+            assert!(
+                (a - a0).abs() < 1. && (b - b0).abs() < 1.,
+                "{d:?} at {}: {a}/{b}, shipped {a0}/{b0}",
+                bounds.h
+            );
+            sound(&l, bounds, "reset");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "{checked} splits reset");
 }

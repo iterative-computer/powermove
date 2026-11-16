@@ -831,8 +831,7 @@ impl Render for PanelLibrary {
                                 .items_center()
                                 .gap(px(8.))
                                 .text_role(&t, Text::Title)
-                                .child(Page::Panels(Some(source)).title())
-                                .child(kit::shelf_count(&t, books.len())),
+                                .child(Page::Panels(Some(source)).title()),
                         );
                     }
                     let mut widths: Vec<_> = books
