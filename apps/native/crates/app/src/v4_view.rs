@@ -179,6 +179,10 @@ fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> 
     ((next * scale).round() / scale).clamp(facts.min, facts.max)
 }
 
+/// How long a body's scroll rests before its controls are themselves again:
+/// the scroll layer's settle (P-SCROLL-LAYER).
+const PICTURE_REST: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -231,6 +235,11 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// While the body scrolls, the controls show as pictures of themselves
+    /// (P-SLOT-PICTURE); `pictures_at` counts the scroll's steps, so only
+    /// the last one's rest lets them go.
+    pictures: pm_shell::picture::PictureHold,
+    pictures_at: u64,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
@@ -347,6 +356,8 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            pictures: Default::default(),
+            pictures_at: 0,
             cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
@@ -938,10 +949,9 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409), Settings' as well; in a
+                    // row's value well it is the small size.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -1012,6 +1022,11 @@ impl SurfaceView {
         }
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
+        }
+        // The header stays put while the body scrolls: its controls are
+        // never pictured.
+        if !self.in_header(id) {
+            control.update(cx, |v, _| v.picture_with(&self.pictures));
         }
         self.controls.insert(id, control);
     }
@@ -1249,6 +1264,9 @@ impl SurfaceView {
                 f.begin_editing_selecting_all(cx);
             });
         }
+        if !self.in_header(id) {
+            field.update(cx, |f, _| f.picture_with(&self.pictures));
+        }
         self.fields.insert(id, field);
     }
     /// Ask JS for the row window that covers native scroll, when it left the
@@ -1268,7 +1286,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -1695,6 +1713,55 @@ impl SurfaceView {
         }
         false
     }
+    /// A step of the body's scroll: its controls show as pictures of
+    /// themselves until the scroll has rested `PICTURE_REST` (the scroll
+    /// layer's settle), then as themselves again (P-SLOT-PICTURE).
+    pub fn scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controls.is_empty() && self.fields.is_empty() {
+            return;
+        }
+        self.pictures_at += 1;
+        if self.pictures.set(true) {
+            self.hold_changed(cx);
+        }
+        let at = self.pictures_at;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PICTURE_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.pictures_at == at && v.pictures.set(false) {
+                    v.hold_changed(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Whether a node is the panel's header or inside it.
+    fn in_header(&self, mut id: Id) -> bool {
+        let Some(header) = self.prepared.header else {
+            return false;
+        };
+        loop {
+            if id == header {
+                return true;
+            }
+            match self.prepared.node(id).and_then(|n| n.parent) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+    fn hold_changed(&self, cx: &mut Context<Self>) {
+        for control in self.controls.values() {
+            control.update(cx, |c, cx| c.hold_changed(cx));
+        }
+        for field in self.fields.values() {
+            field.update(cx, |f, cx| f.hold_changed(cx));
+        }
+    }
+    /// Whether the controls show as pictures (a scroll is moving).
+    pub fn pictures_held(&self) -> bool {
+        self.pictures.held()
+    }
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
@@ -1807,6 +1874,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -1837,8 +1908,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -2429,7 +2507,13 @@ impl SurfaceView {
                 .and_then(|m| m.get("rowFloor"))
                 .and_then(Value::as_f64)
                 .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+                .map_or(0., |rows| {
+                    // Rows of a virtual list are its own height.
+                    let row = node
+                        .virtual_window
+                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                    rows as f32 * row
+                });
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -3753,7 +3837,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {

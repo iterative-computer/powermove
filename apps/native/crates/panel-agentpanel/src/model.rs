@@ -919,7 +919,11 @@ impl Panel {
         if let Some(file) = session.draft.attachments().find(|f| !f.payload_available()) {
             return Err(Error::MissingPayload(file.id().into()));
         }
+        // The agent reads where each attachment sits ("[Attachment: …]");
+        // the thread keeps what the person typed, each attachment at its
+        // place (`promptOffset`), so the bubble and the title show their words.
         let text = session.draft.request_text();
+        let (typed, placed) = session.draft.legacy();
         let steer = session.run.is_some();
         if steer && target.run.as_deref() != Some(run_id) {
             return Err(Error::Stale);
@@ -929,7 +933,7 @@ impl Panel {
         if steer {
             session.archive_trace(now, true)?;
         }
-        session.append(json!({"role":"user","text":text,"attachments":files,"steering":steer}))?;
+        session.append(json!({"role":"user","text":typed,"attachments":placed,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;

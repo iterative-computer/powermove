@@ -296,3 +296,32 @@ test("a new column count asks for a page with room for media imported later", as
     await m.close();
   }
 });
+
+test("the chosen view draws the list or the grid at any width (PM-447)", async () => {
+  const shape = (root: ReturnType<typeof recorder>["root"]) =>
+    (card(root, "a").props.style as { flexDirection?: string }).flexDirection;
+  for (const [mode, drawn] of [
+    ["grid", "column"],
+    ["list", "row"],
+  ] as const) {
+    const m = await model(project, runtime);
+    const { root } = recorder();
+    try {
+      // One column, as a grid is before it hears its width: the Grid
+      // toggle still draws cards, the List toggle rows.
+      await root.render(
+        <ProjectPanel
+          service={m.service}
+          native={native}
+          layout={layout}
+          layoutFor={() => ({ columns: 1, rowHeight: 140 })}
+          viewMode={mode}
+        />,
+      );
+      expect(shape(root)).toBe(drawn);
+    } finally {
+      await root.dispose();
+      await m.close();
+    }
+  }
+});

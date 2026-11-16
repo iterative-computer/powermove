@@ -41,13 +41,15 @@ for (const selected of [false, true]) {
     }
   });
 }
-for (const [sync, label] of [
-  ["Syncing", "Syncing…"],
-  ["NotFound", "Folder not found"],
-  ["Synced", "4 items"],
+for (const [sync, card, listed] of [
+  ["Syncing", "Syncing…", "Syncing…"],
+  ["NotFound", "Folder not found", "Folder not found"],
+  // A list row's trailing column is the count alone.
+  ["Synced", "4 items", "4"],
 ] as const) {
   test(`folder ${sync} stays quiet in grid and list`, async () => {
     for (const viewMode of ["grid", "list"] as const) {
+      const label = viewMode === "grid" ? card : listed;
       const row = folder();
       if ("Folder" in row.data) {
         row.data.Folder.link = { path: "/synthetic/linked" };

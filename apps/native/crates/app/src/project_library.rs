@@ -108,9 +108,15 @@ pub struct ProjectLibrary {
     idle_failed: std::collections::HashSet<String>,
     /// Projects whose poster left offline media out: their card says so.
     missing_media: std::collections::HashSet<String>,
-    /// Cards whose name and second line would read the same as an earlier
-    /// card's: the copy they are ("Copy 2"), so each tells itself apart.
-    copy_marks: std::collections::HashMap<String, usize>,
+    /// Projects whose poster is one flat colour (blank wherever it was
+    /// looked at, or all its media missing): the card says which on it,
+    /// never a bare grey page.
+    flat: std::collections::HashSet<String>,
+    /// Projects whose name another shares: their number among them ("Run6
+    /// (2)"), as the project strip names alike tabs, so every card tells
+    /// itself apart by its name. The first (by id, which never changes) has
+    /// none.
+    numbers: std::collections::HashMap<String, usize>,
     idle_running: bool,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
@@ -218,7 +224,8 @@ impl ProjectLibrary {
             idle_tried: Default::default(),
             idle_failed: Default::default(),
             missing_media: Default::default(),
-            copy_marks: Default::default(),
+            numbers: Default::default(),
+            flat: Default::default(),
             idle_running: false,
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
@@ -671,6 +678,23 @@ const CARD: f32 = 240.;
 /// A card's round "more" button.
 const MORE: f32 = 24.;
 const CARD_LEAST: f32 = 160.;
+/// Each project whose name another shares, numbered among them from 2 in the
+/// order of their ids (which never change, so an edit renumbers nothing);
+/// the first keeps its name as it is.
+fn numbers(rows: &[Row]) -> std::collections::HashMap<String, usize> {
+    let mut alike: std::collections::HashMap<String, Vec<&str>> = Default::default();
+    for row in rows {
+        alike.entry(row.title()).or_default().push(&row.id);
+    }
+    let mut numbers = std::collections::HashMap::new();
+    for mut ids in alike.into_values().filter(|ids| ids.len() > 1) {
+        ids.sort_unstable();
+        for (n, id) in ids.into_iter().enumerate().skip(1) {
+            numbers.insert(id.to_owned(), n + 1);
+        }
+    }
+    numbers
+}
 /// A card's title, `fits` characters at most. Cut at its end it would read
 /// like another title cut there ("Accept — Recovered — …" six times), so it
 /// keeps its start and its end and drops the middle, which the others share.
@@ -695,6 +719,46 @@ fn fit_title(title: &str, titles: &[String], fits: usize) -> String {
         chars[..start].iter().collect::<String>(),
         chars[chars.len() - end..].iter().collect::<String>()
     )
+}
+#[cfg(test)]
+mod number_tests {
+    use super::{Row, numbers};
+    fn row(id: &str, name: &str) -> Row {
+        Row {
+            id: id.into(),
+            name: name.into(),
+            modified_ms: None,
+            deleted_ms: None,
+            trashed: false,
+            summary: None,
+            file: None,
+            edited: false,
+            open: false,
+        }
+    }
+    /// Acceptance run 20: four cards read "Run6 — Native". Each alike name
+    /// after the first is numbered, by id, so an edit renumbers nothing.
+    #[test]
+    fn alike_names_are_numbered_and_others_are_not() {
+        let rows = [
+            row("Pd", "Run6 — Native"),
+            row("Pb", "Run6 — Native — Native"),
+            row("Pa", "Paper"),
+            row("Pc", "Run6 — Native"),
+            row("Pe", "Run6 — Native"),
+        ];
+        let n = numbers(&rows);
+        // "— Native — Native" reads as "Run6 — Native" too (original_name).
+        assert_eq!(n.get("Pb"), None, "the first by id keeps its name");
+        assert_eq!(
+            (n.get("Pc"), n.get("Pd"), n.get("Pe")),
+            (Some(&2), Some(&3), Some(&4))
+        );
+        assert_eq!(n.get("Pa"), None);
+        let mut edited = rows.clone();
+        edited.reverse();
+        assert_eq!(numbers(&edited), n, "the order cards stand in changes nothing");
+    }
 }
 #[cfg(test)]
 mod fit_title_tests {
@@ -982,6 +1046,11 @@ impl ProjectLibrary {
         let (renderer, dir) = (source.renderer.clone(), source.dir.clone());
         let fade = kit::key(&format!("poster-{id}"));
         let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
+            if crate::poster::has_content(&png) {
+                v.flat.remove(&id);
+            } else {
+                v.flat.insert(id.clone());
+            }
             v.thumbs.insert(
                 id,
                 (
@@ -1001,6 +1070,11 @@ impl ProjectLibrary {
                         .background_executor()
                         .spawn(async move {
                             let (stamp, _) = crate::poster::stamp(&stamp_file)?;
+                            // An older format may hold the Media Offline
+                            // card: none is shown, and one is drawn again.
+                            if !crate::poster::current_format(&stamp_file) {
+                                return None;
+                            }
                             let missing = file.with_extension("missing").exists();
                             Some((stamp, std::fs::read(file).ok()?, missing))
                         })
@@ -1187,10 +1261,14 @@ impl ProjectLibrary {
         if self.missing_media.contains(&row.id) {
             facts.push_str(" · Media missing");
         }
-        // First, so a narrow card never cuts the part that tells it apart.
-        match self.copy_marks.get(&row.id) {
-            Some(copy) => format!("Copy {copy} · {facts}"),
-            None => facts,
+        facts
+    }
+    /// The project's name as its card shows it: numbered among projects of
+    /// the same name.
+    fn shown_title(&self, row: &Row) -> String {
+        match self.numbers.get(&row.id) {
+            Some(n) => format!("{} ({n})", row.title()),
+            None => row.title(),
         }
     }
     fn told_apart(&self, row: &Row, now: i64) -> String {
@@ -1323,7 +1401,7 @@ impl ProjectLibrary {
         let c = &t.colors;
         // About how many characters of a title fit the card.
         let fits = (width / (t.typography.title * 0.55)).floor().max(8.) as usize;
-        let title = fit_title(&row.title(), &self.titles, fits);
+        let title = fit_title(&self.shown_title(row), &self.titles, fits);
         let active = self.active.as_deref() == Some(row.id.as_str());
         div()
             .flex()
@@ -1404,6 +1482,42 @@ impl ProjectLibrary {
             .size_full()
             .rounded(px(inner))
             .map(|page| match thumbnail {
+                // A flat picture: its colour, and on it what it is.
+                Some(image) if self.flat.contains(&row.id) => {
+                    let (symbol, says) = if self.missing_media.contains(&row.id) {
+                        ("photo.badge.exclamationmark", "Media missing")
+                    } else {
+                        ("rectangle.dashed", "Blank")
+                    };
+                    page.relative().bg(rgb(c.viewer)).child(
+                        img(ImageSource::Image(image))
+                            .absolute()
+                            .size_full()
+                            .object_fit(if fills {
+                                ObjectFit::Cover
+                            } else {
+                                ObjectFit::Contain
+                            })
+                            .when(fills, |picture| picture.rounded(px(inner))),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(t.space.xs))
+                            .text_role(t, Text::Caption)
+                            .text_color(ink(c.text, tr.faint))
+                            .child(kit.symbol(
+                                symbol,
+                                t.metrics.symbol_toolbar,
+                                Weight::Regular,
+                                c.secondary,
+                            ))
+                            .child(says),
+                    )
+                }
                 Some(image) => page.bg(rgb(c.viewer)).child(
                     img(ImageSource::Image(image))
                         .size_full()
@@ -1415,13 +1529,25 @@ impl ProjectLibrary {
                         .when(fills, |picture| picture.rounded(px(inner)))
                         .opacity(fade.clamp(0., 1.)),
                 ),
-                // No picture: while its poster is on its way, the empty
-                // frame; once none could be drawn, say so.
+                // No picture: while its poster is on its way, a faint
+                // picture glyph (never a bare grey page); once none could
+                // be drawn, say so.
                 None => page.bg(rgb(c.panel)).child(
                     div()
                         .text_role(t, Text::Caption)
                         .text_color(ink(c.text, tr.faint))
-                        .when(self.idle_failed.contains(&row.id), |d| d.child("No Preview")),
+                        .map(|d| {
+                            if self.idle_failed.contains(&row.id) {
+                                d.child("No Preview")
+                            } else {
+                                d.opacity(0.5).child(kit.symbol(
+                                    "photo",
+                                    t.metrics.symbol_toolbar,
+                                    Weight::Regular,
+                                    c.secondary,
+                                ))
+                            }
+                        }),
                 ),
             });
         // Under the pointer: a round "more" button at the page's top
@@ -1445,7 +1571,7 @@ impl ProjectLibrary {
                 .bg(rgba(if open { 0x000000a6 } else { 0x00000073 }))
                 .opacity(reveal)
                 .role(Role::Button)
-                .aria_label(format!("More actions for {}", row.title()))
+                .aria_label(format!("More actions for {}", self.shown_title(row)))
                 .tooltip(kit::tooltip(t, "More"))
                 .child(kit.symbol(
                     "ellipsis",
@@ -1522,8 +1648,8 @@ impl ProjectLibrary {
             .role(Role::ListItem)
             .aria_selected(selected)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
-                None => format!("{}, {facts}", row.title()),
+                Some(tag) => format!("{}, {tag}, {facts}", self.shown_title(row)),
+                None => format!("{}, {facts}", self.shown_title(row)),
             })
             .child(poster)
             .child(self.caption(kit, row, &facts, width).px(px(t.space.hair)));
@@ -1549,8 +1675,8 @@ impl ProjectLibrary {
             .gap(px(t.space.lg))
             .role(Role::ListItem)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
-                None => format!("{}, {facts}", row.title()),
+                Some(tag) => format!("{}, {tag}, {facts}", self.shown_title(row)),
+                None => format!("{}, {facts}", self.shown_title(row)),
             })
             .child(self.frame(
                 kit,
@@ -1576,7 +1702,7 @@ impl ProjectLibrary {
                             .truncate()
                             .text_role(t, Text::Title)
                             .text_color(rgb(t.colors.text))
-                            .child(row.title()),
+                            .child(self.shown_title(row)),
                     )
                     .children(self.tag(row).map(|tag| {
                         div()
@@ -2082,26 +2208,13 @@ impl Render for ProjectLibrary {
             Content::Projects => {
                 let mut rows = self.controller.rows.clone();
                 let mut seen = std::collections::HashSet::new();
-                self.titles = rows.iter().map(Row::title).collect();
                 self.repeated = rows
                     .iter()
                     .map(Row::title)
                     .filter(|title| !seen.insert(title.clone()))
                     .collect();
-                // Same name and same second line: the later ones are copies.
-                let now = crate::poster::now_ms();
-                let mut firsts = std::collections::HashMap::new();
-                self.copy_marks.clear();
-                let mut by_age: Vec<&Row> = rows.iter().collect();
-                by_age.sort_by_key(|r| (r.modified_ms, r.id.clone()));
-                for row in by_age {
-                    let key = (row.title(), self.told_apart(row, now));
-                    let n = firsts.entry(key).or_insert(0usize);
-                    *n += 1;
-                    if *n > 1 {
-                        self.copy_marks.insert(row.id.clone(), *n);
-                    }
-                }
+                self.numbers = numbers(&rows);
+                self.titles = rows.iter().map(|r| self.shown_title(r)).collect();
                 if self.controller.opening().is_some() {
                     let held = self
                         .held_order

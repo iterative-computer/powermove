@@ -105,7 +105,16 @@ fn identity() -> String {
         .unwrap_or_default();
     // The poster's own format: posters drawn before offline media was left
     // out (the Media Offline card) are drawn again.
-    format!("{} ({build}) posters 2", crate::updates::current_version())
+    format!("{} ({build}) {FORMAT}", crate::updates::current_version())
+}
+/// The poster format this build draws: offline media left out.
+const FORMAT: &str = "posters 2";
+/// Whether a stored poster is in this build's format: one in an older
+/// format may show the Media Offline card, so it is never shown, only
+/// drawn again.
+pub(crate) fn current_format(stamp_file: &Path) -> bool {
+    std::fs::read_to_string(stamp_file)
+        .is_ok_and(|text| text.lines().nth(2).is_some_and(|by| by.trim().ends_with(FORMAT)))
 }
 /// A stored poster's stamp and the time in the composition it shows. The
 /// stamp is [`STALE`] when another build drew it.
@@ -120,9 +129,28 @@ fn stamp_by(stamp_file: &Path, identity: &str) -> Option<(i64, Option<f64>)> {
     let same = lines.next().is_some_and(|by| by.trim() == identity);
     Some((if same { stamp } else { STALE }, at))
 }
+/// A stored picture decoded to straight RGBA with its size, to show from
+/// the first frame it is laid out in. Blocking (a file read and a decode).
+pub(crate) fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut pixels).ok()?;
+    pixels.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => pixels,
+        png::ColorType::Rgb => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None,
+    };
+    Some((info.width, info.height, rgba))
+}
 /// Whether a frame shows anything: a flat frame (all black, or one colour
 /// from edge to edge) does not.
-fn has_content(png: &[u8]) -> bool {
+pub(crate) fn has_content(png: &[u8]) -> bool {
     let mut reader = match png::Decoder::new(std::io::Cursor::new(png)).read_info() {
         Ok(reader) => reader,
         Err(_) => return false,
@@ -215,11 +243,9 @@ pub(crate) fn last_frame_files(profile: &Path, id: &str) -> (PathBuf, PathBuf) {
     files(&profile.join("caches").join("last-frame"), id)
 }
 /// What a last frame shows: the project's revision and the playhead's time,
-/// by this build, and whether it is the settled picture or a preview (which
-/// the settled one replaces).
-pub(crate) fn last_frame_mark(revision: u64, time: f64, settled: bool) -> String {
-    let preview = if settled { "" } else { "\npreview" };
-    format!("{revision}\n{time:.4}\n{}{preview}", identity())
+/// by this build.
+pub(crate) fn last_frame_mark(revision: u64, time: f64) -> String {
+    format!("{revision}\n{time:.4}\n{}", identity())
 }
 /// The picture that stands in for `id` while it opens: the frame its viewer
 /// last showed, else its Home card's poster; none when neither was ever
@@ -347,7 +373,7 @@ mod tests {
     fn a_last_frame_is_current_for_its_revision_and_time() {
         let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&profile);
-        let mark = last_frame_mark(7, 12.04, true);
+        let mark = last_frame_mark(7, 12.04);
         assert!(!last_frame_current(&profile, "file-1", &mark), "none stored yet");
         let (image, stamp) = last_frame_files(&profile, "file-1");
         std::fs::create_dir_all(image.parent().unwrap()).unwrap();
@@ -355,12 +381,8 @@ mod tests {
         std::fs::write(&stamp, &mark).unwrap();
         assert!(image.ends_with("caches/last-frame/file_1.png"));
         assert!(last_frame_current(&profile, "file-1", &mark));
-        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04, true)));
-        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3., true)));
-        assert!(
-            !last_frame_current(&profile, "file-1", &last_frame_mark(7, 12.04, false)),
-            "a preview is not the settled picture"
-        );
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04)));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3.)));
         std::fs::remove_dir_all(&profile).unwrap();
     }
 
@@ -413,6 +435,21 @@ mod tests {
         assert!(!has_content(b"not a png"));
     }
 
+    #[test]
+    fn only_a_poster_in_this_format_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            super::current_format(&path)
+        };
+        // Older posters (no format, or the first) may hold Media Offline.
+        assert!(!at("a.stamp", "12\n1"));
+        assert!(!at("b.stamp", "12\n1\n0.1.0 (1)"));
+        assert!(at("c.stamp", "12\n1\n0.1.0 (1) posters 2"));
+        assert!(at("d.stamp", "12\n1\n0.2.0 (7) posters 2"), "another build's, same format");
+        assert!(!super::current_format(&dir.path().join("none.stamp")));
+    }
     #[test]
     fn a_poster_is_looked_for_a_third_in_first() {
         let at = times(Some(60.), None);
