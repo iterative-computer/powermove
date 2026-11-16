@@ -51,6 +51,13 @@ fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<Strin
 /// (a second Quit offers to quit now meanwhile). `None`: nothing to wait
 /// for, or the window is asking the person something (a recovery choice, an
 /// alert, an open edit), which only they can end.
+/// Whether a quit waits for a project operation at this window. A quit
+/// signal never does: the operation may be another window's open waiting on
+/// a recovery answer nobody can give, and the signal path saves nothing (the
+/// journal keeps an operation's edits; the durability barrier runs after).
+fn quit_fenced(state: CloseState, operation: bool, terminating: bool) -> bool {
+    matches!(state, CloseState::Dirty | CloseState::Clean) && operation && !terminating
+}
 fn quit_waits_for(
     state: CloseState,
     opening: bool,
@@ -909,8 +916,11 @@ impl Controller {
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
         crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
-        let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
-            && self.mcp.operation_in_progress();
+        let fenced = quit_fenced(
+            state,
+            self.mcp.operation_in_progress(),
+            cx.global::<QuitCoordinator>().terminating,
+        );
         if intent == Intent::Quit
             && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
         {
@@ -1299,6 +1309,15 @@ mod tests {
             quit_waits_for(Clean, false, false, true),
             Some("finishing a project operation")
         );
+        // A person's Quit waits for an operation; a quit signal never does
+        // (one window's open waiting on its recovery answer fenced every
+        // other window, and the signal never quit).
+        assert!(quit_fenced(Clean, true, false));
+        assert!(quit_fenced(Dirty, true, false));
+        assert!(!quit_fenced(Clean, true, true));
+        assert!(!quit_fenced(Dirty, true, true));
+        assert!(!quit_fenced(Busy, true, false));
+        assert!(!quit_fenced(Clean, false, false));
         assert_eq!(
             quit_waits_for(Dirty, false, false, true),
             Some("finishing a project operation")
