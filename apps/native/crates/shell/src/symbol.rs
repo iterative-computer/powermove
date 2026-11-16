@@ -217,3 +217,14 @@ mod panel_symbol_tests {
         );
     }
 }
+
+/// A picture already decoded (straight RGBA, `width` × `height`) as GPUI
+/// draws it: shown from the first frame it is laid out in, where a path
+/// loads after it.
+pub fn picture(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Arc<RenderImage>> {
+    for p in rgba.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+}

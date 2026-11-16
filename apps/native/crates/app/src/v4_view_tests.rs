@@ -33,6 +33,14 @@ pub(crate) struct Rig {
     pub runtime: Arc<Builtins>,
     _actor: KernelActor,
 }
+/// A test's window outlives the test (GPUI's test app keeps it), and with it
+/// the panel's runtime: its isolates are closed when the test ends, or every
+/// test kept one and the process's heap account filled over the suite.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.runtime.close();
+    }
+}
 /// Three adjacent static strips on one lane, with handles: pro-edit material.
 pub(crate) fn strips_json() -> String {
     let strip = |id: &str, from: f64| {
@@ -62,7 +70,10 @@ pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
         .unwrap();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A mount waits its turn in the process's shared heap account while
+    // other tests' isolates hold it (the whole suite runs in parallel), then
+    // runs: the time in line counts here too.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(result) = ticket.try_take() {
             result.expect("built-in mount");
@@ -367,7 +378,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 36);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -399,6 +410,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             }
             "ease-curve" | "ease-thumbnail" => {
                 props["value"] = json!([0.42, 0., 0.58, 1.]);
+            }
+            "point-pad" => {
+                props["value"] = json!([10., -20.]);
+                props["binding"] = json!("x+y");
+                props["metadata"] = json!({"pmKit":{"minX":-100.,"maxX":100.,"minY":-100.,"maxY":100.}});
+            }
+            "gradient-bar" => {
+                props["value"] = json!(40.);
+                props["binding"] = json!("midpoint");
+                props["metadata"] = json!({"pmKit":{"start":"#000000","end":"#ffffff","min":1.,"max":99.}});
             }
             _ => {}
         }
@@ -570,6 +591,101 @@ fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppCont
     });
     vcx.run_until_parked();
     assert_eq!(last_range(&mut vcx), Some((0, 10)));
+}
+/// PM-447: the Project panel's grid takes its width even when its list was
+/// published again after the tree the window drew (a page, a rename, an
+/// import republish it while a project lands). The width goes to the
+/// current tree; sent to the older one it was refused and never sent again,
+/// and the grid stayed one column of rows under a lit Grid toggle.
+#[gpui::test]
+fn the_project_grid_hears_its_width_from_a_list_published_again(cx: &mut TestAppContext) {
+    let project = |first: &str| {
+        let assets = (0..12)
+            .map(|i| {
+                let name = if i == 0 {
+                    first.to_owned()
+                } else {
+                    format!("Clip {i}")
+                };
+                format!(r#""a{i}":{{"id":"a{i}","kind":"video","dur":10,"name":"{name}"}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r##"{{"id":"integration","name":"Media","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{{assets}}},"comps":{{}},"layers":[]}}"##
+        )
+    };
+    let rig = rig_project("assets", &project("Clip 0"));
+    let rows = |p: &Publication| {
+        p.surface
+            .nodes()
+            .values()
+            .find(|n| n.r#type == "virtual-list")
+            .and_then(|n| n.props.get("count"))
+            .and_then(Value::as_u64)
+    };
+    let older = publication(&rig);
+    // Before its width, the grid is one column: a row for each item (the
+    // twelve clips and the composition).
+    let items = rows(&older).expect("the media list");
+    assert_eq!(items, 13);
+    // A clip is renamed: the panel publishes its list again before the
+    // window has drawn the older tree.
+    let published = rig.kernel.published(PROJECT).unwrap();
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::Restore {
+                    project: pm_model::json::parse(&project("Renamed")).unwrap(),
+                    label: "Rename".into(),
+                    expected_revision: published.revision(),
+                    expected_document: published.snapshot.doc_id,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let newer = std::cell::RefCell::new(vec![]);
+    settle(cx, |_| {
+        newer.borrow_mut().extend(rig.runtime.take_publications());
+        newer.borrow().iter().any(|p| {
+            p.surface
+                .nodes()
+                .values()
+                .any(|n| n.text.contains("Renamed") || format!("{:?}", n.props).contains("Renamed"))
+        })
+    });
+    let (view, mut vcx) = window(cx, &rig, older, Default::default());
+    vcx.run_until_parked();
+    for p in newer.into_inner() {
+        view.update(&mut vcx, |v, cx| v.publish(p, cx));
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        vcx.run_until_parked();
+        let _ = rig.runtime.publish();
+        for p in rig.runtime.take_publications() {
+            view.update(&mut vcx, |v, cx| v.publish(p, cx));
+        }
+        let count = view.read_with(&vcx, |v, _| rows(&v.publication));
+        if count.is_some_and(|c| c < items) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the grid never heard its width: {count:?} rows of one column"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 /// A slot whose height the test sets.
 struct Tall {
@@ -1195,6 +1311,9 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
     );
     wait(rig.runtime.show("export").unwrap());
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    // The sheet's own window, as the app gives it: its body ends at the
+    // footer (in a wider window its rows run on under it).
+    vcx.simulate_resize(size(px(600.), px(640.)));
     let mut sent: Vec<String> = Vec::new();
     // Publications to the sheet, the host's platform requests answered as
     // the app answers them, until `operation` is asked for.
@@ -1430,7 +1549,12 @@ fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppCon
         start.right() <= sheet.right() && summary.right() <= cancel.left(),
         "notice {summary:?}, buttons {cancel:?} {start:?}, sheet {sheet:?}"
     );
-    assert!(summary.size.height > cancel.size.height, "the notice wraps");
+    // Its symbol leads its first line (it no longer takes a line of its
+    // own): the notice stays inside the footer, level with the buttons.
+    assert!(
+        summary.top() < cancel.bottom() && summary.bottom() <= sheet.bottom(),
+        "notice {summary:?}, buttons {cancel:?}, sheet {sheet:?}"
+    );
 }
 
 /// Full Keyboard Access: Tab reaches kit controls in order; `tabIndex` -1
@@ -1774,4 +1898,74 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
             assert_eq!(after, first, "timeline paint should remain reusable");
         }
     }
+}
+/// A deep panel tree renders on a test thread's 2 MB stack: each level of
+/// the recursive render keeps a small frame (what a node is before and after
+/// its children is built in frames of its own). One frame per level was
+/// 180 KB in a debug build, and ten levels with a symbol drawn under them
+/// overflowed.
+#[gpui::test]
+fn a_deep_panel_tree_renders_within_a_small_stack(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    const DEPTH: u64 = 40;
+    let mut ops = vec![];
+    for level in 1..=DEPTH {
+        let props = if level == DEPTH {
+            json!({"id":"deepest","style":{"width":20,"height":20}})
+        } else {
+            json!({"style":{"display":"flex","padding":1}})
+        };
+        ops.extend(node_ops(level, level - 1, "div", props, &["click"]));
+    }
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    assert!(bounds(&mut vcx, "deepest").size.width > px(0.));
+}
+
+/// A rail that names its labels (`metadata.fitsLabels`) is at least as wide
+/// as the widest of them with its padding and its rows' indent, and keeps
+/// that width in a container too narrow for it and the list beside it: the
+/// Effects rail never cuts a category's name (PM-455).
+#[gpui::test]
+fn a_rail_is_as_wide_as_its_widest_name_in_a_narrow_dock(cx: &mut TestAppContext) {
+    let rail_width = |cx: &mut TestAppContext, labels: Value| {
+        let rig = rig("viewer", 1);
+        let _ = publication(&rig);
+        let mut ops = node_ops(
+            1,
+            0,
+            "div",
+            json!({"style":{"display":"flex","flexDirection":"row","width":160,"height":120}}),
+            &[],
+        );
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"id":"rail","data-pm-component":"list","label":"Categories",
+                "metadata":{"fitsLabels":labels,"fitsInsetToken":"metrics.gap"},
+                "style":{"flexGrow":0,"flexShrink":0,"minWidth":20,
+                    "paddingLeft":8,"paddingRight":8,"fontSize":{"token":"typography.body"}}}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "div",
+            json!({"id":"list","style":{"flexGrow":1,"minWidth":0}}),
+            &[],
+        ));
+        let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+        vcx.run_until_parked();
+        bounds(&mut vcx, "rail").size.width
+    };
+    let short = rail_width(cx, json!(["All"]));
+    let long = rail_width(cx, json!(["All", "JB Air Backgrounds"]));
+    let none = rail_width(cx, json!([]));
+    assert_eq!(short, none, "a short name leaves the list its own width");
+    assert!(
+        long > none && long > px(130.),
+        "the widest name sets the rail's width in a 160 pt row: {long:?}"
+    );
 }

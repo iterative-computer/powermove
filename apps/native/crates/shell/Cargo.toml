@@ -50,3 +50,6 @@ harness = false
 [[test]]
 name = "window_tabs"
 harness = false
+[[test]]
+name = "modal_sheets"
+harness = false

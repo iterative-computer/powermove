@@ -2,13 +2,14 @@
 //! trim grip. A strip is a slab of tinted glass on the solid timeline canvas,
 //! derived from the layer's hue for the appearance it stands in.
 //!
-//! On the dark canvas (`Tokens::strip`): glass, lit from above. A
+//! On the dark canvas (`Tokens::strip`): glass, as the owner's reference. A
 //! translucent, saturated slab (the timeline's grid and the row behind show
-//! through) whose top is its lightest and whose foot is deeper, a 1 px rim
-//! of light in its own hue inside the edge instead of an outline, light
-//! falling on the top and left edges at rest, and semibold names (3:1, large-bold text) in a
+//! through) deeper at its top and more luminous toward its foot, a 1 px rim
+//! of light in its own hue inside the edge instead of an outline, brightest
+//! along the top and its corners, and semibold names (3:1, large-bold text) in a
 //! pale tint of the hue, or a deep shade where a tint cannot hold that and
-//! on yellow and orange, whose slabs are the reference's bright amber. As
+//! on yellow, orange, green, cyan and blue, whose slabs are as bright as the
+//! reference's amber. As
 //! bright and saturated as the owner's reference: each hue as vivid as sRGB
 //! allows. Hover and selection brighten and whiten the rim.
 //!
@@ -196,13 +197,16 @@ impl Tokens {
             return self.strip_light(hue, coloured, state);
         }
         let disabled = state == StripState::Disabled;
-        // Yellow and orange are light hues: the reference's amber slab, a
-        // step brighter, under a dark name, which needs the slab a little
-        // less see-through to hold its contrast.
-        let light_hue = coloured && (35. ..110.).contains(&hue);
+        // Yellow, orange, green, cyan and blue are light hues: as bright as
+        // the reference's amber slab, under a dark name and over a
+        // waveform in a deeper shade of the hue (a pale one cannot read on
+        // them), which needs the slab a little less see-through to hold its
+        // contrast. Violet, red and pink stay the deeper slab under a pale
+        // name, as the reference's violet does.
+        let light_hue = coloured && ((35. ..110.).contains(&hue) || (120. ..280.).contains(&hue));
         // Glass: the timeline's grid and the row behind show through the
         // body (a dragged strip a little more, lifted off them).
-        let glass = if light_hue { 0.9 } else { 0.8 };
+        let glass = if light_hue { 0.9 } else { 0.86 };
         let opacity = match state {
             // A light hue's dark name needs its slab as it is.
             StripState::Dragging if !light_hue => glass - 0.1,
@@ -218,10 +222,11 @@ impl Tokens {
             (true, true) => 0.06,
             (true, false) => 0.26,
         };
-        // Lit from above: the top is the slab's lightest, the foot deeper.
-        let (top, foot) = if light_hue { (0.76, 0.64) } else { (0.62, 0.48) };
-        let lit = oklch_fit(top + lift, vivid * 0.9, hue);
-        let body = oklch_fit(foot + lift, vivid, hue);
+        // As the reference's slab: deep and saturated at the top, more
+        // luminous toward the foot (the light hues the reference's amber).
+        let (top, foot) = if light_hue { (0.64, 0.74) } else { (0.52, 0.64) };
+        let lit = oklch_fit(top + lift, vivid, hue);
+        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
         let under_label = under(body);
@@ -276,7 +281,7 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
-            grid: (tint, if disabled { 0.12 } else { 0.4 }),
+            grid: (tint, if disabled { 0.12 } else { 0.6 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.45, 6., 16.)
             } else {
@@ -292,9 +297,16 @@ impl Tokens {
                     .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
                     .unwrap_or(0x000000)
             } else {
-                (0..=12)
-                    .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
+                // Else the pale step that reads best: a mark stays the hue's.
+                let pale = (0..=12).map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue));
+                pale.clone()
                     .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .or_else(|| {
+                        pale.max_by(|a, b| {
+                            crate::color::contrast(*a, solid(body))
+                                .total_cmp(&crate::color::contrast(*b, solid(body)))
+                        })
+                    })
                     .unwrap_or(0xffffff)
             },
         }

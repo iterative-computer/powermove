@@ -879,7 +879,19 @@ fn surface_unknown_ids() -> Check {
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::served_tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 70);
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 72);
+    for name in ["panel_begin", "panel_build"] {
+        assert!(
+            f.session
+                .tools()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name)
+        );
+        assert!(pm_mcp::catalog::permits("app", name));
+        assert!(!pm_mcp::catalog::permits("inspection", name));
+    }
     assert_eq!(
         pm_mcp::catalog::tools().len(),
         68,

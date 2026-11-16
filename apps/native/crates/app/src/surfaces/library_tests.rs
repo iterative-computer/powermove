@@ -1172,3 +1172,23 @@ fn a_new_project_opens_under_the_name_typed_in_its_sheet() {
     });
     assert_eq!(opened.as_deref(), Some("Launch Film"));
 }
+
+/// A duration seeded from a composition shows at most two decimals and
+/// stays frame-exact while its text is left as shown; typed, it is what
+/// was typed. The frame rate the same (29.97 for 30000/1001).
+#[test]
+fn a_seeded_duration_shows_two_decimals_and_stays_exact() {
+    let seed = Format {
+        fps: 30000. / 1001.,
+        duration: 2206. / 30.,
+        ..format()
+    };
+    let mut f = NewProjectForm::new("w".into(), Some(&seed), &format(), &[]);
+    assert_eq!(f.duration, "73.53");
+    assert_eq!(f.fps, "29.97");
+    let made = f.values().unwrap().format;
+    assert_eq!(made.duration, 2206. / 30.);
+    assert_eq!(made.fps, 30000. / 1001.);
+    f.duration = "12.5".into();
+    assert_eq!(f.values().unwrap().format.duration, 12.5);
+}

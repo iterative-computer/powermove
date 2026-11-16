@@ -192,6 +192,12 @@ fn restore_session(cx: &mut App) {
         open_editor_window(cx, true, None, None);
         return;
     }
+    // The front window's project opens first; the others' after its first
+    // frame (`native::front_restoring`).
+    if plan.len() > 1 {
+        native::set_front_restoring(front);
+        native::set_restore_arranging(true);
+    }
     // The window (or tab group) that was in front opens last, so it lies
     // over the others from the start: separate windows each take the front
     // as they open.
@@ -206,15 +212,18 @@ fn restore_session(cx: &mut App) {
     }
     // Once the tabs have joined their groups (a turn later), the window that
     // was in front comes forward again, its tab the one shown.
-    if let Some(id) = front {
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(300))
-                .await;
-            let _ = cx.update(|_| native::bring_session_window(id));
-        })
-        .detach();
-    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(300))
+            .await;
+        let _ = cx.update(|_| {
+            if let Some(id) = front {
+                native::bring_session_window(id);
+            }
+            native::set_restore_arranging(false);
+        });
+    })
+    .detach();
 }
 /// Every window and tab comes back on relaunch with its project, as v1
 /// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
@@ -286,6 +295,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_front = native::front_restoring() == Some(s.id);
                 host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {

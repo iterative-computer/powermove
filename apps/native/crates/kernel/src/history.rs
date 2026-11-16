@@ -56,6 +56,9 @@ pub struct CompactJson {
     compressed: bool,
     len: usize,
     old_3d: bool,
+    /// The text names a media record's key (`storageKey`, `fingerprint`):
+    /// a scan for media records passes over the others undecoded.
+    media: bool,
     exact: Option<Arc<Value>>,
     entries: Option<Arc<[CompactJson]>>,
 }
@@ -89,6 +92,7 @@ impl CompactJson {
     fn text(text: String) -> Self {
         let len = text.len();
         let old_3d = text.contains("powermove.3d.");
+        let media = text.contains("\"storageKey\"") || text.contains("\"fingerprint\"");
         let packed = zstd::bulk::compress(text.as_bytes(), 1).expect("history compression");
         let compressed = packed.len() < len;
         let data = if compressed {
@@ -101,6 +105,7 @@ impl CompactJson {
             compressed,
             len,
             old_3d,
+            media,
             exact: None,
             entries: None,
         }
@@ -150,6 +155,11 @@ impl From<Vec<Op>> for StoredOps {
 impl StoredOps {
     pub(crate) fn may_have_old_3d(&self) -> bool {
         self.0.old_3d
+    }
+    /// Whether these operations may hold a media record: false only when
+    /// their text names neither `storageKey` nor `fingerprint`.
+    pub(crate) fn may_name_media(&self) -> bool {
+        self.0.media
     }
     pub fn to_vec(&self) -> Vec<Op> {
         pm_model::ops::ops_from_value(&self.value()).expect("validated history operations")
@@ -1718,6 +1728,24 @@ pub fn pack(saved: Value) -> Value {
 mod tests {
     use super::*;
     use pm_model::json::parse;
+
+    /// Stored operations say whether they may hold a media record, so an
+    /// open's scan for media decodes only those (PM-384, open time).
+    #[test]
+    fn stored_operations_that_name_no_media_key_are_passed_over() {
+        let leaf = |value: &str| {
+            StoredOps::from(vec![Op::Leaf(pm_model::patch::Patch {
+                path: vec![PathPart::Key("assets".into()), PathPart::Key("a".into())],
+                exists: true,
+                value: Some(parse(value).unwrap()),
+            })])
+        };
+        assert!(leaf(r#"{"id":"a","storageKey":"store:a"}"#).may_name_media());
+        assert!(leaf(r#"{"id":"a","fingerprint":"v2:9:x"}"#).may_name_media());
+        assert!(!leaf(r#"{"id":"a","kind":"image","name":"a.png"}"#).may_name_media());
+        // A value that merely says the word is still looked at.
+        assert!(leaf(r#"{"id":"a","name":"storageKey"}"#).may_name_media());
+    }
 
     /// A v1 project's history whose last edit deleted a v1 video asset: an
     /// Undo restores the asset as opening reads it, with the v1 video

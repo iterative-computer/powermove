@@ -71,7 +71,59 @@ export interface SummaryRow {
   effectLabel: string;
   enabled: boolean;
 }
-export type Row = EffectHeader | ParameterRow | ActionRow | SummaryRow;
+/** v1's gradient bar over an effect's start and end colours (which stay
+ * rows of their own below it), and its midpoint when it has one (the
+ * diamond on the bar; its own row is under More). */
+export interface RampRow {
+  kind: "ramp";
+  id: string;
+  effect: string;
+  group: string;
+  label: string;
+  /** The start and end colours, then the midpoint when there is one. */
+  parameters: Parameter[];
+  effectLabel: string;
+  enabled: boolean;
+}
+/** v1's point: an `…X` and `…Y` pair as one control. */
+export interface PointRow {
+  kind: "point";
+  id: string;
+  effect: string;
+  group: string;
+  label: string;
+  /** X, then Y. */
+  parameters: Parameter[];
+  effectLabel: string;
+  enabled: boolean;
+}
+/** An effect's rarely used parameters, closed until opened (v1's More). */
+export interface MoreRow {
+  kind: "more";
+  id: string;
+  effect: string;
+  count: number;
+  open: boolean;
+  /** One of them is not at its default, or is keyed. */
+  changed: boolean;
+  effectLabel: string;
+  enabled: boolean;
+}
+/** Room under a point row for its pad (two rows tall): nothing in it. */
+export interface SpacerRow {
+  kind: "spacer";
+  id: string;
+  effect: string;
+}
+export type Row =
+  | SpacerRow
+  | EffectHeader
+  | ParameterRow
+  | ActionRow
+  | SummaryRow
+  | RampRow
+  | PointRow
+  | MoreRow;
 /** Read-only worker projection of pm-panel-inspector, never an editable JS document. */
 export interface Projection {
   version: 1;
@@ -230,8 +282,33 @@ export function projection(value: Json): Projection {
         row.index >= 16
       )
         throw new TypeError("Invalid action row");
-    } else if (row.kind === "summary") {
+    } else if (row.kind === "spacer") {
+      if (typeof row.effect !== "string")
+        throw new TypeError("Invalid spacer row");
+    } else if (row.kind === "more") {
       if (
+        typeof row.effect !== "string" ||
+        typeof row.effectLabel !== "string" ||
+        ![row.open, row.changed, row.enabled].every(
+          (v) => typeof v === "boolean",
+        ) ||
+        !Number.isSafeInteger(row.count) ||
+        row.count < 1
+      )
+        throw new TypeError("Invalid more row");
+    } else if (
+      row.kind === "summary" ||
+      row.kind === "ramp" ||
+      row.kind === "point"
+    ) {
+      if (
+        (row.kind === "point" && row.parameters?.length !== 2) ||
+        (row.kind === "ramp" &&
+          ![2, 3].includes(row.parameters?.length ?? 0)) ||
+        (row.kind === "point" &&
+          row.parameters.some(
+            (r) => typeof r?.value !== "number" || !Number.isFinite(r.value),
+          )) ||
         typeof row.effect !== "string" ||
         typeof row.group !== "string" ||
         typeof row.label !== "string" ||

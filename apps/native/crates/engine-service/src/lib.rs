@@ -353,12 +353,126 @@ pub struct FrameReport {
     /// whoever takes a viewer's picture for the delivered one asks this.
     pub settled: bool,
 }
+/// A viewer's last settled picture, copied out of the engine's surface as
+/// it was presented (the engine's output pool keeps none of it), in
+/// extended linear Display P3 half floats, with the stamp and time it
+/// shows: a still of what the viewer shows costs no render.
+#[derive(Clone)]
+pub struct Picture {
+    pub stamp: Stamp,
+    pub time: Ticks,
+    width: usize,
+    height: usize,
+    row: usize,
+    bytes: Arc<[u8]>,
+}
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Picture({}×{} at {:?})", self.width, self.height, self.time)
+    }
+}
+impl Picture {
+    /// A copy of `surface` (half-float RGBA; none otherwise). Its GPU work
+    /// must have completed.
+    fn copy(
+        surface: &pm_gpu::bridge_out::surface::ExportedSurface,
+        stamp: Stamp,
+        time: Ticks,
+    ) -> Option<Self> {
+        if surface.format != pm_protocol::interop::SurfaceFormat::Rgba16Float {
+            return None;
+        }
+        let (width, height) = (surface.size.width as usize, surface.size.height as usize);
+        let row = surface.iosurface.bytes_per_row() as usize;
+        let bytes = surface.iosurface.read();
+        (width > 0 && height > 0 && row >= width * 8 && bytes.len() >= row * height).then(|| Self {
+            stamp,
+            time,
+            width,
+            height,
+            row,
+            bytes: bytes.into(),
+        })
+    }
+    /// The picture as 8-bit sRGB RGBA, opaque over black, box-scaled down
+    /// to at most `max_width` pixels wide, with its width and height.
+    /// Blocking: call it off the main thread.
+    pub fn srgb8(&self, max_width: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let (w, h, row, bytes) = (self.width, self.height, self.row, &self.bytes);
+        Some(srgb8(w, h, |x, y| {
+            let at = y * row + x * 8;
+            let c = |i: usize| half::f16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]]).to_f32();
+            [c(0), c(1), c(2)]
+        }, max_width as usize))
+    }
+}
+/// Extended linear Display P3 pixels (`at(x, y)`, premultiplied, so over
+/// black as they are) as 8-bit sRGB RGBA, box-scaled to `max_width`.
+fn srgb8(w: usize, h: usize, at: impl Fn(usize, usize) -> [f32; 3], max_width: usize) -> (u32, u32, Vec<u8>) {
+    let step = w.div_ceil(max_width.max(1)).max(1);
+    let (ow, oh) = ((w / step).max(1), (h / step).max(1));
+    // Display P3 to sRGB primaries (both D65), linear.
+    const M: [[f32; 3]; 3] = [
+        [1.224_940_2, -0.224_940_2, 0.],
+        [-0.042_056_955, 1.042_057, 0.],
+        [-0.019_637_555, -0.078_636_05, 1.098_273_6],
+    ];
+    let encode = |v: f32| {
+        let v = v.clamp(0., 1.);
+        let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1. / 2.4) - 0.055 };
+        (e * 255. + 0.5) as u8
+    };
+    let mut out = Vec::with_capacity(ow * oh * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut sum = [0f32; 3];
+            for y in oy * step..((oy + 1) * step).min(h) {
+                for x in ox * step..((ox + 1) * step).min(w) {
+                    let p = at(x, y);
+                    for i in 0..3 {
+                        sum[i] += if p[i].is_finite() { p[i] } else { 0. };
+                    }
+                }
+            }
+            let n = (step * step) as f32;
+            let p = sum.map(|v| v / n);
+            for m in M {
+                out.push(encode(m[0] * p[0] + m[1] * p[1] + m[2] * p[2]));
+            }
+            out.push(255);
+        }
+    }
+    (ow as u32, oh as u32, out)
+}
+#[cfg(test)]
+mod picture_tests {
+    /// A held picture reads as sRGB: white, black and mid grey keep their
+    /// lightness, a P3-only red clips to sRGB red, and a wide picture is
+    /// box-scaled to the width asked for.
+    #[test]
+    fn a_picture_reads_as_srgb_and_scales_down() {
+        let one = |p: [f32; 3]| super::srgb8(1, 1, |_, _| p, 8).2;
+        assert_eq!(one([1., 1., 1.]), [255, 255, 255, 255]);
+        assert_eq!(one([0., 0., 0.]), [0, 0, 0, 255]);
+        assert_eq!(one([0.18, 0.18, 0.18])[..3], [118, 118, 118]);
+        assert_eq!(one([1., 0., 0.]), [255, 0, 0, 255]);
+        assert_eq!(one([f32::NAN, 4., -1.]), [0, 255, 0, 255]);
+        let (w, h, px) = super::srgb8(4, 2, |x, _| if x % 2 == 0 { [1.; 3] } else { [0.; 3] }, 2);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(px[..3], [188, 188, 188], "a box of white and black is linear half");
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
     pub refine_progress: Option<studio::RefineProgress>,
     /// Explicit Studio calibration for the current immutable viewer scene.
     pub export_estimate: ExportEstimateState,
     pub frame: Option<FrameReport>,
+    /// The last settled picture presented, copied out of the engine's pool
+    /// ([`Picture`]); kept until another settles.
+    pub settled_picture: Option<Picture>,
+    /// How many settled pictures were copied (`settled_picture`).
+    pub settled_copies: u64,
     pub clock: Option<ClockSample>,
     pub levels: Option<AudioLevels>,
     pub error: Option<String>,
@@ -436,7 +550,7 @@ impl ViewerStatus {
         let owner = self
             .unavailable
             .iter()
-            .find(|u| resources::provides(&u.id, &missing.effect));
+            .find(|u| u.would_provide(&missing.effect));
         if let (None, Some(owner)) = (&missing.revision, owner) {
             return Some(format!(
                 "{} {}: {} is bypassed on {}{}",
@@ -472,6 +586,16 @@ struct View {
     stamp: Stamp,
     content: u64,
     dirty: bool,
+    /// Nobody can see it (its window is a tab behind another): it draws
+    /// nothing, does not play, and its idle memory goes as any idle
+    /// viewer's.
+    hidden: bool,
+    /// Playing when it was hidden: it paused, and plays on at this rate
+    /// when shown again unless the person stopped or played it meanwhile.
+    resume_on_show: Option<pm_protocol::common::PlaybackRate>,
+    /// When its settled picture was copied (`ViewerStatus::settled_picture`),
+    /// in copies across all viewers: the oldest give theirs up first.
+    settled_seq: u64,
     capture: bool,
     /// A capture taken into a frame whose pixels haven't landed yet; a
     /// restarted worker asks for it again.
@@ -624,6 +748,15 @@ impl View {
             self.commands.pop_back();
         }
         ensure!(self.commands.len() < 64, "transport queue full");
+        if matches!(
+            cmd,
+            TransportCommand::Play { .. }
+                | TransportCommand::Pause
+                | TransportCommand::Step { .. }
+                | TransportCommand::PlayAround { .. }
+        ) {
+            self.resume_on_show = None;
+        }
         match cmd {
             TransportCommand::Play { rate } => self.desired_rate = rate,
             TransportCommand::Pause | TransportCommand::Step { .. } => {
@@ -653,6 +786,11 @@ impl View {
         Ok(())
     }
 }
+/// Viewers that keep a settled picture at once, at most (the front tab's,
+/// popouts, windows side by side).
+const SETTLED_PICTURES: usize = 4;
+/// Settled pictures copied so far, across all viewers.
+static SETTLED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[derive(Default)]
 struct State {
     views: BTreeMap<u64, View>,
@@ -667,6 +805,26 @@ struct State {
 impl State {
     /// Takes a view out. Its document is closed (its caches, programs and
     /// override answers go) only if no other view shows it by then.
+    /// At most [`SETTLED_PICTURES`] viewers keep their settled picture (a
+    /// whole picture each, 62 MB at 4K): the ones copied longest ago give
+    /// theirs up; a reader that took one keeps its own reference.
+    fn bound_settled_pictures(&mut self) {
+        let mut kept: Vec<(u64, u64)> = self
+            .views
+            .iter()
+            .filter(|(_, v)| v.status.settled_picture.is_some())
+            .map(|(id, v)| (v.settled_seq, *id))
+            .collect();
+        if kept.len() <= SETTLED_PICTURES {
+            return;
+        }
+        kept.sort_unstable();
+        for (_, id) in &kept[..kept.len() - SETTLED_PICTURES] {
+            if let Some(v) = self.views.get_mut(id) {
+                v.status.settled_picture = None;
+            }
+        }
+    }
     fn remove_view(&mut self, id: u64) {
         if let Some(view) = self.views.remove(&id) {
             sequence_watch::global().track(&watch_owner(self, id), []);
@@ -995,6 +1153,24 @@ impl Viewer {
     /// Auto draws this viewer's dragged frames at reduced resolution while
     /// the project is slower than a refresh, and the frame exact once the
     /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    /// Whether the person can see this viewer. A hidden one (its window a
+    /// tab behind another) draws nothing until it is shown again, when it
+    /// draws its picture at once; its transport and edits carry on.
+    pub fn set_shown(&self, shown: bool) -> Result<()> {
+        self.edit(|v| {
+            if v.hidden == shown {
+                v.hidden = !shown;
+                v.dirty |= shown;
+            }
+            // Its still (a whole picture, 62 MB at 4K) goes: a reader that
+            // took it keeps its own reference; shown again, the viewer
+            // settles and copies a new one.
+            if !shown {
+                v.status.settled_picture = None;
+            }
+            Ok(())
+        })
+    }
     pub fn adapt_drags(&self, on: bool) -> Result<()> {
         self.edit(|v| {
             v.adapt_drags = on;
@@ -1621,11 +1797,9 @@ impl EngineService {
             );
         }
         let mut state = self.shared.state.lock().unwrap();
+        // As many viewers as there are open projects: a viewer nobody can
+        // see draws nothing and keeps no memory while idle.
         let replaced = replaces.filter(|id| state.views.contains_key(id));
-        ensure!(
-            state.views.len() - usize::from(replaced.is_some()) < 8,
-            "at most eight concurrent viewers"
-        );
         state.next += 1;
         state.content += 1;
         let id = state.next;
@@ -1649,6 +1823,9 @@ impl EngineService {
                 stamp,
                 content,
                 dirty: true,
+                hidden: false,
+                resume_on_show: None,
+                settled_seq: 0,
                 capture: false,
                 capture_owed: false,
                 looping: None,
@@ -2633,6 +2810,26 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     audio_host_seconds: f.audio_host,
                     pixels: readback.map(|_| f.submission.pixels()).or(kept),
                 });
+                // A newly settled picture is copied out of the pool, once:
+                // the viewer's still (`Picture`), without pinning a surface.
+                // Only at rest: frames read from disk are settled while
+                // playing, scrubbing or skimming too, and each copy is the
+                // whole picture, taken here under the state lock.
+                let resting = f.spec.moment == Moment::Paused
+                    && v.skim.is_none()
+                    && v.stamp == f.stamp
+                    && v.commands.is_empty()
+                    && runtime.get(&f.id).is_some_and(|r| {
+                        !r.scrub && r.transport.rate() == pm_protocol::common::PlaybackRate::STOPPED
+                    });
+                if resting
+                    && v.status.frame.as_ref().is_some_and(|r| r.settled && r.gpu_ok)
+                    && v.status.settled_picture.as_ref().is_none_or(|p| p.stamp != f.stamp || p.time != f.spec.time)
+                {
+                    v.status.settled_picture = Picture::copy(&f.submission.surface, f.stamp, f.spec.time);
+                    v.status.settled_copies += 1;
+                    v.settled_seq = SETTLED_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                }
                 // A stale, failed or dropped frame did not answer the input.
                 // Keep its origin through retries; never consume a newer one.
                 if t.gpu_ok
@@ -2864,6 +3061,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         let landed = engine.media_landed();
         let mut work = None;
         let mut changed = false;
+        state.bound_settled_pictures();
         let mut ids: Vec<_> = state.views.keys().copied().collect();
         ids.sort_by_key(|id| (*id <= cursor, *id));
         let mut ask = None::<SettleAsk>;
@@ -2958,6 +3156,20 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
+            // Nobody watches a hidden viewer: it does not play (its frames,
+            // audio and deadlines would hold exports, stills and the
+            // background render back). It pauses, and plays on when shown
+            // unless the person stopped or played it meanwhile.
+            if v.hidden && r.transport.running() && v.resume_on_show.is_none() {
+                let rate = r.transport.rate();
+                if v.enqueue(TransportCommand::Pause).is_ok() {
+                    v.resume_on_show = Some(rate);
+                }
+            } else if !v.hidden
+                && let Some(rate) = v.resume_on_show.take()
+            {
+                let _ = v.enqueue(TransportCommand::Play { rate });
+            }
             // A settled picture being drawn for a stamp the viewer has left
             // is never shown: it gives the worker back to the next picture
             // (an edit moving again after a rest).
@@ -3022,6 +3234,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 // A late/repeated link tick must never rewind a submitted target.
                 r.next = r.next.max(phase);
+            }
+            if v.hidden {
+                continue;
             }
             let due = if r.transport.clock.is_playing() {
                 let mut due = r.next;
@@ -3324,7 +3539,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // command to take, a play about to start.
         let wanted = work.is_some()
             || state.views.iter().any(|(id, v)| {
-                (v.dirty && runtime.get(id).is_none_or(|r| r.not_before <= now))
+                (v.dirty && !v.hidden && runtime.get(id).is_none_or(|r| r.not_before <= now))
                     || !v.commands.is_empty()
             })
             || runtime
@@ -4485,6 +4700,93 @@ mod worker_tests {
         );
         drop(viewer);
     }
+    /// A paused viewer's settled picture is copied out of the engine's pool
+    /// once, with the stamp and time of the frame it shows: a still of what
+    /// the viewer shows costs no render and pins no pool surface (PM-444).
+    #[test]
+    fn a_settled_picture_is_copied_out_of_the_pool() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-copy").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let status = wait_for(&v, "a settled picture copied", |s| {
+            s.settled_picture.is_some()
+                && s.frame.as_ref().is_some_and(|f| f.settled && Some(f.stamp) == v.stamp())
+        });
+        let (picture, frame) = (status.settled_picture.unwrap(), status.frame.unwrap());
+        assert_eq!((picture.stamp, picture.time), (frame.stamp, frame.time));
+        let (w, h, rgba) = picture.srgb8(64).unwrap();
+        assert!(w <= 64 && w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Not copied again while the same picture is shown.
+        let again = v.status().settled_picture.unwrap();
+        assert!(Arc::ptr_eq(&again.bytes, &picture.bytes));
+    }
+    /// A hidden viewer gives its settled picture up at once (a reader that
+    /// took it keeps its own), and at most `SETTLED_PICTURES` viewers keep
+    /// one: twenty settled tabs held a whole picture each (PM-453 review).
+    #[test]
+    fn a_hidden_viewer_gives_its_settled_picture_up_and_few_viewers_keep_one() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-bound").unwrap()).unwrap();
+        let settled = |v: &Viewer| {
+            wait_for(v, "a settled picture copied", |s| s.settled_picture.is_some());
+        };
+        let hidden = shapes_viewer(&service, None);
+        settled(&hidden);
+        let taken = hidden.status().settled_picture.unwrap();
+        hidden.set_shown(false).unwrap();
+        assert!(hidden.status().settled_picture.is_none(), "a hidden viewer kept its still");
+        assert!(!taken.bytes.is_empty(), "a reader keeps the still it took");
+        let shown: Vec<_> = (0..SETTLED_PICTURES + 2)
+            .map(|_| {
+                let v = shapes_viewer(&service, None);
+                settled(&v);
+                v
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let kept = shown
+                .iter()
+                .filter(|v| v.status().settled_picture.is_some())
+                .count();
+            if kept <= SETTLED_PICTURES {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{kept} settled pictures kept");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            shown.last().unwrap().status().settled_picture.is_some(),
+            "the newest keeps its still"
+        );
+    }
+    /// Nobody watches a hidden viewer: it pauses (its frames and deadlines
+    /// would hold exports, stills and the background render back), and
+    /// plays on when shown, unless the person paused it meanwhile (PM-453
+    /// review).
+    #[test]
+    fn a_hidden_viewer_pauses_and_plays_on_when_shown_unless_paused_meanwhile() {
+        use pm_protocol::common::PlaybackRate;
+        let service = EngineService::start(pm_gpu::Gpu::new("hidden-pauses").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let playing = |s: &ViewerStatus| s.clock.as_ref().is_some_and(|c| c.rate != PlaybackRate::STOPPED);
+        let range = pm_protocol::common::TickRange {
+            start: Ticks::ZERO,
+            end: seconds(1.),
+        };
+        v.command(TransportCommand::SetLoop { range: Some(range) }).unwrap();
+        v.command(TransportCommand::Play { rate: PlaybackRate::NORMAL }).unwrap();
+        wait_for(&v, "playing", playing);
+        v.set_shown(false).unwrap();
+        wait_for(&v, "paused while hidden", |s| !playing(s));
+        v.set_shown(true).unwrap();
+        wait_for(&v, "playing on when shown", playing);
+        v.set_shown(false).unwrap();
+        wait_for(&v, "paused while hidden again", |s| !playing(s));
+        v.command(TransportCommand::Pause).unwrap();
+        v.set_shown(true).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!playing(&v.status()), "paused by the person, it played on when shown");
+    }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
@@ -4644,12 +4946,28 @@ mod worker_tests {
                 id: "acme".into(),
                 name: "Acme Effects".into(),
                 why: "is turned off".into(),
+                provides: vec![],
             }],
             ..status.clone()
         };
         assert_eq!(
             off.notice().as_deref(),
             Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
+        );
+        // An id its extension's doesn't name (`glow-kit` provides
+        // `acme.glow`): named by what it provided when it last ran (PM-435).
+        let unnamed = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "glow-kit".into(),
+                name: "Glow Kit".into(),
+                why: "is turned off".into(),
+                provides: vec!["acme.glow".into()],
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            unnamed.notice().as_deref(),
+            Some("Glow Kit is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
         );
         let newer = ViewerStatus {
             missing_effects: vec![pm_render::effects::versions::MissingEffect {

@@ -790,3 +790,33 @@ fn legacy_3d_selects_the_electron_renderer_and_native_projects_keep_studio() {
         Some("studio")
     );
 }
+
+/// A file whose container fails opens with that error, and the whole-file
+/// hash beside it stops at its next chunk instead of reading the rest (a
+/// large invalid file on a slow volume held the open until it was read).
+#[test]
+fn an_invalid_container_stops_the_hash_and_keeps_its_error() {
+    let scratch = Scratch::new();
+    let path = scratch.path("invalid.pmv");
+    // PMV3 magic with a header length of 1, then padding.
+    let mut bytes = b"PMV3\n".to_vec();
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.resize(16 << 20, 0);
+    std::fs::write(&path, &bytes).unwrap();
+    let file = File::open(&path).unwrap();
+    let expected = read_container(&file, ReadOptions { verify_media: false }).unwrap_err();
+    match open_project(&path, OpenOptions::default()) {
+        Err(ProjectIoError::Container(error)) => assert_eq!(error.to_string(), expected.to_string()),
+        other => panic!("the container's error, not {other:?}"),
+    }
+    // Stopped, the hash reads one chunk and gives up.
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let mut chunks = 0;
+    read_range(&file, &path, 0, bytes.len() as u64, |_| {
+        chunks += 1;
+        !stop.load(Ordering::Relaxed)
+    })
+    .unwrap();
+    assert_eq!(chunks, 1);
+    assert!(hash_project_file(&file, &path, bytes.len() as u64, &stop).is_err());
+}

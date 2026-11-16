@@ -7567,8 +7567,8 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     8,
     9,
     10,
-    13,
-    24,
+    14,
+    25,
   ],
   "nodes": {
     "0": {
@@ -7677,8 +7677,8 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "11": {
       "children": [
         12,
-        15,
-        23,
+        16,
+        24,
       ],
       "id": 11,
       "input": null,
@@ -7710,15 +7710,11 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "listeners": {},
       "parent": 11,
       "props": {
-        "label": "Connection provider",
-        "role": "group",
         "style": {
           "alignItems": "center",
           "display": "flex",
           "flexDirection": "row",
-          "gap": {
-            "token": "metrics.gap",
-          },
+          "justifyContent": "center",
         },
       },
       "text": "",
@@ -7730,6 +7726,48 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       ],
       "id": 13,
       "input": null,
+      "listeners": {},
+      "parent": 12,
+      "props": {
+        "data-pm-component": "segmented-control",
+        "id": "agent-connect-provider",
+        "label": "Connection provider",
+        "role": "radiogroup",
+        "style": {
+          "background": {
+            "token": "colors.floating",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
+          },
+          "borderRadius": {
+            "token": "metrics.pill_radius",
+          },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "height": {
+            "token": "metrics.tab",
+          },
+          "padding": {
+            "token": "metrics.pill_inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "14": {
+      "children": [
+        15,
+      ],
+      "id": 14,
+      "input": null,
       "listeners": {
         "click": {
           "bubble": true,
@@ -7737,23 +7775,54 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "keys": [],
           "preventDefault": false,
         },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "Home",
+            "End",
+          ],
+          "preventDefault": true,
+        },
       },
-      "parent": 12,
+      "parent": 13,
       "props": {
-        "aria-pressed": true,
-        "data-pm-component": "toolbar-item",
-        "id": "agent-connect-chatgpt",
+        "aria-checked": true,
+        "data-pm-component": "segment",
+        "id": "P0-0:chatgpt",
         "label": "ChatGPT",
+        "preventDefault": {
+          "keydown": [
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "Home",
+            "End",
+          ],
+        },
+        "role": "radio",
         "style": {
+          "alignItems": "center",
           "background": {
-            "token": "colors.selected_fill",
+            "token": "colors.fill_strong",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.segment_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexGrow": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "justifyContent": "center",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -7761,36 +7830,34 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "paddingLeft": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "paddingRight": {
-            "token": "metrics.text_padding",
-          },
-          "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.inset",
           },
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "button",
     },
-    "14": {
+    "15": {
       "children": [],
-      "id": 14,
+      "id": 15,
       "input": null,
       "listeners": {},
-      "parent": 13,
+      "parent": 14,
       "props": {},
       "text": "ChatGPT",
       "type": "text",
     },
-    "15": {
+    "16": {
       "children": [
-        16,
-        18,
-        20,
+        17,
+        19,
+        21,
       ],
-      "id": 15,
+      "id": 16,
       "input": null,
       "listeners": {},
       "parent": 11,
@@ -7817,14 +7884,14 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "div",
     },
-    "16": {
+    "17": {
       "children": [
-        17,
+        18,
       ],
-      "id": 16,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {
         "style": {
           "color": {
@@ -7841,24 +7908,24 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "text",
     },
-    "17": {
+    "18": {
       "children": [],
-      "id": 17,
+      "id": 18,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {},
       "text": "Finish connecting ChatGPT",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {
         "style": {
           "color": {
@@ -7873,16 +7940,6 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         },
       },
       "text": "",
-      "type": "text",
-    },
-    "19": {
-      "children": [],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {},
-      "text": "ChatGPT couldn’t be reached.",
       "type": "text",
     },
     "2": {
@@ -7924,13 +7981,23 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "type": "div",
     },
     "20": {
-      "children": [
-        21,
-      ],
+      "children": [],
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 19,
+      "props": {},
+      "text": "ChatGPT couldn’t be reached.",
+      "type": "text",
+    },
+    "21": {
+      "children": [
+        22,
+      ],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 16,
       "props": {
         "style": {
           "alignItems": "center",
@@ -7941,11 +8008,11 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "div",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
+        23,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {
         "click": {
@@ -7955,7 +8022,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "preventDefault": false,
         },
       },
-      "parent": 20,
+      "parent": 21,
       "props": {
         "data-pm-component": "push-button",
         "disabled": true,
@@ -7987,21 +8054,21 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "22": {
+    "23": {
       "children": [],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {},
       "text": "Waiting for sign-in…",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
+        25,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
       "parent": 11,
@@ -8010,17 +8077,18 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "alignItems": "center",
           "display": "flex",
           "flexDirection": "row",
+          "justifyContent": "center",
         },
       },
       "text": "",
       "type": "div",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
-        27,
+        26,
+        28,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {
         "click": {
@@ -8030,7 +8098,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "preventDefault": false,
         },
       },
-      "parent": 23,
+      "parent": 24,
       "props": {
         "label": "Connection settings",
         "role": "button",
@@ -8056,14 +8124,14 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
+        27,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 24,
+      "parent": 25,
       "props": {
         "style": {
           "color": {
@@ -8080,22 +8148,22 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "text",
     },
-    "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 25,
-      "props": {},
-      "text": "Connection settings",
-      "type": "text",
-    },
     "27": {
       "children": [],
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 24,
+      "parent": 26,
+      "props": {},
+      "text": "Connection settings",
+      "type": "text",
+    },
+    "28": {
+      "children": [],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 25,
       "props": {
         "metadata": {
           "symbol": "chevron.right",
@@ -8396,17 +8464,27 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "create",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "create",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
     "setProps",
     "setProps",
     "create",
     "setText",
+    "insertBefore",
     "insertBefore",
     "insertBefore",
     "insertBefore",
@@ -8475,9 +8553,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     8,
     9,
     10,
-    13,
-    24,
-    30,
+    14,
+    25,
+    31,
   ],
   "nodes": {
     "0": {
@@ -8586,8 +8664,8 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "11": {
       "children": [
         12,
-        15,
-        29,
+        16,
+        30,
       ],
       "id": 11,
       "input": null,
@@ -8619,15 +8697,11 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "listeners": {},
       "parent": 11,
       "props": {
-        "label": "Connection provider",
-        "role": "group",
         "style": {
           "alignItems": "center",
           "display": "flex",
           "flexDirection": "row",
-          "gap": {
-            "token": "metrics.gap",
-          },
+          "justifyContent": "center",
         },
       },
       "text": "",
@@ -8639,6 +8713,48 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       ],
       "id": 13,
       "input": null,
+      "listeners": {},
+      "parent": 12,
+      "props": {
+        "data-pm-component": "segmented-control",
+        "id": "agent-connect-provider",
+        "label": "Connection provider",
+        "role": "radiogroup",
+        "style": {
+          "background": {
+            "token": "colors.floating",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
+          },
+          "borderRadius": {
+            "token": "metrics.pill_radius",
+          },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "height": {
+            "token": "metrics.tab",
+          },
+          "padding": {
+            "token": "metrics.pill_inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "14": {
+      "children": [
+        15,
+      ],
+      "id": 14,
+      "input": null,
       "listeners": {
         "click": {
           "bubble": true,
@@ -8646,23 +8762,54 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "keys": [],
           "preventDefault": false,
         },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "Home",
+            "End",
+          ],
+          "preventDefault": true,
+        },
       },
-      "parent": 12,
+      "parent": 13,
       "props": {
-        "aria-pressed": true,
-        "data-pm-component": "toolbar-item",
-        "id": "agent-connect-chatgpt",
+        "aria-checked": true,
+        "data-pm-component": "segment",
+        "id": "P0-0:chatgpt",
         "label": "ChatGPT",
+        "preventDefault": {
+          "keydown": [
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "Home",
+            "End",
+          ],
+        },
+        "role": "radio",
         "style": {
+          "alignItems": "center",
           "background": {
-            "token": "colors.selected_fill",
+            "token": "colors.fill_strong",
           },
           "borderRadius": {
-            "token": "metrics.control_radius",
+            "token": "metrics.segment_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexGrow": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "justifyContent": "center",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -8670,35 +8817,33 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
             "token": "metrics.hit",
           },
           "paddingLeft": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "paddingRight": {
-            "token": "metrics.text_padding",
-          },
-          "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.inset",
           },
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "button",
     },
-    "14": {
+    "15": {
       "children": [],
-      "id": 14,
+      "id": 15,
       "input": null,
       "listeners": {},
-      "parent": 13,
+      "parent": 14,
       "props": {},
       "text": "ChatGPT",
       "type": "text",
     },
-    "15": {
+    "16": {
       "children": [
-        16,
-        20,
+        17,
+        21,
       ],
-      "id": 15,
+      "id": 16,
       "input": null,
       "listeners": {},
       "parent": 11,
@@ -8726,15 +8871,15 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "16": {
+    "17": {
       "children": [
-        17,
         18,
+        19,
       ],
-      "id": 16,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {
         "style": {
           "alignItems": "center",
@@ -8748,12 +8893,12 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "17": {
+    "18": {
       "children": [],
-      "id": 17,
+      "id": 18,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {
         "metadata": {
           "symbol": "exclamationmark.circle.fill",
@@ -8771,14 +8916,14 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {
         "style": {
           "color": {
@@ -8795,16 +8940,6 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         },
       },
       "text": "",
-      "type": "text",
-    },
-    "19": {
-      "children": [],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {},
-      "text": "ChatGPT couldn’t start",
       "type": "text",
     },
     "2": {
@@ -8846,15 +8981,25 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "type": "div",
     },
     "20": {
-      "children": [
-        21,
-        23,
-        28,
-      ],
+      "children": [],
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 19,
+      "props": {},
+      "text": "ChatGPT couldn’t start",
+      "type": "text",
+    },
+    "21": {
+      "children": [
+        22,
+        24,
+        29,
+      ],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 16,
       "props": {
         "style": {
           "display": "flex",
@@ -8870,14 +9015,14 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
+        23,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {
         "style": {
           "color": {
@@ -8896,26 +9041,26 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {},
       "text": "ChatGPT couldn’t be reached.",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
-        26,
+        25,
         27,
+        28,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {
         "style": {
           "alignItems": "center",
@@ -8929,11 +9074,11 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
+        26,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {
         "click": {
@@ -8943,7 +9088,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 23,
+      "parent": 24,
       "props": {
         "data-pm-component": "push-button",
         "id": "agent-connect-error-retry",
@@ -8974,22 +9119,22 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "25": {
-      "children": [],
-      "id": 25,
-      "input": null,
-      "listeners": {},
-      "parent": 24,
-      "props": {},
-      "text": "Try Again",
-      "type": "text",
-    },
     "26": {
       "children": [],
       "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 25,
+      "props": {},
+      "text": "Try Again",
+      "type": "text",
+    },
+    "27": {
+      "children": [],
+      "id": 27,
+      "input": null,
+      "listeners": {},
+      "parent": 24,
       "props": {
         "style": {
           "flexGrow": 1,
@@ -8998,43 +9143,25 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "27": {
-      "children": [],
-      "id": 27,
-      "input": null,
-      "listeners": {},
-      "parent": 23,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "28": {
       "children": [],
       "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
     },
     "29": {
-      "children": [
-        30,
-      ],
+      "children": [],
       "id": 29,
       "input": null,
       "listeners": {},
-      "parent": 11,
-      "props": {
-        "style": {
-          "alignItems": "center",
-          "display": "flex",
-          "flexDirection": "row",
-        },
-      },
+      "parent": 21,
+      "props": {},
       "text": "",
-      "type": "div",
+      "type": "text",
     },
     "3": {
       "children": [
@@ -9096,9 +9223,28 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "30": {
       "children": [
         31,
-        33,
       ],
       "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "justifyContent": "center",
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "31": {
+      "children": [
+        32,
+        34,
+      ],
+      "id": 31,
       "input": null,
       "listeners": {
         "click": {
@@ -9108,7 +9254,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 29,
+      "parent": 30,
       "props": {
         "label": "Connection settings",
         "role": "button",
@@ -9134,14 +9280,14 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "31": {
+    "32": {
       "children": [
-        32,
+        33,
       ],
-      "id": 31,
+      "id": 32,
       "input": null,
       "listeners": {},
-      "parent": 30,
+      "parent": 31,
       "props": {
         "style": {
           "color": {
@@ -9158,22 +9304,22 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "text",
     },
-    "32": {
-      "children": [],
-      "id": 32,
-      "input": null,
-      "listeners": {},
-      "parent": 31,
-      "props": {},
-      "text": "Connection settings",
-      "type": "text",
-    },
     "33": {
       "children": [],
       "id": 33,
       "input": null,
       "listeners": {},
-      "parent": 30,
+      "parent": 32,
+      "props": {},
+      "text": "Connection settings",
+      "type": "text",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
       "props": {
         "metadata": {
           "symbol": "chevron.right",
@@ -9417,17 +9563,27 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "create",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "create",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
     "setProps",
     "setProps",
     "create",
     "setText",
+    "insertBefore",
     "insertBefore",
     "insertBefore",
     "insertBefore",

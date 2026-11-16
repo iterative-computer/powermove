@@ -4,6 +4,24 @@ Powermove is a kernel plus extensions. The built-in editor (timeline, effects,
 theme, keymap, panels) is itself a set of extensions. You extend or replace any
 of them by writing a new extension — never by editing the app bundle.
 
+## Start a new panel in its workspace slot
+
+Before writing a new panel, read `get_panel_layout`, choose a sensible location,
+and call `panel_begin` with `title`, `placement` and optional `planned` controls
+(`{kind, label}`). Placement is `{dock: "left" | "right" | "bottom"}`,
+`{beside: "panel-id"}` or `{tab_in: "panel-id"}`. Unsupported locations, including
+`{dock: "floating"}`, fall back to the right dock. Use the returned placement in
+your chat explanation and keep the returned `build_id`.
+
+Send `panel_build {build_id, event: "plan", row, kind, label}` when planning a
+control and `event: "commit"` only after committing its code or definition.
+These events drive the slot's Light sketch animation. Publish normally, then
+send `panel_build {build_id, event: "ready", panelId: "registered-panel-id"}`.
+The slot hands off after the panel's first committed render. Do not separately
+open or dock the finished panel: the reserved slot becomes that panel. On failure
+or cancellation send `event: "error"` or `event: "cancel"` to close the slot.
+This applies to both native generated panels and extension/webview panels.
+
 ## Choose the requested contribution
 
 A request for an effect means a registered effect in **Effects & Presets**, with

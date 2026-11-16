@@ -674,6 +674,50 @@ fn settings_project_services_validate_and_publish_only_after_actor_ack() {
     assert_eq!(comp.get("fps").unwrap().to_value().as_f64(), Some(29.97));
 }
 
+/// Settings › Project shows a duration as every duration field does: two
+/// places, so 73.53 s never reads "74 s".
+#[test]
+fn settings_show_a_duration_to_two_places() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend =
+        data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "project.duration")
+        .expect("a duration row");
+    assert_eq!(row["precision"], json!(2), "{row}");
+    assert_eq!(row["unit"], json!("s"), "{row}");
+}
+
+/// Settings › Extensions places an extension as v1 did, by what it
+/// contributes: its content before a companion panel, command or hook.
+#[test]
+fn an_extension_is_placed_by_what_it_contributes() {
+    let kind = |c: &[&str]| {
+        models::extension_kind(&c.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    };
+    assert_eq!(kind(&["effects"]), "Effects");
+    assert_eq!(kind(&["effects", "hooks"]), "Effects");
+    assert_eq!(kind(&["panels", "commands"]), "Panels");
+    assert_eq!(kind(&["themes", "panels", "commands"]), "Appearance");
+    assert_eq!(kind(&["layers", "commands"]), "Layer Types");
+    assert_eq!(kind(&["panels", "hooks"]), "Panels");
+    assert_eq!(kind(&["hooks"]), "Editor Tools");
+    assert_eq!(kind(&[]), "Other");
+    // Every kind it can give is one the page lists.
+    for c in [&["media"][..], &["inspector"], &["transitions"]] {
+        assert!(models::EXTENSION_KINDS.contains(&kind(c)));
+    }
+}
+
 #[test]
 fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
     let actor = actor();
@@ -5162,9 +5206,28 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             .collect()
     };
     let mut shown = Vec::new();
+    // Each wheel node's props, by id (its master rides on it).
+    let mut wheel_props = std::collections::HashMap::new();
     while Instant::now() < deadline {
         if let Some(publication) = panels.take_publications().pop() {
             shown = ids(&publication);
+            wheel_props = publication
+                .surface
+                .nodes()
+                .values()
+                .filter_map(|n| {
+                    let id = n.props.get("id").and_then(Value::as_str)?;
+                    let master = n
+                        .props
+                        .get("metadata")
+                        .and_then(|m| m.get("pmKit"))
+                        .and_then(|k| k.get("masterBinding"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    id.starts_with("color:wheel:")
+                        .then(|| (id.to_owned(), master.to_owned()))
+                })
+                .collect();
         }
         if shown.iter().any(|id| id.starts_with("color:field:")) {
             break;
@@ -5178,24 +5241,39 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             "Color Wheels {effect} has no Reset: {shown:?}"
         );
         // A wheel's red, green and blue are its drawn wheel (one control
-        // over the three); Tone and each Master are fields.
-        assert!(
-            shown.contains(&format!("color:wheel:{effect}:gain")),
-            "the Gain wheel of Color Wheels {effect} is not drawn"
-        );
-        for key in ["exposure", "liftMaster", "gainMaster"] {
-            let row = rows
-                .iter()
+        // over the three), and its master the strip the wheel draws under
+        // itself, bound to the master's own parameter; Tone is a field.
+        let row = |key: &str| {
+            rows.iter()
                 .find(|r| {
                     r["kind"] == "parameter"
                         && r["parameter"]["effect"] == effect
                         && r["parameter"]["key"] == key
                 })
-                .unwrap_or_else(|| panic!("{effect} has no {key} row"));
-            let field = format!("color:field:{}", row["id"].as_str().unwrap());
+                .unwrap_or_else(|| panic!("{effect} has no {key} row"))
+        };
+        let field = |key: &str| format!("color:field:{}", row(key)["id"].as_str().unwrap());
+        assert!(
+            shown.contains(&field("exposure")),
+            "exposure of Color Wheels {effect} is not shown"
+        );
+        for wheel in ["lift", "gain"] {
+            let id = format!("color:wheel:{effect}:{wheel}");
+            let carried = wheel_props
+                .get(&id)
+                .unwrap_or_else(|| panic!("the {wheel} wheel of Color Wheels {effect} is not drawn"));
+            let master = format!("{wheel}Master");
+            let binding = row(&master)["parameter"]["binding"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{master} of {effect} has no binding"))
+                .to_owned();
+            assert_eq!(
+                carried, &binding,
+                "the {wheel} wheel of Color Wheels {effect} does not carry its master"
+            );
             assert!(
-                shown.contains(&field),
-                "{key} of Color Wheels {effect} is not shown"
+                !shown.contains(&field(&master)),
+                "{master} of Color Wheels {effect} is still a separate field"
             );
         }
     }

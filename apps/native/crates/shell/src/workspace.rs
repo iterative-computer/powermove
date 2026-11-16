@@ -233,6 +233,66 @@ pub fn record_id(record: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
 }
+/// Each name in `names` as a menu shows it: one that repeats an earlier name
+/// gets its number ("Design (edited) (2)"), as project tabs and Home's cards
+/// tell alike names apart. Profiles from v1 can hold several workspaces of
+/// one name (v1 forked "Design (edited)" on each edit of a built-in).
+pub fn told_apart(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let before = names[..i].iter().filter(|n| *n == name).count();
+            if before == 0 {
+                name.clone()
+            } else {
+                format!("{name} ({})", before + 1)
+            }
+        })
+        .collect()
+}
+/// The records a menu lists, one per name: v1 forked a "Design (edited)" on
+/// each edit of a built-in, and a list of three alike names says nothing.
+/// Of records that share a name the first of `prefer` (the one this window
+/// shows, its project's, the last used) stays, else the first stored; the
+/// others stay stored (their projects still use them, and the workspace
+/// library still lists them) but are not offered (PM-449).
+pub fn one_per_name<'a>(records: Vec<&'a Value>, prefer: &[&str]) -> Vec<&'a Value> {
+    let rank = |r: &Value| {
+        record_id(r)
+            .and_then(|id| prefer.iter().position(|p| *p == id))
+            .unwrap_or(usize::MAX)
+    };
+    let mut kept: Vec<&'a Value> = Vec::with_capacity(records.len());
+    for record in records {
+        match kept
+            .iter_mut()
+            .find(|k| record_name(k) == record_name(record))
+        {
+            Some(k) if rank(record) < rank(k) => *k = record,
+            Some(_) => {}
+            None => kept.push(record),
+        }
+    }
+    kept
+}
+/// A name for a workspace to save that no other of `taken` has: `wanted`,
+/// else `wanted 2`, `wanted 3`, ...
+pub fn free_name(wanted: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == wanted) {
+        return wanted.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{wanted} {n}"))
+        .find(|name| !taken.iter().any(|t| t == name))
+        .expect("a free number")
+}
+/// What Save Workspace offers (v1's): the current name, without v1's
+/// " (edited)", and " copy", free among the workspaces there are.
+pub fn save_name(current: &str, taken: &[String]) -> String {
+    let base = current.strip_suffix(" (edited)").unwrap_or(current);
+    free_name(&format!("{base} copy"), taken)
+}
 pub fn record_name(record: &Value) -> &str {
     record
         .get("name")
@@ -265,6 +325,7 @@ fn size(v: Option<&Value>) -> Option<f32> {
 /// present), and a record without docks shows the viewer alone. Panels no one
 /// provides stay in place; the shell shows a placeholder naming them.
 pub fn layout(record: &Value) -> Layout {
+    let mut flex_bases = std::collections::BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut docks: Vec<Dock> = vec![];
     let specs = record
@@ -292,6 +353,11 @@ pub fn layout(record: &Value) -> Layout {
                 continue;
             }
             let flag = |k: &str| fields.is_some_and(|o| o.get(k) == Some(&Value::Bool(true)));
+            if flag("flex") && !flag("tabbed") {
+                if let Some(basis) = size(fields.and_then(|o| o.get("size"))) {
+                    flex_bases.insert(id.to_owned(), basis);
+                }
+            }
             match groups.last_mut() {
                 Some(g) if flag("tabbed") && stacks(id) && g.tabs.iter().all(|t| stacks(t)) => {
                     g.tabs.push(id.to_owned());
@@ -316,7 +382,9 @@ pub fn layout(record: &Value) -> Layout {
         if groups.is_empty() {
             continue;
         }
-        if groups.iter().all(|g| g.size.is_some()) {
+        if !matches!(d.get("id").and_then(Value::as_str), Some("left" | "right"))
+            && groups.iter().all(|g| g.size.is_some())
+        {
             groups[0].size = None;
         }
         let mut id = d
@@ -368,6 +436,7 @@ pub fn layout(record: &Value) -> Layout {
         }
     }
     Layout {
+        flex_bases,
         version: 1,
         workspace: record_id(record).unwrap_or(FALLBACK).to_owned(),
         docks,
@@ -388,6 +457,18 @@ fn rounded(n: f32) -> Value {
 /// own extra fields (a title, a `min`, extension metadata); only placement
 /// fields are rewritten. A panel that is shown again leaves `hiddenPanels`.
 pub fn write(layout: &Layout, record: &Value) -> Value {
+    // All persistent layout writers pass here, including named agent saves.
+    let mut persistent = layout.clone();
+    let transient: Vec<String> = persistent
+        .open_panels()
+        .into_iter()
+        .filter(|id| id.starts_with("panel-build-"))
+        .map(str::to_owned)
+        .collect();
+    for id in transient {
+        crate::layout::remove_build(&mut persistent, &id);
+    }
+    let layout = &persistent;
     let mut out = record.as_object().cloned().unwrap_or_default();
     let old_docks = record
         .pointer("/layout/docks")
@@ -447,7 +528,13 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                     if i == 0 {
                         match g.size {
                             Some(n) => s.insert("size".into(), rounded(n)),
-                            None => s.insert("flex".into(), true.into()),
+                            None => {
+                                s.insert("flex".into(), true.into());
+                                if let Some(basis) = layout.flex_bases.get(&g.tabs[0]).copied() {
+                                    s.insert("size".into(), rounded(basis));
+                                }
+                                None
+                            }
                         };
                     } else {
                         s.insert("tabbed".into(), true.into());
@@ -471,7 +558,7 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                 .filter(|h| {
                     h.get("id")
                         .and_then(Value::as_str)
-                        .is_none_or(|id| !open.contains(id))
+                        .is_none_or(|id| !id.starts_with("panel-build-") && !open.contains(id))
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -684,6 +771,49 @@ pub enum Write {
 }
 
 #[cfg(test)]
+mod name_tests {
+    use super::{free_name, save_name, told_apart};
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+    /// Acceptance run 22: the menu offers one "Design (edited)", the one this
+    /// window shows, else its project's, else the last used, else the first.
+    #[test]
+    fn a_menu_offers_one_workspace_per_name() {
+        let r = |id: &str, name: &str| serde_json::json!({"id": id, "name": name});
+        let records = [
+            r("design", "Design"),
+            r("a", "Design (edited)"),
+            r("b", "Design (edited)"),
+            r("c", "Design (edited)"),
+            r("mine", "Mine"),
+        ];
+        let all: Vec<&serde_json::Value> = records.iter().collect();
+        let ids = |kept: Vec<&serde_json::Value>| -> Vec<String> {
+            kept.iter().map(|r| super::record_id(r).unwrap().to_owned()).collect()
+        };
+        assert_eq!(ids(super::one_per_name(all.clone(), &[])), ["design", "a", "mine"]);
+        assert_eq!(ids(super::one_per_name(all.clone(), &["c", "b"])), ["design", "c", "mine"]);
+        assert_eq!(ids(super::one_per_name(all.clone(), &["design", "b"])), ["design", "b", "mine"]);
+    }
+    /// Acceptance run 20: the menu listed "Design (edited)" three times.
+    #[test]
+    fn alike_workspace_names_are_told_apart_and_never_saved_twice() {
+        let there = names(&["Default", "Edit", "Design (edited)", "Design (edited)", "Design (edited)"]);
+        assert_eq!(
+            told_apart(&there)[2..],
+            names(&["Design (edited)", "Design (edited) (2)", "Design (edited) (3)"])
+        );
+        assert_eq!(told_apart(&there)[..2], there[..2]);
+        // Save offers v1's name, free among those there are.
+        assert_eq!(save_name("Design (edited)", &there), "Design copy");
+        let more = names(&["Design copy", "Design copy 2"]);
+        assert_eq!(save_name("Design (edited)", &more), "Design copy 3");
+        assert_eq!(free_name("Edit", &there), "Edit 2");
+        assert_eq!(free_name("Mine", &there), "Mine");
+    }
+}
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -843,5 +973,26 @@ mod tests {
         assert_eq!(record_id(&s.active(Some("broken"))), Some("design"));
         s.apply(&Write::Archive("mine".into()));
         assert!(s.get("mine").is_none());
+    }
+}
+
+/// Guard raw workspace definitions as well as serialized live layouts.
+pub fn persistent_record(record: Value) -> Value {
+    let transient = record
+        .pointer("/layout/docks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|d| d["panels"].as_array().into_iter().flatten())
+        .chain(record["hiddenPanels"].as_array().into_iter().flatten())
+        .any(|p| {
+            p["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("panel-build-"))
+        });
+    if transient {
+        write(&layout(&record), &record)
+    } else {
+        record
     }
 }

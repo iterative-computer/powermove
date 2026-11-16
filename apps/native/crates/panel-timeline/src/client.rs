@@ -189,7 +189,7 @@ impl TimelineClient {
         let ack = self
             .call(
                 GestureCall::Begin {
-                    label: drag.label().into(),
+                    label: drag.label(),
                 }
                 .into(),
             )

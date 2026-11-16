@@ -86,6 +86,11 @@ pub fn expected_catalog() -> Value {
         assert!(schema["properties"].get("compositionId").is_none());
         schema["properties"]["compositionId"] = compositions["property"].clone();
     }
+    // Native panel authoring extends the app allowlist; the frozen source stays pinned.
+    catalog["app"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("panel_begin"), json!("panel_build")]);
     catalog
 }
 pub fn declarations() -> &'static Value {

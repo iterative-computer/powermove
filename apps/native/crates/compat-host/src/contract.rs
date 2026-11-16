@@ -121,6 +121,19 @@ impl PageFace {
 }
 #[derive(Clone, Debug)]
 pub enum HostEvent {
+    DockContent {
+        id: String,
+        height: f64,
+    },
+    DockScroll {
+        id: String,
+        delta: f64,
+    },
+    DockReveal {
+        id: String,
+        top: f64,
+        height: f64,
+    },
     /// Native presentation must reconcile acknowledged page geometry.
     GeometryChanged,
     Ready {

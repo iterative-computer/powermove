@@ -403,7 +403,7 @@ test("extension row enters details, back returns without clearing search, Delete
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Fixture 0", "list-item").id, "click");
+  await event(root, find(root, "Fixture 0").id, "click");
   expect(f.model.detailId).toBe("fixture-0");
   await render();
   await event(root, find(root, "Delete…", "push-button").id, "click");

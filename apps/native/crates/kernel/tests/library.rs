@@ -311,3 +311,25 @@ fn recovery_sequences_keep_rewound_edits_in_plain_and_stringified_slots() {
         }
     }
 }
+
+/// A project's saved workspace is read as its open takes it, for the window
+/// to lay out while the project opens: its own workspace record, else the
+/// one in its session record (newer meta first, then the older state).
+#[test]
+fn a_projects_saved_workspace_is_read_as_its_open_takes_it() {
+    let root = std::env::temp_dir().join(format!("pm-saved-workspace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("store")).unwrap();
+    let write = |key: &str, text: &str| std::fs::write(root.join(format!("store/{key}.json")), text).unwrap();
+    let store = LibraryStore::open(&root);
+    let id = |w: Option<Value>| w.and_then(|w| w.get("id").and_then(Value::as_str).map(str::to_owned));
+    assert_eq!(store.saved_workspace("P"), None, "none saved");
+    write("projectState.P", r#"{"workspace":{"id":"state"}}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("state"));
+    write("projectMeta.P", r#"{"time":3,"workspace":{"id":"meta"}}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("meta"));
+    write("projectWorkspace.P", r#"{"id":"own"}"#);
+    assert_eq!(id(store.saved_workspace("P")).as_deref(), Some("own"));
+    assert_eq!(store.saved_workspace("Q"), None, "another project's is not its");
+    std::fs::remove_dir_all(&root).unwrap();
+}

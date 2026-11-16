@@ -65,6 +65,22 @@ fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_t
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
+        // The composition tools add only an optional `compositionId`
+        // (9a88988d2); every other field is compared without it.
+        let mut tool = tool.clone();
+        let target = tool["inputSchema"]["properties"]
+            .as_object_mut()
+            .and_then(|p| p.remove("compositionId"));
+        let composition = catalog::COMPOSITION_TOOLS.contains(&name);
+        assert_eq!(target.is_some(), composition, "{name}");
+        if target.is_some() {
+            let required = tool["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(!required.contains(&Value::from("compositionId")), "{name}");
+        }
+        let tool = &tool;
         if ["edit_3d", "get_3d_scene", "export_video"].contains(&name) {
             assert_eq!(
                 tool,

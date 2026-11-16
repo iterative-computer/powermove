@@ -139,6 +139,10 @@ struct Control {
     ids: AtomicU64,
     /// The extension the watchdog found running a task it prompts about.
     culprit: crate::vm::Culprit,
+    /// Whether the isolate was admitted to the heap account (`None`: still
+    /// waiting its turn), and the signal when it is decided.
+    admitted: Mutex<Option<Result<()>>>,
+    decided: Condvar,
 }
 struct Inner {
     tx: Arc<SyncSender<Command>>,
@@ -188,6 +192,20 @@ enum Command {
     },
 }
 impl Realm {
+    /// Waits up to `within` for the isolate's turn in the heap account:
+    /// `None` while it still waits (others hold the room), else whether it
+    /// was admitted. A realm starts at once and queues its tasks; a caller
+    /// that times its first task waits for this first, so the time spent in
+    /// line is not counted against the task.
+    pub fn admitted(&self, within: Duration) -> Option<Result<()>> {
+        let control = &self.inner.control;
+        let decided = control.admitted.lock().unwrap();
+        let (decided, _) = control
+            .decided
+            .wait_timeout_while(decided, within, |d| d.is_none())
+            .unwrap();
+        decided.clone()
+    }
     /// Nonblocking; GC and V8 API access stay on the isolate owner.
     pub fn memory_pressure(&self) -> Result<()> {
         self.send(Command::MemoryPressure)
@@ -361,19 +379,61 @@ pub struct Admission {
     peak: Arc<AtomicUsize>,
     isolates: Arc<AtomicUsize>,
     budget: usize,
+    /// Isolates waiting for room, served first come first served, and the
+    /// signal that room was given back.
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    /// How long a waiting isolate goes on while the account does not change
+    /// at all (nothing given back, nothing taken): then it is stuck, not busy.
+    patience: Duration,
+}
+#[derive(Default)]
+struct Queue {
+    /// The next ticket handed out and the one served now.
+    next: u64,
+    serving: u64,
+    /// Tickets whose isolate stopped waiting before its turn.
+    left: std::collections::BTreeSet<u64>,
+    /// Bumped whenever the account changes, so a waiter can tell busy from stuck.
+    changes: u64,
 }
 /// In-process isolates share one 4 GB pointer-compression cage (plan §3.5.1);
 /// a quarter stays for V8's code and read-only spaces, the grace a failing
 /// isolate unwinds in, and allocator overheads.
 pub const CAGE_ADMISSION: usize = 3 * 1024 * 1024 * 1024;
+/// How long an isolate waits for room while the account stays exactly as it
+/// is (no isolate starts, grows, trims or ends): two minutes, as an export
+/// waits for the extensions of other open projects.
+pub const ADMISSION_PATIENCE: Duration = Duration::from_secs(120);
 impl Admission {
     pub fn new(budget: usize) -> Self {
+        Self::with_patience(budget, ADMISSION_PATIENCE)
+    }
+    pub fn with_patience(budget: usize, patience: Duration) -> Self {
         Self {
             used: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
             isolates: Arc::new(AtomicUsize::new(0)),
             budget,
+            queue: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            patience,
         }
+    }
+    /// Room held outside any isolate, given back when the holder is dropped
+    /// (a test fills the account with it).
+    #[doc(hidden)]
+    pub fn hold(&self, bytes: usize) -> Result<impl Drop + Send + use<>> {
+        self.reserve(bytes)
+    }
+    /// How many isolates wait for room now.
+    pub fn waiting(&self) -> usize {
+        let queue = self.queue.0.lock().unwrap();
+        (queue.next - queue.serving) as usize - queue.left.len()
+    }
+    /// Room was given back (or the account changed): waiters look again.
+    fn changed(&self) {
+        let (queue, room) = &*self.queue;
+        queue.lock().unwrap().changes += 1;
+        room.notify_all();
     }
     /// The process's one account: every window's built-ins, v4 extensions,
     /// compat realm and compiler reserve from it.
@@ -404,15 +464,68 @@ impl Admission {
         }
         taken.is_ok()
     }
+    /// Room now, never ahead of an isolate already waiting for it.
     pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
-        if !self.take(bytes) {
+        let queue = self.queue.0.lock().unwrap();
+        let waiters = queue.next - queue.serving > queue.left.len() as u64;
+        if waiters || !self.take(bytes) {
             return Err(Error::Quota("isolate admission"));
         }
+        drop(queue);
+        Ok(self.reserved(bytes))
+    }
+    /// Room for an isolate someone asked for: when the account is full it
+    /// waits its turn (first come, first served) for isolates to give heap
+    /// back, while `wanted` (its realm is still open). It gives up only when
+    /// it is no longer wanted, when it could never fit, or when the account
+    /// stayed exactly as it is for the account's patience (stuck, not busy).
+    pub(crate) fn reserve_waiting(&self, bytes: usize, wanted: impl Fn() -> bool) -> Result<Reservation> {
+        if bytes > self.budget {
+            return Err(Error::Quota("isolate admission"));
+        }
+        let (queue, room) = &*self.queue;
+        let mut q = queue.lock().unwrap();
+        let ticket = q.next;
+        q.next += 1;
+        let mut seen = q.changes;
+        let mut since = Instant::now();
+        let result = loop {
+            loop {
+                let serving = q.serving;
+                if !q.left.remove(&serving) {
+                    break;
+                }
+                q.serving += 1;
+            }
+            if q.serving == ticket && self.take(bytes) {
+                break Ok(());
+            }
+            if !wanted() || since.elapsed() >= self.patience {
+                break Err(Error::Quota("isolate admission"));
+            }
+            q = room.wait_timeout(q, Duration::from_millis(100)).unwrap().0;
+            if q.changes != seen {
+                seen = q.changes;
+                since = Instant::now();
+            }
+        };
+        if q.serving == ticket {
+            q.serving += 1;
+        } else {
+            q.left.insert(ticket);
+        }
+        drop(q);
+        // The next in line may fit now.
+        room.notify_all();
+        result.map(|()| self.reserved(bytes))
+    }
+    fn reserved(&self, bytes: usize) -> Reservation {
         self.isolates.fetch_add(1, Ordering::AcqRel);
-        Ok(Reservation {
+        self.changed();
+        Reservation {
             account: self.clone(),
             bytes: AtomicUsize::new(bytes),
-        })
+        }
     }
 }
 /// One isolate's share of its account. Only its owner thread changes it.
@@ -429,6 +542,7 @@ impl Reservation {
         let taken = self.account.take(bytes);
         if taken {
             self.bytes.fetch_add(bytes, Ordering::AcqRel);
+            self.account.changed();
         }
         taken
     }
@@ -443,8 +557,14 @@ impl Reservation {
     }
     pub(crate) fn shrink(&self, bytes: usize) {
         let bytes = bytes.min(self.bytes());
+        if bytes == 0 {
+            // Nothing given back: waiters must not take it for a change, or
+            // trims that free nothing keep a stuck account from ever saying so.
+            return;
+        }
         self.bytes.fetch_sub(bytes, Ordering::AcqRel);
         self.account.used.fetch_sub(bytes, Ordering::AcqRel);
+        self.account.changed();
     }
 }
 impl Drop for Reservation {
@@ -453,6 +573,7 @@ impl Drop for Reservation {
         self.account
             .used
             .fetch_sub(*self.bytes.get_mut(), Ordering::AcqRel);
+        self.account.changed();
     }
 }
 impl RuntimePool {
@@ -490,10 +611,6 @@ impl RuntimePool {
         {
             return Ok(Realm { inner });
         }
-        let reservation = self
-            .config
-            .admission
-            .reserve(HeapPlan::new(&self.config.limits).initial())?;
         let (tx, rx) = mpsc::sync_channel(self.config.limits.queue_capacity);
         let control = Arc::new(Control {
             active: Mutex::new(None),
@@ -502,6 +619,8 @@ impl RuntimePool {
             wake: Condvar::new(),
             ids: AtomicU64::new(1),
             culprit: crate::vm::Culprit::default(),
+            admitted: Mutex::new(None),
+            decided: Condvar::new(),
         });
         let inner = Arc::new(Inner {
             tx: Arc::new(tx),
@@ -515,15 +634,7 @@ impl RuntimePool {
         thread::Builder::new()
             .name("pm-v8-owner".into())
             .spawn(move || {
-                worker(
-                    rx,
-                    control,
-                    name,
-                    worker_kind,
-                    config,
-                    reservation,
-                    notifier,
-                )
+                worker(rx, control, name, worker_kind, config, notifier)
             })
             .map_err(|e| Error::Host(e.to_string()))?;
         realms.insert(kind.clone(), Arc::downgrade(&inner));
@@ -976,7 +1087,6 @@ fn worker(
     name: String,
     kind: RealmKind,
     config: Config,
-    reservation: Reservation,
     notifier: Weak<SyncSender<Command>>,
 ) {
     let _watchdog = WatchdogThread::new(&control, &config);
@@ -992,10 +1102,22 @@ fn worker(
         realm: name.clone(),
         number: next_generation(),
     };
-    let initial = config
-        .kernel
-        .load_storage(&name)
-        .and_then(|storage| Live::new(generation, &kind, &config, storage, json!({}), reservation));
+    // Its heap, on its own thread: a full account makes this isolate wait its
+    // turn (the tasks sent meanwhile queue behind it) instead of refusing
+    // work someone asked for; closing the realm stops the wait.
+    let admitted = config
+        .admission
+        .reserve_waiting(HeapPlan::new(&config.limits).initial(), || {
+            !control.closing.load(Ordering::Acquire)
+        });
+    *control.admitted.lock().unwrap() = Some(admitted.as_ref().map(|_| ()).map_err(Clone::clone));
+    control.decided.notify_all();
+    let initial = admitted
+        .and_then(|reservation| {
+            config.kernel.load_storage(&name).and_then(|storage| {
+                Live::new(generation, &kind, &config, storage, json!({}), reservation)
+            })
+        });
     let mut current = initial;
     let mut retained: HashMap<u64, Live> = HashMap::new();
     // Set after work that grew a heap: an isolate idle this long gives back

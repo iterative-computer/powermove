@@ -1046,306 +1046,486 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                   div form-group group label="Installed"
                     div
                       virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
-                        div list-item listitem settings.extension.fixture-29980 label="Fixture 29980"
-                          text
-                            text "Fixture 29980"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29981 label="Fixture 29981"
-                          text
-                            text "Fixture 29981"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29982 label="Fixture 29982"
-                          text
-                            text "Fixture 29982"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29983 label="Fixture 29983"
-                          text
-                            text "Fixture 29983"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29984 label="Fixture 29984"
-                          text
-                            text "Fixture 29984"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29985 label="Fixture 29985"
-                          text
-                            text "Fixture 29985"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29986 label="Fixture 29986"
-                          text
-                            text "Fixture 29986"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29987 label="Fixture 29987"
-                          text
-                            text "Fixture 29987"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29988 label="Fixture 29988"
-                          text
-                            text "Fixture 29988"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29989 label="Fixture 29989"
-                          text
-                            text "Fixture 29989"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29990 label="Fixture 29990"
-                          text
-                            text "Fixture 29990"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29991 label="Fixture 29991"
-                          text
-                            text "Fixture 29991"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29992 label="Fixture 29992"
-                          text
-                            text "Fixture 29992"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29993 label="Fixture 29993"
-                          text
-                            text "Fixture 29993"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29994 label="Fixture 29994"
-                          text
-                            text "Fixture 29994"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29995 label="Fixture 29995"
-                          text
-                            text "Fixture 29995"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29996 label="Fixture 29996"
-                          text
-                            text "Fixture 29996"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29997 label="Fixture 29997"
-                          text
-                            text "Fixture 29997"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29998 label="Fixture 29998"
-                          text
-                            text "Fixture 29998"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-29999 label="Fixture 29999"
-                          text
-                            text "Fixture 29999"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30000 label="Fixture 30000"
-                          text
-                            text "Fixture 30000"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30001 label="Fixture 30001"
-                          text
-                            text "Fixture 30001"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30002 label="Fixture 30002"
-                          text
-                            text "Fixture 30002"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30003 label="Fixture 30003"
-                          text
-                            text "Fixture 30003"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30004 label="Fixture 30004"
-                          text
-                            text "Fixture 30004"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30005 label="Fixture 30005"
-                          text
-                            text "Fixture 30005"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30006 label="Fixture 30006"
-                          text
-                            text "Fixture 30006"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30007 label="Fixture 30007"
-                          text
-                            text "Fixture 30007"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30008 label="Fixture 30008"
-                          text
-                            text "Fixture 30008"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30009 label="Fixture 30009"
-                          text
-                            text "Fixture 30009"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30010 label="Fixture 30010"
-                          text
-                            text "Fixture 30010"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30011 label="Fixture 30011"
-                          text
-                            text "Fixture 30011"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30012 label="Fixture 30012"
-                          text
-                            text "Fixture 30012"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30013 label="Fixture 30013"
-                          text
-                            text "Fixture 30013"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30014 label="Fixture 30014"
-                          text
-                            text "Fixture 30014"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30015 label="Fixture 30015"
-                          text
-                            text "Fixture 30015"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30016 label="Fixture 30016"
-                          text
-                            text "Fixture 30016"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30017 label="Fixture 30017"
-                          text
-                            text "Fixture 30017"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30018 label="Fixture 30018"
-                          text
-                            text "Fixture 30018"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30019 label="Fixture 30019"
-                          text
-                            text "Fixture 30019"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30020 label="Fixture 30020"
-                          text
-                            text "Fixture 30020"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30021 label="Fixture 30021"
-                          text
-                            text "Fixture 30021"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30022 label="Fixture 30022"
-                          text
-                            text "Fixture 30022"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30023 label="Fixture 30023"
-                          text
-                            text "Fixture 30023"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30024 label="Fixture 30024"
-                          text
-                            text "Fixture 30024"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30025 label="Fixture 30025"
-                          text
-                            text "Fixture 30025"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30026 label="Fixture 30026"
-                          text
-                            text "Fixture 30026"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30027 label="Fixture 30027"
-                          text
-                            text "Fixture 30027"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30028 label="Fixture 30028"
-                          text
-                            text "Fixture 30028"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30029 label="Fixture 30029"
-                          text
-                            text "Fixture 30029"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30030 label="Fixture 30030"
-                          text
-                            text "Fixture 30030"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30031 label="Fixture 30031"
-                          text
-                            text "Fixture 30031"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30032 label="Fixture 30032"
-                          text
-                            text "Fixture 30032"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30033 label="Fixture 30033"
-                          text
-                            text "Fixture 30033"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30034 label="Fixture 30034"
-                          text
-                            text "Fixture 30034"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30035 label="Fixture 30035"
-                          text
-                            text "Fixture 30035"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30036 label="Fixture 30036"
-                          text
-                            text "Fixture 30036"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30037 label="Fixture 30037"
-                          text
-                            text "Fixture 30037"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30038 label="Fixture 30038"
-                          text
-                            text "Fixture 30038"
-                          text
-                            text "Effects · Installed"
-                        div list-item listitem settings.extension.fixture-30039 label="Fixture 30039"
-                          text
-                            text "Fixture 30039"
-                          text
-                            text "Effects · Installed"
+                        div listitem settings.extension.fixture-29980 label="Fixture 29980"
+                          div
+                          div
+                            text
+                              text "Fixture 29980"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29981 label="Fixture 29981"
+                          div
+                          div
+                            text
+                              text "Fixture 29981"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29982 label="Fixture 29982"
+                          div
+                          div
+                            text
+                              text "Fixture 29982"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29983 label="Fixture 29983"
+                          div
+                          div
+                            text
+                              text "Fixture 29983"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29984 label="Fixture 29984"
+                          div
+                          div
+                            text
+                              text "Fixture 29984"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29985 label="Fixture 29985"
+                          div
+                          div
+                            text
+                              text "Fixture 29985"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29986 label="Fixture 29986"
+                          div
+                          div
+                            text
+                              text "Fixture 29986"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29987 label="Fixture 29987"
+                          div
+                          div
+                            text
+                              text "Fixture 29987"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29988 label="Fixture 29988"
+                          div
+                          div
+                            text
+                              text "Fixture 29988"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29989 label="Fixture 29989"
+                          div
+                          div
+                            text
+                              text "Fixture 29989"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29990 label="Fixture 29990"
+                          div
+                          div
+                            text
+                              text "Fixture 29990"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29991 label="Fixture 29991"
+                          div
+                          div
+                            text
+                              text "Fixture 29991"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29992 label="Fixture 29992"
+                          div
+                          div
+                            text
+                              text "Fixture 29992"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29993 label="Fixture 29993"
+                          div
+                          div
+                            text
+                              text "Fixture 29993"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29994 label="Fixture 29994"
+                          div
+                          div
+                            text
+                              text "Fixture 29994"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29995 label="Fixture 29995"
+                          div
+                          div
+                            text
+                              text "Fixture 29995"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29996 label="Fixture 29996"
+                          div
+                          div
+                            text
+                              text "Fixture 29996"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29997 label="Fixture 29997"
+                          div
+                          div
+                            text
+                              text "Fixture 29997"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29998 label="Fixture 29998"
+                          div
+                          div
+                            text
+                              text "Fixture 29998"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-29999 label="Fixture 29999"
+                          div
+                          div
+                            text
+                              text "Fixture 29999"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30000 label="Fixture 30000"
+                          div
+                          div
+                            text
+                              text "Fixture 30000"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30001 label="Fixture 30001"
+                          div
+                          div
+                            text
+                              text "Fixture 30001"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30002 label="Fixture 30002"
+                          div
+                          div
+                            text
+                              text "Fixture 30002"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30003 label="Fixture 30003"
+                          div
+                          div
+                            text
+                              text "Fixture 30003"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30004 label="Fixture 30004"
+                          div
+                          div
+                            text
+                              text "Fixture 30004"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30005 label="Fixture 30005"
+                          div
+                          div
+                            text
+                              text "Fixture 30005"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30006 label="Fixture 30006"
+                          div
+                          div
+                            text
+                              text "Fixture 30006"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30007 label="Fixture 30007"
+                          div
+                          div
+                            text
+                              text "Fixture 30007"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30008 label="Fixture 30008"
+                          div
+                          div
+                            text
+                              text "Fixture 30008"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30009 label="Fixture 30009"
+                          div
+                          div
+                            text
+                              text "Fixture 30009"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30010 label="Fixture 30010"
+                          div
+                          div
+                            text
+                              text "Fixture 30010"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30011 label="Fixture 30011"
+                          div
+                          div
+                            text
+                              text "Fixture 30011"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30012 label="Fixture 30012"
+                          div
+                          div
+                            text
+                              text "Fixture 30012"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30013 label="Fixture 30013"
+                          div
+                          div
+                            text
+                              text "Fixture 30013"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30014 label="Fixture 30014"
+                          div
+                          div
+                            text
+                              text "Fixture 30014"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30015 label="Fixture 30015"
+                          div
+                          div
+                            text
+                              text "Fixture 30015"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30016 label="Fixture 30016"
+                          div
+                          div
+                            text
+                              text "Fixture 30016"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30017 label="Fixture 30017"
+                          div
+                          div
+                            text
+                              text "Fixture 30017"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30018 label="Fixture 30018"
+                          div
+                          div
+                            text
+                              text "Fixture 30018"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30019 label="Fixture 30019"
+                          div
+                          div
+                            text
+                              text "Fixture 30019"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30020 label="Fixture 30020"
+                          div
+                          div
+                            text
+                              text "Fixture 30020"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30021 label="Fixture 30021"
+                          div
+                          div
+                            text
+                              text "Fixture 30021"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30022 label="Fixture 30022"
+                          div
+                          div
+                            text
+                              text "Fixture 30022"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30023 label="Fixture 30023"
+                          div
+                          div
+                            text
+                              text "Fixture 30023"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30024 label="Fixture 30024"
+                          div
+                          div
+                            text
+                              text "Fixture 30024"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30025 label="Fixture 30025"
+                          div
+                          div
+                            text
+                              text "Fixture 30025"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30026 label="Fixture 30026"
+                          div
+                          div
+                            text
+                              text "Fixture 30026"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30027 label="Fixture 30027"
+                          div
+                          div
+                            text
+                              text "Fixture 30027"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30028 label="Fixture 30028"
+                          div
+                          div
+                            text
+                              text "Fixture 30028"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30029 label="Fixture 30029"
+                          div
+                          div
+                            text
+                              text "Fixture 30029"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30030 label="Fixture 30030"
+                          div
+                          div
+                            text
+                              text "Fixture 30030"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30031 label="Fixture 30031"
+                          div
+                          div
+                            text
+                              text "Fixture 30031"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30032 label="Fixture 30032"
+                          div
+                          div
+                            text
+                              text "Fixture 30032"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30033 label="Fixture 30033"
+                          div
+                          div
+                            text
+                              text "Fixture 30033"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30034 label="Fixture 30034"
+                          div
+                          div
+                            text
+                              text "Fixture 30034"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30035 label="Fixture 30035"
+                          div
+                          div
+                            text
+                              text "Fixture 30035"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30036 label="Fixture 30036"
+                          div
+                          div
+                            text
+                              text "Fixture 30036"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30037 label="Fixture 30037"
+                          div
+                          div
+                            text
+                              text "Fixture 30037"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30038 label="Fixture 30038"
+                          div
+                          div
+                            text
+                              text "Fixture 30038"
+                            text
+                              text "Effects · Installed"
+                            div
+                        div listitem settings.extension.fixture-30039 label="Fixture 30039"
+                          div
+                          div
+                            text
+                              text "Fixture 30039"
+                            text
+                              text "Effects · Installed"
+                            div
               div group label="Store"
                 text heading
                   text "Store"

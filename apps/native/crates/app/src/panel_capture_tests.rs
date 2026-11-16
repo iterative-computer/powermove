@@ -25,6 +25,7 @@ fn capture_builtin_panels() {
         ("agent", 360., 620.),
         ("settings", 760., 520.),
         ("export", 600., 520.),
+        ("color", 360., 760.),
     ] {
         if only
             .as_deref()

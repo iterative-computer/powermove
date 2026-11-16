@@ -305,9 +305,6 @@ struct Run {
     last_execution: Option<u64>,
 }
 
-/// How long an export waits for the shared isolate account to admit its
-/// extensions' realm with no change in the account at all.
-const ADMISSION_WAIT: Duration = Duration::from_secs(120);
 /// Runs one export realm on the calling thread until its export or window ends.
 pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInput>) {
     let events = Arc::new(Events {
@@ -345,7 +342,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
             pm_runtime_v8::Error::Quota("isolate admission") => format!(
                 "The export's extensions could not start: the memory set aside for extensions \
                  stayed full for {} s (other open projects' extensions hold it)",
-                ADMISSION_WAIT.as_secs()
+                pm_runtime_v8::ADMISSION_PATIENCE.as_secs()
             ),
             error => format!("The export's extensions could not start: {error}"),
         });
@@ -434,33 +431,26 @@ impl Run {
         host.set_frames(self.start.frames.clone());
         let pool = crate::pool(&format!("export:{}", self.start.job), host.clone())?;
         // The shared isolate account may be full for a moment (other
-        // windows' realms, one being replaced): the export waits for room,
-        // saying so, rather than failing. It waits while the account changes
-        // (other realms start, grow, trim or end), each change a step for the
-        // app's wait; this long with no change at all, it is stuck.
+        // windows' realms, one being replaced): the export's realm waits its
+        // turn for room, saying so, rather than failing. Each change in the
+        // account (other realms start, grow, trim or end) is a step for the
+        // app's wait; the realm gives up only when the account stays stuck,
+        // and a cancelled export closes it, which ends the wait.
+        let realm = pool.realm(RealmKind::Compat)?;
         let account = pm_runtime_v8::Admission::cage();
-        let mut seen = (account.used(), account.isolates());
-        let mut changed = Instant::now();
-        let realm = loop {
+        let seen = std::cell::Cell::new((account.used(), account.isolates()));
+        crate::admitted(&realm, &|| {
+            if self.start.cancel.load(Ordering::Acquire) {
+                realm.close();
+            }
             let now = (account.used(), account.isolates());
-            if now != seen {
-                seen = now;
-                changed = Instant::now();
+            if now != seen.replace(now) {
                 self.events.progress.step();
             }
-            match pool.realm(RealmKind::Compat) {
-                Err(pm_runtime_v8::Error::Quota("isolate admission"))
-                    if changed.elapsed() < ADMISSION_WAIT
-                        && !self.start.cancel.load(Ordering::Acquire) =>
-                {
-                    self.events
-                        .progress
-                        .note("waiting for memory for the export's extensions".into());
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                other => break other?,
-            }
-        };
+            self.events
+                .progress
+                .note("waiting for memory for the export's extensions".into());
+        })?;
         crate::boot_realm(&realm, &host, "")?;
         self.router = Some(
             RemoteDomPanel::new(

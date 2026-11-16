@@ -168,9 +168,34 @@ static ACTIVITIES: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
 /// work (the background render) waits until they have been idle a while,
 /// as it does after the viewer draws.
 pub fn note_input() {
+    noted_activity();
     for activity in ACTIVITIES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         activity.touch();
     }
+}
+/// When the person or a viewer last did something, in milliseconds since
+/// [`ACTIVITY_EPOCH`].
+static LAST_ACTIVITY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVITY_EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+fn noted_activity() {
+    LAST_ACTIVITY_MS.store(
+        ACTIVITY_EPOCH.elapsed().as_millis() as u64,
+        Ordering::Release,
+    );
+}
+/// Whether the person has pressed, scrolled and typed nothing, and no viewer
+/// has drawn or played, for `quiet`: work that can wait for them (projects
+/// of tabs behind the front one) goes now.
+pub fn app_quiet_for(quiet: std::time::Duration) -> bool {
+    let busy = ACTIVITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(Activity::busy);
+    let since = (ACTIVITY_EPOCH.elapsed().as_millis() as u64)
+        .saturating_sub(LAST_ACTIVITY_MS.load(Ordering::Acquire));
+    !busy && since >= quiet.as_millis() as u64
 }
 pub(crate) fn watch_activity(activity: &Activity) {
     ACTIVITIES
@@ -198,6 +223,7 @@ impl Activity {
             let _grant = self.quiet.0.lock().unwrap();
             self.busy.store(true, Ordering::Release);
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            noted_activity();
             return;
         }
         self.busy.store(false, Ordering::Release);
@@ -728,8 +754,15 @@ struct Reported {
     changed: Condvar,
 }
 impl Reported {
-    fn set(&self, status: JobStatus) {
-        *self.now.lock().unwrap() = status;
+    fn set(&self, mut status: JobStatus) {
+        let mut now = self.now.lock().unwrap();
+        // A running job's preview stands until a newer one comes: the child
+        // sends each once.
+        if status.preview.is_none() && status.state == JobState::Running {
+            status.preview = now.preview.take();
+        }
+        *now = status;
+        drop(now);
         self.changed.notify_all();
     }
 }
@@ -998,7 +1031,26 @@ impl Drop for ExportHandle {
 }
 /// Host binary calls this before initializing GPUI if --engine-job is present.
 /// No window, Node, file transport or mutable kernel authority is created.
+/// A job ends when the app that started it is gone (a quit, a crash, a
+/// signal): it is reparented, and nothing would read what it renders. The
+/// quit's own teardown runs no drops, so it cannot stop a job itself.
+fn end_with_parent() {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    let _ = std::thread::Builder::new()
+        .name("pm-job-parent".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                // SAFETY: as above.
+                if unsafe { libc::getppid() } != parent {
+                    std::process::exit(0);
+                }
+            }
+        });
+}
 pub fn run_child() -> Result<()> {
+    end_with_parent();
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()
@@ -1375,6 +1427,17 @@ pub fn run_child() -> Result<()> {
                     checking: p
                         .checked
                         .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    // Only when a new one was made (at most every 250 ms):
+                    // the parent keeps the last one between them.
+                    preview: p
+                        .preview
+                        .as_ref()
+                        .map(|frame| pm_protocol::priority::JobPreview {
+                            frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
+                            width: frame.width,
+                            height: frame.height,
+                            jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
+                        }),
                     ..status(&request.job, JobState::Running, p.fraction(), None, None)
                 });
             },
@@ -2196,15 +2259,12 @@ fn fill_cache(
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
-    if fill.budget_us.is_some() {
-        // Background work never competes with the app for the CPU: the
-        // background class (efficiency cores, and only when nothing the
-        // person does needs them); its helper threads take it too.
-        let _ = crate::qos::set_job_qos(crate::qos::JobQos::Background);
-        // Every thread of this job process, not only this one (its render
-        // and helper threads start at the default class).
-        crate::qos::background_process();
-    }
+    // A background fill runs at the job process's utility class, not the
+    // background band: that band starved it on a busy machine (a tenth of
+    // the frames while the person was idle). It gives way to the person
+    // through the viewer's activity instead: a frame is granted the GPU only
+    // once they have stopped playing, drawing, pressing and typing for a
+    // while (the parent's grant loop), and a Play waits behind one frame.
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {
         doc: doc.clone(),

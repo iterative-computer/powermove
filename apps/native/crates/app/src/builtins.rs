@@ -134,6 +134,9 @@ pub struct Host {
     /// toolbar's Agent item among them), so that same press's toggle does
     /// not open it again.
     agent_dismissed: Option<std::time::Instant>,
+    /// Select part of the screen is up: the popover stepped aside for it and
+    /// is not dismissed by the editor taking key meanwhile.
+    agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
     /// The Settings window's AppKit chrome while this editor hosts it, and
@@ -158,6 +161,9 @@ pub struct Host {
     /// The media inputs behind `media_runtime`, and the worker observing them.
     media_probed: Option<MediaProbeInputs>,
     media_probe_serial: u64,
+    /// Bumped whenever `media_runtime` is replaced: what the status line's
+    /// offline count is kept by (`FrameFacts::offline`).
+    pub media_observed: u64,
     updating: bool,
     again: bool,
     /// The status line asked for the missing files; the next update hands it
@@ -492,6 +498,7 @@ impl Controller {
             .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
         {
             self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+            self.builtins.media_observed += 1;
             return;
         }
         self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
@@ -521,6 +528,7 @@ impl Controller {
                             Some(p) => observed.rebound(media_stamp(p)),
                             None => observed,
                         };
+                        v.builtins.media_observed += 1;
                         v.update_builtins(cx);
                     }
                     Err(error) => {
@@ -830,6 +838,13 @@ impl Controller {
         self.sync_keymap();
         if crate::first_run::take_workspace_request() {
             self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        }
+        // A restored tab behind the front one starts its panels, media probes
+        // and thumbnails with its project's open: its turn comes once the
+        // front tab shows its first frame and the person is idle, or when it
+        // is selected (`Controller::restore_waiting`).
+        if self.restore_waiting() {
+            return;
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
@@ -1176,7 +1191,7 @@ impl Controller {
             .scrolled_at
             .get(id)
             .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = shown
+        let thumb = (shown || !cx.should_auto_hide_scrollbars())
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
@@ -1191,6 +1206,8 @@ impl Controller {
                 if surface.read(cx).culls() {
                     surface.update(cx, |_, cx| cx.notify());
                 }
+                // Its AppKit controls show as pictures until it rests.
+                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -1284,7 +1301,14 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        Some(div().w_full().child(header).into_any_element())
+        // Cached: drawn again only when its panel changes (it observes the
+        // panel), not with every frame the window draws.
+        Some(
+            div()
+                .w_full()
+                .child(header.cached(StyleRefinement::default().w_full()))
+                .into_any_element(),
+        )
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.
@@ -1386,6 +1410,9 @@ impl Controller {
     /// (anywhere outside the popover) closes it; another window taking key
     /// (Settings, a file picker, another app) leaves it open.
     fn agent_resigned(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.agent_picking {
+            return;
+        }
         let editor = self.close_window;
         if agent_dismisses(self.agent_open(cx), editor.is_some() && cx.active_window() == editor) {
             self.close_agent(cx);
@@ -1990,16 +2017,45 @@ impl Controller {
                             .unwrap_or(false)
                         })
                         .unwrap_or_else(|| window.window_handle());
-                    self.close_agent(cx);
+                    // The popover steps aside, kept as it is: back, it shows
+                    // the new chip at once instead of rebuilding first.
+                    let popover = self
+                        .builtins
+                        .windows
+                        .get("agent")
+                        .copied()
+                        .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+                        .flatten();
+                    if let Some(popover) = &popover {
+                        if let Some(parent) = popover.parentWindow() {
+                            parent.removeChildWindow(popover);
+                        }
+                        popover.orderOut(None);
+                    }
+                    self.builtins.agent_picking = popover.is_some();
                     let picked = pm_shell::region_pick::pick(&editor);
+                    // The overlay takes the pointer from here: no layer stays
+                    // outlined under it, nor after.
+                    // Deferred: the viewer's redraw reads this controller.
+                    if let Some(gizmos) = self.builtins.gizmos.clone() {
+                        cx.defer(move |cx| gizmos.update(cx, |g, cx| g.clear_hover(cx)));
+                    }
                     cx.spawn(async move |this, cx| {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
                             let _ = this.update(cx, |v, cx| {
+                                v.builtins.agent_picking = false;
                                 if let Some(rect) = picked {
                                     v.attach_region(rect, window, cx);
                                 }
-                                v.show_builtin("agent", window, cx);
+                                match &popover {
+                                    Some(popover) if v.builtins.windows.contains_key("agent") => {
+                                        let editor = v.host.borrow().window.clone();
+                                        gpui_macos::child_window::attach(popover, &editor);
+                                        gpui_macos::child_window::show(popover, true);
+                                    }
+                                    _ => v.show_builtin("agent", window, cx),
+                                }
                             });
                         });
                     })

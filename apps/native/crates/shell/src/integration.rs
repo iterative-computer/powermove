@@ -5,10 +5,16 @@ use crate::{
 };
 use gpui::{AnyElement, App, Window};
 use std::{cell::RefCell, rc::Rc};
+/// Ids and names, shared: a list the shell keeps per frame and compares.
+pub type Names = std::sync::Arc<[(String, String)]>;
 
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
     fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
+    /// Last measured natural body plus header height, before column clipping.
+    fn natural_panel_height(&self, _id: &str, _cx: &App) -> Option<f32> {
+        None
+    }
     fn panel(
         &self,
         id: &str,
@@ -46,12 +52,17 @@ pub trait Integration {
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
-    /// Layer ids and names in the active composition.
-    fn palette_effects(&self, _cx: &App) -> Vec<(String, String)> {
-        Vec::new()
+    /// Effect ids and labels the command palette offers. Asked on every
+    /// frame: answer from a value kept until it changes, never by walking
+    /// the project (the same list returns the same `Arc`, compared by
+    /// pointer).
+    fn palette_effects(&self, _cx: &App) -> Names {
+        Names::default()
     }
-    fn palette_layers(&self, _cx: &App) -> Vec<(String, String)> {
-        Vec::new()
+    /// Layer ids and names in the active composition, kept as
+    /// [`Self::palette_effects`] is.
+    fn palette_layers(&self, _cx: &App) -> Names {
+        Names::default()
     }
     /// Recent projects (library id, name), newest first.
     fn recent(&self, _cx: &App) -> Vec<(String, String)> {
@@ -59,6 +70,9 @@ pub trait Integration {
     }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String {
+        id.to_owned()
+    }
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }
@@ -87,6 +101,13 @@ pub trait Integration {
     fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Titles of panels seen before, for a tab whose panel has not
+    /// registered yet (its extension still starting).
+    fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Explicit dismissal of a build, independent of workspace refreshes.
+    fn panel_closed(&self, _id: &str, _cx: &mut App) {}
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The panels on screen this frame (each tab group's front panel, or the

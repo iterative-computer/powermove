@@ -117,6 +117,46 @@ function Chip({ children }: { children: string }) {
     </div>
   );
 }
+/** A file a message carried, as the composer showed it before it was
+ * sent: its document symbol and name in the text face (a code chip's
+ * fixed-width face is for code). */
+function FileChip({ name }: { name: string }) {
+  return (
+    <div
+      role="group"
+      label={`${name}, attachment`}
+      style={{
+        ...row,
+        ...shrink,
+        gap: t("metrics.gap"),
+        height: t("metrics.hit"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        background: t("colors.fill"),
+        borderRadius: t("metrics.inner_radius"),
+      }}
+    >
+      <div
+        metadata={{ symbol: "doc" }}
+        style={{
+          color: t("colors.muted"),
+          symbolSize: t("metrics.symbol_inline"),
+          flexShrink: 0,
+        }}
+      />
+      <text
+        style={{
+          ...quiet,
+          ...shrink,
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {name}
+      </text>
+    </div>
+  );
+}
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -560,9 +600,10 @@ function Gate({
       : local
         ? "Bring your own model"
         : `Connect ${name}`;
+  // Signed out is the plain ask (v1.2.0's gate): the reason is for a fault.
   const body = checking
     ? `Checking your ${name} connection.`
-    : n.reason ||
+    : (!n.signedOut && n.reason) ||
       (local
         ? "Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others."
         : `Use your ${name} subscription to power the Powermove agent.`);
@@ -577,29 +618,20 @@ function Gate({
         ...(compact ? {} : { flexGrow: 1, justifyContent: "center" }),
       }}
     >
-      <div
-        role="group"
-        label="Connection provider"
-        style={{ ...row, gap: t("metrics.gap") }}
-      >
-        {s.catalog.providers.map(([id, label]) => (
-          <UI.ToolbarItem
-            key={id}
-            id={`agent-connect-${id}`}
-            label={id === "compatible" ? "API / local" : label}
-            active={id === provider}
-            onClick={() => {
-              if (id !== provider) send({ type: "setProvider", provider: id });
-            }}
-            style={{
-              paddingLeft: t("metrics.text_padding"),
-              paddingRight: t("metrics.text_padding"),
-              borderRadius: t("metrics.control_radius"),
-            }}
-          >
-            {id === "compatible" ? "API / local" : label}
-          </UI.ToolbarItem>
-        ))}
+      {/* v1.2.0's provider switch: the kit's one segmented control. */}
+      <div style={{ ...row, justifyContent: "center" }}>
+        <UI.SegmentedControl
+          id="agent-connect-provider"
+          label="Connection provider"
+          value={provider}
+          options={s.catalog.providers.map(([id, label]) => ({
+            id,
+            label: id === "compatible" ? "API / local" : label,
+          }))}
+          onChange={(id) => {
+            if (id !== provider) send({ type: "setProvider", provider: id });
+          }}
+        />
       </div>
       {fault ? (
         <ErrorNotice
@@ -634,7 +666,7 @@ function Gate({
         </div>
       )}
       {(!local || fault) && (
-        <div style={row}>
+        <div style={{ ...row, justifyContent: "center" }}>
           <button
             role="button"
             label="Connection settings"
@@ -831,7 +863,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <Chip key={i}>{str(obj(f).name) || "File"}</Chip>
+              <FileChip key={i} name={str(obj(f).name) || "File"} />
             ))}
           </div>
         )}

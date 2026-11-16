@@ -14,7 +14,7 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
 /// panel is ready.
 pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
     let shows = crate::ghost::shows(crate::ghost::Open {
-        chosen: v.opening_name.is_some(),
+        chosen: v.opening_name.is_some() || v.reopening,
         landed: v.session.is_some(),
         settling: v.settling.is_some(),
         ready: v.builtins.ready.contains(id),
@@ -32,7 +32,7 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
         id,
         bounds,
         v.ghost_aspect,
-        v.ghost_poster.as_deref(),
+        v.ghost_picture.clone(),
         &t,
     ))
 }

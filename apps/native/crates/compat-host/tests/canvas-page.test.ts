@@ -80,6 +80,9 @@ async function page(events: unknown[]) {
       deliver = (events) => resolve({json: async () => ({generation:1,seq:events.length,events})});
     });
   };
+  // WebKit's frame callback (the page measures dock content on one).
+  dom.window.requestAnimationFrame = (frame: () => void) =>
+    dom.window.setTimeout(frame, 0);
   dom.window.eval(
     `const PM_HOST_CONFIG={base:'pmcompat://host/synthetic/',generation:1};${built.stdout.toString()}\n${shell}`,
   );

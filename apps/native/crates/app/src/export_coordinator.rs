@@ -150,6 +150,11 @@ impl Controller {
             // Preserve the actual in-flight run and its terminal ownership.
             return;
         }
+        // Trying again (or without the offline clips): the line that said
+        // why the last one failed no longer stands.
+        if retry {
+            self.message.clear();
+        }
         let saved = if retry {
             self.builtins.export_retry.clone().map(|mut frozen| {
                 frozen.without_offline |= without;
@@ -233,8 +238,15 @@ impl Controller {
                 } else if existing == [destination.clone()] && panel_asks {
                     Some((destination, true))
                 } else {
+                    // On the Export sheet when it is up: a window shows one
+                    // sheet at a time, and a question queued behind the
+                    // sheet that waits for its answer would never show.
                     let asked = this.update(cx, |v, _| {
-                        replace_question(&existing).sheet(&v.host.borrow().window)
+                        let host = v.host.borrow();
+                        match host.window.attachedSheet() {
+                            Some(sheet) => replace_question(&existing).sheet(&sheet),
+                            None => replace_question(&existing).sheet(&host.window),
+                        }
                     });
                     match asked {
                         Ok(rx) if rx.recv().await == Ok(Some(true)) => Some((destination, true)),
@@ -371,7 +383,11 @@ impl Controller {
                                 v.note(line, cx);
                             }
                         }
-                        Err(_) => v.close_export_sheet(cx),
+                        Err(_) => {
+                            v.close_export_sheet(cx);
+                            // As v1 said it.
+                            v.note("Export cancelled".into(), cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -778,6 +794,7 @@ async fn execute_inner(
     *job.handle.lock().unwrap() = Some(handle);
     let started = std::time::Instant::now();
     let mut pace = Pace::default();
+    let mut shown = Preview::default();
     let mut cancellation_sent = false;
     loop {
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
@@ -846,7 +863,12 @@ async fn execute_inner(
         {
             // Every frame is encoded: the written file is being checked.
             let checked = (checked * planned.frames as f64).round() as u64;
-            json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
+            let mut run = json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()});
+            // The last frame encoded stays in view while the file is checked.
+            if let Some(key) = shown.show(None) {
+                run["preview"] = json!(key);
+            }
+            run
         } else if status.state == JobState::Running {
             let elapsed = started.elapsed().as_secs_f64();
             let mut run =
@@ -868,12 +890,55 @@ async fn execute_inner(
             if let Some(eta) = pace.left(frame, planned.frames, std::time::Instant::now()) {
                 run["eta"] = json!(eta);
             }
+            // The frame last encoded, as the sheet shows it.
+            if let Some(key) = shown.show(status.preview.as_ref()) {
+                run["preview"] = json!(key);
+            }
             run
         } else {
             json!({"phase":"preparing"})
         };
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+/// The progress sheet's picture of the frame last encoded: each preview the
+/// worker sends is written once to its own file (images are cached by path)
+/// under a key the sheet draws; the last one goes with the export.
+#[derive(Default)]
+struct Preview {
+    file: Option<(u32, String, std::path::PathBuf)>,
+}
+impl Preview {
+    /// The key of the picture of `preview` (written if it is new), or of the
+    /// last one when the worker sent none this time.
+    fn show(&mut self, preview: Option<&pm_protocol::priority::JobPreview>) -> Option<&str> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if let Some(p) = preview
+            && self.file.as_ref().is_none_or(|(frame, ..)| *frame != p.frame)
+        {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join("powermove-export-previews");
+            let path = dir.join(format!("{}-{n}.jpg", std::process::id()));
+            if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &p.jpeg.0).is_ok() {
+                let key = format!("export-preview/{n}");
+                crate::media_thumbs::register(&key, path.clone());
+                self.clear();
+                self.file = Some((p.frame, key, path));
+            }
+        }
+        self.file.as_ref().map(|(_, key, _)| key.as_str())
+    }
+    fn clear(&mut self) {
+        if let Some((_, key, path)) = self.file.take() {
+            crate::media_thumbs::forget(&key);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 /// The time an export has left, from the pace it has kept: frames finished

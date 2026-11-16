@@ -1137,6 +1137,12 @@ impl GizmoSurface {
             self.hover(at, cx);
         }
     }
+    /// Drops the hover outline: the pointer went where the viewer cannot
+    /// follow it (a pick overlay over the editor takes every move).
+    pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_at = None;
+        self.unhover(cx);
+    }
     fn unhover(&mut self, cx: &mut Context<Self>) {
         self.hover_next = None;
         if self.hover_box.take().is_some() {
@@ -1827,10 +1833,16 @@ impl GizmoSurface {
     /// (the viewer was drawn again or covered while held). It ends now, as a
     /// release does, so no edit stays open.
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A marquee or a shape or text box being drawn, or a press whose
+        // pick has not answered yet, waits for the release as a drag does.
         let held = self.drag.is_some()
             || self.pen_drag.is_some()
             || self.panning.is_some()
-            || self.rulers.dragging.is_some();
+            || self.rulers.dragging.is_some()
+            || self.marquee.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
+            || self.picking.is_some();
         if held {
             self.on_up(true, Some(window), cx);
         }
@@ -2036,13 +2048,29 @@ impl GizmoSurface {
             );
             let _ = this.update(cx, |s, cx| {
                 s.busy = false;
-                match result {
+                // A gesture that has finished (or never began) has no id to
+                // step: a later gesture's steps must never reach a committed
+                // one, which would leave the later one empty in the history
+                // (PM-433: two Cmd-Z presses undid one step).
+                let begun = match result {
                     Ok(ack) => match ack.reply {
-                        Reply::Gesture(id) => s.gesture = Some(id),
-                        Reply::Throw(error) => s.host.report(error.to_string(), cx),
-                        _ => {}
+                        Reply::Gesture(id) => {
+                            s.gesture = Some(id);
+                            true
+                        }
+                        Reply::Throw(error) => {
+                            s.host.report(error.to_string(), cx);
+                            false
+                        }
+                        _ => true,
                     },
-                    Err(error) => s.host.report(error, cx),
+                    Err(error) => {
+                        s.host.report(error, cx);
+                        false
+                    }
+                };
+                if kind == "finish" || (kind == "begin" && !begun) {
+                    s.gesture = None;
                 }
                 if s.queue.is_empty()
                     && s.drag.is_none()
@@ -2081,6 +2109,10 @@ impl GizmoSurface {
     #[cfg(test)]
     pub fn idle(&self) -> bool {
         !self.busy && self.queue.is_empty() && self.picks == 0
+    }
+    #[cfg(test)]
+    pub fn marquee_drawn(&self) -> bool {
+        self.marquee.is_some()
     }
     #[cfg(test)]
     pub fn hovered(&self) -> Option<String> {

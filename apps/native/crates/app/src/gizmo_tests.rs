@@ -472,6 +472,31 @@ fn the_rotate_handle_turns_about_the_anchor_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(s.pose().rotation, before.rotation);
 }
+/// A turn and then a move are two undo steps: each Cmd-Z undoes exactly one
+/// (PM-433: two presses once undid only one).
+#[gpui::test]
+fn a_turn_then_a_move_undo_one_step_each(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let start = s.pose();
+    let (.., rotate) = s.points();
+    let at = s.point_of(rotate);
+    s.drag(cx, at, point(px(60.), px(20.)), Modifiers::none());
+    let turned = s.pose();
+    assert!(turned.rotation != start.rotation);
+    let (body, ..) = s.points();
+    let at = s.point_of(body);
+    s.drag(cx, at, point(px(40.), px(-10.)), Modifiers::none());
+    let moved = s.pose();
+    assert_ne!(moved.position, turned.position);
+    s.undo(cx);
+    let once = s.pose();
+    assert_eq!(once.position, turned.position, "the first undo undoes the move");
+    assert_eq!(once.rotation, turned.rotation, "and only the move");
+    s.undo(cx);
+    let twice = s.pose();
+    assert_eq!(twice.rotation, start.rotation, "the second undoes the turn");
+    assert_eq!(twice.position, start.position);
+}
 /// While the rotate handle is held the box is already turned with the layer
 /// (it does not wait for the kernel's read-back), and it is the box the
 /// layer has once released, under a parent scaled 200 % × 100 % too.
@@ -1369,6 +1394,51 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+}
+/// A marquee whose release the viewer never hears (the button came up over
+/// another view) ends when the window reports the release: the rectangle is
+/// gone and it selects what it encloses, as a heard release does.
+#[gpui::test]
+fn a_marquee_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let from = s.point_of([120., 80.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    for step in 1..=4 {
+        let at = from + point(px(40. * step as f32), px(35. * step as f32));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+    // A second report changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
     });
 }
 /// A move that brings the box's right edge within 8 points of the

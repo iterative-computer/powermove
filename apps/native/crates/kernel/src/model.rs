@@ -328,11 +328,24 @@ pub struct LayerInfo {
     pub index: usize,
 }
 
+thread_local! {
+    static LAYER_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// How many walks of a composition's layers ([`list_layers`],
+/// [`layer_names`]) this thread has made: a hot path (a frame) can be shown
+/// to make none.
+pub fn layer_walks() -> u64 {
+    LAYER_WALKS.with(std::cell::Cell::get)
+}
+fn walked() {
+    LAYER_WALKS.with(|w| w.set(w.get() + 1));
+}
 /// Each layer's id and name in the composition `comp_id` (`None`: the open
 /// one), top of the stack first, named as [`list_layers`] names them: what a
 /// list of names needs (the command palette asks on every frame), nothing
 /// else read.
 pub fn layer_names(root: &Node, comp_id: Option<&str>) -> Vec<(String, String)> {
+    walked();
     let open = open_comp_id(root);
     let Some(comp) = comp_node(root, comp_id.or(open.as_deref())) else {
         return Vec::new();
@@ -352,6 +365,7 @@ pub fn layer_names(root: &Node, comp_id: Option<&str>) -> Vec<(String, String)> 
 
 /// The layers of the composition `comp_id` (`None`: the open one).
 pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
+    walked();
     let open = open_comp_id(root);
     let comp_id = comp_id.map(str::to_owned).or(open);
     let Some(comp) = comp_node(root, comp_id.as_deref()) else {

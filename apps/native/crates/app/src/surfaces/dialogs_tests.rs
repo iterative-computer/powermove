@@ -582,7 +582,7 @@ fn a_frame_exact_duration_reads_short_opens_quiet_and_survives_apply() {
         c.layers_cut_by(draft.duration).unwrap(),
     );
     let texts = shown(&surface);
-    assert_eq!(texts["duration"], "73.533");
+    assert_eq!(texts["duration"], "73.53");
     let duration = &surface.fields[4];
     assert_eq!(
         duration.description.as_deref(),
@@ -624,11 +624,14 @@ fn a_frame_exact_duration_reads_short_opens_quiet_and_survives_apply() {
         .unwrap();
     assert_eq!(typed.duration_detail(cut), (CUT_ONE.into(), true));
 }
+/// At most two decimals, as New Project shows them too; the exact value
+/// stays while the text is left as shown
+/// (`a_frame_exact_duration_reads_short_opens_quiet_and_survives_apply`).
 #[test]
-fn sheet_numbers_show_at_most_three_decimals() {
+fn sheet_numbers_show_at_most_two_decimals() {
     assert_eq!(number_text(10.), "10");
     assert_eq!(number_text(0.1), "0.1");
     assert_eq!(number_text(30000. / 1001.), "29.97");
-    assert_eq!(number_text(2206. / 30.), "73.533");
+    assert_eq!(number_text(2206. / 30.), "73.53");
     assert_eq!(number_text(-0.0001), "0");
 }

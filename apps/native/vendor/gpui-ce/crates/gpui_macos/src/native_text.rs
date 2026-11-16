@@ -829,6 +829,26 @@ impl NativeTextSlot {
     pub fn keep(&self) {
         self.state.stage(self.state.staged.get());
     }
+    /// P-SLOT-PICTURE: the editor as AppKit draws it now (its text, scroll
+    /// and appearance), `size` points, for a scroll to move instead of the
+    /// view. `None` for a field drawn by GPUI at rest (dense) or one being
+    /// edited: those are never pictured.
+    pub fn picture(&self, size: NSSize) -> Option<crate::native_control::SlotPicture> {
+        let state = &self.state;
+        if state.kind.dense() || state.kind == TextKind::Canvas || state.editing.get() {
+            return None;
+        }
+        match &state.scroll {
+            Some(scroll) => crate::native_control::picture_of(scroll, size),
+            None => crate::native_control::picture_of(state.editor.view(), size),
+        }
+    }
+    /// Stages nothing: the next present hides the editor (its picture stands
+    /// in the scene); [`Self::keep`] keeps it hidden.
+    pub fn hide(&self) {
+        self.state.stage(None);
+        self.state.staged.set(None);
+    }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {
             *self.state.original.borrow_mut() = self.value();
@@ -1110,6 +1130,15 @@ fn place(key: usize, apply: bool) -> bool {
         // From GPUI's frame in its parent (P-EMBED).
         let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
+        let hidden = visible.size.width <= 0.
+            || visible.size.height <= 0.
+            || (state.kind.dense() && !state.editing.get());
+        // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
+        // field at rest, a field scrolled out) still follows its row, but
+        // nothing on screen moved, so the frame needs no synchronous
+        // present: a panel of number fields made every frame of its scroll
+        // one.
+        let unseen = hidden && state.wrapper.isHidden();
         let frame = NSRect::new(
             NSPoint::new(
                 g.origin.x + visible.origin.x,
@@ -1118,7 +1147,7 @@ fn place(key: usize, apply: bool) -> bool {
             visible.size,
         );
         if state.wrapper.frame() != frame {
-            moved = true;
+            moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
@@ -1132,7 +1161,7 @@ fn place(key: usize, apply: bool) -> bool {
         );
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     scroll.setFrame(local);
                 }
@@ -1155,22 +1184,19 @@ fn place(key: usize, apply: bool) -> bool {
                     NSSize::new(STEPPER.0, local.size.height),
                 );
                 if stepper.frame() != at {
-                    moved = true;
+                    moved |= !unseen;
                     if apply {
                         stepper.setFrame(at);
                     }
                 }
             }
             if state.editor.view().frame() != field {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     state.editor.view().setFrame(field);
                 }
             }
         }
-        let hidden = visible.size.width <= 0.
-            || visible.size.height <= 0.
-            || (state.kind.dense() && !state.editing.get());
         if state.wrapper.isHidden() != hidden {
             moved = true;
             if apply {

@@ -217,9 +217,9 @@ test("Cmd/Ctrl comma toggle, exact modifiers, repeat guard, Cmd F and Cmd W", ()
 });
 test("extension filters, in-place details and stale publications preserve identity", () => {
   const { model } = fixture({
-    extensions: [extension(), { ...extension(1), type: "Commands" }],
+    extensions: [extension(), { ...extension(1), type: "Editor Tools" }],
   });
-  model.filterExtensions("Fixture 1", "Commands");
+  model.filterExtensions("Fixture 1", "Editor Tools");
   expect(model.extensions.map((e) => e.id)).toEqual(["fixture-1"]);
   model.viewExtension("fixture-0");
   expect(model.detail).toBeUndefined();

@@ -12,6 +12,8 @@ use std::{
 
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
+    "panel_begin",
+    "panel_build",
     "open_panel",
     "get_panel_state",
     "interact_panel",
@@ -98,6 +100,7 @@ pub struct McpSession {
     agent_token: Option<String>,
     writer: u32,
     closed: bool,
+    panel_lease: Option<crate::panel_lease::Lease>,
 }
 impl McpSession {
     pub fn new(host: Arc<Mutex<Automation>>) -> Self {
@@ -108,6 +111,7 @@ impl McpSession {
             agent_token: None,
             writer: NEXT.fetch_add(1, Ordering::Relaxed),
             closed: false,
+            panel_lease: None,
         }
     }
     pub fn tools(&self) -> Value {
@@ -358,8 +362,15 @@ impl McpSession {
                 "set_panel_layout" => Some(host.panel_layout(project.as_deref())?),
                 _ => None,
             };
+            let owner = agent(self.agent_token.as_deref(), &host).map(|(run, _)| run);
             drop(host);
-            let live = surfaces.call(name, project.as_deref(), args);
+            let mut surface_args = args.clone();
+            if ["panel_begin", "panel_build"].contains(&name) {
+                surface_args["_panel_owner"] = json!(owner);
+                surface_args["_panel_session"] =
+                    json!(self.panel_lease.as_ref().map(|lease| lease.id()));
+            }
+            let live = surfaces.call(name, project.as_deref(), &surface_args);
             if acting && let Some(id) = project.as_deref() {
                 // Panel handlers may edit asynchronously; later reads see it.
                 let host = shared
@@ -1036,7 +1047,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             let extensions = if host.extensions.is_some() {
-                " To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+                " Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
             } else {
                 " Extension staging is inert: nothing here activates."
             };
@@ -1070,6 +1081,7 @@ impl McpSession {
             }
             _ => None,
         };
+        self.panel_lease = Some(crate::panel_lease::Lease::new());
         self.active = Some(Active {
             project,
             document,
@@ -1088,6 +1100,7 @@ impl McpSession {
         Ok(result)
     }
     pub fn finish(&mut self, commit: bool) -> Result<Value> {
+        self.panel_lease = None;
         let Some(mut session) = self.active.take() else {
             return Ok(json!({"changed":false}));
         };

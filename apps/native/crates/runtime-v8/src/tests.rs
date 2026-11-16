@@ -1015,18 +1015,74 @@ fn queued_fetches_wait_for_room_and_never_refuse_the_engine() {
     close(&r);
 }
 #[test]
-fn admission_refuses_then_releases_after_owner_disposal() {
+fn a_full_account_queues_a_new_isolate_until_heap_is_given_back() {
     let f = fixture_with(|c| c.admission = Admission::new(slice()));
     let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "42");
+    // Asked for while the account is full: it starts at once, and its first
+    // task waits in line for the heap the other gives back.
+    let next = f.pool.realm(RealmKind::Compiler).unwrap();
+    let ticket = next.eval("21*2").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while f.admission.waiting() == 0 {
+        assert!(Instant::now() < deadline, "the new isolate waits for room");
+        thread::sleep(Duration::from_millis(2));
+    }
+    let closing = r.clone();
+    let closer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        close(&closing);
+    });
+    assert_eq!(wait(ticket).unwrap().value, "42");
+    closer.join().unwrap();
+    assert_eq!(f.admission.waiting(), 0);
+    close(&next);
+}
+#[test]
+fn a_stuck_account_refuses_after_its_patience_and_closing_stops_a_wait() {
+    let f = fixture_with(|c| {
+        c.admission = Admission::with_patience(slice(), Duration::from_millis(300))
+    });
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "42");
+    // Nothing gives heap back: refused once the account stayed as it is.
+    let stuck = f.pool.realm(RealmKind::Compiler).unwrap();
     assert!(matches!(
-        f.pool.realm(RealmKind::Compiler),
+        wait(stuck.eval("1").unwrap()),
         Err(Error::Quota("isolate admission"))
     ));
-    eval(&r, "42");
+    close(&stuck);
+    // A realm closed while it waits stops waiting (and holds no place).
+    let left = f.pool.realm(RealmKind::Compiler).unwrap();
+    let _ = left.eval("1").unwrap();
+    close(&left);
+    assert_eq!(f.admission.waiting(), 0);
+    assert_eq!(f.admission.isolates(), 1);
     close(&r);
-    let next = f.pool.realm(RealmKind::Compiler).unwrap();
-    assert_eq!(eval(&next, "42"), "42");
-    close(&next);
+}
+/// A trim that gives nothing back is no change: a stuck account still says
+/// so after its patience, however often its isolates trim.
+#[test]
+fn a_trim_that_frees_nothing_never_keeps_a_stuck_wait_going() {
+    let account = Admission::with_patience(slice(), Duration::from_millis(300));
+    let held = account.reserve(slice()).unwrap();
+    let waiter = {
+        let account = account.clone();
+        thread::spawn(move || {
+            let asked = Instant::now();
+            let refused = account.reserve_waiting(slice(), || true).is_err();
+            (asked.elapsed(), refused)
+        })
+    };
+    let until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until {
+        held.shrink(0);
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (took, refused) = waiter.join().unwrap();
+    assert!(refused, "the stuck account refuses");
+    assert!(took < Duration::from_millis(1000), "refused after its patience, not {took:?}");
+    drop(held);
 }
 #[test]
 fn heap_quota_child() {

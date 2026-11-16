@@ -121,8 +121,43 @@ pub struct Plan {
     pub settings: Option<ExportSettings>,
     pub frames: u64,
     pub summary: String,
+    /// What the file will be, under the summary (v1's): a video's rough
+    /// size and data rate, a PNG's count, what a project file holds.
+    pub note: String,
     pub captions: usize,
     pub has_audio: bool,
+}
+/// v1's line under the summary: a video's rough size at its data rate, how
+/// many PNG files; ProRes says nothing (its profile row does).
+fn note(options: &Options, seconds: f64, frames: u64) -> String {
+    let transparent = if options.alpha { " · transparent" } else { "" };
+    let mbps = match options.quality.as_str() {
+        "draft" => 4.,
+        "max" => 40.,
+        _ => 16.,
+    };
+    let size = |codec: &str| {
+        let mb = (mbps * seconds / 8. * 10.).round() / 10.;
+        format!("≈ {mb} MB · {mbps} Mbps {codec}")
+    };
+    match options.format {
+        Format::Mp4 => size(
+            if options.codec == pm_promedia::export_panel::Codec::Hevc
+                || options.dynamic_range != pm_promedia::export_panel::DynamicRange::Sdr
+            {
+                "HEVC"
+            } else {
+                "H.264"
+            },
+        ),
+        Format::Webm => size("VP9"),
+        Format::Png => format!(
+            "{frames} PNG file{}{transparent}",
+            if frames == 1 { "" } else { "s" }
+        ),
+        Format::Still => format!("Single PNG{transparent}"),
+        Format::Prores | Format::Json => String::new(),
+    }
 }
 fn number(node: &pm_model::Node, key: &str) -> Result<f64, String> {
     node.get(key)
@@ -156,6 +191,7 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
             settings: None,
             frames: 0,
             summary: format!("{name}.pmv"),
+            note: "Packs the composition and its media into one .pmv file".into(),
             captions,
             has_audio,
         });
@@ -290,10 +326,12 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         Some(note) => format!("{summary} · {note}"),
         None => summary,
     };
+    let note = note(&options, pm_time::seconds_from_ticks(end - start), frames);
     Ok(Plan {
         settings: Some(settings),
         frames,
         summary,
+        note,
         captions,
         has_audio,
     })
@@ -722,6 +760,27 @@ mod tests {
         for extra in ["", ",\"work\":[4,2]", ",\"work\":[0,20]"] {
             assert!(plan(&fixture(extra), &o, 0.).is_err());
         }
+    }
+    #[test]
+    fn the_note_says_what_the_file_will_be_as_v1() {
+        let mut o = options();
+        o.range = "work".into();
+        o.format = Format::Mp4;
+        o.quality = "high".into();
+        // 1.05 s at 16 Mbps.
+        let p = plan(&fixture(",\"work\":[2,3.05]"), &o, 0.).unwrap();
+        assert_eq!(p.note, "≈ 2.1 MB · 16 Mbps H.264");
+        o.format = Format::Png;
+        o.alpha = true;
+        let p = plan(&fixture(",\"work\":[2,3.05]"), &o, 0.).unwrap();
+        assert_eq!(p.note, "31 PNG files · transparent");
+        o.format = Format::Still;
+        assert_eq!(plan(&fixture(""), &o, 1.).unwrap().note, "Single PNG · transparent");
+        o.format = Format::Json;
+        assert_eq!(
+            plan(&fixture(""), &o, 0.).unwrap().note,
+            "Packs the composition and its media into one .pmv file"
+        );
     }
     #[test]
     fn still_is_one_frame_at_the_authored_playhead() {
