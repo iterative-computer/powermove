@@ -33,13 +33,14 @@ pub(crate) fn effect_binding_rows<'a>(
     channels: &[String],
 ) -> Option<Vec<&'a Value>> {
     // Every editable parameter the panel shows: its own rows, and those a
-    // summary row edits (Effect Controls' wheel master).
+    // summary row edits (Effect Controls' wheel master) or a point row does
+    // (its X and Y).
     let parameters: Vec<&Value> = projection["rows"]
         .as_array()?
         .iter()
         .flat_map(|r| match r["kind"].as_str() {
             Some("parameter") => vec![&r["parameter"]],
-            Some("summary") => r["parameters"]
+            Some("summary" | "point") => r["parameters"]
                 .as_array()
                 .map(|list| list.iter().collect())
                 .unwrap_or_default(),
