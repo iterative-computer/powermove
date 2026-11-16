@@ -416,28 +416,36 @@ pub enum Failure {
     RenameByOpening,
 }
 
-/// A copy of a copy was named "X — Native — Native" (each copy added the
-/// suffix, fixed since): such a chain shows as the original name. One
-/// " — Native" is a real copy's name and stays.
+/// A copy of a copy was named "X — Native — Native" (each copy added its
+/// suffix again; fixed since), a recovered one "X — Recovered — Recovered":
+/// a part repeated straight after itself shows once. No part that differs is
+/// ever dropped: two names that still read the same are told apart by their
+/// second line.
 pub(crate) fn original_name(name: String) -> String {
-    const COPY: &str = " — Native";
-    let mut base = name.as_str();
-    let mut copies = 0;
-    while let Some(rest) = base.strip_suffix(COPY) {
-        base = rest;
-        copies += 1;
+    const SEP: &str = " — ";
+    let parts: Vec<&str> = name.split(SEP).collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(parts.len());
+    for part in parts {
+        if kept.last() != Some(&part) {
+            kept.push(part);
+        }
     }
-    if copies >= 2 { base.to_owned() } else { name }
+    kept.join(SEP)
 }
 #[cfg(test)]
 mod original_name_tests {
     #[test]
-    fn a_chain_of_copy_suffixes_shows_as_the_original_name() {
+    fn a_part_repeated_after_itself_shows_once() {
         let n = |s: &str| super::original_name(s.to_owned());
-        assert_eq!(n("Run6 — Name — Native — Native"), "Run6 — Name");
-        assert_eq!(n("Accept — Native — Native — Native"), "Accept");
+        assert_eq!(n("Run6 — Native — Native"), "Run6 — Native");
+        assert_eq!(n("Accept — Recovered — Recovered"), "Accept — Recovered");
+        assert_eq!(
+            n("Accept — Recovered — Recovered — Native — Native"),
+            "Accept — Recovered — Native"
+        );
         assert_eq!(n("cut — Native"), "cut — Native", "one copy keeps its name");
-        assert_eq!(n("Paper"), "Paper");
+        assert_eq!(n("Run6"), "Run6", "the original is not its copy");
         assert_eq!(n("A — Native — Native 2"), "A — Native — Native 2");
     }
 }
+
