@@ -28,13 +28,13 @@ pub fn matrix(size: [f32; 2], detail: f32, sample: impl Fn([f32; 2]) -> [f32; 4]
                 let center=[x as f32*pitch,y as f32*pitch];
                 let vis=generation_visibility(detail,k,center);
                 if vis<=0. { continue; }
-                let mut s=[0.;4];
+                let mut s=[0_f32;4];
                 for dy in -1..=1 { for dx in -1..=1 {
                     let p=[(center[0]+dx as f32*pitch*0.33).clamp(0.,size[0]),(center[1]+dy as f32*pitch*0.33).clamp(0.,size[1])];
                     let v=sample(p); for i in 0..4 { s[i]+=v[i]/9.; }
                 }}
                 let a=((s[3]-0.04)/0.31).clamp(0.,1.); let a=a*a*(3.-2.*a)*vis;
-                if a>0. { let c=|i| (s[i]/s[3].max(0.001)*255.).clamp(0.,255.) as u32;
+                if a>0. { let c=|i: usize| (s[i]/s[3].max(0.001)*255.).clamp(0.,255.) as u32;
                     dots.push(Dot{center,radius:1.35,alpha:a,color:(c(0)<<16)|(c(1)<<8)|c(2)}); }
             }
         }
@@ -90,5 +90,27 @@ pub fn aurora(size:[f32;2],age:f32,accent:u32,text:u32,muted:u32)->Vec<Dot> {
         assert_eq!(a,aurora([60.,40.],1.,0xff8800,0xffffff,0x888888));
         assert_ne!(a,aurora([60.,40.],2.,0xff8800,0xffffff,0x888888));
         assert!(a.iter().all(|d|d.radius==0.7));
+    }
+}
+
+/// A successful texture owns every resolving frame; the live host takes over
+/// atomically at one. Failed captures use only the live host's ready crossfade.
+pub fn snapshot_visibility(captured: bool, ready: Option<f32>) -> (f32, f32) {
+    let resolve=ready.unwrap_or(0.).clamp(0.,1.);
+    if captured { if resolve>=1. {(0.,1.)}else{(1.,0.)} }
+    else {(0.,resolve)}
+}
+#[cfg(test)] mod snapshot_tests {
+    use super::*;
+    #[test] fn successful_handoff_has_exactly_one_visible_owner() {
+        for i in 0..=1000 { let (dots,live)=snapshot_visibility(true,Some(i as f32/1000.));
+            assert_eq!(dots+live,1.); assert_eq!(dots*live,0.);
+        }
+        assert_eq!(snapshot_visibility(true,None),(1.,0.));
+    }
+    #[test] fn failed_capture_only_crossfades_at_ready() {
+        assert_eq!(snapshot_visibility(false,None),(0.,0.));
+        assert_eq!(snapshot_visibility(false,Some(0.5)),(0.,0.5));
+        assert_eq!(snapshot_visibility(false,Some(1.)),(0.,1.));
     }
 }

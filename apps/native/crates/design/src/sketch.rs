@@ -20,7 +20,11 @@ impl Tokens {
             pencil: self.colors.muted,
             ink: self.colors.accent,
             wash: self.colors.accent_wash,
-            bloom_peak: if light { 0.22 } else { 0.58 },
+            bloom_peak: if self.scheme == crate::Scheme::Light {
+                0.22
+            } else {
+                0.58
+            },
             dot_pitch: 6.,
         }
     }
