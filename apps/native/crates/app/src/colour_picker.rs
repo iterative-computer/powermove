@@ -514,6 +514,7 @@ impl Picker {
         self.hue = h;
         self.set(next, cx);
         self.hue = h;
+        cx.notify();
     }
     /// Precise normalized RGBA entry point for shared hosts and headless tests.
     /// Emits the same Begin/Value events as numeric entry; no byte quantization.
@@ -763,12 +764,12 @@ impl Picker {
                                 window.paint_quad(fill(bounds, gradient(180., c, transparent)));
                             }
                         }
-                        let [h, s, v] = color.hsv();
+                        let [_, s, v] = color.hsv();
                         let knob = t.metrics.color_picker_track + 2. * t.metrics.border;
                         let mark = t.space.xs + t.metrics.border;
                         let (x, y, w, h) = match kind {
                             Track::Plane => (s, 1. - v, knob, knob),
-                            Track::Hue => (0., h / 360., t.metrics.color_picker_track, mark),
+                            Track::Hue => (0., hue / 360., t.metrics.color_picker_track, mark),
                             Track::Alpha => {
                                 (0., 1. - color.0[3], t.metrics.color_picker_track, mark)
                             }
@@ -1405,6 +1406,10 @@ mod tests {
         vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[7].focus(w, cx)));
         vcx.simulate_keystrokes("right");
         assert!((picker.read_with(&vcx, |p, _| p.hue) - 1.).abs() < 0.0001);
+        picker.update(&mut vcx, |p, cx| p.edit_rgba([1., 1., 1., 1.], cx));
+        vcx.simulate_keystrokes("right");
+        assert!((picker.read_with(&vcx, |p, _| p.hue) - 2.).abs() < 0.0001);
+        assert_eq!(picker.read_with(&vcx, |p, _| p.color.hex()), "#FFFFFF");
         vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[22].focus(w, cx)));
         vcx.simulate_keystrokes("tab");
         vcx.run_until_parked();
