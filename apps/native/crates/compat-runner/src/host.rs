@@ -274,6 +274,18 @@ impl Published {
             loading: self.starting.iter().cloned().chain(realm).collect(),
             contributions: self.contributions.clone(),
             unavailable: self.records.values().filter_map(unavailable).collect(),
+            provides: self
+                .records
+                .iter()
+                .filter_map(|(id, record)| {
+                    let ids: Vec<String> = record["provides"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect();
+                    (!ids.is_empty()).then(|| (id.clone(), ids))
+                })
+                .collect(),
         }
     }
 }
@@ -337,6 +349,11 @@ pub struct Publication {
     /// `why` reads after the name ("is turned off"). They are named beside
     /// the effects they would provide.
     pub unavailable: Vec<(String, String, String)>,
+    /// The definitions (effects, layer types, transitions) each installed
+    /// extension published when it last ran, by extension id: what an
+    /// unavailable one would provide, whatever its ids are named
+    /// (`macos-cursor` provides `macos.cursor`). Kept across launches.
+    pub provides: BTreeMap<String, Vec<String>>,
 }
 
 struct Shared {
@@ -623,25 +640,6 @@ impl RealmEvents for Arc<Events> {
 /// D11 stops.
 static FIRST_ENTRIES: AtomicBool = AtomicBool::new(true);
 /// Whether D11 Stop turned the extension off for this run.
-pub fn stopped_this_run(entry: &pm_kernel::state::ExtensionEntry) -> bool {
-    entry
-        .source
-        .get("hostRecord")
-        .and_then(|record| record.get("stopped"))
-        .and_then(pm_model::Value::as_bool)
-        == Some(true)
-}
-/// Ends a D11 stop on the entry (Settings, or an extension turning it on).
-pub fn clear_stop(entry: &mut pm_kernel::state::ExtensionEntry) {
-    if let Some(record) = entry
-        .source
-        .as_object_mut()
-        .and_then(|source| source.get_mut("hostRecord"))
-        .and_then(pm_model::Value::as_object_mut)
-    {
-        record.remove("stopped");
-    }
-}
 /// Synchronous layout reads: the read waiting for the page, and answers that
 /// came before their read started waiting (the request goes out with the
 /// realm's batch first, so the page can answer before the wait begins).
@@ -2008,17 +2006,8 @@ impl Owner {
             Ok(state
                 .extensions
                 .get(id)
-                .filter(|entry| entry.enabled != enabled || (enabled && stopped_this_run(entry)))
-                .map(|entry| {
-                    let mut entry = pm_kernel::state::ExtensionEntry {
-                        enabled,
-                        ..entry.clone()
-                    };
-                    if enabled {
-                        clear_stop(&mut entry);
-                    }
-                    vec![StateOp::Extension(entry)]
-                }))
+                .filter(|entry| entry.enabled != enabled || (enabled && entry.stopped_this_run()))
+                .map(|entry| vec![StateOp::Extension(entry.switched(enabled))]))
         });
     }
     fn set_enabled(&mut self, id: &str, enabled: bool) {
@@ -2039,13 +2028,19 @@ impl Owner {
         if confined {
             self.sync_stores();
             self.publish_store();
-        } else {
+        } else if enabled {
             let records = self.realm_plan();
             self.shared.update(|p| {
                 p.activations += 1;
                 p.ready = false;
             });
             self.load(&records, "update", &format!(",{},\"enable\"", json!([id])));
+        } else if let Some(clock) = self.retire_for_rebuild() {
+            // Off ends everything it started (its timers, listeners and
+            // pending work), not only what it registered: the realm the
+            // trusted extensions share is rebuilt without it, as a Stop does,
+            // with nobody blamed (PM-435).
+            self.boot_realm(clock);
         }
         self.publish_records();
     }
@@ -2054,7 +2049,7 @@ impl Owner {
         state
             .extensions
             .get(id)
-            .is_none_or(|entry| entry.enabled && !stopped_this_run(entry))
+            .is_none_or(|entry| entry.enabled && !entry.stopped_this_run())
     }
     /// D11 Stop: off for this run (every window), not in the saved
     /// preference; Settings shows it off and turning it on clears this.
@@ -2063,7 +2058,7 @@ impl Owner {
             Ok(state
                 .extensions
                 .get(id)
-                .filter(|e| !stopped_this_run(e))
+                .filter(|e| !e.stopped_this_run())
                 .map(|entry| {
                     let mut entry = entry.clone();
                     if let Some(source) = entry.source.as_object_mut() {
@@ -2080,7 +2075,31 @@ impl Owner {
         });
     }
     /// Settings and MCP read extensions from kernel state, as they do built-ins.
+    /// The definition ids each extension's live registrations name now
+    /// (effects, layer types, transitions), by owner.
+    fn provided_now(&self) -> BTreeMap<String, Vec<String>> {
+        let mut provided: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let contributions = self.shared.published.lock().unwrap().contributions.clone();
+        for kind in ["effects", "layers", "transitions"] {
+            for entry in contributions
+                .as_ref()
+                .and_then(|c| c[kind].as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(owner), Some(id)) = (entry["owner"].as_str(), entry["id"].as_str()) {
+                    let ids = provided.entry(owner.to_owned()).or_default();
+                    if !ids.iter().any(|known| known == id) {
+                        ids.push(id.to_owned());
+                    }
+                }
+            }
+        }
+        provided
+    }
     fn publish_entries(&mut self) {
+        let provided = self.provided_now();
+        let mut kept: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let _ = update_state::<String>(&self.config.kernel, |state| {
             let ops: Vec<StateOp> = self
                 .records
@@ -2095,7 +2114,7 @@ impl Owner {
                     // Stopped this run: kept while the app runs, gone at the
                     // next launch's first publication.
                     let stopped = !FIRST_ENTRIES.load(Ordering::Acquire)
-                        && previous.is_some_and(stopped_this_run);
+                        && previous.is_some_and(|e| e.stopped_this_run());
                     let mut summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
                     "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
                     if stopped {
@@ -2103,6 +2122,20 @@ impl Owner {
                     }
                     if let Some(folder) = self.folders.get(id) {
                         summary["folder"] = json!(folder.to_string_lossy());
+                    }
+                    // What it provides: its live registrations, else what it
+                    // provided when it last ran (it is off, or failing).
+                    let provides: Vec<String> = provided.get(id).cloned().unwrap_or_else(|| {
+                        source
+                            .get("hostRecord")
+                            .and_then(|r| r.get("provides"))
+                            .and_then(pm_model::Value::as_array)
+                            .map(|ids| ids.iter().filter_map(|d| d.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default()
+                    });
+                    if !provides.is_empty() {
+                        summary["provides"] = json!(provides);
+                        kept.insert(id.to_owned(), provides);
                     }
                     source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
                     let next = pm_kernel::state::ExtensionEntry {
@@ -2117,6 +2150,28 @@ impl Owner {
                 .collect();
             Ok((!ops.is_empty()).then_some(ops))
         });
+        // The published rows carry it too (`Publication::provides`).
+        let mut changed = false;
+        for record in &mut self.records {
+            let id = record["id"].as_str().unwrap_or_default().to_owned();
+            let next = kept.get(&id).map(|ids| json!(ids)).unwrap_or(Value::Null);
+            if record["provides"] != next {
+                record["provides"] = next;
+                changed = true;
+            }
+        }
+        if changed {
+            let rows = self.records.clone();
+            self.shared.update(|p| {
+                for row in rows {
+                    if let Some(id) = row["id"].as_str()
+                        && let Some(published) = p.records.get_mut(id)
+                    {
+                        published["provides"] = row["provides"].clone();
+                    }
+                }
+            });
+        }
         FIRST_ENTRIES.store(false, Ordering::Release);
         self.forget_vanished();
     }
@@ -2196,7 +2251,7 @@ impl Owner {
             .filter_map(|record| {
                 let id = record["id"].as_str()?;
                 let entry = state.extensions.get(id)?;
-                let enabled = entry.enabled && !stopped_this_run(entry);
+                let enabled = entry.enabled && !entry.stopped_this_run();
                 (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
             })
             .collect();
@@ -2680,14 +2735,9 @@ impl Owner {
     /// extension stays off until someone turns it back on, here and in every other
     /// window, and the next launch does not run into it again.
     fn restart(&mut self, culprit: Option<String>) {
-        let Some(live) = &self.realm else { return };
-        live.events.activating.lock().unwrap().take();
-        let transport = live.host.transport();
-        let clock = (transport.time(), transport.playing());
-        self.retire_realm();
-        // What the retired realm contributed went with it: nothing of it is
-        // settled until the realm that replaces it has loaded.
-        self.publish_without_realm(None);
+        let Some(clock) = self.retire_for_rebuild() else {
+            return;
+        };
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2719,6 +2769,23 @@ impl Owner {
             self.publish_records();
             return;
         }
+        self.boot_realm(clock);
+    }
+    /// The live realm retired for a rebuild, with the transport's clock to
+    /// carry over. `None` with no realm.
+    fn retire_for_rebuild(&mut self) -> Option<(f64, bool)> {
+        let live = self.realm.as_ref()?;
+        live.events.activating.lock().unwrap().take();
+        let transport = live.host.transport();
+        let clock = (transport.time(), transport.playing());
+        self.retire_realm();
+        // What the retired realm contributed went with it: nothing of it is
+        // settled until the realm that replaces it has loaded.
+        self.publish_without_realm(None);
+        Some(clock)
+    }
+    /// A new realm at `clock`, booting the enabled trusted extensions.
+    fn boot_realm(&mut self, clock: (f64, bool)) {
         match self.start_realm(Some(clock)) {
             Ok(()) => {
                 self.publish_records();
@@ -4646,7 +4713,7 @@ mod tests {
                 .unwrap()
         };
         assert!(entry(&fixture).enabled);
-        assert!(stopped_this_run(&entry(&fixture)));
+        assert!(entry(&fixture).stopped_this_run());
         let view = fixture.host.view();
         assert_eq!(view, 2, "one rebuild, one new page");
         thread::sleep(Duration::from_millis(1500));
@@ -4654,8 +4721,7 @@ mod tests {
         assert_eq!(fixture.health("synthetic-hangs"), "runtime-error");
         // Turning it on (Settings ▸ Extensions) runs it again: it hangs again,
         // and the watchdog asks about it again.
-        let mut on = entry(&fixture);
-        clear_stop(&mut on);
+        let on = entry(&fixture).switched(true);
         drop(fixture.kernel.state_transaction(StateTransaction {
             expected_revision: None,
             ops: vec![StateOp::Extension(on)],
@@ -5960,5 +6026,158 @@ mod tests {
             Some("added"),
             "{layers:?}"
         );
+    }
+    /// The PM-435 fixture: `toggled` contributes a panel, a command and an
+    /// effect and keeps a timer running; `switcher`'s commands turn it on and
+    /// off through the extension API (`api.extensions.setEnabled`).
+    fn toggled_extensions(extensions: &Path) {
+        extension(
+            extensions,
+            "toggled",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.panels.register({id:'toggled-panel',title:'Toggled',build(){}});
+                   api.commands.register({id:'toggled.hello',label:'Hello',run(){}});
+                   api.effects.register({id:'toggled.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                   setInterval(()=>api.storage.set('ticks',(api.storage.get('ticks')||0)+1),20);
+                 }",
+            )],
+        );
+        extension(
+            extensions,
+            "switcher",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.commands.register({id:'switcher.on',label:'On',run(){api.extensions.setEnabled('toggled',true)}});
+                   api.commands.register({id:'switcher.off',label:'Off',run(){api.extensions.setEnabled('toggled',false)}});
+                 }",
+            )],
+        );
+    }
+    fn contributes(now: &Publication, kind: &str, id: &str) -> bool {
+        now.contributions.as_ref().is_some_and(|c| {
+            c[kind]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|e| e["id"] == id))
+        })
+    }
+    fn toggled_contributes(now: &Publication) -> bool {
+        contributes(now, "panels", "toggled-panel")
+            && contributes(now, "commands", "toggled.hello")
+            && contributes(now, "effects", "toggled.tint")
+    }
+    fn toggled_gone(now: &Publication) -> bool {
+        now.settled
+            && !contributes(now, "panels", "toggled-panel")
+            && !contributes(now, "commands", "toggled.hello")
+            && !contributes(now, "effects", "toggled.tint")
+            && now
+                .unavailable
+                .iter()
+                .any(|(id, _, why)| id == "toggled" && why == "is turned off")
+    }
+    /// The extension's timer: still counting, or not.
+    fn ticking(kernel: &KernelHandle) -> bool {
+        let ticks = || stored(kernel, "ticks").and_then(|t| t.as_u64()).unwrap_or(0);
+        let before = ticks();
+        thread::sleep(Duration::from_millis(300));
+        ticks() > before
+    }
+    /// PM-435: an installed extension turned off (Settings' switch) gives up
+    /// everything it contributes (its panel, command and effect) and stops
+    /// running until it is turned on again, says which extension is off to
+    /// whatever needed it (the viewer and exports name it), keeps the choice
+    /// in the saved state, and comes back on without a relaunch, here
+    /// through the extension API's `setEnabled`.
+    #[test]
+    fn an_extension_turned_off_gives_up_its_panels_commands_effects_and_work_until_turned_on() {
+        let root = tempfile::tempdir().unwrap();
+        toggled_extensions(&root.path().join("extensions"));
+        let fixture = Fixture::start(root);
+        fixture.until("the extension contributes", |host| {
+            let now = host.publication();
+            now.settled && toggled_contributes(&now)
+        });
+        assert!(ticking(&fixture.kernel), "its timer runs");
+        let off = pm_kernel::state::switch_extension(&fixture.kernel.state(), "toggled", false);
+        fixture.kernel.state_transaction(off.unwrap()).wait().unwrap().unwrap();
+        fixture.until("off: nothing of it is left", |host| toggled_gone(&host.publication()));
+        assert!(!ticking(&fixture.kernel), "its timer stopped with it");
+        // What it would provide stays known, to name it beside a project's
+        // effect that needs it.
+        assert_eq!(
+            fixture.host.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()])
+        );
+        assert!(!fixture.kernel.state().extensions["toggled"].enabled, "the saved choice");
+        fixture.host.run_command("switcher.on", json!([]));
+        fixture.until("on again, without a relaunch", |host| {
+            let now = host.publication();
+            now.settled
+                && toggled_contributes(&now)
+                && now.unavailable.iter().all(|(id, ..)| id != "toggled")
+        });
+        assert!(fixture.kernel.state().extensions["toggled"].enabled);
+        assert!(ticking(&fixture.kernel), "its timer runs again");
+        fixture.host.run_command("switcher.off", json!([]));
+        fixture.until("off through the API too", |host| toggled_gone(&host.publication()));
+    }
+    /// PM-435: the choice survives a relaunch. A host started again on the
+    /// saved state leaves the extension off: nothing of it activates.
+    #[test]
+    fn an_extension_turned_off_stays_off_when_the_app_starts_again() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        toggled_extensions(&extensions);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let start = || {
+            ExtensionHost::start(HostConfig {
+                kernel: kernel.clone(),
+                project: "window".into(),
+                roots: vec![extensions.clone()],
+                cache: root.path().join("cache"),
+                owner: None,
+                text: None,
+                frames: None,
+                rasters: None,
+                clipboard: None,
+                vars: None,
+                wake: Arc::new(|| ()),
+            })
+        };
+        let wait = |host: &ExtensionHost, what: &str, done: &dyn Fn(&Publication) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&host.publication()) {
+                assert!(Instant::now() < deadline, "{what}: {:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let first = start();
+        wait(&first, "first launch", &|now| now.settled && toggled_contributes(now));
+        let off = pm_kernel::state::switch_extension(&kernel.state(), "toggled", false).unwrap();
+        kernel.state_transaction(off).wait().unwrap().unwrap();
+        wait(&first, "turned off", &toggled_gone);
+        drop(first);
+        let again = start();
+        wait(&again, "the next launch leaves it off, the others run", &|now| {
+            toggled_gone(now) && contributes(now, "commands", "switcher.on")
+        });
+        assert_eq!(
+            again.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()]),
+            "what it provided is kept across the launch"
+        );
+        assert!(!ticking(&kernel), "nothing of it runs");
+        drop(again);
+        drop(actor);
     }
 }

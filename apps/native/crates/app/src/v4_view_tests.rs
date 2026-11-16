@@ -1945,7 +1945,7 @@ fn a_rail_is_as_wide_as_its_widest_name_in_a_narrow_dock(cx: &mut TestAppContext
             "div",
             json!({"id":"rail","data-pm-component":"list","label":"Categories",
                 "metadata":{"fitsLabels":labels,"fitsInsetToken":"metrics.gap"},
-                "style":{"flexGrow":0,"flexShrink":0,"flexBasis":"auto","minWidth":20,
+                "style":{"flexGrow":0,"flexShrink":0,"minWidth":20,
                     "paddingLeft":8,"paddingRight":8,"fontSize":{"token":"typography.body"}}}),
             &[],
         ));
