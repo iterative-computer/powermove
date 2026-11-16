@@ -1343,16 +1343,12 @@ impl Controller {
             p.dirty,
             self.path.as_deref(),
         );
-        platform::history_labels(
-            p.history
-                .undo_label
-                .as_deref()
-                .filter(|_| p.history.can_undo),
-            p.history
-                .redo_label
-                .as_deref()
-                .filter(|_| p.history.can_redo),
-        );
+        // The menu bar is the app's: only the editor last in front names
+        // its Undo and Redo (a tab behind publishing its own history left
+        // a bare "Undo" over the front project's, PM-396).
+        if menu_editor_is(cx.entity_id()) {
+            history_menu(&p.history);
+        }
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
@@ -4462,5 +4458,44 @@ mod open_failure_tests {
                 alert.message
             );
         }
+    }
+}
+
+thread_local! {
+    /// The editor whose window was last in front: the Edit menu's Undo and
+    /// Redo name its history.
+    static MENU_EDITOR: std::cell::Cell<Option<gpui::EntityId>> = const { std::cell::Cell::new(None) };
+}
+/// Whether `editor` names the Edit menu's Undo and Redo (none chosen yet:
+/// any, so the first window's do).
+pub(crate) fn menu_editor_is(editor: gpui::EntityId) -> bool {
+    MENU_EDITOR.with(|m| m.get().is_none_or(|e| e == editor))
+}
+/// `editor`'s window came to the front: its history names the menu.
+pub(crate) fn set_menu_editor(editor: gpui::EntityId) {
+    MENU_EDITOR.with(|m| m.set(Some(editor)));
+}
+/// Undo and Redo named by `history` (each disabled when there is none).
+pub(crate) fn history_menu(history: &pm_kernel::actor::HistorySummary) {
+    platform::history_labels(
+        history.undo_label.as_deref().filter(|_| history.can_undo),
+        history.redo_label.as_deref().filter(|_| history.can_redo),
+    );
+}
+
+#[cfg(test)]
+mod menu_editor_tests {
+    /// PM-396: Undo and Redo name the history of the editor last in front;
+    /// another tab's publication leaves them as they are.
+    #[test]
+    fn only_the_editor_last_in_front_names_undo_and_redo() {
+        let (front, behind) = (gpui::EntityId::from(1u64), gpui::EntityId::from(2u64));
+        // Before any window comes to the front, the first editor's do.
+        assert!(super::menu_editor_is(behind));
+        super::set_menu_editor(front);
+        assert!(super::menu_editor_is(front));
+        assert!(!super::menu_editor_is(behind));
+        super::set_menu_editor(behind);
+        assert!(!super::menu_editor_is(front));
     }
 }

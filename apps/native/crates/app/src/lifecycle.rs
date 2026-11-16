@@ -599,6 +599,15 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             // The key window is where MCP acts.
             if window.is_window_active() {
                 v.mcp.activate_window(v.window_key);
+                // Its history names Undo and Redo now.
+                crate::session::set_menu_editor(cx.entity_id());
+                if let Some(published) = v
+                    .session
+                    .as_ref()
+                    .and_then(|s| v.kernel.published(&s.project))
+                {
+                    crate::session::history_menu(&published.history);
+                }
             }
             if window.is_window_active()
                 && !v.close_pending
