@@ -380,6 +380,13 @@ pub(crate) struct Session {
     /// id it opened under (a copy made by the open), where the next open of
     /// that project looks for its unsaved work (PM-360).
     pub journal_id: String,
+    /// The backing file association of the library slot this session
+    /// opened and saves back to, when the open did not take that file up
+    /// (it was away): kept named on every save to that slot until a save
+    /// takes media from a file, whatever the session id and whether the
+    /// file is back meanwhile, so its media connect again at a later open
+    /// (Sol review of PM-421).
+    pub kept_file: Option<Value>,
 }
 /// A save that installed its file and could not sync the folder, whole:
 /// what it wrote, and for a Save As where to and the lock taken there. All
@@ -2180,6 +2187,16 @@ impl Kernel {
             }
             _ => None,
         };
+        // A slot opened without its backing file (away now), saved back to
+        // that same slot: its association is kept (`Session::kept_file`).
+        let kept_file = match (&source, &destination) {
+            (OpenSource::Library(lib), Destination::Library(slot)) if *slot == lib.id => lib
+                .session
+                .as_ref()
+                .and_then(|m| m.get("file"))
+                .cloned(),
+            _ => None,
+        };
         let setting_aside = matches!(
             choice,
             Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
@@ -2391,6 +2408,7 @@ impl Kernel {
                 pending_save: None,
                 unfinalized: None,
                 journal_id,
+                kept_file,
             },
         );
         // What an open writes to the library (view state, a format upgrade,
@@ -2719,21 +2737,20 @@ impl Kernel {
                 .zip(backing.as_deref())
                 .is_some_and(|(path, backing)| path.starts_with(backing)),
         };
-        // A project opened as itself while its file is not here (its drive
-        // unplugged, its backing file gone) keeps naming it: when the file
-        // is back its media connect again, and the slot never stands for a
-        // project that holds them all. A copy never names its original's.
-        let unavailable = slot == id
-            && p.store().path().is_none()
-            && meta
-                .get("file")
-                .and_then(|f| f.get("path"))
-                .and_then(Value::as_str)
-                .is_some_and(|path| !std::path::Path::new(path).exists());
+        // The slot's own backing file, not taken up by this session (it was
+        // away at the open): still named, so its media connect again. Only a
+        // different, new slot (a copy) drops what it inherited.
+        let kept = session
+            .kept_file
+            .clone()
+            .filter(|_| matches!(&session.destination, Destination::Library(d) if d == slot));
         if own_file && p.store().path().is_some() {
             meta = file_metadata(meta, p.store());
-        } else if !unavailable && let Value::Object(m) = &mut meta {
-            m.remove("file");
+        } else if let Value::Object(m) = &mut meta {
+            match kept {
+                Some(file) => m.insert("file", file),
+                None => m.remove("file"),
+            };
         }
         let writer = self
             .library

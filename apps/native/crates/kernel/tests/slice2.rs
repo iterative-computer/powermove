@@ -7176,8 +7176,22 @@ fn an_unavailable_backing_file_stays_named_and_its_media_connect_again() {
     assert_eq!(backing_of().as_ref(), Some(&backing), "a save keeps the file named");
     assert_eq!(LibraryStore::open(&profile).projects().unwrap().len(), before);
     drop(k);
-    // The file is back: its media connect again, with the edit.
+    // Opened under another session id while its file is away (as a copy's
+    // reopen does): still its own slot, still named.
+    let mut k = kernel(&profile);
+    let h = open(&mut k, "elsewhere", library(&slot));
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "another session id keeps it named");
+    // Opened while away, and the file comes back before the close: the
+    // session never took its media up, so the close keeps it named.
+    let h = open(&mut k, &slot, library(&slot));
     fs::rename(&away, &backing).unwrap();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a file back mid-session stays named");
+    drop(k);
+    // The file is back: its media connect again, with the edit.
     let mut k = kernel(&profile);
     open(&mut k, &slot, library(&slot));
     let store = k.project(&slot).unwrap().store();
