@@ -677,7 +677,241 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "children": [
                             {
                               "props": {},
-                              "text": "Drag media here or import from your computer.",
+                              "text": "This composition is empty",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "textAlign": "center",
+                              "whiteSpace": "normal",
+                            },
+                          },
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Text",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-component": "push-button",
+                                "id": "timeline:empty:newText",
+                                "label": "Text",
+                                "metadata": {
+                                  "pmKit": {
+                                    "buttonRole": "normal",
+                                  },
+                                },
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.body",
+                                  },
+                                  "height": {
+                                    "token": "metrics.control",
+                                  },
+                                  "minHeight": {
+                                    "token": "metrics.hit",
+                                  },
+                                  "minWidth": {
+                                    "token": "metrics.hit",
+                                  },
+                                },
+                                "tabIndex": -1,
+                                "title": "Text (⌘T)",
+                              },
+                              "type": "button",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Shape",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-component": "push-button",
+                                "id": "timeline:empty:newShape",
+                                "label": "Shape",
+                                "metadata": {
+                                  "pmKit": {
+                                    "buttonRole": "normal",
+                                  },
+                                },
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.body",
+                                  },
+                                  "height": {
+                                    "token": "metrics.control",
+                                  },
+                                  "minHeight": {
+                                    "token": "metrics.hit",
+                                  },
+                                  "minWidth": {
+                                    "token": "metrics.hit",
+                                  },
+                                },
+                                "tabIndex": -1,
+                                "title": "Shape (⇧⌘Y)",
+                              },
+                              "type": "button",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Solid",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-component": "push-button",
+                                "id": "timeline:empty:newSolid",
+                                "label": "Solid",
+                                "metadata": {
+                                  "pmKit": {
+                                    "buttonRole": "normal",
+                                  },
+                                },
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.body",
+                                  },
+                                  "height": {
+                                    "token": "metrics.control",
+                                  },
+                                  "minHeight": {
+                                    "token": "metrics.hit",
+                                  },
+                                  "minWidth": {
+                                    "token": "metrics.hit",
+                                  },
+                                },
+                                "tabIndex": -1,
+                                "title": "Solid (⌘Y)",
+                              },
+                              "type": "button",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Null",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-component": "push-button",
+                                "id": "timeline:empty:newNull",
+                                "label": "Null",
+                                "metadata": {
+                                  "pmKit": {
+                                    "buttonRole": "normal",
+                                  },
+                                },
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.body",
+                                  },
+                                  "height": {
+                                    "token": "metrics.control",
+                                  },
+                                  "minHeight": {
+                                    "token": "metrics.hit",
+                                  },
+                                  "minWidth": {
+                                    "token": "metrics.hit",
+                                  },
+                                },
+                                "tabIndex": -1,
+                                "title": "Null (⌥⇧⌘Y)",
+                              },
+                              "type": "button",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "props": {},
+                                  "text": "Import…",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-component": "push-button",
+                                "id": "timeline:empty:import",
+                                "label": "Import…",
+                                "metadata": {
+                                  "pmKit": {
+                                    "buttonRole": "normal",
+                                  },
+                                },
+                                "style": {
+                                  "color": {
+                                    "token": "colors.text",
+                                  },
+                                  "fontSize": {
+                                    "token": "typography.body",
+                                  },
+                                  "height": {
+                                    "token": "metrics.control",
+                                  },
+                                  "minHeight": {
+                                    "token": "metrics.hit",
+                                  },
+                                  "minWidth": {
+                                    "token": "metrics.hit",
+                                  },
+                                },
+                                "tabIndex": -1,
+                                "title": "Import (⌘I)",
+                              },
+                              "type": "button",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "flexWrap": "wrap",
+                              "gap": {
+                                "token": "metrics.gap",
+                              },
+                              "justifyContent": "center",
+                            },
+                          },
+                          "type": "div",
+                        },
+                        {
+                          "children": [
+                            {
+                              "props": {},
+                              "text": "or drop media here",
                               "type": "text",
                             },
                           ],
@@ -694,44 +928,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                           },
                           "type": "text",
-                        },
-                        {
-                          "children": [
-                            {
-                              "props": {},
-                              "text": "Import…",
-                              "type": "text",
-                            },
-                          ],
-                          "props": {
-                            "data-pm-component": "push-button",
-                            "id": "timeline:import",
-                            "label": "Import…",
-                            "metadata": {
-                              "pmKit": {
-                                "buttonRole": "normal",
-                              },
-                            },
-                            "style": {
-                              "color": {
-                                "token": "colors.text",
-                              },
-                              "fontSize": {
-                                "token": "typography.body",
-                              },
-                              "height": {
-                                "token": "metrics.control",
-                              },
-                              "minHeight": {
-                                "token": "metrics.hit",
-                              },
-                              "minWidth": {
-                                "token": "metrics.hit",
-                              },
-                            },
-                            "tabIndex": -1,
-                          },
-                          "type": "button",
                         },
                       ],
                       "props": {

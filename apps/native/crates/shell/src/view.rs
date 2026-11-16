@@ -68,6 +68,9 @@ pub struct Editor {
     /// opening): a tab whose panel has not registered yet keeps its place
     /// with a quiet body, not "Panel Unavailable" (`panels:waiting/ready`).
     awaiting_panels: bool,
+    /// Panels asked back before their extension had registered them (at
+    /// launch): restored once the extensions are ready, never an error.
+    pending_restores: Vec<String>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -157,6 +160,7 @@ impl Editor {
             maximized_panel: None,
             parked: HashMap::new(),
             awaiting_panels: true,
+            pending_restores: Vec::new(),
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -721,6 +725,15 @@ impl Editor {
         let rest = parts.next().unwrap_or("");
         if kind == "panels" && matches!(verb, "waiting" | "ready") {
             self.awaiting_panels = verb == "waiting";
+            if verb == "ready" {
+                let known = self.panels(cx);
+                for id in std::mem::take(&mut self.pending_restores) {
+                    // One whose extension never came stays away quietly.
+                    if known.contains(&id) {
+                        self.shell_command(&format!("panel:restore:{id}"), cx);
+                    }
+                }
+            }
             cx.notify();
             return true;
         }
@@ -797,6 +810,14 @@ impl Editor {
                         })
                 }
                 _ if self.layout.find(rest).is_some() => Ok(()),
+                // Its extension has not registered it yet (launch): it comes
+                // back when the extensions are ready, not as "Unknown panel".
+                _ if !panels.contains(rest) => {
+                    if !self.pending_restores.iter().any(|id| id == rest) {
+                        self.pending_restores.push(rest.to_owned());
+                    }
+                    Ok(())
+                }
                 _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {

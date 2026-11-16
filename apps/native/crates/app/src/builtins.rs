@@ -2503,6 +2503,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
             E::Seek(time) => v.seek(time),
+            // The empty composition's buttons: the app's own commands.
+            E::Run(name) => v.host.borrow().send_command(&name, vec![]),
+            // Import… from the timeline: File › Import…, at the playhead.
+            E::Import { .. } => v.host.borrow().send_command("import", vec![]),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),

@@ -248,6 +248,17 @@ fn host_effects_are_requests_not_transport_or_import_success() {
     assert!(
         matches!(&dispatch(&mut c, json!({"type":"import"})).unwrap()[0], HostEffect::Import { time, before_layer: None, as_folder: false } if *time == 0.)
     );
+    // The empty composition's buttons run the app's own commands; only those.
+    for command in v4::RUN_COMMANDS {
+        assert_eq!(
+            dispatch(&mut c, json!({"type":"run","command":command})).unwrap(),
+            [HostEffect::Run(command.into())]
+        );
+    }
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"run","command":"quit"})),
+        Err(v4::Error::InvalidIntent(_))
+    ));
     assert!(matches!(
         dispatch(&mut c, json!({"type":"tab","id":"c","close":true})),
         Err(v4::Error::MissingHost(_))
