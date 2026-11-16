@@ -56,6 +56,22 @@ fn at_path<'a>(root: &'a Value, path: &Value) -> Option<&'a Value> {
 pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     let view = host.view(id)?;
     let p = host.read_document(id)?;
+    let original = host.original_view(id)?;
+    let original = json_value(
+        &original
+            .snapshot
+            .document
+            .to_value()
+            .ok_or_else(|| Error::invalid("Missing document"))?,
+    );
+    let open = original["compId"].as_str();
+    let mut compositions = original["comps"].as_object().map(|comps| comps.iter().map(|(id, c)|
+        json!({"id":id,"name":c["name"],"width":c["w"],"height":c["h"],"fps":c["fps"],
+            "duration":c["dur"],"layerCount":c["layers"].as_array().map_or(0, Vec::len),"open":Some(id.as_str()) == open})
+    ).collect::<Vec<_>>()).unwrap_or_default();
+    if compositions.is_empty() {
+        compositions.push(json!({"id":original["id"],"name":original["name"],"width":original["w"],"height":original["h"],"fps":original["fps"],"duration":original["dur"],"layerCount":original["layers"].as_array().map_or(0, Vec::len),"open":true}));
+    }
     let selection = host.selection(id)?;
     let time = host.playhead(id);
     let mut result = project_state_with_document(
@@ -66,6 +82,18 @@ pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
         a,
         &view.snapshot.document,
     )?;
+
+
+    let target = host.view(id)?.snapshot.render_comp();
+    if a.get("compositionId").is_some() {
+        result["composition"]["id"] = json!(target);
+    }
+    if a.get("compositionId").is_some()
+        && let Some(comp) = compositions.iter().find(|c| c["id"] == target)
+    {
+        result["composition"]["name"] = comp["name"].clone();
+    }
+    result["compositions"] = json!(compositions);
     if let Some(registry) = host.media_registry.as_deref()
         && let Some(assets) = result["mediaAssets"].as_array_mut()
     {
