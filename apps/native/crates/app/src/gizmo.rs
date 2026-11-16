@@ -915,6 +915,20 @@ impl GizmoSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// Whether a Blender key of View ▸ 3D in `group` belongs to the viewer
+    /// (PM-367): the composition shows Studio 3D layers, the viewer has the
+    /// keyboard (`canvas`, or the gizmos' own focus), and for the view keys
+    /// the 3D side of 2D | 3D is showing. Otherwise the key goes on to its
+    /// next meaning; the menus and the bar still run the command.
+    pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
+        let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        focused
+            && self.studio.active()
+            && match group {
+                "look" | "fly" => true,
+                _ => self.studio.free_look,
+            }
+    }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
         self.rulers.shown = shown;
@@ -1517,6 +1531,8 @@ impl GizmoSurface {
             };
             let by = point(px(by.x as f32), px(by.y as f32));
             self.host.navigate(Navigate::Pan(by), cx);
+            // The outline is drawn over the picture: it moves with the view.
+            self.draw(cx);
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -1540,6 +1556,9 @@ impl GizmoSurface {
                 self.space_panned |= self.space_hand;
             }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
+            // The outline is drawn over the picture: it moves with the view
+            // while held, not on release.
+            self.draw(cx);
             return;
         }
         if self.sketch.is_some() || self.text_sketch.is_some() {
@@ -1746,6 +1765,20 @@ impl GizmoSurface {
         } else if let Some(press) = drag.click.filter(|_| commit) {
             self.pick(press, cx);
         }
+    }
+    /// The button came up in the window while a pointer gesture of this
+    /// surface still waits for it: its own listener never heard the release
+    /// (the viewer was drawn again or covered while held). It ends now, as a
+    /// release does, so no edit stays open.
+    pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let held = self.drag.is_some()
+            || self.pen_drag.is_some()
+            || self.panning.is_some()
+            || self.rulers.dragging.is_some();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {

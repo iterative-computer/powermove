@@ -8,7 +8,7 @@ use std::{
     ffi::c_void,
     sync::{
         Arc, Mutex, Once, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -306,6 +306,9 @@ struct HeapGuard {
     /// because the isolate reached its own ceiling.
     account_full: AtomicBool,
     reservation: Reservation,
+    /// Full (mark-compact) collections so far: a heap that keeps collecting
+    /// while it barely holds anything is starved of room, not of memory.
+    major_collections: AtomicU64,
 }
 impl HeapGuard {
     /// Its own ceiling is the extension's limit; a full account is the app's
@@ -386,6 +389,16 @@ impl HeapPlan {
             current.saturating_add(8 * MIB).min(self.ceiling_old),
         ]
     }
+}
+/// Counts each full collection; the guard outlives the isolate (see `Drop for Vm`).
+unsafe extern "C" fn collected(
+    _: v8::UnsafeRawIsolatePtr,
+    _: v8::GCType,
+    _: v8::GCCallbackFlags,
+    data: *mut c_void,
+) {
+    let guard = unsafe { &*(data as *const HeapGuard) };
+    guard.major_collections.fetch_add(1, Ordering::Relaxed);
 }
 unsafe extern "C" fn near_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
     // Box lives until callback removal, on the same owner thread as this callback.
@@ -1013,11 +1026,17 @@ impl Vm {
                 exceeded: AtomicBool::new(false),
                 account_full: AtomicBool::new(false),
                 reservation,
+                major_collections: AtomicU64::new(0),
             }),
             plan,
         });
         isolate.set_slot(Guarded(quota.guard.clone()));
         isolate.add_near_heap_limit_callback(near_limit, &*quota as *const Quota as *mut c_void);
+        isolate.add_gc_epilogue_callback(
+            collected,
+            Arc::as_ptr(&quota.guard) as *mut c_void,
+            v8::GCType::kGCTypeMarkSweepCompact,
+        );
         let native_state = Arc::new(Mutex::new(NativeState {
             limits: limits.clone(),
             queued: vec![],
@@ -1113,6 +1132,7 @@ impl Vm {
             engine_reserved_bytes: native.engine_reserved,
             snapshot_bytes: self.blob.len(),
             reserved_heap_bytes: self.quota.guard.reservation.bytes(),
+            major_collections: self.quota.guard.major_collections.load(Ordering::Relaxed),
         }
     }
     /// True once the isolate holds more than its initial slice.
@@ -1368,6 +1388,10 @@ impl Drop for Vm {
             drop(self.context.take());
             crate::modules::clear(&mut guard);
             guard.remove_near_heap_limit_callback(near_limit, 0);
+            guard.remove_gc_epilogue_callback(
+                collected,
+                Arc::as_ptr(&self.quota.guard) as *mut c_void,
+            );
         }
         drop(self.isolate.take());
     }

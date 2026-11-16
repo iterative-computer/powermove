@@ -339,6 +339,9 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
     stagger: HashMap<String, Vec<crate::stagger::Band>>,
+    /// The timeline holds the keyboard: selected rows take the accent tint
+    /// then, the neutral selection fill otherwise (the Mac convention, PM-367).
+    pub focused: bool,
 }
 /// Where dropped media joins the layer stack ([`Scene::drop_before`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -669,6 +672,7 @@ impl Scene {
             markers: vec![],
             bars: vec![],
             stagger: HashMap::new(),
+            focused: true,
         })
     }
     /// v1's `layerDrop` geometry: the layer row under `y` (panel space; a
@@ -830,21 +834,30 @@ impl Scene {
     /// The rows on screen. Every scroll prepares a new frame, so rows past
     /// the viewport would only cost time (a project with baked animation
     /// puts tens of thousands of keys in them).
-    fn range(&self, v: Viewport, t: &Tokens) -> Range<usize> {
+    fn range(&self, v: Viewport, t: &Tokens, reach: f64) -> Range<usize> {
         let height = (v.height - t.metrics.ruler as f64).max(0.);
         let first = self
             .tops
-            .partition_point(|y| *y < v.scroll_y.max(0.))
+            .partition_point(|y| *y < (v.scroll_y - reach).max(0.))
             .saturating_sub(1)
             .min(self.total());
         let end = self
             .tops
-            .partition_point(|y| *y < v.scroll_y + height)
+            .partition_point(|y| *y < v.scroll_y + height + reach)
             .min(self.total());
         first..end
     }
     /// The rows on screen; time keys use binary search.
     pub fn prepare(&self, v: Viewport, t: &Tokens) -> Result<Frame, Error> {
+        self.prepare_reaching(v, t, 0.)
+    }
+    /// [`Self::prepare`] with the rows `reach` points above and below the
+    /// view too, placed for the same view (a surface that records its rows
+    /// past its edges and replays them shifted while it scrolls). The track
+    /// clip, the work-area veils and the column's edge reach as far; the
+    /// ruler's ops, before [`Frame::fixed`], are the view's own.
+    pub fn prepare_reaching(&self, v: Viewport, t: &Tokens, reach: f64) -> Result<Frame, Error> {
+        let reach = if reach.is_finite() { reach.max(0.) } else { 0. };
         if !v.valid() {
             return Err(Error::InvalidGeometry);
         }
@@ -881,7 +894,8 @@ impl Scene {
             c.panel_secondary,
         ));
         self.ruler(v, t, &mut ops);
-        let range = self.range(v, t);
+        let fixed = ops.len();
+        let range = self.range(v, t, reach);
         let mut ax = vec![];
         let mut controls = vec![];
         for i in range.clone() {
@@ -897,9 +911,9 @@ impl Scene {
                 let x = if track { v.layer_column } else { 0. };
                 let area = Rect::new(
                     x,
-                    m.ruler as f64,
+                    m.ruler as f64 - reach,
                     v.width - x,
-                    (v.height - m.ruler as f64).max(0.),
+                    (v.height - m.ruler as f64).max(0.) + reach * 2.,
                 );
                 // An op clipped to its own box (a summary key to its strip)
                 // keeps that inside the tracks; wholly outside, it is not
@@ -930,7 +944,13 @@ impl Scene {
         .into_iter()
         .enumerate()
         {
-            if let Some(r) = span(a, b, m.ruler as f64, v.height - m.ruler as f64, v) {
+            if let Some(r) = span(
+                a,
+                b,
+                m.ruler as f64 - reach,
+                v.height - m.ruler as f64 + reach * 2.,
+                v,
+            ) {
                 let mut o = Op::new(format!("work-area-veil:{side}"), "rect", r, veil);
                 o.opacity = veil_alpha as f64;
                 ops.push(o);
@@ -954,9 +974,9 @@ impl Scene {
             "rect",
             Rect::new(
                 v.layer_column - m.border as f64,
-                0.,
+                0. - reach,
                 m.border as f64,
-                v.height,
+                v.height + reach * 2.,
             ),
             edge,
         );
@@ -964,6 +984,7 @@ impl Scene {
         ops.push(o);
         Ok(Frame {
             viewport: v,
+            fixed,
             range,
             total: self.total(),
             ops,
@@ -1047,7 +1068,9 @@ impl Scene {
                 format!("row:{}", row.id),
                 "rect",
                 rect,
-                if row.selected && row.hovered {
+                if row.selected && !self.focused {
+                    c.selected_fill
+                } else if row.selected && row.hovered {
                     c.timeline_selected_hover
                 } else if row.selected {
                     c.timeline_selected
@@ -1460,8 +1483,12 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-/// How far either side of a layer's in or out point a press trims it.
+/// How far past a layer's in or out point a press trims it.
 const TRIM_REACH: f64 = 5.;
+/// How far in from a strip's drawn end a press trims it: v1's five points,
+/// with room for an end drawn on a half point, so five points in trims at
+/// both ends (the out end was drawn on a half point and lost its fifth).
+const TRIM_INSIDE: f64 = 6.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1678,7 +1705,8 @@ fn paint_clip(
             t.typography.body
         } as f64;
         o.opacity = strength * if c.media == Media::Loading { 0.7 } else { 1. };
-        o.detail = json!({"truncate":"tail","offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
+        // Names are semibold (pm-design: large-bold text against the slab).
+        o.detail = json!({"truncate":"tail","weight":600,"offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
         ops.push(o);
     }
     if let Some(effect) = badge {
@@ -1925,6 +1953,9 @@ pub struct Marquee {
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub viewport: Viewport,
+    /// The ops before this index (the ground, the column's ground and the
+    /// ruler with its grid) stand still while the rows scroll.
+    pub fixed: usize,
     pub range: Range<usize>,
     pub total: usize,
     pub ops: Vec<Op>,
@@ -2123,11 +2154,11 @@ impl Frame {
             let drawn = o.detail["stripEdges"].as_array()?;
             let (a, b) = (edges[0].as_f64()?, edges[1].as_f64()?);
             let (da, db) = (drawn[0].as_f64()?, drawn[1].as_f64()?);
-            // v1's reach at both ends: `TRIM_REACH` inside the strip as drawn
-            // and as far past the layer's edge; a strip too short for both
-            // trims the end nearer the point.
-            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_REACH;
-            let near_out = x >= db - TRIM_REACH && x <= b + TRIM_REACH;
+            // v1's reach at both ends: `TRIM_INSIDE` inside the strip as
+            // drawn and `TRIM_REACH` past the layer's edge; a strip too short
+            // for both trims the end nearer the point.
+            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_INSIDE;
+            let near_out = x >= db - TRIM_INSIDE && x <= b + TRIM_REACH;
             let edge = match (near_in, near_out) {
                 (true, true) if (x - da).abs() <= (x - db).abs() => Some(Edge::In),
                 (true, true) => Some(Edge::Out),

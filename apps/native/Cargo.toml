@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["spikes/*", "crates/*", "crates/acceptance/runtime", "packaging", "js/v4/panels/effects/conformance", "js/v4/panels/export/wire", "js/v4/panels/effect-controls/native", "js/v4/panels/project/native"]
-exclude = ["vendor/gpui-ce"]
+exclude = ["vendor/gpui-ce", "vendor/taffy"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,3 +28,6 @@ debug-assertions = true
 # engine/third_party/wgpu/POWERMOVE.md.
 [patch.crates-io]
 wgpu = { path = "../../engine/third_party/wgpu" }
+# GPUI's layout engine with taffy 0.14's measure cache: 0.13's measured every
+# level of nested flex columns again (vendor/taffy/POWERMOVE.md).
+taffy = { path = "vendor/taffy" }

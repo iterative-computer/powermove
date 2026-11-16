@@ -71,6 +71,10 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
+    /// The project's Home poster, shown in the opening viewer's frame until
+    /// the viewer draws: the first picture waits for the open and for the
+    /// extensions the project draws with (PM-384).
+    pub(crate) ghost_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -159,6 +163,10 @@ pub struct Controller {
     pub(crate) page_drawn: bool,
     /// A restored window is checking whether its project reopens.
     pub(crate) reopening: bool,
+    /// The open running is a window restored at launch: if it fails (the
+    /// project's file is gone, it can't be read) the project is left out of
+    /// the restore without a word, only in the Error Log (PM-392).
+    pub(crate) restoring: bool,
     /// Wakes the playback loop, which places the playhead layers.
     pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
@@ -444,6 +452,29 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
+        if id != "timeline" {
+            return;
+        }
+        let (timeline, runtime) = {
+            let v = self.0.read(cx);
+            (v.builtins.timeline.clone(), v.builtins.runtime.clone())
+        };
+        let Some(timeline) = timeline else { return };
+        // The tracks' scene and the panel's rows (its frame) follow it.
+        if timeline.update(cx, |t, cx| t.set_focused(focused, cx))
+            && let Some(runtime) = runtime
+            && let Ok(ticket) = runtime
+                .timeline_action(serde_json::json!({"type": "panelFocus", "focused": focused}))
+        {
+            let controller = self.0.downgrade();
+            cx.spawn(async move |cx| {
+                let _ = ticket.await;
+                let _ = controller.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
@@ -735,6 +766,8 @@ impl Controller {
             }
         })
         .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -778,6 +811,11 @@ impl Controller {
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {
                                     v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { .. } => {
+                                    crate::appearance::follow(&v.kernel.state())
                                 }
                                 _ => {}
                             }
@@ -833,6 +871,7 @@ impl Controller {
             busy: None,
             opening_name: None,
             ghost_aspect: None,
+            ghost_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -888,6 +927,7 @@ impl Controller {
             store: None,
             page_drawn: false,
             reopening: false,
+            restoring: false,
             playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
@@ -1013,6 +1053,7 @@ impl Controller {
         self.ghosted.clear();
         self.revealed.clear();
         self.ghost_aspect = None;
+        self.ghost_poster = None;
         self.host
             .borrow()
             .set_document_metadata("Untitled", "", false, None);
@@ -1038,6 +1079,13 @@ impl Controller {
                 cx.notify();
                 return;
             }
+            // Tabs mode: the project shown stays as it is and the other
+            // opens as a new tab of this window.
+            crate::lifecycle::OpenPlan::AfterClose if pm_shell::tabs_mode() => {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(next, leader, cx);
+                return;
+            }
             crate::lifecycle::OpenPlan::AfterClose => {}
         }
         self.replace_with = Some(next);
@@ -1056,6 +1104,16 @@ impl Controller {
     /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
     /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        // The pages open in this window's strip at the last quit open again,
+        // behind the project.
+        let pages = std::mem::take(&mut self.host.borrow_mut().restored_pages);
+        if !pages.is_empty() {
+            for page in &pages {
+                self.pages.open(page);
+            }
+            self.pages.leave();
+            self.sync_pages();
+        }
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };
@@ -1091,8 +1149,21 @@ impl Controller {
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // Every restored window reopens its project, one open at a
+                // time (an open holds the project-operation fence): a tab
+                // waits for the one before it instead of giving up.
+                for _ in 0..300 {
+                    let busy = this.update(cx, |v, _| v.mcp.operation_in_progress());
+                    if !matches!(busy, Ok(true)) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
+                        v.restoring = true;
                         v.open_named(
                             SessionSource::Library {
                                 profile: v.profile.clone(),
@@ -1652,8 +1723,23 @@ impl Controller {
         }
         // The viewer's clock lands later (always so for a viewer bound a
         // moment ago, as on open): record the time asked for, so MCP's
-        // playhead and the saved transport never read the old one.
-        let _ = self.write_ui_at(target.unwrap_or_else(|| self.time()));
+        // playhead and the saved transport never read the old one. A ruler
+        // scrub writes it once it ends: each write republishes every panel
+        // that shows the time (PM-310), and the viewer, the playhead and
+        // timecode layers, extensions and Properties follow the scrub as it
+        // goes.
+        let time = target.unwrap_or_else(|| self.time());
+        if self.builtins.scrubbing {
+            self.builtins.scrub_time = Some(time);
+        } else {
+            let _ = self.write_ui_at(time);
+        }
+    }
+    /// A ruler scrub ended: the kernel records where it left the time.
+    pub fn finish_scrub(&mut self) {
+        if let Some(time) = self.builtins.scrub_time.take() {
+            let _ = self.write_ui_at(time);
+        }
     }
     pub fn persist_ui(&self) {
         let _ = self.write_ui();
@@ -1761,6 +1847,17 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        // Its Home poster stands in the opening viewer, where one was kept.
+        self.ghost_poster = Some(
+            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
+        )
+        .filter(|poster| poster.is_file());
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if !matches!(source, SessionSource::New(_)) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
         let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
@@ -1920,6 +2017,8 @@ impl Controller {
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
                         v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
                     }
                 }
                 match result {
@@ -1930,6 +2029,7 @@ impl Controller {
                         info,
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
+                        v.restoring = false;
                         // Media resolves on a worker after the project shows.
                         let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
@@ -1944,9 +2044,18 @@ impl Controller {
                         }
                     }
                     // Already open in a window: that window comes forward.
+                    // A restored window whose project another restored
+                    // window holds goes, without taking the front.
                     Some(Err(KernelFailure::AlreadyOpen(project))) => {
                         v.message = String::new();
-                        v.focus_project(&project, cx);
+                        if std::mem::take(&mut v.restoring) {
+                            if pm_shell::live_window_ids().len() > 1 {
+                                let window = v.host.borrow().window.clone();
+                                cx.defer(move |_| pm_shell::request_close(&window));
+                            }
+                        } else {
+                            v.focus_project(&project, cx);
+                        }
                     }
                     Some(Err(error)) => {
                         v.open_timer
@@ -1954,9 +2063,11 @@ impl Controller {
                         v.report_open_failure(&name, path, &error, cx)
                     }
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.restoring = false;
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
                     }
                     other => {
+                        v.restoring = false;
                         v.message = format!("“{name}” couldn’t be opened.");
                         v.errors.borrow_mut().push(
                             "Project",
@@ -2261,6 +2372,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         let Some(file) = path.clone() else {
             return self.report_open_error(name, path, error, cx);
         };
@@ -2390,6 +2504,20 @@ impl Controller {
         })
         .detach();
     }
+    /// A project restored at launch that did not open is left out without
+    /// an alert (its file was deleted or moved since): logged, and its
+    /// window goes when another window is open, else it stays on Home.
+    fn drop_restored(&mut self, name: &str, error: &KernelFailure, cx: &mut Context<Self>) {
+        self.errors
+            .borrow_mut()
+            .push("Project", &format!("“{name}” was not reopened: {error}"));
+        self.message = String::new();
+        if pm_shell::live_window_ids().len() > 1 {
+            let window = self.host.borrow().window.clone();
+            cx.defer(move |_| pm_shell::request_close(&window));
+        }
+        cx.notify();
+    }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_error(
         &mut self,
@@ -2398,6 +2526,9 @@ impl Controller {
         error: &KernelFailure,
         cx: &mut Context<Self>,
     ) {
+        if std::mem::take(&mut self.restoring) {
+            return self.drop_restored(name, error, cx);
+        }
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
         let failure = open_failure(error);
@@ -2415,6 +2546,39 @@ impl Controller {
                 && let Some(path) = path
             {
                 platform::reveal(&path);
+            }
+        })
+        .detach();
+    }
+    /// A project opened here has a poster for Home's card from now on, even
+    /// if it is never saved in this app (a save draws a new one): once its
+    /// open has settled and its extensions' effects are in, so the poster
+    /// shows what the project looks like. Off the screen, so a window that
+    /// is not drawing gets one too.
+    fn poster_once_open(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            for _ in 0..120 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let Ok(ready) = this.update(cx, |v, _| {
+                    let shown = v.session.as_ref().map(|s| s.project.as_str());
+                    (shown == Some(project.as_str()))
+                        .then(|| v.settling.is_none() && !v.awaiting_extension_effects())
+                }) else {
+                    return;
+                };
+                match ready {
+                    None => return,
+                    Some(false) => {}
+                    Some(true) => {
+                        let _ = this.update(cx, |v, cx| v.write_poster(cx));
+                        return;
+                    }
+                }
             }
         })
         .detach();
@@ -2437,6 +2601,7 @@ impl Controller {
         self.rows.clear();
         self.keyframes = 0;
         self.session = Some(session);
+        self.poster_once_open(cx);
         self.media_refresh.reset();
         self.thumbs.reset();
         self.media = MediaCatalog::default();
@@ -2566,7 +2731,12 @@ impl Controller {
             // opens in a window of its own (one project per window), never
             // in place of the one the person is working on.
             self.mcp.bind_window(self.window_key, self.session.clone());
-            crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            if pm_shell::tabs_mode() {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            } else {
+                crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            }
             return;
         }
         self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
@@ -2599,6 +2769,12 @@ impl Controller {
         if self.recovery_pending || self.save_pending {
             self.message = "Finish the recovery decision or current save first".into();
             return;
+        }
+        // An edit left open (its owner never ended it: no button is held,
+        // nothing is typed) would refuse the save: it is finished first, as
+        // Undo does, and the save takes it.
+        if self.edit_left_open(cx) {
+            self.call(Call::History(HistoryCall::Seal), cx);
         }
         let path = as_path.clone();
         if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
@@ -2704,7 +2880,7 @@ impl Controller {
         })
         .detach();
     }
-    fn project_name(&self) -> String {
+    pub(crate) fn project_name(&self) -> String {
         self.published
             .as_ref()
             .and_then(|p| p.snapshot.document.root())
@@ -3160,6 +3336,15 @@ impl Controller {
                         .to_owned()
                 };
                 let (group, value) = (arg(0), arg(1));
+                if cmd.token.is_some() {
+                    let canvas = self.host.borrow().canvas_focus.get();
+                    let takes = self.builtins.gizmos.as_ref().is_some_and(|g| {
+                        g.read(cx).studio_takes_key(&group, canvas, window)
+                    });
+                    if !takes {
+                        return false;
+                    }
+                }
                 if let Some(g) = self.builtins.gizmos.clone() {
                     cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
                 }
@@ -3275,9 +3460,8 @@ impl Controller {
             // The gear and ⌘, toggle: Settings showing closes, back to the
             // tab it came forward over; open behind another tab, it comes
             // forward. Its rows have saved as they changed (as its × closes).
-            "settings" if self.pages.toggle_closes("settings") => {
-                self.close_tab_page("settings", cx)
-            }
+            // ⌘, with Settings in front closes it.
+            "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
@@ -3290,7 +3474,9 @@ impl Controller {
                     self.close_tab_page(&id, cx);
                 }
             }
-            "closeTab" | "closeProject" if self.session.is_some() => {
+            // Tabs mode: the tab closes (its window; the last one stays on
+            // Home). Separate windows: the project closes, the window stays.
+            "closeTab" | "closeProject" if self.session.is_some() && !pm_shell::tabs_mode() => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Project, cx)
             }
@@ -3344,6 +3530,16 @@ impl Controller {
                     .borrow()
                     .send_command("panel:show:timeline", vec![]);
                 timeline.update(cx, |t, cx| t.show_graph(layer, channel, keys, cx));
+            }
+            // A Properties diamond keyed a property: the graph plots it.
+            "timeline.focusGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.focus_graph(layer, channel, cx));
             }
             "properties.expression" => {
                 let Some(input) = cmd.args.first() else {
@@ -3708,12 +3904,8 @@ impl Controller {
                 if self.published.is_none() {
                     return false;
                 }
+                self.builtins.settings_page = Some("project".into());
                 self.show_builtin("settings", window, cx);
-                if let Some(view) = self.builtins.views.get("settings") {
-                    view.update(cx, |v, cx| {
-                        v.scroll_semantic("settings.section.project", cx)
-                    });
-                }
             }
             "actualSize" => self.step_zoom(1., Some(1.), window, cx),
             "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),
@@ -3767,6 +3959,16 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // The button came up somewhere in the window (after the views
+            // heard it): a pointer gesture whose own view never did ends now.
+            "pointerReleased" => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                }
+                for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
+                    view.update(cx, |v, cx| v.release_unheard(window, cx));
+                }
+            }
             // Space came up after arming the hand over the viewer: it plays
             // only if the hand did not pan (After Effects' rule).
             "viewer.spaceUp" => {
@@ -3778,6 +3980,19 @@ impl Controller {
                 if !panned {
                     self.host.borrow().send_command("play", vec![]);
                 }
+            }
+            // Space on a Project item a click left with the keyboard is the
+            // item's (Quick Look, as in Finder): Play declines and the key
+            // reaches it. Everywhere else Space plays.
+            "play"
+                if cmd.token.is_some()
+                    && self
+                        .builtins
+                        .views
+                        .get("assets")
+                        .is_some_and(|v| v.read(cx).focused_takes_keys(window)) =>
+            {
+                return false;
             }
             // Space held over the viewer is the hand: Play waits for the key
             // to come up (no drag) instead of starting on the way down.

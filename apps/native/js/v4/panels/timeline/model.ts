@@ -117,6 +117,8 @@ export interface TimelineFrame {
   document: string | null;
   revision: string;
   hasComposition: boolean;
+  /** The timeline panel holds the keyboard; absent counts as yes. */
+  focused?: boolean;
   mode: Mode;
   view: View;
   playing: boolean;
