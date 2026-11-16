@@ -848,6 +848,7 @@ fn render(
                 .pb(px(m.gap))
                 .text_size(px(ty.label))
                 .text_color(rgb(c.muted))
+                .filter(dot_filter(build.as_ref(),None,&t))
                 .child(note.to_owned()),
         );
     }
@@ -917,7 +918,9 @@ fn render(
                 }))
         };
         body = body.child(
-            div().px(px(m.inset)).pb(px(m.gap)).child(
+            div().px(px(m.inset)).pb(px(m.gap))
+                .filter(dot_filter(build.as_ref(),Some(start),&t))
+                .opacity(control_opacity(build.as_ref(),start,t.accessibility.reduce_motion)).child(
                 div()
                     .flex()
                     .h(px(m.control))
