@@ -707,26 +707,6 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                     <text style={{ ...help, flexShrink: 0 }}>
                       {`${extension.type} · ${extension.source}`}
                     </text>
-                    {/* On or off here, as from the Library; the window's
-                        extensions follow at once. */}
-                    {extension.binding && (
-                      <UI.Switch
-                        label={extension.name}
-                        binding={extension.binding}
-                        value={extension.enabled}
-                        disabled={
-                          !model.services || model.pending.has(extension.id)
-                        }
-                        onChange={(e) => {
-                          if (typeof e.value === "boolean")
-                            void model.perform({
-                              type: "extension.enabled",
-                              id: extension.id,
-                              enabled: e.value,
-                            });
-                        }}
-                      />
-                    )}
                     <div
                       metadata={{ symbol: "chevron.right" }}
                       style={{
@@ -735,6 +715,8 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                         flexShrink: 0,
                       }}
                     />
+                    {/* No switch until the extension host can turn one off
+                        (PM-435): it would say off while its work runs on. */}
                   </div>
                 </div>
               ))}

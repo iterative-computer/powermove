@@ -809,13 +809,7 @@ impl Backend {
             })
             .collect::<Vec<_>>();
         // Like kinds together, in the order the page lists them, then by name.
-        // Each row's switch is a local control: its lease only names it.
         let mut extensions = extensions;
-        for e in &mut extensions {
-            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
-            let lease = self.fields(&json!([name]))?;
-            e["binding"] = lease[&name].clone();
-        }
         extensions.sort_by_cached_key(|e| {
             let kind = e["type"].as_str().unwrap_or("Other");
             (
