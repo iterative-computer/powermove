@@ -1688,67 +1688,115 @@ impl StoreWindow {
         out.push(self.section(self.heading("Made by You", None), made));
         out
     }
+    /// An extension's page (S076): its head (art, name, what it does, who
+    /// made it, and the action at the trailing edge), then About and a card
+    /// of facts and one of versions, each under a small label as v1.2.0's.
     fn detail_view(
         &self,
         listing: &Listing,
         load: &Load<Detail>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let (c, m, ty) = (
-            &self.tokens.colors,
-            &self.tokens.metrics,
-            self.tokens.typography,
-        );
-        let mut out = vec![
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let back = div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xs))
+            .mb(px(t.space.xl))
+            .child(
+                self.kit()
+                    .icon_button("store-back", "chevron.left", "Back", false)
+                    .debug_selector(|| "store-back".into())
+                    .on_click(cx.listener(|v, _, _, cx| v.back(cx))),
+            )
+            .child(
+                div()
+                    .text_role(t, Text::Label)
+                    .text_color(rgb(c.muted))
+                    .child(self.title_for_back()),
+            );
+        let (from, to) = art(&listing.repo_id);
+        let seal = listing.verified.then(|| {
             div()
-                .flex()
-                .items_center()
-                .gap(px(m.gap))
-                .child(
-                    self.kit()
-                        .icon_button("store-back", "chevron.left", "Back", false)
-                        .debug_selector(|| "store-back".into())
-                        .on_click(cx.listener(|v, _, _, cx| v.back(cx))),
-                )
-                .child(self.title_for_back())
-                .into_any_element(),
-            div()
-                .px(px(m.gap))
-                .pt(px(m.gap))
-                .text_size(px(ty.title))
-                .font_weight(FontWeight(ty.semibold_weight))
-                .child(listing.name.clone())
-                .into_any_element(),
-            div()
-                .px(px(m.gap))
-                .text_color(rgb(c.secondary))
-                .child(format!(
-                    "{} · by {}{}",
-                    kind_label(&listing.category),
-                    listing.handle,
-                    if listing.verified {
-                        " · Verified publisher"
-                    } else {
-                        ""
-                    }
+                .id("store-detail-verified")
+                .flex_none()
+                .role(Role::Image)
+                .aria_label("Verified")
+                .child(pm_shell::symbol::symbol(
+                    "checkmark.seal.fill",
+                    m.symbol_inline,
+                    Weight::Semibold,
+                    c.accent_text,
+                    window,
                 ))
-                .into_any_element(),
-        ];
+        });
+        let copy = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap(px(t.space.hair))
+            .child(
+                div()
+                    .text_role(t, Text::Display)
+                    .child(listing.name.clone()),
+            )
+            .when(!listing.tagline.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_role(t, Text::Reading)
+                        .text_color(rgb(c.secondary))
+                        .child(listing.tagline.clone()),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(t.space.xs))
+                    .text_color(rgb(c.muted))
+                    .child(format!("by {}", listing.handle))
+                    .children(seal),
+            );
+        let mut head = div()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xl))
+            .pb(px(t.space.xxl))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(HERO))
+                    .corner(t, t.radius.xl + t.space.xs)
+                    .bg(linear_gradient(
+                        135.,
+                        linear_color_stop(rgb(from), 0.),
+                        linear_color_stop(rgb(to), 1.),
+                    )),
+            )
+            .child(copy);
         let detail = match load {
             Load::Loading => {
-                out.push(self.loading().into_any_element());
-                return out;
+                return vec![
+                    back.into_any_element(),
+                    head.into_any_element(),
+                    self.loading().into_any_element(),
+                ];
             }
             Load::Failed(_) => {
-                out.push(self.load_failed(cx).into_any_element());
-                return out;
+                return vec![
+                    back.into_any_element(),
+                    head.into_any_element(),
+                    self.load_failed(cx).into_any_element(),
+                ];
             }
             Load::Ready(detail) => detail,
         };
         // The one action, then Uninstall for an install.
         let action = self.action(detail);
         let installed = self.installed(listing).cloned();
-        let mut actions = div().flex().gap(px(m.gap)).px(px(m.gap)).pt(px(m.gap));
         let can_act = match action {
             DetailAction::Install | DetailAction::InstallAndSetUp | DetailAction::Update => {
                 self.services.source.is_some() && self.busy.is_none()
@@ -1780,8 +1828,14 @@ impl StoreWindow {
             };
             button = button.on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx)));
         }
-        actions = actions.child(button);
-        if let Some(item) = installed {
+        let mut actions = div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .items_end()
+            .gap(px(t.space.md))
+            .child(button);
+        if let Some(item) = &installed {
             let (id, name, repo) = (item.id.clone(), item.name.clone(), item.repo.clone());
             actions = actions.child(
                 self.button("store-uninstall", "Uninstall…", self.busy.is_none(), false)
@@ -1790,10 +1844,9 @@ impl StoreWindow {
                     })),
             );
         }
-        out.push(actions.into_any_element());
-        if let Some(message) = self.message_line() {
-            out.push(message.into_any_element());
-        }
+        head = head.child(actions);
+        let mut out = vec![back.into_any_element(), head.into_any_element()];
+        out.extend(self.message_line().map(IntoElement::into_any_element));
         if primary && self.services.source.is_none() {
             out.push(
                 self.status(SIGNING)
@@ -1801,98 +1854,154 @@ impl StoreWindow {
                     .into_any_element(),
             );
         }
-        let block = |title: &str, body: Div| {
+        // A small label over its card or text, as a Settings page.
+        let block = |title: &str, body: AnyElement| {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(m.border * 2.))
-                .px(px(m.gap))
-                .pt(px(m.inset))
+                .pb(px(t.space.xxl))
                 .child(
                     div()
-                        .font_weight(FontWeight(ty.semibold_weight))
+                        .px(px(CARD_PAD))
+                        .pb(px(t.space.md))
+                        .text_role(t, Text::Label)
+                        .text_color(rgb(c.muted))
                         .child(title.to_string()),
                 )
                 .child(body)
                 .into_any_element()
         };
-        if !listing.tagline.is_empty() {
-            out.push(
-                div()
-                    .px(px(m.gap))
-                    .pt(px(m.gap))
-                    .child(listing.tagline.clone())
-                    .into_any_element(),
-            );
-        }
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .corner(t, t.radius.lg)
+                .bg(rgb(c.panel))
+        };
+        let fact = |key: &str, value: AnyElement| {
+            div()
+                .flex()
+                .gap(px(t.space.xl))
+                .px(px(CARD_PAD))
+                .py(px(t.space.md + t.space.hair))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(FACT_KEY))
+                        .text_color(rgb(c.secondary))
+                        .child(key.to_string()),
+                )
+                .child(div().flex_1().min_w(px(0.)).child(value))
+        };
+        let text = |s: String| div().child(s).into_any_element();
         if let Some(about) = &detail.about {
             out.push(block(
                 "About",
-                div().text_color(rgb(c.secondary)).child(about.clone()),
+                div()
+                    .px(px(CARD_PAD))
+                    .text_role(t, Text::Reading)
+                    .child(about.clone())
+                    .into_any_element(),
+            ));
+        }
+        let mut facts: Vec<Div> = vec![
+            fact("Made by", text(listing.handle.clone())),
+            fact("Kind", text(kind_label(&listing.category).to_string())),
+        ];
+        if let Some(latest) = &listing.latest {
+            facts.push(fact(
+                "Version",
+                text(match &installed {
+                    Some(item) if item.version != latest.1 => {
+                        format!("{} installed · {} available", item.version, latest.1)
+                    }
+                    _ => latest.1.clone(),
+                }),
             ));
         }
         let uses = permission_lines(&detail.listing.permissions);
         if !uses.is_empty() || !detail.link_hosts.is_empty() {
-            let mut body = div().flex().flex_col();
+            let mut lines = div().flex().flex_col().gap(px(t.space.hair));
             for (label, warn) in uses {
-                body = body.child(
+                lines = lines.child(
                     div()
-                        .text_color(rgb(if warn { c.danger } else { c.secondary }))
+                        .text_color(rgb(if warn { c.warning } else { c.text }))
                         .child(label),
                 );
             }
             if !detail.link_hosts.is_empty() {
-                body = body.child(div().text_color(rgb(c.secondary)).child(format!(
+                lines = lines.child(div().child(format!(
                     "Opens {} in your browser without asking",
                     detail.link_hosts.join(", ")
                 )));
             }
-            out.push(block("Uses", body));
+            facts.push(fact("Access", lines.into_any_element()));
         }
         if !detail.contributes.is_empty() {
-            out.push(block(
-                "Includes",
-                div()
-                    .text_color(rgb(c.secondary))
-                    .child(includes_text(&detail.contributes)),
-            ));
+            facts.push(fact("Includes", text(includes_text(&detail.contributes))));
         }
-        out.push(block(
-            "Requires",
-            div()
-                .text_color(rgb(c.secondary))
-                .child(requires_text(listing.latest.as_ref().and_then(|l| l.2))),
+        facts.push(fact(
+            "Compatibility",
+            text(requires_text(listing.latest.as_ref().and_then(|l| l.2)).to_string()),
         ));
-        let mut versions = div().flex().flex_col().gap(px(m.border * 2.));
-        for release in &detail.releases {
-            let mut line = vec![release.version.clone()];
-            let date = relative_date(&release.published_at, today());
-            if !date.is_empty() {
-                line.push(date);
+        let mut details = card();
+        for (i, row) in facts.into_iter().enumerate() {
+            if i > 0 {
+                details = details.child(self.kit().separator().mx(px(CARD_PAD)));
             }
-            if release.withdrawn {
-                line.push("Withdrawn".into());
+            details = details.child(row);
+        }
+        out.push(block("Details", details.into_any_element()));
+        let mut versions = card();
+        for (i, release) in detail.releases.iter().enumerate() {
+            if i > 0 {
+                versions = versions.child(self.kit().separator().mx(px(CARD_PAD)));
             }
             let id = release.version.clone();
+            let date = relative_date(&release.published_at, today());
             versions = versions.child(
                 div()
                     .debug_selector(move || format!("store-version-{id}"))
                     .flex()
                     .flex_col()
+                    .px(px(CARD_PAD))
+                    .py(px(t.space.md + t.space.hair))
                     .child(
                         div()
-                            .text_color(rgb(if release.withdrawn { c.muted } else { c.text }))
-                            .child(line.join(" · ")),
+                            .flex()
+                            .items_baseline()
+                            .gap(px(t.space.md))
+                            .when(release.withdrawn, |d| {
+                                d.child(div().text_color(rgb(c.warning)).child("Withdrawn"))
+                            })
+                            .child(
+                                div()
+                                    .text_role(t, Text::Label)
+                                    .text_color(rgb(if release.withdrawn {
+                                        c.muted
+                                    } else {
+                                        c.text
+                                    }))
+                                    .child(release.version.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_role(t, Text::Caption)
+                                    .text_color(rgb(c.muted))
+                                    .child(date),
+                            ),
                     )
                     .children(release.notes.clone().map(|note| {
                         div()
-                            .text_size(px(ty.minimum))
+                            .pt(px(t.space.hair))
                             .text_color(rgb(c.secondary))
                             .child(note)
                     })),
             );
         }
-        out.push(block("Versions", versions));
+        if !detail.releases.is_empty() {
+            out.push(block("Version History", versions.into_any_element()));
+        }
         out
     }
     fn message_line(&self) -> Option<Div> {
@@ -1923,7 +2032,7 @@ impl Render for StoreWindow {
         ));
         let t = self.tokens.clone();
         let content = match self.detail.clone() {
-            Some((listing, load)) => self.detail_view(&listing, &load, cx),
+            Some((listing, load)) => self.detail_view(&listing, &load, window, cx),
             None => self.list(window, cx),
         };
         // v1.2.0's Store column: a readable width centred however wide the
@@ -1990,6 +2099,9 @@ const CARD_PAD: f32 = 14.;
 const TILE: f32 = 44.;
 const ART: f32 = 30.;
 const NARROW: f32 = 640.;
+/// An extension page's art, and the key column of its facts.
+const HERO: f32 = 80.;
+const FACT_KEY: f32 = 120.;
 
 /// A listing's artwork when it has none: two hues fixed by its repository
 /// (v1.2.0's `artFor`), as a diagonal ramp.

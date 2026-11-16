@@ -1007,6 +1007,15 @@ fn capture_utility_store() {
         },
     )
     .unwrap();
+    let glow = pm_services::surfaces::store::Listing::from_value(&listing(GLOW_REPO)).unwrap();
+    let svc = services(&f, true);
+    crate::utility_capture_tests::capture("store-detail", |_, cx| {
+        cx.new(|cx| {
+            let mut view = StoreWindow::new(svc, pm_shell::tokens(), cx);
+            view.open_detail(glow, cx);
+            view
+        })
+    });
     for (name, page) in [
         ("store-library", Page::Library),
         ("store-panels", Page::Kind(2)),
