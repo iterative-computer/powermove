@@ -1504,7 +1504,12 @@ impl MetalRenderer {
                         boundary.opacity,
                         false,
                         boundary.filters.iter().find_map(|filter| match filter {
-                            gpui::ScaledFilter::DotMatrix { detail, resolve, accent, scale } => Some((*detail, *resolve, *accent, *scale)),
+                            gpui::ScaledFilter::DotMatrix {
+                                detail,
+                                resolve,
+                                accent,
+                                scale,
+                            } => Some((*detail, *resolve, *accent, *scale)),
                             _ => None,
                         }),
                     );
@@ -1753,7 +1758,12 @@ impl MetalRenderer {
         );
         if let Some((detail, resolve, accent, scale)) = dots {
             composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
-            composite_uniforms.dot_accent = wgsl_rs::std::vec4f(((accent >> 16) & 255) as f32 / 255.0, ((accent >> 8) & 255) as f32 / 255.0, (accent & 255) as f32 / 255.0, 1.0);
+            composite_uniforms.dot_accent = wgsl_rs::std::vec4f(
+                ((accent >> 16) & 255) as f32 / 255.0,
+                ((accent >> 8) & 255) as f32 / 255.0,
+                (accent & 255) as f32 / 255.0,
+                1.0,
+            );
         }
         let encoder = new_command_encoder_for_texture(
             command_buffer,

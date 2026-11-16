@@ -8,7 +8,8 @@
 //! of light in its own hue inside the edge instead of an outline, brightest
 //! along the top and its corners, and semibold names (3:1, large-bold text) in a
 //! pale tint of the hue, or a deep shade where a tint cannot hold that and
-//! on yellow and orange, whose slabs are the reference's bright amber. As
+//! on yellow, orange, green, cyan and blue, whose slabs are as bright as the
+//! reference's amber. As
 //! bright and saturated as the owner's reference: each hue as vivid as sRGB
 //! allows. Hover and selection brighten and whiten the rim.
 //!
@@ -196,10 +197,13 @@ impl Tokens {
             return self.strip_light(hue, coloured, state);
         }
         let disabled = state == StripState::Disabled;
-        // Yellow and orange are light hues: the reference's amber slab, a
-        // step brighter, under a dark name, which needs the slab a little
-        // less see-through to hold its contrast.
-        let light_hue = coloured && (35. ..110.).contains(&hue);
+        // Yellow, orange, green, cyan and blue are light hues: as bright as
+        // the reference's amber slab, under a dark name and over a
+        // waveform in a deeper shade of the hue (a pale one cannot read on
+        // them), which needs the slab a little less see-through to hold its
+        // contrast. Violet, red and pink stay the deeper slab under a pale
+        // name, as the reference's violet does.
+        let light_hue = coloured && ((35. ..110.).contains(&hue) || (120. ..280.).contains(&hue));
         // Glass: the timeline's grid and the row behind show through the
         // body (a dragged strip a little more, lifted off them).
         let glass = if light_hue { 0.9 } else { 0.86 };

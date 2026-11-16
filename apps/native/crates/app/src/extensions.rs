@@ -44,6 +44,55 @@ const V4_THEME: &str = "extension.v4theme:";
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
+/// Runs the row chosen from a menu (`target`: `token:index`) once the
+/// update that heard it returns: what a row does may read the entity that
+/// heard it (the timeline asks the Controller for the time), and reading an
+/// entity inside its own update is a double lease, a panic in any build.
+pub(crate) fn run_choice<T: 'static>(
+    pending: &mut Option<(u64, crate::timeline_surface::Choose)>,
+    target: &str,
+    cx: &mut Context<T>,
+) {
+    if let Some((token, index)) = target.split_once(':')
+        && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+        && let Some((_, choose)) = pending.take_if(|(waiting, _)| *waiting == token)
+    {
+        cx.defer(move |cx| choose(Some(index), cx));
+    }
+}
+#[cfg(test)]
+mod choice_tests {
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+    struct Holder {
+        pending: Option<(u64, crate::timeline_surface::Choose)>,
+    }
+    /// A row chosen while the entity that holds the menu is updating runs
+    /// after that update: the row reads the entity (the timeline's rows ask
+    /// the Controller for the time), which inside its update panicked.
+    #[gpui::test]
+    fn a_chosen_row_may_read_the_entity_that_heard_it(cx: &mut TestAppContext) {
+        let holder = cx.new(|_| Holder { pending: None });
+        let ran = Rc::new(Cell::new(None));
+        let (weak, seen) = (holder.downgrade(), ran.clone());
+        holder.update(cx, |h, _| {
+            h.pending = Some((
+                7,
+                Box::new(move |index, cx| {
+                    // Reads the holder, as the timeline's rows read the Controller.
+                    let waiting = weak.upgrade().map(|h| h.read(cx).pending.is_some());
+                    seen.set(Some((index, waiting)));
+                }),
+            ));
+        });
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "7:2", cx));
+        cx.run_until_parked();
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+        // Another menu's token runs nothing.
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "8:0", cx));
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+    }
+}
 /// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
 const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
@@ -1033,6 +1082,12 @@ impl Controller {
                         return MenuEntry::separator();
                     }
                     let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
                     let mut entry = match row["children"].as_array() {
                         Some(children) if !children.is_empty() => {
                             MenuEntry::submenu(label, entries(children, token, next))
@@ -1041,6 +1096,10 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
+                    entry.shortcut = row["id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()
@@ -1580,15 +1639,7 @@ impl Controller {
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(CHOICE) {
-            if let Some((token, index)) = target.split_once(':')
-                && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
-                && let Some((_, choose)) = self
-                    .extensions
-                    .choice
-                    .take_if(|(pending, _)| *pending == token)
-            {
-                choose(Some(index), cx);
-            }
+            run_choice(&mut self.extensions.choice, target, cx);
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
@@ -2091,6 +2142,7 @@ impl Controller {
         let owners = self.extensions.owners.clone();
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
+        let clips = shell.native_panel_clips.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
@@ -2133,8 +2185,15 @@ impl Controller {
                     .collect();
                 // The page shows through each panel's whole body, on the
                 // panels' ground ...
-                let panel_regions = mine.iter().map(|(_, r)| *r).collect();
-                let overlay_regions = stage.as_ref().map(to_rect).into_iter().collect();
+                let clips = clips.borrow();
+                let clipped = |id: &String, r: Rect| {
+                    clips
+                        .iter()
+                        .find(|(key, _)| key == id)
+                        .map_or(r, |(_, clip)| to_rect(clip))
+                };
+                let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
+                let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
                 // ... and its content only within that panel's body and every
                 // place recently sent to the page: a page that has not yet
                 // moved a panel's content (a splitter drag) never shows it
@@ -2144,11 +2203,20 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            if host.panel_layout_applied(id, *r) {
+                            let mask = if host.panel_layout_applied(id, *r) {
                                 *r
                             } else {
                                 sent.mask(id, *r)
-                            }
+                            };
+                            let clip = clipped(id, *r);
+                            Rect::new(
+                                mask.x.max(clip.x),
+                                mask.y.max(clip.y),
+                                ((mask.x + mask.w).min(clip.x + clip.w) - mask.x.max(clip.x))
+                                    .max(0.),
+                                ((mask.y + mask.h).min(clip.y + clip.h) - mask.y.max(clip.y))
+                                    .max(0.),
+                            )
                         })
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
@@ -2362,6 +2430,18 @@ impl Controller {
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::DockContent { id, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockContent:{id}"), vec![json!(height)]),
+                    HostEvent::DockScroll { id, delta } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockScroll:{id}"), vec![json!(delta)]),
+                    HostEvent::DockReveal { id, top, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
                     HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
@@ -2800,7 +2880,10 @@ fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
 thread_local! {
     static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
 }
-fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String, String>) -> R) -> R {
+fn with_titles<R>(
+    profile: &std::path::Path,
+    f: impl FnOnce(&mut BTreeMap<String, String>) -> R,
+) -> R {
     TITLES.with(|t| {
         let mut t = t.borrow_mut();
         let titles = t.get_or_insert_with(|| {
@@ -2813,7 +2896,9 @@ fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String
     })
 }
 pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
-    with_titles(profile, |t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    with_titles(profile, |t| {
+        t.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    })
 }
 fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
     let changed = with_titles(profile, |t| {

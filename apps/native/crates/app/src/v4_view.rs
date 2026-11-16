@@ -178,6 +178,10 @@ fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> 
     ((next * scale).round() / scale).clamp(facts.min, facts.max)
 }
 
+/// How long a body's scroll rests before its controls are themselves again:
+/// the scroll layer's settle (P-SCROLL-LAYER).
+const PICTURE_REST: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -232,6 +236,11 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// While the body scrolls, the controls show as pictures of themselves
+    /// (P-SLOT-PICTURE); `pictures_at` counts the scroll's steps, so only
+    /// the last one's rest lets them go.
+    pictures: pm_shell::picture::PictureHold,
+    pictures_at: u64,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
@@ -320,11 +329,51 @@ pub struct SurfaceView {
     pub(crate) grows: bool,
     fit: Cell<f32>,
     natural: Rc<Cell<f32>>,
+    column_natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
     pub log: Vec<(Id, String, EventDetail)>,
     pub error: Option<String>,
+}
+/// Fades over a scroller's viewport where content runs past its top or
+/// bottom edge, into `ground` (the colour under it), a row tall: a region
+/// that draws no scroller still shows there is more. Drawn over the content
+/// in the viewport's own place, whatever the scroll.
+fn scroll_edges(scroll: ScrollHandle, ground: u32, t: &pm_design::Tokens) -> AnyElement {
+    let depth = px(t.metrics.form_row);
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let view = scroll.bounds();
+            let (offset, max) = (-scroll.offset().y, scroll.max_offset().y);
+            if max <= px(0.) || view.size.height <= depth * 2. {
+                return;
+            }
+            let fade = |top: bool| {
+                let (from, to) = if top { (1., 0.) } else { (0., 1.) };
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, from), 0.),
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, to), 1.),
+                )
+            };
+            if offset > px(1.) {
+                let band = Bounds::new(view.origin, size(view.size.width, depth));
+                window.paint_quad(gpui::fill(band, fade(true)));
+            }
+            if offset < max - px(1.) {
+                let band = Bounds::new(
+                    point(view.origin.x, view.bottom() - depth),
+                    size(view.size.width, depth),
+                );
+                window.paint_quad(gpui::fill(band, fade(false)));
+            }
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
 }
 impl SurfaceView {
     pub fn new(
@@ -350,6 +399,8 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            pictures: Default::default(),
+            pictures_at: 0,
             cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
@@ -396,6 +447,7 @@ impl SurfaceView {
             grows: false,
             fit: Cell::new(0.),
             natural: Rc::new(Cell::new(0.)),
+            column_natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -1083,18 +1135,19 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the
                     // bezel. `quiet` is the borderless title in the
                     // secondary ink, for an option bar under a composer.
-                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet" | "pulldown"))
-                        && matches!(kind, crate::v4_control::Kind::Popup),
+                    inline: matches!(
+                        crate::v4_compile::variant(node),
+                        Some("inline" | "quiet" | "pulldown")
+                    ) && matches!(kind, crate::v4_control::Kind::Popup),
                     well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     pull: crate::v4_compile::variant(node) == Some("pulldown"),
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409), Settings' as well; in a
+                    // row's value well it is the small size.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -1165,6 +1218,11 @@ impl SurfaceView {
         }
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
+        }
+        // The header stays put while the body scrolls: its controls are
+        // never pictured.
+        if !self.in_header(id) {
+            control.update(cx, |v, _| v.picture_with(&self.pictures));
         }
         self.controls.insert(id, control);
     }
@@ -1402,6 +1460,9 @@ impl SurfaceView {
                 f.begin_editing_selecting_all(cx);
             });
         }
+        if !self.in_header(id) {
+            field.update(cx, |f, _| f.picture_with(&self.pictures));
+        }
         self.fields.insert(id, field);
     }
     /// Ask JS for the row window that covers native scroll, when it left the
@@ -1421,7 +1482,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -1796,7 +1857,10 @@ impl SurfaceView {
             return;
         };
         let ready = self.controls.get(id).is_some_and(|c| c.read(cx).focused())
-            || self.fields.get(id).is_some_and(|f| f.read(cx).has_keyboard());
+            || self
+                .fields
+                .get(id)
+                .is_some_and(|f| f.read(cx).has_keyboard());
         if ready {
             pm_shell::typing::field_ready();
         }
@@ -1847,6 +1911,55 @@ impl SurfaceView {
             stack.extend(node.children.iter().copied());
         }
         false
+    }
+    /// A step of the body's scroll: its controls show as pictures of
+    /// themselves until the scroll has rested `PICTURE_REST` (the scroll
+    /// layer's settle), then as themselves again (P-SLOT-PICTURE).
+    pub fn scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controls.is_empty() && self.fields.is_empty() {
+            return;
+        }
+        self.pictures_at += 1;
+        if self.pictures.set(true) {
+            self.hold_changed(cx);
+        }
+        let at = self.pictures_at;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PICTURE_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.pictures_at == at && v.pictures.set(false) {
+                    v.hold_changed(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Whether a node is the panel's header or inside it.
+    fn in_header(&self, mut id: Id) -> bool {
+        let Some(header) = self.prepared.header else {
+            return false;
+        };
+        loop {
+            if id == header {
+                return true;
+            }
+            match self.prepared.node(id).and_then(|n| n.parent) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+    fn hold_changed(&self, cx: &mut Context<Self>) {
+        for control in self.controls.values() {
+            control.update(cx, |c, cx| c.hold_changed(cx));
+        }
+        for field in self.fields.values() {
+            field.update(cx, |f, cx| f.hold_changed(cx));
+        }
+    }
+    /// Whether the controls show as pictures (a scroll is moving).
+    pub fn pictures_held(&self) -> bool {
+        self.pictures.held()
     }
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
@@ -1961,6 +2074,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -1991,8 +2108,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -2445,14 +2569,66 @@ impl SurfaceView {
         cx: &mut Context<Self>,
         skip: Option<Id>,
     ) -> AnyElement {
-        if skip == Some(id) {
-            return div().into_any_element();
-        }
+        // The render recurses here once per level of the tree: this frame
+        // holds only the children loop. What a node is before and after its
+        // children is built in frames of their own (`element_open`,
+        // `element_close`): in one frame, a debug build gave each level
+        // 180 KB, and ten levels with a symbol drawn under them overflowed a
+        // 2 MB thread.
+        let (element, mut children, shown) = match self.element_open(id, window, cx, skip) {
+            Ok(open) => open,
+            Err(done) => return done,
+        };
         let Some(node) = self.prepared.node(id) else {
             return div().into_any_element();
         };
+        for child in node.children.iter().take(shown) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
+            match self.prepared.node(*child) {
+                Some(c) if c.is_plain_text => {
+                    if let Some(text) = &c.text {
+                        children.push(text.clone().into_any_element());
+                    }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
+                }
+                _ => children.push(self.element(*child, window, cx, skip)),
+            }
+        }
+        self.element_close(id, element, children, window, cx)
+    }
+    /// A node's element up to its children, and the children that come
+    /// before them; `Err` when the node is all there is (a control, a field,
+    /// nothing).
+    #[inline(never)]
+    fn element_open(
+        &self,
+        id: Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        skip: Option<Id>,
+    ) -> Result<(Box<Stateful<Div>>, Vec<AnyElement>, usize), AnyElement> {
+        if skip == Some(id) {
+            return Err(div().into_any_element());
+        }
+        let Some(node) = self.prepared.node(id) else {
+            return Err(div().into_any_element());
+        };
         if node.hidden {
-            return div().into_any_element();
+            return Err(div().into_any_element());
         }
         if let Some(control) = self.controls.get(&id) {
             // A control whose node may shrink gives way (and truncates)
@@ -2524,13 +2700,13 @@ impl SurfaceView {
             } else {
                 control.clone().into_any_element()
             };
-            return slot
+            return Err(slot
                 .child(child)
                 .children(self.probe(id))
-                .into_any_element();
+                .into_any_element());
         }
         if let Some(field) = self.fields.get(&id) {
-            return self.field_element(node, field, cx);
+            return Err(self.field_element(node, field, cx));
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
@@ -2598,6 +2774,22 @@ impl SurfaceView {
                 .width;
             element = element.min_w(width);
         }
+        if let Some((labels, room)) = &node.fits_labels {
+            let mut text = window.text_style();
+            text.refine(&node.style.text);
+            let size = text.font_size.to_pixels(window.rem_size());
+            let widest = labels
+                .iter()
+                .map(|label| {
+                    let run = text.to_run(label.len());
+                    window
+                        .text_system()
+                        .shape_line(label.clone(), size, &[run])
+                        .width
+                })
+                .fold(px(0.), |a, b| a.max(b));
+            element = element.min_w(widest + px(*room)).flex_shrink_0();
+        }
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }
@@ -2629,7 +2821,13 @@ impl SurfaceView {
                 .and_then(|m| m.get("rowFloor"))
                 .and_then(Value::as_f64)
                 .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+                .map_or(0., |rows| {
+                    // Rows of a virtual list are its own height.
+                    let row = node
+                        .virtual_window
+                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                    rows as f32 * row
+                });
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -2878,32 +3076,22 @@ impl SurfaceView {
         } else {
             usize::MAX
         };
-        for child in node.children.iter().take(shown) {
-            if let Some(stand_in) = self.cull.stand_in(*child) {
-                children.push(stand_in);
-                continue;
-            }
-            match self.prepared.node(*child) {
-                Some(c) if c.is_plain_text => {
-                    if let Some(text) = &c.text {
-                        children.push(text.clone().into_any_element());
-                    }
-                }
-                _ if node.fixed_items => {
-                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
-                    children.push(
-                        div()
-                            .flex_none()
-                            .h(px(size))
-                            .flex()
-                            .flex_col()
-                            .child(self.element(*child, window, cx, skip))
-                            .into_any_element(),
-                    );
-                }
-                _ => children.push(self.element(*child, window, cx, skip)),
-            }
-        }
+        Ok((Box::new(element), children, shown))
+    }
+    /// A node's element with its children: the edges, the probe, the sheet
+    /// and its place in the panel.
+    #[inline(never)]
+    fn element_close(
+        &self,
+        id: Id,
+        element: Box<Stateful<Div>>,
+        mut children: Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(node) = self.prepared.node(id) else {
+            return element.into_any_element();
+        };
         if let Some(geometry) = node.virtual_window {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
@@ -2918,7 +3106,13 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let mut element = element.children(children).children(self.probe(node.id));
+        let mut element = (*element).children(children).children(self.probe(node.id));
+        // Over the content, last: where it runs past the scroller's edges.
+        if let Some(ground) = node.scroll_edge.filter(|_| node.scroll_y)
+            && let Some(scroll) = self.scrolls.get(&id)
+        {
+            element = element.child(scroll_edges(scroll.clone(), ground, &self.table.tokens));
+        }
         if self.fitted_sheet(node, window) {
             // The sheet is its window's height: its actions stay on the bottom
             // edge while the body between gives way.
@@ -3709,7 +3903,11 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
+            Kit::Wheel { .. }
+            | Kit::Curve { .. }
+            | Kit::Ease { .. }
+            | Kit::Pad { .. }
+            | Kit::Ramp { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures
@@ -3737,6 +3935,14 @@ impl SurfaceView {
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
+        // A symbol leading a line of text stands in the text's leading
+        // inset, level with its first line; the words keep the width and
+        // wrap under themselves (a row would keep them on one line).
+        if node.symbol_leads {
+            element = element
+                .relative()
+                .pl(px(node.symbol_size + t.metrics.gap / 2.));
+        }
         if let Some(symbol) = &node.symbol {
             // The glyph takes the colour the panel declared (an active toggle's
             // accent, a keyframe state); disabled is always `muted`.
@@ -3749,13 +3955,18 @@ impl SurfaceView {
                     (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
                 })
             };
-            element = element.child(pm_shell::symbol::symbol(
+            let glyph = pm_shell::symbol::symbol(
                 symbol,
                 node.symbol_size,
                 pm_shell::symbol::Weight::Regular,
                 ink,
                 window,
-            ));
+            );
+            element = if node.symbol_leads {
+                element.child(div().absolute().left_0().top_0().child(glyph))
+            } else {
+                element.child(glyph)
+            };
         }
         // A picture the host made (a Project thumbnail): it fills the node,
         // cropped to its shape; until it exists the node shows its fill.
@@ -3764,13 +3975,13 @@ impl SurfaceView {
             .as_ref()
             .and_then(|key| crate::media_thumbs::resolve(key))
         {
-            element = element.child(
-                img(path)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            );
+            element = element.child(img(path).absolute().inset_0().size_full().object_fit(
+                if node.contain {
+                    ObjectFit::Contain
+                } else {
+                    ObjectFit::Cover
+                },
+            ));
         }
         if let Some(text) = &node.text {
             element = element.child(text.clone());
@@ -3949,7 +4160,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -4030,10 +4241,20 @@ impl Render for SurfaceView {
         let root = if self.grows {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
+            let column_natural = self.column_natural.clone();
+            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let origin = self.origin.clone();
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
                     let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    if (natural.replace(height) - height).abs() > 0.5 {
+                    let demand = scrolls.iter().fold(height, |height, scroll| {
+                        height.max(f32::from(
+                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                        ))
+                    });
+                    let changed = (natural.replace(height) - height).abs() > 0.5;
+                    let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if changed || column_changed {
                         window.refresh();
                     }
                 })
@@ -4475,8 +4696,12 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
-    /// The style of a scrolling body's content (`panel_body`): the panel at
-    /// least `body` tall, and as tall as it last measured.
+    /// Natural content demand includes inner lists before they are clipped.
+    pub(crate) fn natural_body_height(&self) -> f32 {
+        self.natural.get().max(self.column_natural.get())
+    }
+
+    /// The panel fills its body and grows with longer content.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
         gpui::StyleRefinement::default()
             .w_full()

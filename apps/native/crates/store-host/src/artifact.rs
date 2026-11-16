@@ -250,6 +250,212 @@ pub fn verify(
     })
 }
 
+/// What the Store's registry records of a release, read over HTTPS from the
+/// Store origin: the facts [`admit_registry`] holds the archive to.
+#[derive(Debug, Clone)]
+pub struct RegistryRelease {
+    pub release_id: String,
+    /// The id the registry recorded from the manifest at publish.
+    pub extension: ExtensionId,
+    /// The repository owner's publisher id, under which permissions are
+    /// decided.
+    pub publisher: String,
+    /// SHA-256 of the gzipped tar the Store serves.
+    pub tar_sha256: String,
+    /// The git tree hash (SHA-1) of the release's files.
+    pub tree_sha: String,
+}
+
+/// Admits a release the Store does not sign, as the shipped app installs one:
+/// the archive must hash to the registry's `tarSha256`, its files must hash
+/// to its git `treeSha` (dot-entries and `node_modules` are outside every
+/// tree, so an archive carrying one is refused), and its manifest must be
+/// valid and name the extension the registry recorded. The proof kept is
+/// unsigned (format 0), as a migrated install's is.
+pub fn admit_registry(
+    record: &RegistryRelease,
+    archive: &[u8],
+    limits: Limits,
+) -> Result<VerifiedRelease> {
+    if record.release_id.is_empty()
+        || record.release_id.len() > 256
+        || record.publisher.is_empty()
+        || record.publisher.len() > 256
+        || !valid_hash(&record.tar_sha256)
+        || record.tree_sha.len() != 40
+        || !record
+            .tree_sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || archive.len() > limits.archive_bytes
+    {
+        return Err(Error::Invalid("release bounds"));
+    }
+    if hex(&Sha256::digest(archive)) != record.tar_sha256 {
+        return Err(Error::Integrity("archive hash"));
+    }
+    let tar_limit = limits
+        .expanded_bytes
+        .checked_add(
+            limits
+                .files
+                .checked_mul(2048)
+                .ok_or(Error::Invalid("limits"))?,
+        )
+        .and_then(|n| n.checked_add(10240))
+        .ok_or(Error::Invalid("limits"))?;
+    let mut raw = Vec::new();
+    MultiGzDecoder::new(archive)
+        .take(tar_limit as u64 + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() > tar_limit {
+        return Err(Error::Invalid("decompression budget"));
+    }
+    let mut tar = tar::Archive::new(raw.as_slice());
+    let mut files = BTreeMap::new();
+    let mut folded = std::collections::BTreeSet::new();
+    let mut total = 0u64;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            return Err(Error::Integrity("non-regular archive entry"));
+        }
+        let path = std::str::from_utf8(&entry.path_bytes())
+            .map_err(|_| Error::Invalid("UTF-8 path"))?
+            .to_string();
+        if !valid_path(&path)
+            || path.split('/').any(|p| p == "node_modules")
+            || files.contains_key(&path)
+            || !folded.insert(path.to_lowercase())
+        {
+            return Err(Error::Integrity("duplicate or unsafe path"));
+        }
+        total = total
+            .checked_add(entry.size())
+            .ok_or(Error::Invalid("expanded size"))?;
+        if files.len() >= limits.files || total > limits.expanded_bytes as u64 {
+            return Err(Error::Invalid("expanded size"));
+        }
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        files.insert(path, data);
+    }
+    if git_tree(&files)? != record.tree_sha {
+        return Err(Error::Integrity("tree hash"));
+    }
+    let manifest_bytes = files
+        .get("manifest.json")
+        .ok_or(Error::Integrity("missing manifest"))?;
+    if manifest_bytes.len() > limits.manifest_bytes {
+        return Err(Error::Invalid("manifest size"));
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(manifest_bytes).map_err(|_| Error::Invalid("manifest"))?;
+    manifest.validate()?;
+    if let Some(icon) = &manifest.icon
+        && (!valid_path(icon) || !files.contains_key(icon))
+    {
+        return Err(Error::Integrity("manifest icon"));
+    }
+    if manifest.id != record.extension {
+        return Err(Error::Integrity("manifest id"));
+    }
+    let statement = ReleaseStatement {
+        format: 0,
+        key_id: String::new(),
+        publisher: record.publisher.clone(),
+        extension: record.extension.clone(),
+        release_id: record.release_id.clone(),
+        archive_sha256: record.tar_sha256.clone(),
+        files: files
+            .iter()
+            .map(|(path, data)| {
+                (
+                    path.clone(),
+                    FileSeal {
+                        sha256: hex(&Sha256::digest(data)),
+                        bytes: data.len() as u64,
+                    },
+                )
+            })
+            .collect(),
+    };
+    Ok(VerifiedRelease {
+        proof: SignedRelease {
+            statement: statement.clone(),
+            signature: vec![],
+        },
+        statement,
+        manifest,
+        publisher_identity: PublisherIdentity::default(),
+        files,
+        archive: archive.to_vec(),
+    })
+}
+
+/// The git tree hash of `files` (paths to bytes), as the Store's registry
+/// computes it: blobs mode 100644, folders 40000, entries in byte order with
+/// a folder's name read with a trailing `/`.
+fn git_tree(files: &BTreeMap<String, Vec<u8>>) -> Result<String> {
+    use sha1::Sha1;
+    fn object(kind: &str, body: &[u8]) -> [u8; 20] {
+        let mut hash = Sha1::new();
+        hash.update(format!("{kind} {}\0", body.len()).as_bytes());
+        hash.update(body);
+        hash.finalize().into()
+    }
+    #[derive(Default)]
+    struct Node<'a> {
+        files: BTreeMap<&'a str, &'a [u8]>,
+        dirs: BTreeMap<&'a str, Node<'a>>,
+    }
+    fn tree(node: &Node) -> [u8; 20] {
+        let mut entries: Vec<(Vec<u8>, String, [u8; 20])> = Vec::new();
+        for (name, data) in &node.files {
+            entries.push((
+                name.as_bytes().to_vec(),
+                format!("100644 {name}"),
+                object("blob", data),
+            ));
+        }
+        for (name, child) in &node.dirs {
+            entries.push((
+                format!("{name}/").into_bytes(),
+                format!("40000 {name}"),
+                tree(child),
+            ));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut body = Vec::new();
+        for (_, head, sha) in entries {
+            body.extend(head.as_bytes());
+            body.push(0);
+            body.extend(sha);
+        }
+        object("tree", &body)
+    }
+    let mut root = Node::default();
+    for (path, data) in files {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        let name = parts.pop().ok_or(Error::Invalid("path"))?;
+        let mut cursor = &mut root;
+        for part in parts {
+            if cursor.files.contains_key(part) {
+                return Err(Error::Integrity("file and folder share a name"));
+            }
+            cursor = cursor.dirs.entry(part).or_default();
+        }
+        if cursor.dirs.contains_key(name) {
+            return Err(Error::Integrity("file and folder share a name"));
+        }
+        cursor.files.insert(name, data);
+    }
+    if files.is_empty() {
+        return Err(Error::Integrity("empty release"));
+    }
+    Ok(hex(&tree(&root)))
+}
+
 /// Worker-only; completion means the complete object is durable. Never removes
 /// bundles or user data, including failed candidates. Kernel publishes references.
 pub trait ArtifactStore {

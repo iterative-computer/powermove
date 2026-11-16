@@ -310,6 +310,10 @@ pub struct Metrics {
     /// a row's value column (it takes what the label column leaves).
     pub field: f32,
     pub value_column: f32,
+    /// The most a row's value column takes when its panel asks for a cap
+    /// (Effect Controls): on a wide panel the label and its control stay
+    /// together instead of the control stretching to the far edge.
+    pub value_column_most: f32,
     /// The most a row's label takes before its value; it gives way first
     /// when the panel is too narrow for both.
     pub label_column: f32,
@@ -328,8 +332,11 @@ pub struct Metrics {
     /// The least width of two colour wheels side by side on their plates
     /// (each wheel and its plate's padding, and the gap between them).
     pub grade_pair: f32,
-    /// A colour wheel's master field, centred under the wheel: its number is
-    /// subordinate to the instrument.
+    /// The most two plates side by side take (each at the largest wheel,
+    /// and the gap): past it a row of wheels is centred, never stretched.
+    pub grade_pair_max: f32,
+    /// A colour wheel's master: the number beside its strip takes most of
+    /// six tenths of this.
     pub grade_field: f32,
     /// The curve editor's least graph height; it grows square with the
     /// panel's width up to `curve_editor_max`.
@@ -377,6 +384,9 @@ pub struct Metrics {
     /// Tallest a sheet's option body grows before it scrolls, so the sheet
     /// and its footer stay on screen.
     pub sheet_body_max: f32,
+    /// Height of the Export progress sheet's picture of the frame last
+    /// encoded: a 16:9 frame across the wide sheet's content.
+    pub export_preview: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// The agent composer's tray around its field (v1's 4 pt).
@@ -859,6 +869,7 @@ impl Tokens {
                 segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
+                value_column_most: 240.,
                 label_column: 120.,
                 keyframe: 9.,
                 // v1's row height: the strip is 26 pt, tall enough for its
@@ -870,6 +881,7 @@ impl Tokens {
                 grade_wheel: 112.,
                 grade_wheel_max: 220.,
                 grade_pair: 2. * (112. + 2. * space.sm) + space.sm,
+                grade_pair_max: 2. * 220. + space.sm,
                 grade_field: 72.,
                 curve_editor: 200.,
                 curve_editor_max: 360.,
@@ -898,6 +910,7 @@ impl Tokens {
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
+                export_preview: 315.,
                 composer_max_lines: 10.,
                 composer_tray: space.xs,
                 group_radius: radius.lg,

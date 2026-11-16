@@ -240,6 +240,16 @@ pub fn new3d() -> Vec<Item> {
     .map(|(l, k)| item(l, k))
     .collect()
 }
+/// The key the menu bar shows for `command` (the person's own once they
+/// record one), for a context menu's row of the same command to show it
+/// too. `None` when the menu bar has no row for it or the row has no key.
+pub fn chord_for(command: &str) -> Option<String> {
+    menus()
+        .into_iter()
+        .flat_map(|(_, items)| items)
+        .find(|i| i.command == command && i.args.is_empty() && !i.chord.is_empty())
+        .map(|i| i.chord)
+}
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     let eq = equivalents();
     // The menu bar matches these keys itself: the person's key, once they
@@ -881,5 +891,19 @@ mod every_menu_tests {
             let (key, _) = accelerator(&e.accelerator);
             assert!(!key.is_empty(), "{} ({})", e.command, e.accelerator);
         }
+    }
+}
+
+#[cfg(test)]
+mod chord_tests {
+    /// A context menu's row shows the key the menu bar shows for its
+    /// command (Duplicate's ⌘D), and none for a command the bar lacks.
+    #[test]
+    fn context_rows_show_the_menu_bar_key() {
+        let duplicate = super::chord_for("duplicate").expect("Duplicate has a key");
+        let (key, flags) = super::accelerator(&duplicate);
+        assert_eq!(key, "d");
+        assert_ne!(flags, 0);
+        assert_eq!(super::chord_for("noSuchCommand"), None);
     }
 }

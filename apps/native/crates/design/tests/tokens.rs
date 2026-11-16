@@ -188,8 +188,13 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));
     assert!(lightness(pale.foreground) < 0.45);
     // The dark canvas's slab: vivid glass, never the light canvas's pale
-    // tint, under a pale name.
-    assert!(lightness(m.top) < 0.7 && lightness(m.foreground) > 0.8);
+    // tint. Green is a light hue: as bright as the reference's amber, under a
+    // dark name and over a waveform in a deeper shade of the hue; violet
+    // stays the deeper slab under a pale name.
+    assert!(lightness(m.top) < 0.8 && lightness(m.bottom) > 0.7);
+    assert!(lightness(m.foreground) < 0.3 && lightness(m.primary) < lightness(m.bottom));
+    let violet = dark.strip(dark.colors.labels.violet, StripState::Rest);
+    assert!(lightness(violet.top) < 0.6 && lightness(violet.foreground) > 0.8);
     assert!(
         lightness(ringed.top) < lightness(pale.top),
         "selected is a step deeper"

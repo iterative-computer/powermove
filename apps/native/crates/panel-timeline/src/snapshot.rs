@@ -30,6 +30,11 @@ pub struct Key {
     pub stored: Node,
 }
 impl Key {
+    /// A hold key, as the file stores it: v1's `hold: true`, or the AE
+    /// model's `outInterp: "hold"`.
+    pub fn held(&self) -> bool {
+        boolean(self.stored.get("hold")) || self.stored_string("outInterp") == Some("hold")
+    }
     pub fn stored_string(&self, field: &str) -> Option<&str> {
         match self.stored.get(field)?.kind() {
             NodeKind::String(value) => value.as_str(),

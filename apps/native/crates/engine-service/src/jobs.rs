@@ -728,8 +728,15 @@ struct Reported {
     changed: Condvar,
 }
 impl Reported {
-    fn set(&self, status: JobStatus) {
-        *self.now.lock().unwrap() = status;
+    fn set(&self, mut status: JobStatus) {
+        let mut now = self.now.lock().unwrap();
+        // A running job's preview stands until a newer one comes: the child
+        // sends each once.
+        if status.preview.is_none() && status.state == JobState::Running {
+            status.preview = now.preview.take();
+        }
+        *now = status;
+        drop(now);
         self.changed.notify_all();
     }
 }
@@ -1394,6 +1401,17 @@ pub fn run_child() -> Result<()> {
                     checking: p
                         .checked
                         .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    // Only when a new one was made (at most every 250 ms):
+                    // the parent keeps the last one between them.
+                    preview: p
+                        .preview
+                        .as_ref()
+                        .map(|frame| pm_protocol::priority::JobPreview {
+                            frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
+                            width: frame.width,
+                            height: frame.height,
+                            jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
+                        }),
                     ..status(&request.job, JobState::Running, p.fraction(), None, None)
                 });
             },
@@ -2215,15 +2233,12 @@ fn fill_cache(
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
-    if fill.budget_us.is_some() {
-        // Background work never competes with the app for the CPU: the
-        // background class (efficiency cores, and only when nothing the
-        // person does needs them); its helper threads take it too.
-        let _ = crate::qos::set_job_qos(crate::qos::JobQos::Background);
-        // Every thread of this job process, not only this one (its render
-        // and helper threads start at the default class).
-        crate::qos::background_process();
-    }
+    // A background fill runs at the job process's utility class, not the
+    // background band: that band starved it on a busy machine (a tenth of
+    // the frames while the person was idle). It gives way to the person
+    // through the viewer's activity instead: a frame is granted the GPU only
+    // once they have stopped playing, drawing, pressing and typing for a
+    // while (the parent's grant loop), and a Play waits behind one frame.
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {
         doc: doc.clone(),

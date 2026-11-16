@@ -117,6 +117,46 @@ function Chip({ children }: { children: string }) {
     </div>
   );
 }
+/** A file a message carried, as the composer showed it before it was
+ * sent: its document symbol and name in the text face (a code chip's
+ * fixed-width face is for code). */
+function FileChip({ name }: { name: string }) {
+  return (
+    <div
+      role="group"
+      label={`${name}, attachment`}
+      style={{
+        ...row,
+        ...shrink,
+        gap: t("metrics.gap"),
+        height: t("metrics.hit"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        background: t("colors.fill"),
+        borderRadius: t("metrics.inner_radius"),
+      }}
+    >
+      <div
+        metadata={{ symbol: "doc" }}
+        style={{
+          color: t("colors.muted"),
+          symbolSize: t("metrics.symbol_inline"),
+          flexShrink: 0,
+        }}
+      />
+      <text
+        style={{
+          ...quiet,
+          ...shrink,
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {name}
+      </text>
+    </div>
+  );
+}
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -823,7 +863,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <Chip key={i}>{str(obj(f).name) || "File"}</Chip>
+              <FileChip key={i} name={str(obj(f).name) || "File"} />
             ))}
           </div>
         )}

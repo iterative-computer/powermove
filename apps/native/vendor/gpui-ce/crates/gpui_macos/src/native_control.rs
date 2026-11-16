@@ -16,7 +16,7 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
-    alpha: Cell<Option<(u64,f64)>>,
+    alpha: Cell<Option<(u64, f64)>>,
     staged_alpha: Cell<f64>,
 }
 impl State {
@@ -122,10 +122,10 @@ impl NativeControlSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
-    pub fn stage_alpha(&self, alpha:f64) {
-        let alpha=alpha.clamp(0.,1.);
-        let paint=crate::composition::open_paint(self.state.key());
-        self.state.alpha.set(Some((paint,alpha)));
+    pub fn stage_alpha(&self, alpha: f64) {
+        let alpha = alpha.clamp(0., 1.);
+        let paint = crate::composition::open_paint(self.state.key());
+        self.state.alpha.set(Some((paint, alpha)));
         self.state.staged_alpha.set(alpha);
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
@@ -138,6 +138,103 @@ impl NativeControlSlot {
     pub fn wrapper(&self) -> &NSView {
         &self.state.wrapper
     }
+}
+/// A control as AppKit draws it now: premultiplied BGRA rows from the top,
+/// `width` by `height` pixels at the window's backing scale, BGRA with
+/// straight (not premultiplied) alpha, rows from the top.
+pub struct SlotPicture {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+impl NativeControlSlot {
+    /// Powermove P-SLOT-PICTURE: the control drawn into a bitmap in its
+    /// current state and appearance (light or dark, its value, enabled or
+    /// not), without moving or showing it: while a scroll moves, the panel
+    /// draws this picture with its rows instead of moving the AppKit view
+    /// (each move made the frame a synchronous present). `None` when AppKit
+    /// gives no 32-bit bitmap or the control has no size. `size` is where
+    /// the paint puts it, in points: the size a present would give it.
+    pub fn picture(&self, size: NSSize) -> Option<SlotPicture> {
+        if size.width < 1. || size.height < 1. {
+            return None;
+        }
+        // A control never shown yet joins the window (still hidden), so it
+        // draws in the window's appearance and key state, as it will show.
+        if unsafe { self.state.wrapper.superview() }.is_none() {
+            self.state.attach();
+        }
+        picture_of(&self.state.control, size)
+    }
+    /// Stages nothing: the next present hides the control (a picture of it
+    /// stands in the scene). [`Self::keep`] keeps it hidden.
+    pub fn hide(&self) {
+        self.state.stage(None);
+        self.state.staged.set(None);
+    }
+}
+/// `view` drawn by AppKit into a bitmap at `size` points, wherever it is
+/// and whether shown or not (P-SLOT-PICTURE).
+pub(crate) fn picture_of(view: &NSView, size: NSSize) -> Option<SlotPicture> {
+    use objc2::{msg_send, runtime::AnyObject};
+    if size.width < 1. || size.height < 1. {
+        return None;
+    }
+    if view.frame().size != size {
+        view.setFrameSize(size);
+    }
+    let control = view;
+    let bounds = view.bounds();
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let rep: *mut AnyObject =
+            msg_send![control, bitmapImageRepForCachingDisplayInRect: bounds];
+        let rep = rep.as_ref()?;
+        let _: () = msg_send![control, cacheDisplayInRect: bounds, toBitmapImageRep: rep];
+        let width: isize = msg_send![rep, pixelsWide];
+        let height: isize = msg_send![rep, pixelsHigh];
+        let row: isize = msg_send![rep, bytesPerRow];
+        let bits: isize = msg_send![rep, bitsPerPixel];
+        let samples: isize = msg_send![rep, samplesPerPixel];
+        let format: usize = msg_send![rep, bitmapFormat];
+        let data: *const u8 = msg_send![rep, bitmapData];
+        if data.is_null() || bits != 32 || samples != 4 || width <= 0 || height <= 0 {
+            return None;
+        }
+        // NSBitmapFormat: alpha first (1 << 0), not premultiplied (1 << 1),
+        // floating point (1 << 2).
+        if format & 0b100 != 0 {
+            return None;
+        }
+        let alpha_first = format & 0b1 != 0;
+        let straight = format & 0b10 != 0;
+        let (w, h, row) = (width as usize, height as usize, row as usize);
+        let src = std::slice::from_raw_parts(data, row * h);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &src[y * row + x * 4..y * row + x * 4 + 4];
+                let (r, g, b, a) = if alpha_first {
+                    (p[1], p[2], p[3], p[0])
+                } else {
+                    (p[0], p[1], p[2], p[3])
+                };
+                // Straight alpha, GPUI's sprite format.
+                let out = |c: u8| {
+                    if straight || a == 0 || a == 255 {
+                        c
+                    } else {
+                        ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                    }
+                };
+                bgra.extend_from_slice(&[out(b), out(g), out(r), a]);
+            }
+        }
+        Some(SlotPicture {
+            width: w as u32,
+            height: h as u32,
+            bgra,
+        })
+    })
 }
 impl Drop for NativeControlSlot {
     fn drop(&mut self) {
@@ -185,7 +282,10 @@ pub(crate) fn pending(key: usize) -> bool {
                 state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
-                    || state.alpha.get().is_some_and(|(paint,alpha)| Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha)
+                    || state.alpha.get().is_some_and(|(paint, alpha)| {
+                        Some(paint) == crate::composition::last_paint(key)
+                            && state.control.alphaValue() != alpha
+                    })
             }
         })
 }
@@ -202,17 +302,23 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             }
             continue;
         };
+        // P-HIDDEN-MOVES: a wrapper hidden before and after (scrolled out
+        // of its clip) follows its row unseen, with no synchronous present.
+        let unseen = hidden && state.wrapper.isHidden();
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
-            moved = true;
+            moved |= !unseen;
         }
         if state.control.frame() != local {
             state.control.setFrame(local);
-            moved = true;
+            moved |= !unseen;
         }
-        if let Some((paint,alpha))=state.alpha.get() {
-            if Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha {
-                state.control.setAlphaValue(alpha);moved=true;
+        if let Some((paint, alpha)) = state.alpha.get() {
+            if Some(paint) == crate::composition::last_paint(key)
+                && state.control.alphaValue() != alpha
+            {
+                state.control.setAlphaValue(alpha);
+                moved = true;
             }
         }
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {

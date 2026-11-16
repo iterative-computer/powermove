@@ -11,6 +11,7 @@ mod edit;
 mod effect_definitions;
 mod effects;
 pub mod input;
+pub mod param_layout;
 mod relations;
 pub mod text_animators;
 pub mod v4_effects;

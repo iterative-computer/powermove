@@ -306,6 +306,24 @@ pub struct ImportRequest {
     pub add_3d: bool,
     /// Import Folder: chosen folders stay folders in the Project panel.
     pub keep_folders: bool,
+    /// How far the import has come, for the toolbar's task pill.
+    pub progress: ImportProgress,
+}
+/// How far an import has come: files read of the total, and the file
+/// being read. Shared with whoever shows it; the import only writes.
+#[derive(Clone, Debug, Default)]
+pub struct ImportProgress(Arc<Mutex<(usize, usize, String)>>);
+impl ImportProgress {
+    /// Files done, the total (0 before the files are known) and the file
+    /// being read.
+    pub fn read(&self) -> (usize, usize, String) {
+        self.0.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+    fn set(&self, done: usize, total: usize, file: &str) {
+        if let Ok(mut p) = self.0.lock() {
+            *p = (done, total, file.to_owned());
+        }
+    }
 }
 /// Figma's image fallback: the layer is named for the selection and fitted
 /// into the selection's size, keeping the image's aspect.
@@ -685,7 +703,8 @@ impl Builtins {
             }
             None => expand(request.paths),
         };
-        for path in paths {
+        let total = paths.len();
+        for (done, path) in paths.into_iter().enumerate() {
             if cancel.load(Ordering::Acquire) {
                 outcome.cancelled = true;
                 break;
@@ -693,6 +712,7 @@ impl Builtins {
             let name = path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            request.progress.set(done, total, &name);
             let model = request.models.then(|| model_mime(&path)).flatten();
             let kind = match &sequence {
                 Some(_) => Some("video"),
@@ -782,6 +802,7 @@ impl Builtins {
                 Err(error) => outcome.failed.push((name, error)),
             }
         }
+        request.progress.set(total, total, "");
         if items.is_empty() {
             return Ok(outcome);
         }

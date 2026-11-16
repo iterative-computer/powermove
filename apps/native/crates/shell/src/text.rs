@@ -39,6 +39,13 @@ pub struct TextField {
     ink: Option<u32>,
     /// The width the editor was last given, to count its wrapped lines.
     width: Rc<std::cell::Cell<f32>>,
+    /// Shown as a picture of itself while its surface's body scrolls.
+    picture: crate::picture::Picture,
+}
+impl Drop for TextField {
+    fn drop(&mut self) {
+        self.picture.retire();
+    }
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -114,6 +121,7 @@ impl TextField {
             code: None,
             ink: None,
             width: Rc::default(),
+            picture: Default::default(),
         }
     }
     /// The lines a multi-line field shows: its text as it wraps in the
@@ -269,14 +277,8 @@ impl TextField {
         let _ = window;
         div()
             .id("native-text")
-            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(
-                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
-                    0.
-                } else {
-                    1.
-                },
-            )
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
             .w_full()
             .flex()
             .items_center()
@@ -332,6 +334,16 @@ impl TextField {
             }))
             .into_any_element()
     }
+    /// Shares its surface's picture hold (P-SLOT-PICTURE).
+    pub fn picture_with(&mut self, hold: &crate::picture::PictureHold) {
+        self.picture.hold = hold.clone();
+    }
+    /// The surface's hold changed: a held editor draws as its picture, a
+    /// released one as itself again.
+    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
+        self.picture.hold_changed();
+        cx.notify();
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);
@@ -341,6 +353,11 @@ impl TextField {
     /// Stages the slot again on a frame whose cached paint did not run: as
     /// last painted, or shifted with the scroll layer it is in.
     pub fn keep(&self, window: &Window) {
+        if self.picture.standing() {
+            // Its picture stands in the scene the frame replays.
+            self.slot.hide();
+            return;
+        }
         match self.layer.kept(window) {
             Some((bounds, clip)) => self.slot.stage(
                 crate::native_control::ns_rect(bounds),
@@ -461,6 +478,7 @@ impl Render for TextField {
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing() && build.is_none();
+        let picture = self.picture.painter();
         let (t, bare) = (&self.tokens, self.bare);
         let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
         // A well is a soft ink fill with no outline; while it is edited a
@@ -476,14 +494,8 @@ impl Render for TextField {
         };
         div()
             .id("native-text")
-            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(
-                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
-                    0.
-                } else {
-                    1.
-                },
-            )
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
             .relative()
             .w_full()
             .when(self.fill, |d| d.h_full())
@@ -542,11 +554,15 @@ impl Render for TextField {
             .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.build.is_none() {
-                        this.slot.begin_editing();
-                        cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    if this.build.is_some() {
+                        return;
                     }
+                    // A press on its picture goes to the editor once shown.
+                    if !this.picture.press(window) {
+                        this.slot.begin_editing();
+                    }
+                    cx.notify();
                 }),
             )
             .flex()
@@ -617,7 +633,16 @@ impl Render for TextField {
                             bounds.origin.y += px(DENSE_EDIT_DROP);
                             bounds.size.height -= px(DENSE_EDIT_DROP);
                         }
+                        let painted = bounds;
                         let (bounds, mask) = layer.painted(bounds, mask, window);
+                        let size = rect(bounds).size;
+                        if build.is_none() {
+                            slot.stage_build_alpha(1.);
+                        }
+                        if picture.paint(painted, || slot.picture(size), window) {
+                            slot.hide();
+                            return;
+                        }
                         slot.stage(rect(bounds), rect(mask));
                         if let Some(build) = build {
                             if !dense {
@@ -639,13 +664,21 @@ impl Render for TextField {
                         } else {
                             slot.stage_build_alpha(1.);
                         }
+                        if let Some(image) = snapshot {
+                            let _ = window.paint_image(
+                                painted,
+                                painted,
+                                Corners::default(),
+                                0.,
+                                image,
+                                0,
+                                false,
+                            );
+                        }
                     },
                 )
                 .absolute()
                 .inset_0(),
-            )
-            .children(
-                snapshot.map(|image| div().absolute().inset_0().child(img(image).size_full())),
             )
             .into_any_element()
     }

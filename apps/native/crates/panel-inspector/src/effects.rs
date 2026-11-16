@@ -192,6 +192,25 @@ impl Inspector {
         self.disclosure.insert((layer.into(), id.into()), open);
         Ok(())
     }
+    /// An effect's More group (v1's disclosure of rarely used parameters):
+    /// closed until opened, per layer and effect, UI state only.
+    pub fn set_more_open(
+        &mut self,
+        layer: &str,
+        id: &str,
+        open: bool,
+    ) -> Result<(), InspectorError> {
+        self.effect(layer, id)?;
+        self.disclosure
+            .insert((layer.into(), format!("more:{id}")), open);
+        Ok(())
+    }
+    pub fn more_open(&self, layer: &str, id: &str) -> bool {
+        self.disclosure
+            .get(&(layer.into(), format!("more:{id}")))
+            .copied()
+            .unwrap_or(false)
+    }
     pub fn effect_disclosure(&self, layer: &str, id: &str) -> Result<bool, InspectorError> {
         let effect = self.effect(layer, id)?;
         Ok(self

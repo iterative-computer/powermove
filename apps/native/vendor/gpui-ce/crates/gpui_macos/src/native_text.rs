@@ -121,7 +121,7 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
-    build_alpha: Cell<Option<(u64,f64)>>,
+    build_alpha: Cell<Option<(u64, f64)>>,
     kept_alpha: Cell<f64>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
     caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
@@ -803,7 +803,9 @@ impl NativeTextSlot {
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
     }
-    pub fn snapshot_visible(&self)->bool {!self.state.wrapper.isHidden()}
+    pub fn snapshot_visible(&self) -> bool {
+        !self.state.wrapper.isHidden()
+    }
     /// Whether the field has the keyboard now (AppKit's first responder is
     /// it or its field editor), not only asked to take it.
     pub fn has_keyboard(&self) -> bool {
@@ -830,14 +832,36 @@ impl NativeTextSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
-    pub fn stage_build_alpha(&self,alpha:f64) {
-        let paint=crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
-        let alpha=alpha.clamp(0.,1.);self.state.build_alpha.set(Some((paint,alpha)));self.state.kept_alpha.set(alpha);
+    pub fn stage_build_alpha(&self, alpha: f64) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
+        let alpha = alpha.clamp(0., 1.);
+        self.state.build_alpha.set(Some((paint, alpha)));
+        self.state.kept_alpha.set(alpha);
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
         self.state.stage(self.state.staged.get());
         self.stage_build_alpha(self.state.kept_alpha.get());
+    }
+    /// P-SLOT-PICTURE: the editor as AppKit draws it now (its text, scroll
+    /// and appearance), `size` points, for a scroll to move instead of the
+    /// view. `None` for a field drawn by GPUI at rest (dense) or one being
+    /// edited: those are never pictured.
+    pub fn picture(&self, size: NSSize) -> Option<crate::native_control::SlotPicture> {
+        let state = &self.state;
+        if state.kind.dense() || state.kind == TextKind::Canvas || state.editing.get() {
+            return None;
+        }
+        match &state.scroll {
+            Some(scroll) => crate::native_control::picture_of(scroll, size),
+            None => crate::native_control::picture_of(state.editor.view(), size),
+        }
+    }
+    /// Stages nothing: the next present hides the editor (its picture stands
+    /// in the scene); [`Self::keep`] keeps it hidden.
+    pub fn hide(&self) {
+        self.state.stage(None);
+        self.state.staged.set(None);
     }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {
@@ -1117,14 +1141,26 @@ fn place(key: usize, apply: bool) -> bool {
             }
             continue;
         };
-        if let Some((paint,alpha))=state.build_alpha.get() {
-            if Some(paint)==last && state.wrapper.alphaValue()!=alpha {
-                moved=true;if apply{state.wrapper.setAlphaValue(alpha);}
+        if let Some((paint, alpha)) = state.build_alpha.get() {
+            if Some(paint) == last && state.wrapper.alphaValue() != alpha {
+                moved = true;
+                if apply {
+                    state.wrapper.setAlphaValue(alpha);
+                }
             }
         }
         // From GPUI's frame in its parent (P-EMBED).
         let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
+        let hidden = visible.size.width <= 0.
+            || visible.size.height <= 0.
+            || (state.kind.dense() && !state.editing.get());
+        // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
+        // field at rest, a field scrolled out) still follows its row, but
+        // nothing on screen moved, so the frame needs no synchronous
+        // present: a panel of number fields made every frame of its scroll
+        // one.
+        let unseen = hidden && state.wrapper.isHidden();
         let frame = NSRect::new(
             NSPoint::new(
                 g.origin.x + visible.origin.x,
@@ -1133,7 +1169,7 @@ fn place(key: usize, apply: bool) -> bool {
             visible.size,
         );
         if state.wrapper.frame() != frame {
-            moved = true;
+            moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
@@ -1147,7 +1183,7 @@ fn place(key: usize, apply: bool) -> bool {
         );
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     scroll.setFrame(local);
                 }
@@ -1170,22 +1206,19 @@ fn place(key: usize, apply: bool) -> bool {
                     NSSize::new(STEPPER.0, local.size.height),
                 );
                 if stepper.frame() != at {
-                    moved = true;
+                    moved |= !unseen;
                     if apply {
                         stepper.setFrame(at);
                     }
                 }
             }
             if state.editor.view().frame() != field {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     state.editor.view().setFrame(field);
                 }
             }
         }
-        let hidden = visible.size.width <= 0.
-            || visible.size.height <= 0.
-            || (state.kind.dense() && !state.editing.get());
         if state.wrapper.isHidden() != hidden {
             moved = true;
             if apply {

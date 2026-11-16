@@ -803,11 +803,20 @@ impl Backend {
                 } else {
                     text("about").unwrap_or_default()
                 };
-                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
+                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
                     "enabled":e.enabled && !stopped,"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
+        // Like kinds together, in the order the page lists them, then by name.
+        let mut extensions = extensions;
+        extensions.sort_by_cached_key(|e| {
+            let kind = e["type"].as_str().unwrap_or("Other");
+            (
+                EXTENSION_KINDS.iter().position(|k| *k == kind),
+                e["name"].as_str().unwrap_or("").to_lowercase(),
+            )
+        });
         let accounts = self.account_rows();
         let speech = crate::speech::status();
         let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
@@ -1182,10 +1191,11 @@ impl Backend {
                 .model
                 .menu(&context)
                 .into_iter()
+                .filter(|item| item.is_action())
                 .map(|item| {
                     json!({
                         "id": item.id,
-                        "label": pm_panel_timeline::menu_label(item.id),
+                        "label": item.label,
                         "checked": item.checked,
                         "enabled": item.enabled,
                         "intent": {"type":"graphMenu","action":item.id},
@@ -1421,7 +1431,7 @@ impl Backend {
                 "hasAudio":kept("hasAudio", json!(false)),"captionLayers":kept("captionLayers", json!(0)),
                 "hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),
                 "duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),
-                "summary":kept("summary", json!(""))});
+                "summary":kept("summary", json!("")),"note":kept("note", json!(""))});
             let studio = kept("studio", Value::Null);
             self.native.export["project"] = project;
             if !studio.is_null() {
@@ -1446,7 +1456,7 @@ impl Backend {
         let work_area = comp
             .get("work")
             .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary,"note":plan.note});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         let comp_key = format!(
@@ -2346,6 +2356,46 @@ pub(crate) fn mod_records(
     pm_services::surface_backing::Records {
         revision: state.revision,
         entries,
+    }
+}
+/// The kinds Settings › Extensions sorts by, in the order it lists them
+/// (v1.3.2 `EXTENSION_GROUPS`).
+pub(crate) const EXTENSION_KINDS: [&str; 7] = [
+    "Effects",
+    "Panels",
+    "Appearance",
+    "Layer Types",
+    "Media",
+    "Editor Tools",
+    "Other",
+];
+/// What an extension is, from what it contributes, as v1 placed it: its
+/// content before a companion panel, command or property control (an effect
+/// with a panel is an effect), and Other when it names nothing known.
+pub(crate) fn extension_kind(contributes: &[String]) -> &'static str {
+    let has = |kinds: &[&str]| contributes.iter().any(|c| kinds.contains(&c.as_str()));
+    if has(&["effects", "transitions"]) {
+        "Effects"
+    } else if has(&["themes"]) {
+        "Appearance"
+    } else if has(&["layers"]) {
+        "Layer Types"
+    } else if has(&["media"]) {
+        "Media"
+    } else if has(&["panels"]) {
+        "Panels"
+    } else if has(&[
+        "commands",
+        "inspector",
+        "keybindings",
+        "palette",
+        "menus",
+        "status",
+        "hooks",
+    ]) {
+        "Editor Tools"
+    } else {
+        "Other"
     }
 }
 /// Deleted from Settings: the folder is in the archive, its values are kept.

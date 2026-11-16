@@ -159,12 +159,19 @@ impl UnitScanner {
             if self.string {
                 if self.escape {
                     self.escape = false;
+                    i += 1;
+                    continue;
+                }
+                // Most of a project's text is inside strings: passed eight
+                // bytes at a time to the next quote or backslash.
+                i = string_stop(bytes, i);
+                if i == bytes.len() {
+                    break;
+                }
+                if bytes[i] == b'"' {
+                    self.string = false;
                 } else {
-                    match bytes[i] {
-                        b'"' => self.string = false,
-                        b'\\' => self.escape = true,
-                        _ => {}
-                    }
+                    self.escape = true;
                 }
                 i += 1;
                 continue;
@@ -239,6 +246,30 @@ impl UnitScanner {
     pub fn finish(self) -> Option<Vec<Unit>> {
         (!self.broken && !self.string && self.open.is_empty()).then_some(self.pending)
     }
+}
+
+/// The first index from `i` of a `"` or `\\` in `bytes` (`bytes.len()` when
+/// there is none), eight bytes at a time.
+fn string_stop(bytes: &[u8], mut i: usize) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // The high bit of each byte equal to `b`, exact up to the first one.
+    let equal = |word: u64, b: u8| {
+        let x = word ^ (ONES * u64::from(b));
+        x.wrapping_sub(ONES) & !x & HIGH
+    };
+    while i + 8 <= bytes.len() {
+        let word = u64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
+        let found = equal(word, b'"') | equal(word, b'\\');
+        if found != 0 {
+            return i + (found.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\\' {
+        i += 1;
+    }
+    i
 }
 
 /// A unit's value, parsed from its own text ahead of the parse of the whole
@@ -337,6 +368,20 @@ where
         offset: e.valid_up_to(),
         message: "invalid UTF-8",
     })?;
+    parse_text_parallel(text, builder, prebuilt, complete)
+}
+
+/// [`parse_bytes_parallel_prebuilt`] of text already known to be UTF-8.
+fn parse_text_parallel<B: TreeBuilder + Clone + Send + Sync>(
+    text: &str,
+    builder: &mut B,
+    prebuilt: Vec<Prebuilt<B::Out>>,
+    complete: bool,
+) -> Result<B::Out, ParseError>
+where
+    B::Out: Send,
+{
+    let bytes = text.as_bytes();
     if prebuilt.is_empty() && (bytes.len() < PARALLEL_MIN_BYTES || crate::parallel::workers() < 2) {
         return parse_with(text, builder);
     }
@@ -418,10 +463,17 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Value, ParseError> {
 /// Decodes bytes the way the app reads files (`new TextDecoder().decode`: a
 /// leading UTF-8 byte order mark is dropped and invalid sequences become
 /// U+FFFD), then parses.
+/// [`parse`] on several threads for a large input ([`parse_bytes_parallel`]):
+/// the same value and the same errors.
+pub fn parse_parallel(text: &str) -> Result<Value, ParseError> {
+    parse_text_parallel(text, &mut ValueBuilder, Vec::new(), false)
+}
+
+/// A large file parses on several threads ([`parse_bytes_parallel`]): the
+/// same value and the same errors.
 pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    let text = String::from_utf8_lossy(bytes);
-    parse(&text)
+    parse_parallel(&String::from_utf8_lossy(bytes))
 }
 
 /// `Object.keys` of the object at `path` in JSON text this module already
@@ -486,13 +538,13 @@ impl Scan<'_> {
     fn skip_string(&mut self) -> Option<()> {
         self.pos += 1;
         loop {
+            self.pos = string_stop(self.bytes, self.pos);
             match *self.bytes.get(self.pos)? {
                 b'"' => {
                     self.pos += 1;
                     return Some(());
                 }
-                b'\\' => self.pos += 2,
-                _ => self.pos += 1,
+                _ => self.pos += 2,
             }
         }
     }
@@ -1003,6 +1055,55 @@ mod tests {
                 .unwrap()
                 .as_str(),
             Some("M4")
+        );
+    }
+
+    /// The scan's word-at-a-time search finds the first quote or backslash
+    /// a byte-by-byte search finds, whatever surrounds it.
+    #[test]
+    fn a_string_stops_at_its_first_quote_or_backslash() {
+        let naive = |bytes: &[u8], i: usize| {
+            (i..bytes.len()).find(|&k| bytes[k] == b'"' || bytes[k] == b'\\').unwrap_or(bytes.len())
+        };
+        let fill = [b'a', 0x00, 0x7f, 0x80, 0xff, b'!', b'#', b'[', 0xe9, b'\x01'];
+        for len in 0..40 {
+            for at in 0..=len {
+                for stop in [b'"', b'\\'] {
+                    let mut bytes: Vec<u8> = (0..len).map(|k| fill[k % fill.len()]).collect();
+                    if at < len {
+                        bytes[at] = stop;
+                        // A second one later never wins.
+                        if at + 3 < len {
+                            bytes[at + 3] = b'"';
+                        }
+                    }
+                    for from in 0..=len.min(at) {
+                        assert_eq!(super::string_stop(&bytes, from), naive(&bytes, from), "{bytes:?} from {from}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A large file reads as the same value on several threads, with a byte
+    /// order mark and with invalid UTF-8 decoded as `TextDecoder` does.
+    #[test]
+    fn a_large_file_parses_to_the_same_value() {
+        let text = large_document();
+        let mut file = vec![0xef, 0xbb, 0xbf];
+        file.extend_from_slice(text.as_bytes());
+        assert!(parse_file_text(&file).unwrap() == parse(&text).unwrap());
+        // An invalid byte inside a string becomes U+FFFD.
+        let at = text.find("\"M4\"").unwrap() + 2;
+        let mut broken = text.clone().into_bytes();
+        broken[at] = 0xff;
+        let lossy = String::from_utf8_lossy(&broken).into_owned();
+        assert!(parse_file_text(&broken).unwrap() == parse(&lossy).unwrap());
+        // A malformed file reports the sequential parse's error.
+        let cut = &text.trim_end().as_bytes()[..text.trim_end().len() - 1];
+        assert_eq!(
+            parse_file_text(cut).unwrap_err(),
+            parse(core::str::from_utf8(cut).unwrap()).unwrap_err()
         );
     }
 

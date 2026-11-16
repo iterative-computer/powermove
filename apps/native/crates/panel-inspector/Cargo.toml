@@ -12,8 +12,9 @@ pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-surface = { path = "../surface" }
+# Definitions' layout hints (`ui`) are JSON as pm-fx-defs keeps them.
+serde_json = "1"
 
 [dev-dependencies]
 pm-design = { path = "../design" }
-serde_json = "1"
 accesskit = "=0.24.1"

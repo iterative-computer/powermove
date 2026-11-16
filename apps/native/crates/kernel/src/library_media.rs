@@ -84,7 +84,12 @@ pub(crate) fn history_assets(history: &crate::History, mut f: impl FnMut(&str, &
         }
     }
     for record in history.records() {
-        for op in record.forward.iter().chain(record.inverse.iter()) {
+        // Only operations whose text names a media key are decoded.
+        let ops = [&record.forward, &record.inverse]
+            .into_iter()
+            .filter(|ops| ops.may_name_media())
+            .flat_map(|ops| ops.iter());
+        for op in ops {
             match op {
                 Op::Leaf(patch) => {
                     let id = match patch.path.as_slice() {

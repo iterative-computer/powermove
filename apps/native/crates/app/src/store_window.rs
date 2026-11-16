@@ -1053,8 +1053,7 @@ fn problem_text(
     }
 }
 const GENERIC: &str = "Something went wrong. Try again.";
-const SIGNING: &str =
-    "Store installs need a signed release, and the Store doesn't sign releases yet.";
+const SIGNING: &str = "Installing from the Store isn't available in this build.";
 /// A failed read, as one sentence for the person who asked (v1.2.0 `actionErrorText`).
 fn load_error(error: pm_services::ServiceError) -> String {
     match error.code {
@@ -2091,7 +2090,8 @@ impl StoreWindow {
             text(format!("{}/{}", listing.handle, listing.slug)),
         ));
         let uses = permission_lines(&detail.listing.permissions);
-        if !uses.is_empty() || !detail.link_hosts.is_empty() {
+        let listed = !uses.is_empty() || !detail.link_hosts.is_empty();
+        if listed {
             let mut lines = div().flex().flex_col().gap(px(t.space.hair));
             for (label, warn) in uses {
                 lines = lines.child(
@@ -2132,7 +2132,13 @@ impl StoreWindow {
                 div()
                     .px(px(CARD_PAD))
                     .text_color(rgb(c.muted))
-                    .child("This extension runs in a sandbox with the permissions listed above."),
+                    // v1's sentence where access is listed; where none is,
+                    // it would point at nothing.
+                    .child(if listed {
+                        "This extension runs in a sandbox with the permissions listed above."
+                    } else {
+                        "This extension runs in a sandbox and asks for no permissions."
+                    }),
             );
         let mut versions = card();
         for (i, release) in detail.releases.iter().enumerate() {

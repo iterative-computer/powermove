@@ -115,6 +115,14 @@ fn append_menu(
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             continue;
         }
+        // A section's title (the keyframe menu's "Keyframe"): no action.
+        if option.get("header") == Some(&Value::Bool(true)) {
+            let title = NSString::from_str(option.get("label").and_then(Value::as_str).unwrap_or(""));
+            let item: Retained<NSMenuItem> =
+                unsafe { msg_send![objc2::class!(NSMenuItem), sectionHeaderWithTitle: &*title] };
+            menu.addItem(&item);
+            continue;
+        }
         let label = option
             .get("label")
             .and_then(Value::as_str)
@@ -145,6 +153,17 @@ fn append_menu(
         });
         if let Some(tooltip) = option.get("tooltip").and_then(Value::as_str) {
             item.setToolTip(Some(&NSString::from_str(tooltip)));
+        }
+        // The key the menu bar shows for the row's command.
+        if let Some((key, flags)) = option
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+            .and_then(pm_shell::menu::chord_for)
+            .map(|chord| pm_shell::menu::accelerator(&chord))
+        {
+            item.setKeyEquivalent(&NSString::from_str(&key));
+            item.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags(flags as _));
         }
         unsafe {
             item.setTarget(Some(target));

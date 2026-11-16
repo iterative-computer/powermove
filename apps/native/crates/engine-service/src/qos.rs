@@ -23,9 +23,6 @@ use pm_protocol::error::EngineProcess;
 pub enum JobQos {
     Default,
     Utility,
-    /// Work nobody waits for (the background render): macOS runs it on the
-    /// efficiency cores and only when nothing the person does needs them.
-    Background,
 }
 
 /// Sets the calling thread's class. A thread can only set its own Darwin QoS;
@@ -36,7 +33,6 @@ pub fn set_job_qos(class: JobQos) -> Result<(), String> {
         let native = match class {
             JobQos::Default => libc::qos_class_t::QOS_CLASS_DEFAULT,
             JobQos::Utility => libc::qos_class_t::QOS_CLASS_UTILITY,
-            JobQos::Background => libc::qos_class_t::QOS_CLASS_BACKGROUND,
         };
         // SAFETY: sets the calling thread's QoS class; no pointers involved.
         let status = unsafe { libc::pthread_set_qos_class_self_np(native, 0) };
@@ -85,17 +81,6 @@ where
         let _ = apply_process_qos(process);
         work()
     })
-}
-
-/// Puts the whole process in the background (every thread, those it starts
-/// later too, and its disk reads and writes): for a process that only does
-/// work nobody waits for (a background render's job).
-pub fn background_process() {
-    #[cfg(target_vendor = "apple")]
-    // SAFETY: changes this process's own scheduling band; no pointers.
-    unsafe {
-        libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG);
-    }
 }
 
 /// The calling thread's class, to start helper threads in: macOS gives a new

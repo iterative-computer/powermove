@@ -32,7 +32,7 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
         id,
         bounds,
         v.ghost_aspect,
-        v.ghost_poster.as_deref(),
+        v.ghost_picture.clone(),
         &t,
     ))
 }

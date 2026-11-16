@@ -5,9 +5,17 @@ use crate::{
     session::WindowState,
     workspace,
 };
+#[cfg(test)]
+use ::core::prelude::v1::test;
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 /// A tab drag in progress: the layout it started from, the pointer and the
 /// target it would drop on. Escape restores `original`.
@@ -41,6 +49,11 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    dock_scroll: HashMap<String, f32>,
+    dock_reported_heights: BTreeMap<String, f32>,
+    dock_natural_heights: BTreeMap<String, f32>,
+    dock_scroll_max: HashMap<String, f32>,
+    last_scroll_focus: Option<FocusHandle>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -76,6 +89,10 @@ pub struct Editor {
     /// The workspace this window last showed by choice (restored or
     /// activated); a new window follows the store's last activated one.
     preferred: Option<String>,
+    /// The project that choice was made for (`None`: Home). Another
+    /// project bound to the window later never takes it: a new project
+    /// starts with the default workspace as shipped (PM-454).
+    preferred_for: Option<String>,
     /// Writes for the kernel, sent on the next frame.
     outbox: Vec<workspace::Write>,
     /// The status last passed to the app's status line.
@@ -131,6 +148,11 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            dock_scroll: HashMap::new(),
+            dock_reported_heights: BTreeMap::new(),
+            dock_natural_heights: BTreeMap::new(),
+            dock_scroll_max: HashMap::new(),
+            last_scroll_focus: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -148,6 +170,7 @@ impl Editor {
             pending: vec![],
             seen: None,
             preferred: None,
+            preferred_for: None,
             outbox: vec![],
             noted: String::new(),
             project,
@@ -259,6 +282,7 @@ impl Editor {
         self.window_id = state.id;
         self.project = state.project.clone();
         self.preferred = Some(state.workspace.clone());
+        self.preferred_for = Some(state.project.clone()).filter(|p| !p.is_empty());
         self.show_record(self.workspaces.active(self.preferred.as_deref()));
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -328,8 +352,47 @@ impl Editor {
         self.seen = None;
         self.persist_session();
     }
-    /// Writes the window's layout into its workspace record (the project's
-    /// saved workspace and its entry in `workspaces`), then the session.
+    fn dock_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if event.modifiers.control || event.modifiers.platform || event.modifiers.shift {
+            return;
+        }
+        let by = -f32::from(event.delta.pixel_delta(px(16.)).y);
+        if by == 0. || !by.is_finite() {
+            return;
+        }
+        let Some(di) = self.geometry.wheel_dock(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            self.tokens.metrics.splitter_reach,
+        ) else {
+            return;
+        };
+        let id = self.layout.docks[di].id.clone();
+        let moved = self.scroll_dock(&id, by);
+        // The gutter belongs to this column, even at its limit. Never pass a
+        // wheel to the viewer beneath the divider's overlapping hit area.
+        cx.stop_propagation();
+        if moved {
+            cx.notify();
+        }
+    }
+
+    /// Move a side column without saving transient viewport state (Electron's rule).
+    pub fn scroll_dock(&mut self, id: &str, by: f32) -> bool {
+        if !by.is_finite() {
+            return false;
+        }
+        let old = self.dock_scroll.get(id).copied().unwrap_or(0.);
+        let maximum = self.dock_scroll_max.get(id).copied().unwrap_or(0.);
+        let next = (old + by).clamp(0., maximum);
+        if next == old {
+            return false;
+        }
+        self.dock_scroll.insert(id.into(), next);
+        true
+    }
+
+    /// Save the layout in its workspace record and session.
     pub fn save(&mut self) {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
@@ -371,6 +434,12 @@ impl Editor {
         self.pending.push(after.clone());
         self.record = after;
     }
+    /// This window's choice, when it was made for the project it shows now.
+    fn preferred_here(&self) -> Option<&str> {
+        self.preferred
+            .as_deref()
+            .filter(|_| self.preferred_for == self.workspaces.project_id)
+    }
     fn show_record(&mut self, record: serde_json::Value) {
         self.maximized_panel = None;
         self.layout = workspace::layout(&record);
@@ -379,6 +448,7 @@ impl Editor {
     /// Shows workspace `record` in this window and makes it the active one.
     fn activate_record(&mut self, record: serde_json::Value) {
         self.preferred = workspace::record_id(&record).map(str::to_owned);
+        self.preferred_for = self.workspaces.project_id.clone();
         self.show_record(record.clone());
         self.commit(record);
         self.persist_session();
@@ -409,7 +479,7 @@ impl Editor {
         if !Rc::ptr_eq(&store, &self.workspaces) {
             self.workspaces = store;
         }
-        let target = self.workspaces.active(self.preferred.as_deref());
+        let target = self.workspaces.active(self.preferred_here());
         if self.seen.as_ref() == Some(&target) {
             return;
         }
@@ -471,16 +541,42 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        self.workspaces
-            .offered()
+        // One entry per name: the one this window shows, else its project's,
+        // else the last used (PM-449).
+        let prefer: Vec<&str> = [
+            workspace::record_id(&self.record),
+            self.workspaces
+                .project
+                .as_ref()
+                .and_then(workspace::record_id),
+            self.workspaces.current.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let offered = workspace::one_per_name(self.workspaces.offered(), &prefer);
+        let names: Vec<String> = offered
+            .iter()
+            .map(|r| workspace::record_name(r).to_owned())
+            .collect();
+        offered
             .into_iter()
-            .map(|r| {
+            .zip(workspace::told_apart(&names))
+            .map(|(r, name)| {
                 (
                     workspace::record_id(r).unwrap_or_default().to_owned(),
-                    workspace::record_name(r).to_owned(),
+                    name,
                     workspace::is_builtin(r),
                 )
             })
+            .collect()
+    }
+    /// The names of the workspaces there are, as saved.
+    fn workspace_names(&self) -> Vec<String> {
+        self.workspaces
+            .offered()
+            .into_iter()
+            .map(|r| workspace::record_name(r).to_owned())
             .collect()
     }
     /// The active workspace record.
@@ -824,12 +920,16 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow()
-                        .prompt_workspace_name(workspace::record_name(&self.record));
+                    h.borrow().prompt_workspace_name(&workspace::save_name(
+                        workspace::record_name(&self.record),
+                        &self.workspace_names(),
+                    ));
                 }
                 Ok(())
             }
             ("layout", "save") => layout::layout_name(rest).map(|name| {
+                // Never a second workspace of a name already there.
+                let name = workspace::free_name(&name, &self.workspace_names());
                 let mut copy = workspace::write(&self.layout, &self.record);
                 copy["id"] = workspace::new_id().into();
                 copy["name"] = name.clone().into();
@@ -889,6 +989,66 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = cmd.name.strip_prefix("dockContent:") {
+            if self.layout.find(id).is_some()
+                && let Some(height) = cmd
+                    .args
+                    .first()
+                    .and_then(|v| v.as_f64())
+                    .filter(|h| h.is_finite() && *h > 0.)
+            {
+                let height = height as f32 + self.tokens.metrics.header;
+                if self
+                    .dock_reported_heights
+                    .get(id)
+                    .is_none_or(|old| (*old - height).abs() > 1.)
+                {
+                    self.dock_reported_heights.insert(id.into(), height);
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dockScroll:") {
+            if let Some((di, _, _)) = self.layout.find(id) {
+                let dock = self.layout.docks[di].id.clone();
+                let by = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+                if by.is_finite() && self.scroll_dock(&dock, by) {
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dockReveal:") {
+            if let Some(p) = self
+                .geometry
+                .panels
+                .iter()
+                .find(|p| {
+                    self.layout.docks[p.dock].groups[p.group]
+                        .tabs
+                        .iter()
+                        .any(|tab| tab == id)
+                })
+                .cloned()
+                && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+            {
+                let relative = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+                let height = cmd.args.get(1).and_then(|v| v.as_f64()).unwrap_or(24.) as f32;
+                let y = p.rect.y + self.tokens.metrics.header + relative;
+                let by = if y < bounds.y {
+                    y - bounds.y
+                } else {
+                    (y + height.min(bounds.h) - bounds.y - bounds.h).max(0.)
+                };
+                let dock = self.layout.docks[p.dock].id.clone();
+                if by.is_finite() && self.scroll_dock(&dock, by) {
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         // Resolve a review drag from the actual divider, never screen constants.
         #[cfg(debug_assertions)]
         if let Some(rest) = cmd.name.strip_prefix("reviewSplitter:") {
@@ -1570,6 +1730,7 @@ impl Editor {
     ) -> anyhow::Result<(String, String)> {
         let base = layout::layout_name(name)?;
         let layout = Layout {
+            flex_bases: self.layout.flex_bases.clone(),
             version: self.layout.version,
             workspace: workspace::new_id(),
             docks,
@@ -1868,6 +2029,7 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
+            h.native_panel_clips.borrow_mut().clear();
             // Home covers the viewer: its extra 3D views have no place.
             h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
@@ -1962,11 +2124,94 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.dock_gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.dock_gap).max(0.),
         };
-        self.geometry = self.layout.geometry_with_maximized(
-            self.dock_bounds,
-            &t,
-            self.maximized_panel.as_deref(),
-        );
+        // Freeze content measurements during a splitter drag, so every delta
+        // uses the same starting geometry. Explicitly resized heights win below.
+        if !matches!(self.gesture, Some(Gesture::Resize(..))) {
+            self.dock_natural_heights = self.dock_reported_heights.clone();
+            for dock in &self.layout.docks {
+                for group in &dock.groups {
+                    let id = group.active();
+                    if let Some(height) = self
+                        .integration
+                        .as_ref()
+                        .and_then(|i| i.natural_panel_height(id, cx))
+                    {
+                        self.dock_natural_heights.insert(id.into(), height);
+                    }
+                }
+            }
+        }
+        self.geometry = if self.maximized_panel.is_some() {
+            self.layout.geometry_with_maximized(
+                self.dock_bounds,
+                &t,
+                self.maximized_panel.as_deref(),
+            )
+        } else {
+            self.layout.geometry_with_panel_heights(
+                self.dock_bounds,
+                &t,
+                &self.dock_natural_heights,
+            )
+        };
+        // Keep input/drop geometry in window coordinates, including the column offset.
+        for (&di, bounds) in &self.geometry.side_docks {
+            let id = &self.layout.docks[di].id;
+            let bottom = self
+                .geometry
+                .panels
+                .iter()
+                .filter(|p| p.dock == di)
+                .map(|p| p.rect.y + p.rect.h)
+                .fold(bounds.y, f32::max);
+            let offset = self.dock_scroll.entry(id.clone()).or_default();
+            let maximum = (bottom - bounds.y - bounds.h).max(0.);
+            // Electron ignores a <=1 px range; fractional flex rounding
+            // must not turn a fitting column into a scrollable one.
+            let maximum = if maximum <= 1. { 0. } else { maximum };
+            self.dock_scroll_max.insert(id.clone(), maximum);
+            *offset = offset.clamp(0., maximum);
+            for p in self.geometry.panels.iter_mut().filter(|p| p.dock == di) {
+                p.rect.y -= *offset;
+            }
+            for d in self
+                .geometry
+                .dividers
+                .iter_mut()
+                .filter(|d| d.dock == di && d.group.is_some())
+            {
+                d.rect.y -= *offset;
+            }
+        }
+        let focused = self
+            .panel_focus
+            .iter()
+            .find(|(_, f)| f.contains_focused(w, cx))
+            .map(|(id, _)| id.clone());
+        let focused_handle = w.focused(cx);
+        if focused_handle != self.last_scroll_focus {
+            self.last_scroll_focus = focused_handle;
+            if let Some(p) = self
+                .geometry
+                .panels
+                .iter()
+                .find(|p| {
+                    Some(self.layout.docks[p.dock].groups[p.group].active()) == focused.as_deref()
+                })
+                .cloned()
+                && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+            {
+                let by = if p.rect.y < bounds.y {
+                    p.rect.y - bounds.y
+                } else {
+                    (p.rect.y + p.rect.h.min(bounds.h) - bounds.y - bounds.h).max(0.)
+                };
+                let id = self.layout.docks[p.dock].id.clone();
+                if self.scroll_dock(&id, by) {
+                    cx.notify();
+                }
+            }
+        }
         let placed: Vec<(String, Rect)> = self
             .geometry
             .panels
@@ -1981,10 +2226,21 @@ impl Render for Editor {
         }
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
-            a.rect
-                .y
-                .total_cmp(&b.rect.y)
-                .then(a.rect.x.total_cmp(&b.rect.x))
+            (a.rect.y
+                + self
+                    .dock_scroll
+                    .get(&self.layout.docks[a.dock].id)
+                    .copied()
+                    .unwrap_or(0.))
+            .total_cmp(
+                &(b.rect.y
+                    + self
+                        .dock_scroll
+                        .get(&self.layout.docks[b.dock].id)
+                        .copied()
+                        .unwrap_or(0.)),
+            )
+            .then(a.rect.x.total_cmp(&b.rect.x))
         });
         self.panel_order = ordered
             .iter()
@@ -2071,6 +2327,9 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
+            .on_scroll_wheel(
+                cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)),
+            )
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2164,7 +2423,13 @@ impl Render for Editor {
                             }
                             this.resize_live = true;
                             this.layout = original.clone();
-                            this.layout.resize(d, delta, this.dock_bounds, &this.tokens);
+                            this.layout.resize_with_panel_heights(
+                                d,
+                                delta,
+                                this.dock_bounds,
+                                &this.tokens,
+                                &this.dock_natural_heights,
+                            );
                             cx.notify();
                         }
                         Some(Gesture::Panel(drag)) => {
@@ -2232,8 +2497,13 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout
-                        .resize(&d, delta, this.dock_bounds, &this.tokens);
+                    this.layout.resize_with_panel_heights(
+                        &d,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
                     this.save();
                     cx.notify();
                 }
@@ -2692,7 +2962,15 @@ impl Render for Editor {
             }
             panel = panel.child(header);
             if collapsed {
-                root = root.child(panel);
+                if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
+                    let mut local = self.slides.shown(&id, p.rect);
+                    local.x -= bounds.x;
+                    local.y -= bounds.y;
+                    panel = panel.left(px(local.x)).top(px(local.y));
+                    root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+                } else {
+                    root = root.child(panel);
+                }
                 continue;
             }
             if let (Some(i), Some(f)) = (self.integration.clone(), self.panel_focus.get(&id)) {
@@ -2769,8 +3047,18 @@ impl Render for Editor {
                 }
                 panel = panel.child(empty);
             }
-            root = root.child(panel);
+            if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
+                let mut local = self.slides.shown(&id, p.rect);
+                local.x -= bounds.x;
+                local.y -= bounds.y;
+                panel = panel.left(px(local.x)).top(px(local.y));
+                root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+            } else {
+                root = root.child(panel);
+            }
         }
+        // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
+        // momentum still move the column; no idle scrollbar timer is needed.
         self.geometry.tabs = tab_spans;
         if let Some(integration) = &self.integration {
             // Every panel on screen, built-in or an extension's: the viewer
@@ -2779,6 +3067,18 @@ impl Render for Editor {
             integration.shown_panels(&shown, cx);
         }
         if let Some(h) = &self.host {
+            let clips = native_bodies
+                .iter()
+                .map(|(id, r)| {
+                    let clip = self
+                        .layout
+                        .find(id)
+                        .and_then(|(di, _, _)| self.geometry.side_docks.get(&di))
+                        .map_or(*r, |bounds| r.intersection(*bounds));
+                    (id.clone(), clip)
+                })
+                .collect();
+            *h.borrow().native_panel_clips.borrow_mut() = clips;
             *h.borrow().native_panels.borrow_mut() = native_bodies;
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
@@ -2851,99 +3151,118 @@ impl Render for Editor {
                     ..d.rect
                 }
             };
-            root = root.child(
-                positioned(hit)
-                    .id(format!("splitter-{i}"))
-                    .role(Role::Splitter)
-                    .aria_label("Resize dock")
-                    .tab_index(1000 + i as isize)
-                    // Only a keyboard focus shows (a press focuses it too).
-                    .focus_visible_style(|s| s.bg(tint(c.focus, 0.5)))
-                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
-                        let delta = match e.keystroke.key.as_str() {
-                            "left" | "up" => -this.tokens.metrics.keyboard_step,
-                            "right" | "down" => this.tokens.metrics.keyboard_step,
-                            // Return puts a dock back at its size (the original app).
-                            "enter" if key_divider.group.is_none() => {
-                                this.layout.reset_dock(&key_divider);
-                                0.
-                            }
-                            _ => return,
-                        };
-                        this.layout
-                            .resize(&key_divider, delta, this.dock_bounds, &this.tokens);
-                        this.save();
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .cursor(if d.horizontal {
-                        CursorStyle::ResizeUpDown
-                    } else {
-                        CursorStyle::ResizeLeftRight
-                    })
-                    // The glow follows the pointer along the gap.
-                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                        let along = if hover_divider.horizontal {
-                            f32::from(e.position.x) - hover_divider.rect.x
-                        } else {
-                            f32::from(e.position.y) - hover_divider.rect.y
-                        };
-                        this.split_hover = Some((hover_key, along));
-                        cx.notify();
-                    }))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if !*hovered
-                            && this.split_hover.is_some_and(|(k, _)| k == hover_key)
-                            && !matches!(this.gesture, Some(Gesture::Resize(..)))
-                        {
-                            this.split_hover = None;
-                            cx.notify();
+            let mut splitter = positioned(hit)
+                .id(format!("splitter-{i}"))
+                .on_scroll_wheel(
+                    cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)),
+                )
+                .role(Role::Splitter)
+                .aria_label("Resize dock")
+                .tab_index(1000 + i as isize)
+                // Only a keyboard focus shows (a press focuses it too).
+                .focus_visible_style(|s| s.bg(tint(c.focus, 0.5)))
+                .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
+                    let delta = match e.keystroke.key.as_str() {
+                        "left" | "up" => -this.tokens.metrics.keyboard_step,
+                        "right" | "down" => this.tokens.metrics.keyboard_step,
+                        // Return puts a dock back at its size (the original app).
+                        "enter" if key_divider.group.is_none() => {
+                            this.layout.reset_dock(&key_divider);
+                            0.
                         }
-                    }))
-                    .children(glow)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            // The grab reaches over the panels' edges: the
-                            // header or body under it must not also take the
-                            // press (a header would start a panel drag).
-                            cx.stop_propagation();
-                            this.split_focus = Some(divd.clone());
-                            if let Some(h) = &this.host {
-                                h.borrow_mut().splitter_focus = true;
-                            }
-                            // A double-click puts a dock back at its size
-                            // (the original app), and two panels back at
-                            // their heights.
-                            if e.click_count >= 2 {
-                                this.gesture = None;
-                                let (bounds, t) = (this.dock_bounds, this.tokens.clone());
-                                if this.layout.reset_dock(&divd)
-                                    || this.layout.reset_split(&divd, bounds, &t)
-                                {
-                                    this.slides.armed = true;
-                                    this.save();
-                                }
-                                cx.notify();
-                                return;
-                            }
-                            // A folded panel beside it opens first, so the
-                            // drag has room to work with.
-                            if this.layout.expand_beside(&divd) {
+                        _ => return,
+                    };
+                    this.layout.resize_with_panel_heights(
+                        &key_divider,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
+                    this.save();
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .cursor(if d.horizontal {
+                    CursorStyle::ResizeUpDown
+                } else {
+                    CursorStyle::ResizeLeftRight
+                })
+                // The glow follows the pointer along the gap.
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                    let along = if hover_divider.horizontal {
+                        f32::from(e.position.x) - hover_divider.rect.x
+                    } else {
+                        f32::from(e.position.y) - hover_divider.rect.y
+                    };
+                    this.split_hover = Some((hover_key, along));
+                    cx.notify();
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if !*hovered
+                        && this.split_hover.is_some_and(|(k, _)| k == hover_key)
+                        && !matches!(this.gesture, Some(Gesture::Resize(..)))
+                    {
+                        this.split_hover = None;
+                        cx.notify();
+                    }
+                }))
+                .children(glow)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        // The grab reaches over the panels' edges: the
+                        // header or body under it must not also take the
+                        // press (a header would start a panel drag).
+                        cx.stop_propagation();
+                        this.split_focus = Some(divd.clone());
+                        if let Some(h) = &this.host {
+                            h.borrow_mut().splitter_focus = true;
+                        }
+                        // A double-click puts a dock back at its size
+                        // (the original app); between panels it does nothing.
+                        if e.click_count >= 2 {
+                            this.gesture = None;
+                            if this.layout.reset_dock(&divd)
+                                || this.layout.reset_split_with_panel_heights(
+                                    &divd,
+                                    this.dock_bounds,
+                                    &this.tokens,
+                                    &this.dock_natural_heights,
+                                )
+                            {
+                                this.slides.armed = true;
                                 this.save();
                             }
-                            this.resize_live = false;
-                            this.gesture = Some(Gesture::Resize(
-                                divd.clone(),
-                                e.position,
-                                this.layout.clone(),
-                            ));
-                            this.watch_release(cx);
-                            window.focus(&this.focus, cx);
                             cx.notify();
-                        }),
-                    ),
-            );
+                            return;
+                        }
+                        // A folded panel beside it opens first, so the
+                        // drag has room to work with.
+                        if this.layout.expand_beside(&divd) {
+                            this.save();
+                        }
+                        this.resize_live = false;
+                        this.gesture = Some(Gesture::Resize(
+                            divd.clone(),
+                            e.position,
+                            this.layout.clone(),
+                        ));
+                        this.watch_release(cx);
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }),
+                );
+            if d.group.is_some()
+                && let Some(bounds) = self.geometry.side_docks.get(&d.dock)
+            {
+                splitter = splitter
+                    .left(px(hit.x - bounds.x))
+                    .top(px(hit.y - bounds.y));
+                root = root.child(positioned(*bounds).overflow_hidden().child(splitter));
+            } else {
+                root = root.child(splitter);
+            }
         }
         // Drop preview and a card that follows the pointer. Work-surface
         // overlays stay solid tints (no glass below the controls band).
@@ -3672,6 +3991,59 @@ mod tests {
         fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
     }
 
+    /// Acceptance run 22: a window that showed an edited copy of Design (its
+    /// timeline collapsed) takes a new project, which has no workspace of
+    /// its own: the project starts with Design as shipped (PM-454).
+    #[gpui::test]
+    fn a_new_project_in_a_window_never_takes_the_windows_last_workspace(cx: &mut TestAppContext) {
+        let mut edited = workspace::preset("design").unwrap();
+        edited["id"] = "wsedited".into();
+        edited["name"] = "Design (edited)".into();
+        edited["builtin"] = false.into();
+        edited["layout"]["docks"] = serde_json::json!([{"id": "center", "panels": ["viewer"]}]);
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&edited)),
+            current: Some("wsedited".into()),
+            default: None,
+            project: Some(edited.clone()),
+            project_id: Some("old".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e.restore(&crate::session::WindowState {
+                id: 1,
+                frame: [0., 0., 1440., 900.],
+                project: "old".into(),
+                workspace: "wsedited".into(),
+                tab_group: None,
+                tab_index: 0,
+                pages: vec![],
+                fullscreen: false,
+            });
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "wsedited", "its own project keeps it");
+                // The window takes a new project with no workspace of its own.
+                let before = (**kernel.store.borrow()).clone();
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    project: None,
+                    project_id: Some("new".into()),
+                    ..before
+                });
+                v.sync_workspaces(cx);
+                assert_eq!(v.workspace_record(), &workspace::preset("design").unwrap());
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn a_workspace_deleted_by_another_window_moves_this_one_to_the_fallback(
         cx: &mut TestAppContext,
@@ -4007,6 +4379,17 @@ mod tests {
                             } else {
                                 (r.x + across, r.y + at)
                             };
+                            // Scrolling docks keep offscreen dividers in geometry.
+                            if d.group.is_some()
+                                && view.read_with(cx, |v, _| {
+                                    v.geometry
+                                        .side_docks
+                                        .get(&d.dock)
+                                        .is_some_and(|clip| !clip.contains(x, y))
+                                })
+                            {
+                                continue;
+                            }
                             // Where two dividers' grabs cross, either answers.
                             let crossing = dividers
                                 .iter()
@@ -4032,6 +4415,18 @@ mod tests {
                     } else {
                         (r.x + thick + reach - 0.5, r.y + length / 2.)
                     };
+                    // An offscreen splitter has no press target, just as it
+                    // has no cursor target in the sweep above.
+                    if d.group.is_some()
+                        && view.read_with(cx, |v, _| {
+                            v.geometry
+                                .side_docks
+                                .get(&d.dock)
+                                .is_some_and(|clip| !clip.contains(x, y))
+                        })
+                    {
+                        continue;
+                    }
                     if dividers
                         .iter()
                         .enumerate()

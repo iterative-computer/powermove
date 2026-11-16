@@ -9,6 +9,7 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sha1 = "0.10"
 ed25519-dalek = "2"
 flate2 = "1"
 tar = "0.4"
