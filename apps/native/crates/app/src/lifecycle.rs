@@ -51,13 +51,6 @@ fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<Strin
 /// (a second Quit offers to quit now meanwhile). `None`: nothing to wait
 /// for, or the window is asking the person something (a recovery choice, an
 /// alert, an open edit), which only they can end.
-/// Whether a quit waits for a project operation at this window. A quit
-/// signal never does: the operation may be another window's open waiting on
-/// a recovery answer nobody can give, and the signal path saves nothing (the
-/// journal keeps an operation's edits; the durability barrier runs after).
-fn quit_fenced(state: CloseState, operation: bool, terminating: bool) -> bool {
-    matches!(state, CloseState::Dirty | CloseState::Clean) && operation && !terminating
-}
 fn quit_waits_for(
     state: CloseState,
     opening: bool,
@@ -80,13 +73,8 @@ fn quit_waits_for(
 fn last_frame_wait(intent: Intent, signal: bool) -> Option<std::time::Duration> {
     (!(signal && intent == Intent::Quit)).then_some(LAST_FRAME_WAIT)
 }
-/// Whether a window lets go of its project for a quit signal instead of
-/// holding the quit: one that would ask the person something (`Busy` once
-/// [`quit_waits_for`] has nothing to wait for). Work that ends on its own
-/// (a save, an open) is still waited for.
-fn lets_go_unattended(state: CloseState, terminating: bool) -> bool {
-    terminating && state == CloseState::Busy
-}
+/// The longest a quit signal keeps the process running.
+const SIGNAL_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -613,10 +601,26 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         let terminations = crate::platform::terminations();
         cx.spawn(async move |cx| {
             while terminations.recv().await.is_ok() {
-                cx.update(|cx| {
+                let first = cx.update(|cx| {
+                    let first = !cx.global::<QuitCoordinator>().terminating;
                     cx.global_mut::<QuitCoordinator>().terminating = true;
-                    begin_quit(cx)
+                    begin_quit(cx);
+                    first
                 });
+                if first {
+                    // The orderly signal quit ends the process itself within
+                    // a second or two; this bounds it if a kernel step is
+                    // still busy (a long open, a large save), so a logout
+                    // never waits on Powermove. The journals hold the work.
+                    let timer = cx.background_executor().timer(SIGNAL_QUIT_LIMIT);
+                    cx.background_executor()
+                        .spawn(async move {
+                            timer.await;
+                            crate::diag::line(serde_json::json!({"quit":"limit"}));
+                            std::process::exit(0);
+                        })
+                        .detach();
+                }
             }
         })
         .detach();
@@ -867,6 +871,24 @@ impl Controller {
     }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         crate::diag::line(serde_json::json!({"quit":"request_close", "intent":format!("{intent:?}"), "pending":self.close_pending}));
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
+            // A quit signal (logout, shutdown, a script) never waits and never
+            // asks: not for a sheet or question on screen, a save, an open,
+            // an export, a close already under way or another window's
+            // operation. Nobody can answer, and waiting kept the app running
+            // through a logout. The window lets go of its project as after a
+            // crash: nothing is saved without the person's choice, the journal
+            // keeps the work (the quit makes it durable), and the next open
+            // offers it.
+            crate::diag::line(serde_json::json!({"quit":"let_go"}));
+            self.close_operation = self.mcp.try_operation();
+            self.close_pending = true;
+            self.mcp.closing.store(true, Ordering::Release);
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
         if self.close_pending {
             if intent == Intent::Quit {
                 cancel_quit(cx);
@@ -927,11 +949,8 @@ impl Controller {
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
         crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
-        let fenced = quit_fenced(
-            state,
-            self.mcp.operation_in_progress(),
-            cx.global::<QuitCoordinator>().terminating,
-        );
+        let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
+            && self.mcp.operation_in_progress();
         if intent == Intent::Quit
             && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
         {
@@ -949,19 +968,6 @@ impl Controller {
                 });
             })
             .detach();
-            return;
-        }
-        if intent == Intent::Quit
-            && lets_go_unattended(state, cx.global::<QuitCoordinator>().terminating)
-        {
-            // A quit signal at a window asking a question (a recovery choice,
-            // an edit left open): nobody can answer it, and refusing would
-            // keep the app running through a logout. The window lets go as
-            // after a crash: the journal keeps the work, nothing is saved,
-            // and the next launch asks again.
-            self.session = None;
-            self.mcp.bind_window(self.window_key, None);
-            self.complete_close(intent, cx);
             return;
         }
         if quit_now_here
@@ -994,33 +1000,17 @@ impl Controller {
             }
             _ => {}
         }
-        let operation = self.mcp.try_operation();
-        // A quit signal goes on without the operation lock: it saves nothing,
-        // and the holder may be another window's open waiting on a recovery
-        // answer nobody can give.
-        if operation.is_none() && !cx.global::<QuitCoordinator>().terminating {
+        let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try closing again when it finishes.".into();
             cancel_quit(cx);
             cx.notify();
             return;
-        }
-        self.close_operation = operation;
+        };
+        self.close_operation = Some(operation);
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
-            self.complete_close(intent, cx);
-            return;
-        }
-        if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
-            // SIGTERM (logout, shutdown, a script): nobody can answer a Save
-            // question, and the file is never written without the person's
-            // choice. The window lets go of its project without closing it:
-            // the quit then leaves its unsaved work in the journal and the
-            // file as saved (`ShellCall::PrepareQuit` defers it), and the
-            // next open offers the work, as after a crash.
-            self.session = None;
-            self.mcp.bind_window(self.window_key, None);
             self.complete_close(intent, cx);
             return;
         }
@@ -1324,15 +1314,6 @@ mod tests {
             quit_waits_for(Clean, false, false, true),
             Some("finishing a project operation")
         );
-        // A person's Quit waits for an operation; a quit signal never does
-        // (one window's open waiting on its recovery answer fenced every
-        // other window, and the signal never quit).
-        assert!(quit_fenced(Clean, true, false));
-        assert!(quit_fenced(Dirty, true, false));
-        assert!(!quit_fenced(Clean, true, true));
-        assert!(!quit_fenced(Dirty, true, true));
-        assert!(!quit_fenced(Busy, true, false));
-        assert!(!quit_fenced(Clean, false, false));
         assert_eq!(
             quit_waits_for(Dirty, false, false, true),
             Some("finishing a project operation")
@@ -1340,13 +1321,6 @@ mod tests {
         // A recovery choice or an alert on screen, an open edit, a stopped
         // project, and a window that can simply close.
         assert_eq!(quit_waits_for(Busy, true, true, false), None);
-        // A quit signal never stops at a question nobody can answer; a
-        // person's Quit still does, and nothing else lets go.
-        assert!(lets_go_unattended(Busy, true));
-        assert!(!lets_go_unattended(Busy, false));
-        for state in [Saving, Clean, Dirty, Stopped] {
-            assert!(!lets_go_unattended(state, true), "{state:?}");
-        }
         assert_eq!(quit_waits_for(Busy, false, false, false), None);
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
