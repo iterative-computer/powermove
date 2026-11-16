@@ -252,6 +252,9 @@ impl McpSession {
             pending: None,
             bypass_hold: true,
             hold_note: None,
+            // This worker only replays the four editing tools admitted above.
+            // Panel tools stay on the parent session and use its trusted lease.
+            panel_lease: None,
         };
         let (send, receive) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
