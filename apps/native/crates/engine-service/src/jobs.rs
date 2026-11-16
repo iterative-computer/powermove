@@ -728,8 +728,15 @@ struct Reported {
     changed: Condvar,
 }
 impl Reported {
-    fn set(&self, status: JobStatus) {
-        *self.now.lock().unwrap() = status;
+    fn set(&self, mut status: JobStatus) {
+        let mut now = self.now.lock().unwrap();
+        // A running job's preview stands until a newer one comes: the child
+        // sends each once.
+        if status.preview.is_none() && status.state == JobState::Running {
+            status.preview = now.preview.take();
+        }
+        *now = status;
+        drop(now);
         self.changed.notify_all();
     }
 }
@@ -1394,6 +1401,17 @@ pub fn run_child() -> Result<()> {
                     checking: p
                         .checked
                         .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    // Only when a new one was made (at most every 250 ms):
+                    // the parent keeps the last one between them.
+                    preview: p
+                        .preview
+                        .as_ref()
+                        .map(|frame| pm_protocol::priority::JobPreview {
+                            frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
+                            width: frame.width,
+                            height: frame.height,
+                            jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
+                        }),
                     ..status(&request.job, JobState::Running, p.fraction(), None, None)
                 });
             },

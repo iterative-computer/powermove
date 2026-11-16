@@ -335,6 +335,45 @@ pub struct SurfaceView {
     pub log: Vec<(Id, String, EventDetail)>,
     pub error: Option<String>,
 }
+/// Fades over a scroller's viewport where content runs past its top or
+/// bottom edge, into `ground` (the colour under it), a row tall: a region
+/// that draws no scroller still shows there is more. Drawn over the content
+/// in the viewport's own place, whatever the scroll.
+fn scroll_edges(scroll: ScrollHandle, ground: u32, t: &pm_design::Tokens) -> AnyElement {
+    let depth = px(t.metrics.form_row);
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let view = scroll.bounds();
+            let (offset, max) = (-scroll.offset().y, scroll.max_offset().y);
+            if max <= px(0.) || view.size.height <= depth * 2. {
+                return;
+            }
+            let fade = |top: bool| {
+                let (from, to) = if top { (1., 0.) } else { (0., 1.) };
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, from), 0.),
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, to), 1.),
+                )
+            };
+            if offset > px(1.) {
+                let band = Bounds::new(view.origin, size(view.size.width, depth));
+                window.paint_quad(gpui::fill(band, fade(true)));
+            }
+            if offset < max - px(1.) {
+                let band = Bounds::new(
+                    point(view.origin.x, view.bottom() - depth),
+                    size(view.size.width, depth),
+                );
+                window.paint_quad(gpui::fill(band, fade(false)));
+            }
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
 impl SurfaceView {
     pub fn new(
         runtime: Arc<Builtins>,
@@ -2810,6 +2849,12 @@ impl SurfaceView {
             );
         }
         let mut element = element.children(children).children(self.probe(node.id));
+        // Over the content, last: where it runs past the scroller's edges.
+        if let Some(ground) = node.scroll_edge.filter(|_| node.scroll_y)
+            && let Some(scroll) = self.scrolls.get(&id)
+        {
+            element = element.child(scroll_edges(scroll.clone(), ground, &self.table.tokens));
+        }
         if self.fitted_sheet(node, window) {
             // The sheet is its window's height: its actions stay on the bottom
             // edge while the body between gives way.
@@ -3599,7 +3644,11 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
+            Kit::Wheel { .. }
+            | Kit::Curve { .. }
+            | Kit::Ease { .. }
+            | Kit::Pad { .. }
+            | Kit::Ramp { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures
@@ -3627,6 +3676,14 @@ impl SurfaceView {
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
+        // A symbol leading a line of text stands in the text's leading
+        // inset, level with its first line; the words keep the width and
+        // wrap under themselves (a row would keep them on one line).
+        if node.symbol_leads {
+            element = element
+                .relative()
+                .pl(px(node.symbol_size + t.metrics.gap / 2.));
+        }
         if let Some(symbol) = &node.symbol {
             // The glyph takes the colour the panel declared (an active toggle's
             // accent, a keyframe state); disabled is always `muted`.
@@ -3639,13 +3696,18 @@ impl SurfaceView {
                     (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
                 })
             };
-            element = element.child(pm_shell::symbol::symbol(
+            let glyph = pm_shell::symbol::symbol(
                 symbol,
                 node.symbol_size,
                 pm_shell::symbol::Weight::Regular,
                 ink,
                 window,
-            ));
+            );
+            element = if node.symbol_leads {
+                element.child(div().absolute().left_0().top_0().child(glyph))
+            } else {
+                element.child(glyph)
+            };
         }
         // A picture the host made (a Project thumbnail): it fills the node,
         // cropped to its shape; until it exists the node shows its fill.
@@ -3659,7 +3721,11 @@ impl SurfaceView {
                     .absolute()
                     .inset_0()
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(if node.contain {
+                        ObjectFit::Contain
+                    } else {
+                        ObjectFit::Cover
+                    }),
             );
         }
         if let Some(text) = &node.text {

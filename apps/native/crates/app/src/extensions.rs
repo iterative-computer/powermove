@@ -1249,7 +1249,11 @@ impl Controller {
         if self.extensions.panels_ready != ready {
             self.extensions.panels_ready = ready;
             self.host.borrow().send_command(
-                if ready { "panels:ready" } else { "panels:waiting" },
+                if ready {
+                    "panels:ready"
+                } else {
+                    "panels:waiting"
+                },
                 vec![],
             );
         }
@@ -1826,6 +1830,19 @@ impl Controller {
         .detach();
     }
     /// A panel body is a hole in GPUI; the shared document shows through it.
+    pub(crate) fn extension_build_rendered(&self, id: &str) -> bool {
+        let bodies = self.host.borrow().native_panels.clone();
+        let bodies = bodies.borrow();
+        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else {
+            return false;
+        };
+        self.extensions.page_of(id).is_some_and(|page| {
+            page.borrow().panel_layout_applied(
+                id,
+                Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64),
+            )
+        })
+    }
     pub fn extension_panel(
         &mut self,
         id: &str,
@@ -2049,7 +2066,8 @@ impl Controller {
         // editor is occluded, in the editor's window.
         let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
-            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
         if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
@@ -2071,7 +2089,9 @@ impl Controller {
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
-        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(&shell.tokens)));
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
+            &shell.tokens,
+        )));
         let themed_fill = fill.clone();
         let themed_views = self.extensions.views.clone();
         shell.native_style = Some(Rc::new(move |tokens| {
@@ -2144,7 +2164,9 @@ impl Controller {
                     && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
                 {
                     let _ = host.place_panels(
-                        mine.iter().map(|(id, rect)| ((*id).clone(), *rect)).collect(),
+                        mine.iter()
+                            .map(|(id, rect)| ((*id).clone(), *rect))
+                            .collect(),
                     );
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);

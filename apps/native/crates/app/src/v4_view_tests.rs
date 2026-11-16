@@ -378,7 +378,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 36);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -410,6 +410,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             }
             "ease-curve" | "ease-thumbnail" => {
                 props["value"] = json!([0.42, 0., 0.58, 1.]);
+            }
+            "point-pad" => {
+                props["value"] = json!([10., -20.]);
+                props["binding"] = json!("x+y");
+                props["metadata"] = json!({"pmKit":{"minX":-100.,"maxX":100.,"minY":-100.,"maxY":100.}});
+            }
+            "gradient-bar" => {
+                props["value"] = json!(40.);
+                props["binding"] = json!("midpoint");
+                props["metadata"] = json!({"pmKit":{"start":"#000000","end":"#ffffff","min":1.,"max":99.}});
             }
             _ => {}
         }
@@ -1301,6 +1311,9 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
     );
     wait(rig.runtime.show("export").unwrap());
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    // The sheet's own window, as the app gives it: its body ends at the
+    // footer (in a wider window its rows run on under it).
+    vcx.simulate_resize(size(px(600.), px(640.)));
     let mut sent: Vec<String> = Vec::new();
     // Publications to the sheet, the host's platform requests answered as
     // the app answers them, until `operation` is asked for.
@@ -1536,7 +1549,12 @@ fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppCon
         start.right() <= sheet.right() && summary.right() <= cancel.left(),
         "notice {summary:?}, buttons {cancel:?} {start:?}, sheet {sheet:?}"
     );
-    assert!(summary.size.height > cancel.size.height, "the notice wraps");
+    // Its symbol leads its first line (it no longer takes a line of its
+    // own): the notice stays inside the footer, level with the buttons.
+    assert!(
+        summary.top() < cancel.bottom() && summary.bottom() <= sheet.bottom(),
+        "notice {summary:?}, buttons {cancel:?}, sheet {sheet:?}"
+    );
 }
 
 /// Full Keyboard Access: Tab reaches kit controls in order; `tabIndex` -1

@@ -6,7 +6,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "query": {"type": "string", "maxLength": 200}
+        "query": {
+          "type": "string",
+          "maxLength": 200
+        }
       }
     }
   },
@@ -16,10 +19,120 @@
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "properties": {
-        "command": {"type": "string", "minLength": 1, "maxLength": 200},
-        "args": {"type": "array", "maxItems": 8}
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 8
+        }
+      }
+    }
+  },
+  {
+    "name": "panel_begin",
+    "description": "Call BEFORE writing any new panel or extension. Read get_panel_layout, choose a sensible dock, beside panel id or tab_in panel id, and tell the user where you placed it. Reserves a visible Light sketch slot immediately. Returns build_id and actual placement (floating is currently a reported right-dock fallback). Keep build_id for panel_build events.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "placement"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "placement": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dock": {
+              "type": "string"
+            },
+            "beside": {
+              "type": "string"
+            },
+            "tab_in": {
+              "type": "string"
+            }
+          }
+        },
+        "size_hint": {
+          "type": "number",
+          "minimum": 120,
+          "maximum": 1200
+        },
+        "planned": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "label"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "panel_build",
+    "description": "Send real authoring progress for a panel_begin build_id: plan a row, commit a control only after its definition/code is committed, ready with the registered panelId after publish_extensions or workspace publication, or cancel/error to fade and close the slot. ready waits for the target first rendered layout before handing off; never report successful completion before publication. For incremental generated panels, publish each control and include its registered panelId on commit so the real control fades through its ink while building continues.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "event"
+      ],
+      "properties": {
+        "build_id": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "commit",
+            "ready",
+            "cancel",
+            "error"
+          ]
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 80
+        }
       }
     }
   }

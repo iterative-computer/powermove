@@ -46,6 +46,28 @@ pub(super) enum GradeDrag {
         live: Curve,
         leaving: bool,
     },
+    /// v1's point pad: the point follows the pointer over the pad.
+    Pad {
+        min: [f64; 2],
+        max: [f64; 2],
+        /// The point as the hand has it now.
+        live: [f64; 2],
+    },
+    /// v1's gradient bar: its midpoint follows the pointer along the bar.
+    Ramp {
+        range: [f64; 2],
+        live: f64,
+    },
+    /// A wheel's master strip: the value where the press began, how far
+    /// the knob travels (points) over its range, and the value now.
+    Master {
+        /// Where on its track the press began (0 to 1).
+        from: f64,
+        travel: f32,
+        range: [f64; 2],
+        neutral: f64,
+        live: f64,
+    },
     /// An easing curve's handle (0 outgoing, 1 incoming) under the pointer.
     Ease {
         graph: ease::Graph,
@@ -102,6 +124,9 @@ fn side(kit: &Kit, width: f32, t: &pm_design::Tokens) -> f32 {
         // A little taller than wide: room above and below the square for
         // handles that overshoot.
         Kit::Ease { .. } => (width * 1.15).clamp(m.curve_editor, m.curve_editor_max),
+        // v1's: the pad two controls tall, the bar one.
+        Kit::Pad { .. } => 2. * m.control,
+        Kit::Ramp { .. } => m.control,
         _ => width.clamp(m.grade_wheel, m.grade_wheel_max),
     }
 }
@@ -114,6 +139,8 @@ impl SurfaceView {
             kit,
             Kit::Wheel { .. }
                 | Kit::Curve { .. }
+                | Kit::Pad { .. }
+                | Kit::Ramp { .. }
                 | Kit::Ease {
                     thumbnail: false,
                     ..
@@ -126,7 +153,16 @@ impl SurfaceView {
             .borrow()
             .get(&id)
             .map_or(0., |b| f32::from(b.size.width));
-        Some(side(kit, width, &self.table.tokens))
+        let t = &self.table.tokens;
+        // A wheel with a master has its strip under the square.
+        let strip = match kit {
+            Kit::Wheel {
+                master_strip: Some(_),
+                ..
+            } => grade::master_height(t) + t.metrics.gap,
+            _ => 0.,
+        };
+        Some(side(kit, width, t) + strip)
     }
 
     /// The drawing of a grading control, showing a drag ahead of the kernel.
@@ -154,6 +190,7 @@ impl SurfaceView {
                     rgb,
                     neutral,
                     master,
+                    master_strip,
                     ..
                 },
                 drag,
@@ -163,14 +200,46 @@ impl SurfaceView {
                     _ => (*rgb, false),
                 };
                 let target = grade::puck(rgb, *neutral);
-                let master = *master;
+                let neutral = *neutral;
+                // The master as the hand has it while its strip is dragged:
+                // the bezel's arc follows it too.
+                let strip = master_strip.as_ref().map(|(value, range, _)| match drag {
+                    Some(GradeDrag::Master { live, .. }) => (*live, *range, true),
+                    _ => (*value, *range, false),
+                });
+                let master = match strip {
+                    Some((value, range, true)) => {
+                        let span = if value >= neutral {
+                            range[1] - neutral
+                        } else {
+                            neutral - range[0]
+                        };
+                        Some(((value - neutral) / span.max(1e-9)).clamp(-1., 1.))
+                    }
+                    _ => *master,
+                };
+                let wheel_look = Look {
+                    active: dragged,
+                    ..look
+                };
                 let motion = self.grade_motion.clone();
                 Box::new(move |b, window, cx| {
+                    let (square, below) = grade::wheel_parts(b, strip.is_some(), &tokens);
                     // Under the pointer the puck is where the hand puts it;
                     // otherwise (a reset, an undo, another wheel's edit) it
                     // settles there on the layout spring, interruptibly.
                     let puck = settle(&motion, id, target, dragged, &tokens, window);
-                    grade::paint_wheel(b, puck, master, look, &tokens, window, cx);
+                    grade::paint_wheel(square, puck, master, wheel_look, &tokens, window, cx);
+                    if let (Some(below), Some((value, range, held))) = (below, strip) {
+                        let d = grade::wheel_diameter(square);
+                        let look = Look {
+                            active: held,
+                            ..look
+                        };
+                        grade::paint_master(
+                            below, d, value, range, neutral, look, &tokens, window, cx,
+                        );
+                    }
                 })
             }
             (Kit::Curve { values, channel }, drag) => {
@@ -187,6 +256,34 @@ impl SurfaceView {
                 Box::new(move |b, window, _| {
                     let g = graph(b, &tokens);
                     grade::paint_curve(g, &curve, channel, held, leaving, look, &tokens, window);
+                })
+            }
+            (Kit::Pad { point, min, max }, drag) => {
+                let (point, min, max) = match drag {
+                    Some(GradeDrag::Pad { live, .. }) => (*live, *min, *max),
+                    _ => (*point, *min, *max),
+                };
+                Box::new(move |b, window, _| {
+                    grade::paint_pad(b, grade::pad_unit(point, min, max), look, &tokens, window)
+                })
+            }
+            (
+                Kit::Ramp {
+                    start,
+                    end,
+                    midpoint,
+                    range,
+                },
+                drag,
+            ) => {
+                let (start, end, range) = (*start, *end, *range);
+                let at = match drag {
+                    Some(GradeDrag::Ramp { live, .. }) => Some(*live),
+                    _ => *midpoint,
+                };
+                let unit = at.map(|m| ramp_unit(m, range));
+                Box::new(move |b, window, _| {
+                    grade::paint_ramp(b, start, end, unit, look, &tokens, window)
                 })
             }
             (
@@ -348,9 +445,54 @@ impl SurfaceView {
         };
         let t = self.table.tokens.clone();
         let kit = node.kit.clone();
+        // A press on a wheel's master strip moves the master.
+        if let Kit::Wheel {
+            neutral,
+            master_strip: Some((value, range, strip_binding)),
+            ..
+        } = &kit
+        {
+            let (square, strip) = grade::wheel_parts(bounds, true, &t);
+            if let Some(strip) = strip.filter(|s| s.contains(&event.position)) {
+                let strip_binding = strip_binding.clone();
+                if event.click_count == 2 {
+                    self.scrub = None;
+                    self.scrub_ops.push_back(ScrubOp::Begin);
+                    self.scrub_ops
+                        .push_back(ScrubOp::Value(strip_binding, json!(neutral)));
+                    self.scrub_ops.push_back(ScrubOp::Finish(true));
+                    self.scrub_pump(cx);
+                    return;
+                }
+                let (from, to, _) = grade::master_layout(strip, grade::wheel_diameter(square), &t);
+                self.scrub = Some(ScrubDrag {
+                    id,
+                    start: event.position,
+                    number: Default::default(),
+                    binding: Some(strip_binding),
+                    active: false,
+                    grade: Some(GradeDrag::Master {
+                        from: grade::master_place(*value, *range, *neutral),
+                        travel: (to - from).max(1.),
+                        range: *range,
+                        neutral: *neutral,
+                        live: *value,
+                    }),
+                });
+                cx.notify();
+                return;
+            }
+        }
         if event.click_count == 2 {
             let neutral = match &kit {
                 Kit::Wheel { neutral, .. } => json!([neutral, neutral, neutral]),
+                // The middle of the pad, of the bar.
+                Kit::Pad { min, max, .. } => json!(grade::pad_point((0.5, 0.5), *min, *max)),
+                Kit::Ramp {
+                    midpoint: Some(_),
+                    range,
+                    ..
+                } => json!(range[0] + (range[1] - range[0]) / 2.),
                 Kit::Curve { values, .. } => json!(
                     Curve {
                         points: vec![(0., 0.), (1., 1.)]
@@ -366,15 +508,57 @@ impl SurfaceView {
             self.scrub_pump(cx);
             return;
         }
+        // A pad's point, a bar's midpoint: where the press is, at once (v1's),
+        // then wherever the pointer goes.
+        let placed = match &kit {
+            Kit::Pad { min, max, .. } => Some(GradeDrag::Pad {
+                min: *min,
+                max: *max,
+                live: grade::pad_point(unit_in(bounds, event.position), *min, *max),
+            }),
+            Kit::Ramp {
+                midpoint: Some(_),
+                range,
+                ..
+            } => Some(GradeDrag::Ramp {
+                range: *range,
+                live: ramp_value(unit_in(bounds, event.position).0, *range),
+            }),
+            _ => None,
+        };
+        if let Some(drag) = placed {
+            let value = match &drag {
+                GradeDrag::Pad { live, .. } => json!(live),
+                GradeDrag::Ramp { live, .. } => json!(live),
+                _ => unreachable!(),
+            };
+            self.scrub_ops.push_back(ScrubOp::Begin);
+            self.scrub_ops.push_back(ScrubOp::Value(binding.clone(), value));
+            self.scrub = Some(ScrubDrag {
+                id,
+                start: event.position,
+                number: Default::default(),
+                binding: Some(binding),
+                active: true,
+                grade: Some(drag),
+            });
+            self.scrub_pump(cx);
+            cx.notify();
+            return;
+        }
         let drag = match kit {
             Kit::Wheel {
                 rgb,
                 neutral,
                 range,
+                ref master_strip,
                 ..
             } => GradeDrag::Wheel {
                 from: grade::puck(rgb, neutral),
-                reach: grade::wheel_reach(grade::wheel_diameter(bounds), &t),
+                reach: grade::wheel_reach(
+                    grade::wheel_diameter(grade::wheel_parts(bounds, master_strip.is_some(), &t).0),
+                    &t,
+                ),
                 keep: rgb,
                 neutral,
                 range,
@@ -568,6 +752,31 @@ impl SurfaceView {
                 *live = next;
                 json!(live.values(rest))
             }
+            Some(GradeDrag::Pad { min, max, live }) => {
+                let Some(bounds) = self.grade_drawn.borrow().get(&drag.id).copied() else {
+                    return;
+                };
+                *live = grade::pad_point(unit_in(bounds, event.position), *min, *max);
+                json!(live)
+            }
+            Some(GradeDrag::Ramp { range, live }) => {
+                let Some(bounds) = self.grade_drawn.borrow().get(&drag.id).copied() else {
+                    return;
+                };
+                *live = ramp_value(unit_in(bounds, event.position).0, *range);
+                json!(live)
+            }
+            Some(GradeDrag::Master {
+                from,
+                travel,
+                range,
+                neutral,
+                live,
+            }) => {
+                let place = *from + (dx / *travel) as f64 * fine;
+                *live = precise(grade::master_value(place, *range, *neutral));
+                json!(*live)
+            }
             Some(GradeDrag::Ease { .. }) | None => return,
         };
         self.scrub_ops.push_back(ScrubOp::Value(binding, value));
@@ -576,6 +785,30 @@ impl SurfaceView {
     }
 }
 
+/// Where `at` stands in `bounds`, 0 to 1 across and down, held to it.
+fn unit_in(bounds: Bounds<Pixels>, at: Point<Pixels>) -> (f64, f64) {
+    let along = |p: Pixels, from: Pixels, span: Pixels| {
+        let span = f32::from(span);
+        if span > 0. {
+            (f32::from(p - from) / span).clamp(0., 1.) as f64
+        } else {
+            0.5
+        }
+    };
+    (
+        along(at.x, bounds.left(), bounds.size.width),
+        along(at.y, bounds.top(), bounds.size.height),
+    )
+}
+/// A midpoint's place along its bar (0 to 1), and the value a place stands
+/// for (rounded to a hundredth, as a field shows it).
+fn ramp_unit(value: f64, range: [f64; 2]) -> f64 {
+    let span = range[1] - range[0];
+    if span > 0. { ((value - range[0]) / span).clamp(0., 1.) } else { 0.5 }
+}
+fn ramp_value(unit: f64, range: [f64; 2]) -> f64 {
+    ((range[0] + unit.clamp(0., 1.) * (range[1] - range[0])) * 100.).round() / 100.
+}
 fn precise(v: f64) -> f64 {
     (v * 1000.).round() / 1000.
 }
@@ -648,6 +881,20 @@ fn place(curve: &Curve, i: usize, x: f64) -> f64 {
     precise(x.clamp(lo.max(0.), hi.min(1.)))
 }
 
+#[cfg(test)]
+mod ramp_tests {
+    use super::{ramp_unit, ramp_value, unit_in};
+    use gpui::{Bounds, point, px, size};
+    #[test]
+    fn a_place_on_the_bar_is_a_midpoint_and_back() {
+        assert_eq!(ramp_value(0.333, [1., 99.]), 33.63);
+        assert_eq!(ramp_unit(50., [0., 100.]), 0.5);
+        assert_eq!(ramp_unit(500., [0., 100.]), 1., "held to the bar");
+        let b = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(40.)));
+        assert_eq!(unit_in(b, point(px(35.), px(30.))), (0.25, 0.25));
+        assert_eq!(unit_in(b, point(px(-50.), px(90.))), (0., 1.), "held to it");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
