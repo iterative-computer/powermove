@@ -499,7 +499,17 @@ fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
         let resized = heights(&layout.geometry(bounds, &t));
         assert_eq!(layout.docks[di].groups[0].size.is_none(), first.is_none(), "resizing preserves fluid sizing");
         let saved = pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
-        assert_eq!(pm_shell::workspace::layout(&saved).docks[di].groups, layout.docks[di].groups, "workspace keeps fixed heights and fluid basis");
+        let restored = pm_shell::workspace::layout(&saved);
+        assert_eq!(restored.docks[di].groups.len(), layout.docks[di].groups.len());
+        for (actual, expected) in restored.docks[di].groups.iter().zip(&layout.docks[di].groups) {
+            let mut expected = expected.clone();
+            if let Some(basis) = expected.flex_basis {
+                assert!((actual.flex_basis.unwrap() - basis).abs() <= 0.05, "saved basis keeps workspace precision");
+                expected.flex_basis = actual.flex_basis;
+            }
+            assert_eq!(actual, &expected, "workspace keeps fixed heights and fluid sizing");
+        }
+        assert_eq!(pm_shell::workspace::write(&restored, &saved), saved);
         if first.is_none() {
             let larger = layout.geometry(Rect { h: 1400., ..bounds }, &t);
             assert!(heights(&larger)[0].h > resized[0].h, "fluid panel still fills a taller window");
