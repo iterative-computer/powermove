@@ -3325,3 +3325,30 @@ fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
     let tip = tip.expect("a tooltip over the marker");
     assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
 }
+
+/// The ruler menu's "Switch to Track Timeline" and the Layers | Tracks
+/// control drive one state: the published view (the header's control and the
+/// layer column draw from it) follows the menu both ways.
+#[gpui::test]
+fn the_ruler_menus_mode_switch_reaches_the_published_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mode = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .timeline
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .map(str::to_owned)
+    };
+    for (action, want) in [("mode.tracks", "tracks"), ("mode.layers", "layers")] {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.choose_menu(
+                pm_panel_timeline::Context::Ruler { time: 0. },
+                action,
+                cx,
+            )
+        });
+        s.idle(cx);
+        assert_eq!(mode(&s).as_deref(), Some(want), "{action}");
+    }
+}

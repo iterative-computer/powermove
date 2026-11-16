@@ -582,7 +582,13 @@ pub async fn dispatch(
         _ => return Err(Error::InvalidIntent("action")),
     };
     let effects = client.dispatch(plan).await?;
-    if persist && let Err(error) = client.publish_view().await {
+    // Whatever changed the view (a key toggling the mode too) publishes it.
+    let published = if persist {
+        client.publish_view().await
+    } else {
+        client.publish_view_if_changed().await
+    };
+    if let Err(error) = published {
         if let Some(published) = client.kernel.published(&client.project) {
             client.model.restore_ui(&published.ui_state);
         }

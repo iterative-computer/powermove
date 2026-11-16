@@ -3533,7 +3533,7 @@ impl SurfaceView {
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let root = self
             .publication
             .surface
@@ -3543,7 +3543,9 @@ impl SurfaceView {
             && self.prepared.has_keydown
         {
             self.key_down(root, event, window, cx);
+            return true;
         }
+        false
     }
     fn key_down(
         &mut self,

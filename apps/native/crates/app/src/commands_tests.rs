@@ -466,6 +466,13 @@ fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
     );
     assert!(disabled(None, &[], &Clipboard::Empty).contains("projectSettings"));
 }
+/// Over Home there is nothing to export: File ▸ Export and its keys are off
+/// (v1's dimmed row), and they come back while a project opens (PM-472).
+#[test]
+fn export_is_off_without_a_project() {
+    assert!(disabled(None, &[], &Clipboard::Empty).contains("export"));
+    assert!(crate::layer_commands::waits_for_project("export"));
+}
 fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
     let p = published(&s.rig.kernel);
     let root = p.snapshot.root().unwrap();
