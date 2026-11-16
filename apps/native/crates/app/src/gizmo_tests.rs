@@ -472,6 +472,51 @@ fn the_rotate_handle_turns_about_the_anchor_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(s.pose().rotation, before.rotation);
 }
+/// While the rotate handle is held the box is already turned with the layer
+/// (it does not wait for the kernel's read-back), and it is the box the
+/// layer has once released, under a parent scaled 200 % × 100 % too.
+#[gpui::test]
+fn a_held_turn_draws_the_box_turned_as_it_will_be(cx: &mut TestAppContext) {
+    let parented = project()
+        .replacen(r#""id":"l0","#, r#""id":"l0","parent":"pa","#, 1)
+        .replace(
+            r#""layers":["#,
+            r#""layers":[{"id":"pa","type":"null","name":"Parent","from":0,"dur":2,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"scale.x":{"v":200,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},"#,
+        );
+    for json in [project(), parented] {
+        let mut s = stage_on(cx, &json);
+        let (.., rotate) = s.points();
+        let from = s.point_of(rotate);
+        let by = point(px(60.), px(20.));
+        s.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        for step in 1..=3 {
+            let at = from + point(by.x * (step as f32 / 3.), by.y * (step as f32 / 3.));
+            s.vcx
+                .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+            let surface = s.surface.clone();
+            settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+        }
+        let held = s.pose();
+        let [a, b, ..] = held.corners;
+        assert!((a[1] - b[1]).abs() > 1., "the held box is level: {held:?}");
+        s.vcx
+            .simulate_mouse_up(from + by, MouseButton::Left, Modifiers::none());
+        let surface = s.surface.clone();
+        settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+        s.refresh(cx);
+        let released = s.pose();
+        assert_eq!(held.rotation, released.rotation);
+        for (h, r) in held.corners.iter().zip(released.corners.iter()) {
+            assert!(
+                (h[0] - r[0]).abs() < 1e-6 && (h[1] - r[1]).abs() < 1e-6,
+                "held {:?} released {:?}",
+                held.corners,
+                released.corners
+            );
+        }
+    }
+}
 #[gpui::test]
 fn the_anchor_tool_moves_the_anchor_and_keeps_the_picture(cx: &mut TestAppContext) {
     let mut s = stage(cx);
