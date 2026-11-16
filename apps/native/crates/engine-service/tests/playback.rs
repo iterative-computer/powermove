@@ -1209,3 +1209,51 @@ fn a_dragged_edit_shows_frames_while_the_drag_goes_on() {
             .is_some_and(|f| f.stamp.revision == revision && f.moment == Moment::Paused)
     });
 }
+
+/// Twelve projects open as tabs (PM-453): every one gets a viewer, the
+/// number of open projects is limited only by memory. Tabs behind the front
+/// one draw nothing; a tab brought to the front draws at once.
+#[test]
+fn twelve_projects_each_get_a_viewer_and_only_shown_ones_draw() {
+    let service = service("twelve-projects");
+    let viewers: Vec<Viewer> = (0..12u64)
+        .map(|i| {
+            let mut s = snapshot(&format!(
+                r##"{{"id":"P{i}","name":"P{i}","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+                "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+                shape("top", "#FF0000", 320.)
+            ));
+            s.doc_id = 1000 + i;
+            service
+                .viewer(config(s, MediaCatalog::default(), output(160, 90)))
+                .unwrap_or_else(|e| panic!("project {i}: {e}"))
+        })
+        .collect();
+    for (i, v) in viewers.iter().enumerate() {
+        v.set_shown(i == 11).unwrap();
+    }
+    let drawn = |v: &Viewer, why: &str| {
+        v.capture_next().unwrap();
+        let stamp = v.stamp().unwrap();
+        wait(v, why, |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+        })
+    };
+    assert_eq!(drawn(&viewers[11], "the front tab").error, None);
+    // A tab behind it is asked for a picture and draws none.
+    viewers[3].capture_next().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        viewers[3].status().frame.is_none_or(|f| f.pixels.is_none()),
+        "a hidden tab drew"
+    );
+    // Selected, it draws; the one it replaces in front stops.
+    viewers[3].set_shown(true).unwrap();
+    viewers[11].set_shown(false).unwrap();
+    assert_eq!(
+        drawn(&viewers[3], "the tab brought to the front").error,
+        None
+    );
+}

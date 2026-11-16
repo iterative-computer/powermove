@@ -677,6 +677,21 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         })
         .detach();
     });
+    // A project's viewer draws only while its window can be seen: a tab
+    // behind another gives its drawing (and, idle, its memory) up and takes
+    // it back when selected, so any number of tabs can be open.
+    let watched = entity.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            if watched.update(cx, |v, _| v.follow_shown()).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
     let weak = entity.downgrade();
     window.on_window_should_close(cx, move |_, cx| {
         let _ = weak.update(cx, |v, cx| v.request_close(Intent::Window, cx));

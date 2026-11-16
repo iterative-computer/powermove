@@ -586,6 +586,9 @@ struct View {
     stamp: Stamp,
     content: u64,
     dirty: bool,
+    /// Nobody can see it (its window is a tab behind another): it draws
+    /// nothing, and its idle memory goes as any idle viewer's.
+    hidden: bool,
     capture: bool,
     /// A capture taken into a frame whose pixels haven't landed yet; a
     /// restarted worker asks for it again.
@@ -1109,6 +1112,18 @@ impl Viewer {
     /// Auto draws this viewer's dragged frames at reduced resolution while
     /// the project is slower than a refresh, and the frame exact once the
     /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    /// Whether the person can see this viewer. A hidden one (its window a
+    /// tab behind another) draws nothing until it is shown again, when it
+    /// draws its picture at once; its transport and edits carry on.
+    pub fn set_shown(&self, shown: bool) -> Result<()> {
+        self.edit(|v| {
+            if v.hidden == shown {
+                v.hidden = !shown;
+                v.dirty |= shown;
+            }
+            Ok(())
+        })
+    }
     pub fn adapt_drags(&self, on: bool) -> Result<()> {
         self.edit(|v| {
             v.adapt_drags = on;
@@ -1735,11 +1750,9 @@ impl EngineService {
             );
         }
         let mut state = self.shared.state.lock().unwrap();
+        // As many viewers as there are open projects: a viewer nobody can
+        // see draws nothing and keeps no memory while idle.
         let replaced = replaces.filter(|id| state.views.contains_key(id));
-        ensure!(
-            state.views.len() - usize::from(replaced.is_some()) < 8,
-            "at most eight concurrent viewers"
-        );
         state.next += 1;
         state.content += 1;
         let id = state.next;
@@ -1763,6 +1776,7 @@ impl EngineService {
                 stamp,
                 content,
                 dirty: true,
+                hidden: false,
                 capture: false,
                 capture_owed: false,
                 looping: None,
@@ -3156,6 +3170,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A late/repeated link tick must never rewind a submitted target.
                 r.next = r.next.max(phase);
             }
+            if v.hidden {
+                continue;
+            }
             let due = if r.transport.clock.is_playing() {
                 let mut due = r.next;
                 if due < now {
@@ -3457,7 +3474,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // command to take, a play about to start.
         let wanted = work.is_some()
             || state.views.iter().any(|(id, v)| {
-                (v.dirty && runtime.get(id).is_none_or(|r| r.not_before <= now))
+                (v.dirty && !v.hidden && runtime.get(id).is_none_or(|r| r.not_before <= now))
                     || !v.commands.is_empty()
             })
             || runtime

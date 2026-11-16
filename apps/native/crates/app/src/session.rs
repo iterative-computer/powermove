@@ -46,6 +46,8 @@ pub struct Controller {
     pub published: Option<Arc<Published>>,
     pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
+    /// The viewer last told whether its window can be seen, and what.
+    viewer_shown: Option<(u64, bool)>,
     pub media: MediaCatalog,
     pub(crate) linked_sync: crate::linked_sync::Sync,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
@@ -952,6 +954,7 @@ impl Controller {
             published: None,
             mirror: None,
             viewer: None,
+            viewer_shown: None,
             media: MediaCatalog::default(),
             linked_sync: Default::default(),
             media_refresh: Default::default(),
@@ -2812,6 +2815,19 @@ impl Controller {
             self.seek(time);
         }
         self.mcp.bind_window(self.window_key, self.session.clone());
+    }
+    /// Tells the viewer whether its window can be seen: a tab behind
+    /// another (or a minimized window) draws nothing until it is shown.
+    pub(crate) fn follow_shown(&mut self) {
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let window = &self.host.borrow().window;
+        let shown = window.isVisible() && !window.isMiniaturized();
+        let now = (viewer.identity(), shown);
+        if self.viewer_shown != Some(now) && viewer.set_shown(shown).is_ok() {
+            self.viewer_shown = Some(now);
+        }
     }
     fn bind_composition(&mut self) {
         // The viewer before this one changes places with the next in one
