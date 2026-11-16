@@ -1343,6 +1343,9 @@ pub struct Settled {
     pub undecided: Vec<Leftover>,
     /// Private files no record names: never touched.
     pub unrecorded: Vec<PathBuf>,
+    /// Staged files no record names, removed: what a save cut short while
+    /// writing its staged file left.
+    pub cleared: Vec<PathBuf>,
     /// The folder could not be synced after recovery's moves: they may not
     /// survive a power cut. Whoever acts on the result says so.
     pub unsynced: Option<String>,
@@ -1433,11 +1436,23 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
         settled.left = left;
         settled.undecided.extend(undecided);
     }
-    settled.unrecorded = private_files(destination)
-        .into_iter()
-        .filter(|(path, _)| !named.contains(path) && fs::metadata(path).is_ok_and(|m| m.len() > 0))
-        .map(|(path, _)| path)
-        .collect();
+    for (path, extension) in private_files(destination) {
+        if named.contains(&path) || !fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+            continue;
+        }
+        // A staged file no record names is a save cut short while it was
+        // still writing it (a save records itself before it moves
+        // anything): the project is as it was, and the file is only the
+        // space it takes (a signal quit mid-save left 219 MB). It goes; any
+        // other private file no record names is left as it is.
+        // A record beside it, even one that cannot be read, is its save's.
+        let recorded = fs::symlink_metadata(path.with_extension(RECORD)).is_ok();
+        if extension == STAGED && !recorded && fs::remove_file(&path).is_ok() {
+            settled.cleared.push(path);
+        } else {
+            settled.unrecorded.push(path);
+        }
+    }
     if !records.is_empty()
         && let Err(e) = folder_sync(destination.parent().unwrap_or(Path::new(".")), host.hooks)
     {
@@ -2049,6 +2064,48 @@ fn use_leftover_now(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A staged file no record names (a save cut short while it was still
+    /// writing it) goes at the next settle, and only that: an empty one, a
+    /// name that is not a save's, another private kind, or one beside
+    /// another project stay.
+    #[test]
+    fn an_unrecorded_staged_file_goes_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("pm-cleared-{}", crate::new_id("t")));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("cut.pmv");
+        fs::write(&file, b"project").unwrap();
+        let named = |stem: &str, uuid: &str, extension: &str| dir.join(format!(".{stem}.{uuid}.{extension}"));
+        let uuid = crate::project_io::durable::random_uuid();
+        let staged = named("cut.pmv", &uuid, STAGED);
+        fs::write(&staged, vec![7u8; 4096]).unwrap();
+        let empty = named("cut.pmv", &crate::project_io::durable::random_uuid(), STAGED);
+        fs::write(&empty, b"").unwrap();
+        let aside = named("cut.pmv", &crate::project_io::durable::random_uuid(), ASIDE);
+        fs::write(&aside, b"previous").unwrap();
+        let other = named("other.pmv", &crate::project_io::durable::random_uuid(), STAGED);
+        fs::write(&other, b"another project's").unwrap();
+        let not_ours = dir.join(".cut.pmv.not-a-uuid.tmp");
+        fs::write(&not_ours, b"someone else's").unwrap();
+        // One whose record is there but cannot be read stays with it.
+        let unread = named("cut.pmv", &crate::project_io::durable::random_uuid(), STAGED);
+        fs::write(&unread, b"recorded").unwrap();
+        fs::write(unread.with_extension(RECORD), b"not a record").unwrap();
+        let hooks = PublishHooks::default();
+        let host = Host { hooks: &hooks, coordinator: None, profile: None, backups: None, backup: None, unconfirmed: None };
+        let settled = settle(&file, &host);
+        assert_eq!(settled.cleared, [staged.clone()]);
+        assert!(!staged.exists());
+        let mut unrecorded = settled.unrecorded.clone();
+        unrecorded.sort();
+        let mut expected = vec![aside.clone(), unread.clone()];
+        expected.sort();
+        assert_eq!(unrecorded, expected);
+        for kept in [&file, &empty, &aside, &other, &not_ours, &unread] {
+            assert!(kept.exists(), "{} stays", kept.display());
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_record_is_read_up_to_its_first_torn_line() {
