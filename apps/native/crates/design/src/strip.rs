@@ -203,15 +203,18 @@ impl Tokens {
         // its descenders (`LABEL_FOOT` of the way down).
         let under = |bottom: u32| mix(deep, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
-        let body = (0..=16)
+        // Names are a pale tint of the hue, not white (the reference): the
+        // foot is as luminous as lets that tint hold its contrast.
+        let name = oklch(0.94, chroma * 0.45, hue);
+        let body = (0..=20)
             .map(|step| oklch(0.6 + lift - step as f32 * 0.01, chroma * 0.9, hue))
-            .find(|bottom| crate::color::contrast(0xffffff, landed(under(*bottom))) >= 4.7)
-            .unwrap_or_else(|| oklch(0.44 + lift, chroma * 0.9, hue));
+            .find(|bottom| crate::color::contrast(name, landed(under(*bottom))) >= 4.7)
+            .unwrap_or_else(|| oklch(0.4 + lift, chroma * 0.9, hue));
         let under_label = under(body);
-        let foreground = (0..=14)
-            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.7, hue))
+        let foreground = (0..=8)
+            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.6, hue))
             .find(|label| crate::color::contrast(*label, landed(under_label)) >= 4.6)
-            .unwrap_or(0xffffff);
+            .unwrap_or(name);
         // The rim's light is the palest tint of the hue; under the pointer
         // it brightens toward white, selected it is white.
         let tint = oklch(0.9, chroma * 0.55, hue);
@@ -235,7 +238,7 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
-            grid: (tint, if disabled { 0.1 } else { 0.3 }),
+            grid: (tint, if disabled { 0.12 } else { 0.4 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.45, 6., 16.)
             } else {
