@@ -55,8 +55,7 @@ export interface SurfaceProps {
     | "pulldown"
     | "band"
     | "code"
-    | "plate"
-    | "glass";
+    | "plate";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
   /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports
