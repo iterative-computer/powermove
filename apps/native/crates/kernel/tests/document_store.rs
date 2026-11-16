@@ -874,3 +874,40 @@ fn evaluate_property_preserves_stop_collections_and_composition_context() {
         Some(5.)
     );
 }
+
+#[test]
+fn coedit_segmented_squash_preserves_interleaved_user_steps_and_redo() {
+    let mut s = store();
+    let mark = s.history_mark();
+    let mut owned = std::collections::HashSet::new();
+    for value in [80., 70.] {
+        s.execute(opacity("s1", value), Origin::Agent).unwrap();
+        owned.insert(s.history().peek_undo().unwrap().id);
+    }
+    s.execute(
+        Command::SetLayerName {
+            layer_id: "s1".into(),
+            name: "Mine".into(),
+        },
+        Origin::Interface,
+    )
+    .unwrap();
+    let user = s.history().peek_undo().unwrap().id;
+    for value in [60., 50.] {
+        s.execute(opacity("s1", value), Origin::Agent).unwrap();
+        owned.insert(s.history().peek_undo().unwrap().id);
+    }
+    let ids = s.squash_segments(&mark, &owned, "Agent · Animate").unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        s.history().labels(),
+        ["Agent · Animate", "Rename Layer", "Agent · Animate (cont.)"]
+    );
+    assert_eq!(s.history().records()[1].id, user);
+    s.undo().unwrap();
+    assert_eq!(opacity_of(&s, "s1"), Some(70.));
+    assert_eq!(name(&s, "s1"), "Mine");
+    s.redo().unwrap();
+    assert_eq!(opacity_of(&s, "s1"), Some(50.));
+    assert_eq!(name(&s, "s1"), "Mine");
+}

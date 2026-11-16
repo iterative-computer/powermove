@@ -556,6 +556,11 @@ define_class!(
     struct Target;
 
     impl Target {
+        #[unsafe(method(coedit:))]
+        fn coedit(&self, sender: &NSButton) {
+            let name=match sender.tag() {1=>"agent.undoTurn",2=>"agent.pause",3=>"agent.stop",_=>"agent.steer"};
+            self.send(Command{name:name.into(),args:vec![],token:None});
+        }
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
@@ -1214,6 +1219,33 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind=MainThreadOnly]
+    #[name="PMCoeditPresence"]
+    struct CoeditPresence;
+    impl CoeditPresence {
+        #[unsafe(method(updateTrackingAreas))]
+        fn tracking(&self) {
+            for area in self.trackingAreas().to_vec() {self.removeTrackingArea(&area);}
+            let area=unsafe {NSTrackingArea::initWithRect_options_owner_userInfo(
+                <NSTrackingArea as objc2::AllocAnyThread>::alloc(),self.bounds(),
+                NSTrackingAreaOptions::MouseEnteredAndExited|NSTrackingAreaOptions::ActiveAlways|NSTrackingAreaOptions::InVisibleRect,
+                Some(self),None)};
+            self.addTrackingArea(&area);
+        }
+        #[unsafe(method(mouseEntered:))]
+        fn entered(&self,_:&NSEvent) {
+            let buttons=self.subviews().to_vec();
+            let done=buttons.first().and_then(|v|v.downcast_ref::<NSButton>()).is_some_and(|b|b.tag()==1);
+            if !done {for button in buttons.iter().skip(1) {button.setHidden(false);}}
+        }
+        #[unsafe(method(mouseExited:))]
+        fn exited(&self,_:&NSEvent) {
+            for button in self.subviews().to_vec().iter().skip(1) {button.setHidden(true);}
+        }
+    }
+);
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -2227,7 +2259,9 @@ define_class!(
         }
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
-            toolbar_ids()
+            let mut ids = toolbar_ids().to_vec();
+            ids.push(NSString::from_str("agentPresence"));
+            NSArray::from_retained_slice(&ids)
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
@@ -2389,6 +2423,51 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
         }
+        if name == "agentPresence" {
+            let view: Retained<CoeditPresence> = unsafe {
+                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
+            };
+            let view: Retained<NSView> = Retained::into_super(view);
+            view.setWantsLayer(true);
+            if let Some(layer) = view.layer() {
+                layer.setCornerRadius(t.metrics.capsule_radius as f64);
+                layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
+            }
+            for (tag, title, x, width) in [
+                (0, "Agent working", 4., 194.),
+                (2, "Ⅱ", 200., 22.),
+                (3, "■", 224., 22.),
+            ] {
+                let button = unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        &NSString::from_str(title),
+                        Some(target),
+                        Some(sel!(coedit:)),
+                        mtm,
+                    )
+                };
+                button.setTag(tag);
+                if tag != 0 {
+                    button.setHidden(true);
+                    button.setToolTip(Some(&NSString::from_str(if tag == 2 {
+                        "Pause or Resume Agent"
+                    } else {
+                        "Stop Agent"
+                    })));
+                    button.setAccessibilityLabel(Some(&NSString::from_str(if tag == 2 {
+                        "Pause or Resume Agent"
+                    } else {
+                        "Stop Agent"
+                    })));
+                }
+                button.setBordered(false);
+                button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, 24.)));
+                view.addSubview(&button);
+            }
+            item.setView(Some(&view));
+            item.setLabel(&NSString::from_str("Agent presence"));
+            return Some(item);
+        }
         if name == "add" {
             let item = objc2_app_kit::NSMenuToolbarItem::initWithItemIdentifier(
                 objc2_app_kit::NSMenuToolbarItem::alloc(mtm),
@@ -2475,6 +2554,353 @@ impl Host {
             return;
         };
         button.publish(snapshot, self.tokens.clone());
+    }
+}
+/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
+/// idle, working (an accent ring turns around the glyph) or needing an
+/// answer (an accent dot; it wins over the ring), with background runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentStatus {
+    pub working: bool,
+    pub attention: bool,
+    /// `m:ss` of the run in view, for the tooltip.
+    pub elapsed: Option<String>,
+    pub background: usize,
+    pub progress: Option<String>,
+    pub paused: bool,
+    pub held: bool,
+}
+impl AgentStatus {
+    pub fn tooltip(&self) -> String {
+        if self.attention {
+            "Agent needs your answer".into()
+        } else if self.working {
+            match &self.elapsed {
+                Some(e) => format!("Agent is working · {e}"),
+                None => "Agent is working".into(),
+            }
+        } else {
+            "Ask the Agent".into()
+        }
+    }
+}
+/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
+/// quarter ring at `turn` (working), or with a dot at its top trailing
+/// corner (attention). Idle is the plain template symbol.
+fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
+    let glyph = toolbar_symbol("sparkles", "Agent", t);
+    if !status.working && !status.attention {
+        return glyph;
+    }
+    let size = t.metrics.symbol_toolbar as f64 + 8.;
+    let accent = t.colors.accent;
+    let (working, attention) = (status.working && !status.attention, status.attention);
+    let dot = t.metrics.status_dot as f64;
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let inner = glyph.size();
+        let at = NSRect::new(
+            NSPoint::new(
+                (rect.size.width - inner.width) / 2.,
+                (rect.size.height - inner.height) / 2.,
+            ),
+            inner,
+        );
+        glyph.drawInRect(at);
+        // The glyph in accent ink.
+        native_color(accent).set();
+        NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
+        if working {
+            let path = NSBezierPath::bezierPath();
+            let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
+            let start = 90. - turn * 360.;
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                centre,
+                rect.size.width / 2. - 1.,
+                start,
+                start - 270.,
+                true,
+            );
+            path.setLineWidth(1.5);
+            native_color(accent).setStroke();
+            path.stroke();
+        }
+        if attention {
+            let r = NSRect::new(
+                NSPoint::new(rect.size.width - dot, rect.size.height - dot),
+                NSSize::new(dot, dot),
+            );
+            native_color(accent).setFill();
+            NSBezierPath::bezierPathWithOvalInRect(r).fill();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
+    image.setAccessibilityDescription(Some(&NSString::from_str("Agent")));
+    image
+}
+fn agent_window_title(project: &str, running: bool) -> String {
+    if running {
+        format!("● {project}")
+    } else {
+        project.to_owned()
+    }
+}
+fn title_agent_dot(t: &Tokens) -> Retained<NSImage> {
+    let palette = t.sketch();
+    let light = t.scheme == Scheme::Light;
+    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
+        let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(2., 2.),
+            NSSize::new(4., 4.),
+        ));
+        native_color(palette.core).setFill();
+        path.fill();
+        if light {
+            native_color(palette.ink).setStroke();
+            path.setLineWidth(1.);
+            path.stroke();
+        }
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(8., 8.), false, &draw)
+}
+#[cfg(test)]
+mod coedit_window_presence_tests {
+    use super::agent_window_title;
+    #[test]
+    fn window_menu_presence_is_static_and_preserves_the_project_name() {
+        assert_eq!(agent_window_title("Lettering", true), "● Lettering");
+        assert_eq!(agent_window_title("Lettering", false), "Lettering");
+    }
+}
+fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSImage> {
+    let palette = t.sketch();
+    let paused = status.paused;
+    let reduced = t.accessibility.reduce_motion;
+    let muted = t.colors.muted;
+    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
+        let breath = if reduced || paused {
+            0.5
+        } else {
+            0.5 + 0.5 * (phase * std::f64::consts::TAU * 0.5).sin()
+        };
+        if !reduced && !paused {
+            native_color(palette.halo)
+                .colorWithAlphaComponent(0.16 + 0.10 * breath)
+                .setFill();
+            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(0., 0.),
+                NSSize::new(14., 14.),
+            ))
+            .fill();
+        }
+        let radius = if reduced || paused {
+            1.5
+        } else {
+            2.2 + 0.6 * (breath - 0.5)
+        };
+        native_color(if paused { muted } else { palette.core }).setFill();
+        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(7. - radius, 7. - radius),
+            NSSize::new(radius * 2., radius * 2.),
+        ))
+        .fill();
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(14., 14.), false, &draw)
+}
+impl Host {
+    pub fn agent_effect_frames(&self) -> u64 {
+        self.agent_effect_frames.get()
+    }
+    fn set_agent_presence(&mut self, status: &AgentStatus) {
+        let was_working = self.agent_status.working;
+        let existing = self
+            ._toolbar
+            .items()
+            .iter()
+            .position(|i| i.itemIdentifier().to_string() == "agentPresence");
+        if status.working && existing.is_none() {
+            let index = self
+                ._toolbar
+                .items()
+                .iter()
+                .position(|i| i.itemIdentifier().to_string() == "agent")
+                .unwrap_or(0);
+            self._toolbar
+                .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index as isize);
+        }
+        if status.working && !was_working {
+            self.agent_presence_generation
+                .set(self.agent_presence_generation.get() + 1);
+        }
+        let Some(item) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
+        else {
+            return;
+        };
+        if let Some(view) = item.view() {
+            let buttons = view.subviews().to_vec();
+            if let Some(button) = buttons.first() {
+                let text = if !status.working {
+                    "Done · Undo".to_owned()
+                } else if status.paused {
+                    "Paused · ⇧⌘. to resume".to_owned()
+                } else if status.held {
+                    "Waiting for you to finish".to_owned()
+                } else {
+                    format!(
+                        "• {}",
+                        status.progress.as_deref().unwrap_or("Agent working")
+                    )
+                };
+                let text: String = text.chars().take(38).collect();
+                let old: Retained<NSString> = unsafe { msg_send![&**button, title] };
+                if old.to_string() != text {
+                    let _: () =
+                        unsafe { msg_send![&**button,setTitle:&*NSString::from_str(&text)] };
+                }
+                let _: () =
+                    unsafe { msg_send![&**button,setTag:if status.working {0isize}else{1isize}] };
+            }
+            if !status.working {
+                for button in buttons.iter().skip(1) {
+                    button.setHidden(true);
+                }
+            }
+        }
+        if !status.working && was_working {
+            let toolbar = self._toolbar.clone();
+            let generation = self.agent_presence_generation.clone();
+            let version = generation.get();
+            let step =
+                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    if generation.get() != version {
+                        return;
+                    }
+                    if let Some(index) = toolbar
+                        .items()
+                        .iter()
+                        .position(|i| i.itemIdentifier().to_string() == "agentPresence")
+                    {
+                        toolbar.removeItemAtIndex(index as isize);
+                    }
+                });
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
+            };
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            }
+        }
+    }
+
+    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
+    /// turning ring while working, still under Reduce Motion; a dot when it
+    /// needs an answer) and its tooltip.
+    pub fn set_agent_status(&mut self, status: AgentStatus) {
+        if status == self.agent_status {
+            return;
+        }
+        if status.working != self.agent_status.working {
+            let title = self.document.borrow().0.clone();
+            self.window
+                .setTitle(&NSString::from_str(&agent_window_title(
+                    &title,
+                    status.working,
+                )));
+            self.sync_tabs();
+        }
+        self.set_agent_presence(&status);
+
+        let Some(item) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "agent")
+        else {
+            return;
+        };
+        let tokens = self.tokens.clone();
+        let presence = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
+            .and_then(|i| i.view())
+            .and_then(|v| v.subviews().to_vec().into_iter().next())
+            .and_then(|v| v.downcast::<NSButton>().ok());
+        if status.progress != self.agent_status.progress {
+            if let Some(timer) = self.agent_timer.take() {
+                timer.invalidate();
+            }
+        }
+        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
+        let visual_changed = status.working != self.agent_status.working
+            || status.attention != self.agent_status.attention
+            || status.paused != self.agent_status.paused
+            || status.held != self.agent_status.held;
+        let turning = status.working
+            && !status.attention
+            && !status.paused
+            && !status.held
+            && !tokens.accessibility.reduce_motion;
+        if !turning {
+            if let Some(timer) = self.agent_timer.take() {
+                timer.invalidate();
+            }
+            if visual_changed {
+                item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
+                if let Some(button) = &presence {
+                    button.setImage(Some(&presence_light(&status, 0., &tokens)));
+                }
+            }
+        } else if self.agent_timer.is_none() {
+            let started = std::time::Instant::now();
+            let shown = status.clone();
+            let item = item.clone();
+            let frame_count = self.agent_effect_frames.clone();
+            let step =
+                block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    frame_count.set(frame_count.get() + 1);
+                    let elapsed = started.elapsed().as_secs_f64();
+                    if elapsed >= 12. {
+                        item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
+                        if let Some(button) = &presence {
+                            button.setImage(Some(&presence_light(&shown, 0., &tokens)));
+                        }
+                        // Keep the invalidated timer in agent_timer until the
+                        // run ends: elapsed text updates must not restart it.
+                        unsafe {
+                            timer.as_ref().invalidate();
+                        }
+                        return;
+                    }
+                    let turn = elapsed % 1.;
+                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
+                    if let Some(button) = &presence {
+                        button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
+                    }
+                });
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+                    1. / 20.,
+                    true,
+                    &step,
+                )
+            };
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            }
+            self.agent_timer = Some(timer);
+        }
+        self.agent_status = status;
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -2600,6 +3026,12 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
+    /// What the toolbar's Agent item shows, and the timer that turns its
+    /// working ring.
+    agent_status: AgentStatus,
+    agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
+    agent_presence_generation: Rc<Cell<u64>>,
+    agent_effect_frames: Rc<Cell<u64>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2803,6 +3235,10 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
+            agent_status: AgentStatus::default(),
+            agent_timer: None,
+            agent_presence_generation: Rc::new(Cell::new(0)),
+            agent_effect_frames: Rc::new(Cell::new(0)),
             _delegate: delegate,
             _target: target,
             observer: None,
@@ -3484,7 +3920,11 @@ impl Host {
                 }
             }
         }
-        self.window.setTitle(&NSString::from_str(title));
+        self.window
+            .setTitle(&NSString::from_str(&agent_window_title(
+                title,
+                self.agent_status.working,
+            )));
         self.window.setDocumentEdited(edited);
         self.window.setSubtitle(&NSString::from_str(subtitle));
         let url = path.map(|p| {
@@ -4037,6 +4477,9 @@ impl Host {
         holder(0., height).addSubview(&self._delegate.ivars().home);
         let mut x = height + TAB_GAP;
         if let Some((name, sub, menu)) = title {
+            let agent = name.starts_with("● ");
+            let name = name.strip_prefix("● ").unwrap_or(&name).to_owned();
+            let dot_room = if agent { 10. } else { 0. };
             // A label keeps `LABEL_PAD` clear inside each end of its frame.
             const LABEL_PAD: f64 = 2.;
             const CHEVRON: f64 = 9.;
@@ -4064,12 +4507,13 @@ impl Host {
                 .as_ref()
                 .map_or(NSSize::new(0., 0.), |l| l.fittingSize());
             let chevron_room = if menu { CHEVRON + TAB_DOT_GAP } else { 0. };
-            let text = name_size.width.max(sub_size.width) - 2. * LABEL_PAD;
+            let text = name_size.width.max(sub_size.width) - 2. * LABEL_PAD + dot_room;
             // The name truncates before it would reach the tools.
             let width = (TAB_PAD + text + chevron_room + TAB_PAD)
                 .ceil()
                 .min(room.max(TAB_MIN));
-            let text_room = (width - 2. * TAB_PAD - chevron_room + 2. * LABEL_PAD).max(0.);
+            let text_room =
+                (width - 2. * TAB_PAD - chevron_room + 2. * LABEL_PAD - dot_room).max(0.);
             // One line centred; two lines (name, state) share the height.
             let lines = name_size.height + sub_size.height;
             let top = ((height - lines) / 2.).floor();
@@ -4082,7 +4526,7 @@ impl Host {
                 }
             };
             name_label.setFrame(NSRect::new(
-                NSPoint::new(TAB_PAD - LABEL_PAD, at(top, name_size.height)),
+                NSPoint::new(TAB_PAD - LABEL_PAD + dot_room, at(top, name_size.height)),
                 NSSize::new(text_room.min(name_size.width), name_size.height),
             ));
             let cell = NSView::initWithFrame(
@@ -4090,10 +4534,19 @@ impl Host {
                 NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
             );
             cell.addSubview(&name_label);
+            if agent {
+                let dot = NSImageView::imageViewWithImage(&title_agent_dot(t), mtm);
+                dot.setFrame(NSRect::new(
+                    NSPoint::new(TAB_PAD - 2., at(top + (name_size.height - 8.) / 2., 8.)),
+                    NSSize::new(8., 8.),
+                ));
+                dot.setAccessibilityLabel(Some(&NSString::from_str("Agent running")));
+                cell.addSubview(&dot);
+            }
             if let Some(label) = &sub_label {
                 label.setFrame(NSRect::new(
                     NSPoint::new(
-                        TAB_PAD - LABEL_PAD,
+                        TAB_PAD - LABEL_PAD + dot_room,
                         at(top + name_size.height, sub_size.height),
                     ),
                     NSSize::new(text_room.min(sub_size.width), sub_size.height),
@@ -6912,7 +7365,9 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
-            if self.anchor.is_none() { save_palette_recent(&mut self.model.recents, &name); }
+            if self.anchor.is_none() {
+                save_palette_recent(&mut self.model.recents, &name);
+            }
             let (command, args) = menu::split_palette_command(&name);
             let _ = self.sender.try_send(Command {
                 name: command.to_owned(),
@@ -7895,7 +8350,11 @@ mod sidebar_rect_tests {
 }
 
 fn toolbar_click_command(command: &str, double_click: bool) -> &str {
-    if command == "toolAnchor" && double_click { "centerAnchor" } else { command }
+    if command == "toolAnchor" && double_click {
+        "centerAnchor"
+    } else {
+        command
+    }
 }
 
 #[cfg(test)]
@@ -7914,26 +8373,38 @@ mod anchor_toolbar_tests {
 
 fn load_palette_recents() -> Vec<String> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-    defaults.stringForKey(&NSString::from_str("PowermovePaletteRecents"))
+    defaults
+        .stringForKey(&NSString::from_str("PowermovePaletteRecents"))
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value.to_string()).ok())
-        .map(|mut ids| { ids.truncate(8); ids }).unwrap_or_default()
+        .map(|mut ids| {
+            ids.truncate(8);
+            ids
+        })
+        .unwrap_or_default()
 }
 fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     crate::transient::remember_command(recents, command);
     let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
     // NSString is a property-list value accepted by NSUserDefaults.
-    unsafe { objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents")); }
+    unsafe {
+        objc2_foundation::NSUserDefaults::standardUserDefaults()
+            .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
+    }
 }
 
 /// Viewer preferences share the shell's native application settings store.
 pub fn viewer_preference(key: &str, default: bool) -> bool {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = NSString::from_str(key);
-    if defaults.objectForKey(&key).is_none() { default } else { defaults.boolForKey(&key) }
+    if defaults.objectForKey(&key).is_none() {
+        default
+    } else {
+        defaults.boolForKey(&key)
+    }
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
-    objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(value, &NSString::from_str(key));
 }
 
 #[cfg(test)]

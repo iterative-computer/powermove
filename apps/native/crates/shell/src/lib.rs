@@ -67,7 +67,7 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,
+    AgentStatus, viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, front_window_id,
     live_window_ids, opens_in_place, project_menu_entries,
     ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,

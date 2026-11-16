@@ -248,6 +248,8 @@ pub struct Published {
     pub changes: Arc<[Arc<Change>]>,
     pub history: HistorySummary,
     pub entry: Option<OpenEntryInfo>,
+    /// Immutable pre-gesture values for MCP hold conflict checks.
+    pub entry_before: Option<Snapshot>,
     pub selection: Selection,
     pub workspace: Value,
     pub ui_state: crate::state::UiState,
@@ -909,6 +911,7 @@ fn publish_timed(
             entries: history.len(),
             applied: history.applied(),
         },
+        entry_before: p.entry_before(),
         entry: p.open_entry().map(|(id, label, depth)| OpenEntryInfo {
             id,
             label: label.to_owned(),

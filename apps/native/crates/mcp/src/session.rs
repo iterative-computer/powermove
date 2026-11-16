@@ -10,6 +10,9 @@ use std::{
     },
 };
 
+mod hold;
+use hold::PendingHold;
+
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
     "panel_begin",
@@ -88,6 +91,16 @@ struct Active {
     /// Panel controls ran during this run (main's `panelActions`): their own
     /// editor Undo applies, so the run never snapshot-restores over them.
     panel_actions: bool,
+    /// Private agent focus; never publish this into Interface selection.
+    focus: Vec<String>,
+    time: f64,
+    default_comp: Option<String>,
+    focus_comp: Option<String>,
+    comp_focus: std::collections::HashMap<Option<String>, Vec<String>>,
+    known_layers: std::collections::HashSet<String>,
+    owned_scopes: Vec<Vec<pm_model::patch::PathPart>>,
+    observed_revision: u64,
+    steer_epoch: u64,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -100,16 +113,76 @@ pub struct McpSession {
     agent_token: Option<String>,
     writer: u32,
     closed: bool,
+    pending: Option<PendingHold>,
+    bypass_hold: bool,
+    hold_note: Option<Value>,
+}
+fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
+    let Some(note) = pending.take() else {
+        return;
+    };
+    match result {
+        Value::Object(fields) => {
+            fields.insert("coeditNote".into(), note);
+        }
+        Value::Array(content)
+            if [
+                "render_frames",
+                "probe_media",
+                "sample_media_frames",
+                "media_contact_sheet",
+                "media_waveform",
+                "capture_panel",
+                "computer_use_panel",
+            ]
+            .contains(&name) =>
+        {
+            content.push(json!({"type":"text","text":note.to_string()}));
+        }
+        _ => *pending = Some(note),
+    }
+}
+#[cfg(test)]
+mod coedit_notes {
+    use super::*;
+    #[test]
+    fn image_results_keep_their_content_and_receive_a_text_note() {
+        let mut value = json!([{"type":"image","data":"synthetic","mimeType":"image/png"}]);
+        let original = value[0].clone();
+        let mut note = Some(json!({"status":"applied"}));
+        attach_hold_note("render_frames", &mut value, &mut note);
+        assert_eq!(value[0], original);
+        assert_eq!(value[1]["type"], "text");
+        assert!(note.is_none());
+    }
+    #[test]
+    fn plain_list_results_preserve_the_note_for_the_next_object_result() {
+        let mut list = json!(["asset"]);
+        let mut note = Some(json!({"status":"dropped"}));
+        attach_hold_note("list_media", &mut list, &mut note);
+        assert_eq!(list, json!(["asset"]));
+        assert!(note.is_some());
+        let mut next = json!({"revision":3});
+        attach_hold_note("get_project_state", &mut next, &mut note);
+        assert_eq!(next["coeditNote"]["status"], "dropped");
+        assert!(note.is_none());
+    }
+}
+fn next_writer() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1000);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 impl McpSession {
     pub fn new(host: Arc<Mutex<Automation>>) -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(1000);
         Self {
             host,
             active: None,
             agent_token: None,
-            writer: NEXT.fetch_add(1, Ordering::Relaxed),
+            writer: next_writer(),
             closed: false,
+            pending: None,
+            bypass_hold: false,
+            hold_note: None,
         }
     }
     pub fn tools(&self) -> Value {
@@ -119,7 +192,7 @@ impl McpSession {
         self.agent_token = Some(token.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
-        if name == "project_memory" {
+        if name == "project_memory" && self.pending.is_none() {
             return match self.project_memory(&args) {
                 Ok(value) => crate::success_model(&value),
                 Err(error) => failure(error),
@@ -141,6 +214,13 @@ impl McpSession {
                 json!({"content":v,"isError":false})
             }
             Ok(v) => success(v),
+            // Only new co-edit errors carry structured diagnostics. The
+            // generic stdio failure contract remains verbatim message text.
+            Err(e) if e.code == "target_removed" => json!({
+                "content":[{"type":"text","text":json!({
+                    "error":e.code,"status":"dropped","reason":e.message
+                }).to_string()}],"isError":true
+            }),
             Err(e) => failure(e),
         }
     }
@@ -174,7 +254,54 @@ impl McpSession {
         assert_project(session, &host, id)?;
         host.project_memory(id, args, self.writer)
     }
+    fn run_revoked(&self) -> bool {
+        self.agent_token.as_deref().is_some_and(|token| {
+            self.host.lock().map_or(true, |host| {
+                host.agent_grants
+                    .as_ref()
+                    .is_some_and(|grants| grants(token).is_none())
+            })
+        })
+    }
+    /// Called before the app acquires its session-transition fence.
+    pub fn wait_for_pause(&self) -> Result<()> {
+        if self.agent_token.is_none() {
+            return Ok(());
+        }
+        if let Some(project) = self.active.as_ref().and_then(|s| s.project.as_deref()) {
+            let gate = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("MCP host stopped"))?
+                .coedit_host();
+            if let Some(gate) = gate {
+                if !gate.wait_if_paused(project, || !self.run_revoked()) {
+                    return Err(Error {
+                        code: "agent_paused".into(),
+                        message:
+                            "The run is paused or stopped. Resume it before the next tool call."
+                                .into(),
+                        backing: None,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
+        if !self.take_hold(name == "finish_session")? {
+            return Ok(
+                json!({"status":"held","reason":"Your previous write is still waiting; do not retry it."}),
+            );
+        }
+        if let Some(result) = self.defer_if_touched(name, args)? {
+            return Ok(result);
+        }
+        let mut result = self.dispatch_inner(name, args)?;
+        attach_hold_note(name, &mut result, &mut self.hold_note);
+        Ok(result)
+    }
+    fn dispatch_inner(&mut self, name: &str, args: &Value) -> Result<Value> {
         if name == "project_memory" {
             return self
                 .project_memory(args)
@@ -303,6 +430,42 @@ impl McpSession {
             } else {
                 crate::extensions::fork(extensions.as_ref(), id, args["forkId"].as_str(), &staging)
             };
+        }
+        if name == "run_command" && self.agent_token.is_some() {
+            catalog::validate(name, args)?;
+            let command = args["command"].as_str().unwrap_or_default();
+            if command == "transport.seek" {
+                let time = args["args"][0]
+                    .as_f64()
+                    .filter(|t| t.is_finite() && *t >= 0.)
+                    .ok_or_else(|| Error::invalid("Give a finite private evaluation time."))?;
+                self.active.as_mut().unwrap().time = time;
+                return Ok(json!({"ran":true,"scope":"agent","time":time}));
+            }
+            if command.starts_with("viewer.")
+                || command.starts_with("timeline.")
+                || command.starts_with("transport.")
+                || matches!(
+                    command,
+                    "play"
+                        | "pause"
+                        | "fitView"
+                        | "fitComposition"
+                        | "fitComp"
+                        | "selectAll"
+                        | "deselect"
+                        | "nextTab"
+                        | "previousTab"
+                )
+            {
+                return Ok(json!({"ran":false,"scope":"agent",
+                    "reason":"The user's view and transport stay where they left them. Use render_frames for private inspection."}));
+            }
+        }
+        if name == "run_command" && self.agent_token.is_some() {
+            return Err(Error::invalid(
+                "Use apply_commands or edit_video for edits in the agent's private focus. UI menu commands belong to the user during co-editing.",
+            ));
         }
         if PANEL_TOOLS.contains(&name) {
             // As with the Store reads, a host without the capability says so
@@ -520,6 +683,9 @@ impl McpSession {
             return Err(Error::unavailable(catalog::backing(name)));
         }
         if catalog::COMPOSITION_TOOLS.contains(&name) {
+            if self.agent_token.is_some() {
+                host.composition = session.default_comp.clone();
+            }
             if let Some(value) = args.get("compositionId") {
                 let comp = value
                     .as_str()
@@ -528,6 +694,23 @@ impl McpSession {
                 host.composition = Some(comp.to_owned());
                 if let Some(id) = session.project.as_deref() {
                     host.view(id)?;
+                }
+            }
+        }
+        if let Some(id) = session.project.as_deref() {
+            let view = host.view(id)?;
+            if self.agent_token.is_none() {
+                session.focus = view.selection.layers().to_vec();
+                session.time = host.playhead(id);
+            } else if catalog::COMPOSITION_TOOLS.contains(&name) {
+                let comp = view.snapshot.open_comp();
+                if session.focus_comp != comp {
+                    session.comp_focus.insert(
+                        session.focus_comp.clone(),
+                        std::mem::take(&mut session.focus),
+                    );
+                    session.focus = session.comp_focus.get(&comp).cloned().unwrap_or_default();
+                    session.focus_comp = comp;
                 }
             }
         }
@@ -560,9 +743,10 @@ impl McpSession {
             return outcome.map(|(value, _)| value);
         }
         let prepared_selection = if name == "select_layers" {
-            let project = host
-                .active_project()
-                .map(|id| host.read_document(&id))
+            let project = session
+                .project
+                .as_deref()
+                .map(|id| host.read_document(id))
                 .transpose()?;
             let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
                 id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
@@ -597,7 +781,13 @@ impl McpSession {
         assert_project(session, &host, &id)?;
         if ["get_project_state", "get_timeline", "list_media"].contains(&name) {
             let result = if name == "get_project_state" {
-                views::project_state(&host, &id, args)?
+                views::project_state_at(
+                    &host,
+                    &id,
+                    args,
+                    json!({"layers":session.focus,"keys":[],"chan":null}),
+                    session.time,
+                )?
             } else if name == "list_media" {
                 crate::media::list(
                     &host.read_document(&id)?,
@@ -608,6 +798,15 @@ impl McpSession {
             } else {
                 views::timeline(&host, &id, args)?
             };
+            if name == "get_project_state" {
+                session.known_layers.extend(
+                    result["layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|layer| layer["id"].as_str().map(str::to_owned)),
+                );
+            }
             refresh(session, &mut host, &id, self.writer)?;
             return Ok(result);
         }
@@ -756,7 +955,14 @@ impl McpSession {
                     ));
                 }
                 let plan = crate::media::manage(&host.read_document(&id)?, args)?;
-                let ack = host.apply_body(&id, plan.body, "Manage media", expected, self.writer)?;
+                let ack = host.apply_body(
+                    &id,
+                    plan.body,
+                    "Manage media",
+                    expected,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
                 // Native media Undo is separate from run grouping and snapshot
                 // rollback, exactly as the frozen contract promises.
                 session.external_actions = true;
@@ -773,7 +979,11 @@ impl McpSession {
                     .filter(|s| !plan.removed.contains(s))
                     .cloned()
                     .collect::<Vec<_>>();
-                host.select_layers(&id, &selected, false, self.writer)?;
+                if self.agent_token.is_none() {
+                    host.select_layers(&id, &selected, false, self.writer)?;
+                } else {
+                    session.focus = selected;
+                }
                 let mut result = plan.result;
                 result["changed"] = json!(ack.revision != expected);
                 result["revision"] = json!(ack.revision);
@@ -784,9 +994,29 @@ impl McpSession {
             }
             "select_layers" => {
                 let ids = prepared_selection.unwrap();
-                Ok(
-                    json!({"selection":host.select_layers(&id,&ids,args["add"]==true, self.writer)?}),
-                )
+                if self.agent_token.is_none() {
+                    let selection =
+                        host.select_layers(&id, &ids, args["add"] == true, self.writer)?;
+                    return Ok(json!({"selection":selection}));
+                }
+                Ok({
+                    if args["add"] != true {
+                        session.focus.clear();
+                    }
+                    for id in ids {
+                        session.known_layers.insert(id.clone());
+                        if !session.focus.contains(&id) {
+                            session.focus.push(id);
+                        }
+                    }
+                    host.presence(
+                        &id,
+                        &session.run,
+                        crate::presence::Kind::Focus,
+                        session.focus.last().cloned(),
+                    );
+                    json!({"selection":{"layers":session.focus},"scope":"agent"})
+                })
             }
             "save_project" => host.save_project(&id),
             "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
@@ -796,6 +1026,30 @@ impl McpSession {
                     .map_or(session.baseline, |t| t.revision);
                 let revision = host.revision(&id)?;
                 if expected != revision {
+                    let current = host.read_document(&id)?;
+                    for command in args["commands"].as_array().into_iter().flatten() {
+                        let target = command["target"]
+                            .as_str()
+                            .filter(|t| !t.starts_with('$'))
+                            .or_else(|| session.focus.first().map(String::as_str));
+                        if let Some(target) = target
+                            && session.known_layers.contains(target)
+                            && !current["layers"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|l| l["id"] == target)
+                        {
+                            return Err(Error {
+                                code: "target_removed".into(),
+                                message: format!(
+                                    "The user deleted {target} while you were working. Skip it; do not recreate it unless asked. Mention the skipped target in your reply."
+                                ),
+                                backing: None,
+                            });
+                        }
+                    }
+
                     return Err(Error::conflict(format!(
                         "The project changed during the agent run (expected revision {expected}, found {revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry."
                     )));
@@ -821,14 +1075,9 @@ impl McpSession {
                 } else {
                     host.read_document(&id)?
                 };
-                let selection = host.selection(&id)?["layers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>();
+                let selection = session.focus.clone();
                 let strips = if name == "edit_layer_strips" {
-                    Some(crate::strips::plan(&p, args, host.playhead(&id))?)
+                    Some(crate::strips::plan(&p, args, session.time)?)
                 } else {
                     None
                 };
@@ -855,7 +1104,7 @@ impl McpSession {
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
-                        host.playhead(&id),
+                        session.time,
                         scene_assets
                             .as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
@@ -865,7 +1114,7 @@ impl McpSession {
                         &view.snapshot,
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
-                        host.playhead(&id),
+                        session.time,
                         Some(&host.state()),
                     )?)
                 } else {
@@ -884,7 +1133,14 @@ impl McpSession {
                 let mut clip = Value::Null;
                 let (ack, descriptions, results, strips_result) = if let Some(plan) = video {
                     clip = plan.clip;
-                    let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some(),
+                    )?;
                     let applied = if ack.revision != revision {
                         vec![crate::video::describe(args)]
                     } else {
@@ -892,7 +1148,14 @@ impl McpSession {
                     };
                     (ack, applied, vec![], None)
                 } else if let Some(plan) = strips {
-                    let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
+                    let ack = host.apply_body(
+                        &id,
+                        plan.body,
+                        &label,
+                        expected,
+                        self.writer,
+                        self.agent_token.is_some(),
+                    )?;
                     let result = if plan.state {
                         json!({"results":plan.results,"revision":ack.revision})
                     } else {
@@ -901,23 +1164,92 @@ impl McpSession {
                     (ack, vec![], plan.results, Some(result))
                 } else {
                     let batch = batch.unwrap();
-                    let ack = host.apply_commands(
+                    let ack = host.apply_commands_guarded(
                         &id,
                         batch.commands,
                         &label,
                         Origin::Mcp,
                         expected,
                         self.writer,
+                        self.agent_token.is_some(),
                     )?;
-                    host.select_layers(&id, &batch.selection, false, self.writer)?;
+                    if self.agent_token.is_none() {
+                        host.select_layers(&id, &batch.selection, false, self.writer)?;
+                    }
+                    session.focus = batch.selection;
+                    for result in &batch.results {
+                        if let Some(id) = result["data"]["id"].as_str() {
+                            session.known_layers.insert(id.into());
+                        }
+                    }
+                    if ack.revision != revision {
+                        for result in &batch.results {
+                            let kind = match result["command"]["type"].as_str().unwrap_or("") {
+                                "add_layer" | "add_text" | "add_shape" | "add_captions" => {
+                                    crate::presence::Kind::Create
+                                }
+                                "replace_keyframes" => crate::presence::Kind::Key,
+                                "set_property" if result["command"]["mode"] != "static" => {
+                                    crate::presence::Kind::Key
+                                }
+                                "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
+                                _ => crate::presence::Kind::Set,
+                            };
+                            let target = result["data"]["id"].as_str();
+                            let offset = target
+                                .and_then(|target| {
+                                    host.view(&id).ok().and_then(|v| {
+                                        let root = v.snapshot.root()?;
+                                        let location = pm_kernel::model::find_layer(root, target)?;
+                                        let layer = pm_kernel::model::layer_at(root, &location)?;
+                                        match layer.get("from")?.kind() {
+                                            pm_model::NodeKind::Number(n) => Some(*n),
+                                            _ => None,
+                                        }
+                                    })
+                                })
+                                .unwrap_or(0.);
+                            let mut times: Vec<f64> = result["command"]["keyframes"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|k| k["time"].as_f64())
+                                .map(|t| t + offset)
+                                .collect();
+                            if kind == crate::presence::Kind::Key && times.is_empty() {
+                                times.push(
+                                    result["command"]["time"]
+                                        .as_f64()
+                                        .unwrap_or(session.time)
+                                        .max(offset),
+                                );
+                            }
+                            host.presence_detail(
+                                &id,
+                                &session.run,
+                                kind,
+                                result["data"]["id"].as_str().map(str::to_owned),
+                                result["command"]["path"].as_str().map(str::to_owned),
+                                times,
+                            );
+                        }
+                    }
                     (ack, batch.descriptions, batch.results, None)
                 };
                 let tx = session.transaction.as_mut().unwrap();
                 tx.revision = ack.revision;
                 tx.label = label.clone();
+                if let Some(app) = host.coedit_host() {
+                    app.record_turn(
+                        &id,
+                        pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                        &label,
+                    );
+                }
                 tx.changed |= ack.revision != revision;
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
+                observe_foreign(session, &host, &id);
                 let message = if name == "edit_video" && ack.revision == revision {
                     "No source changes"
                 } else {
@@ -931,7 +1263,7 @@ impl McpSession {
                     let after = host.read_document(&id)?;
                     let target = crate::scene3d::result_id(&p, &after, args, &selection);
                     if let Some(ref target) = target {
-                        host.select_layers(&id, std::slice::from_ref(target), false, self.writer)?;
+                        session.focus = vec![target.clone()];
                     }
                     result["result"] = json!({"id":target,"layerId":target});
                 }
@@ -957,8 +1289,7 @@ impl McpSession {
                     .host
                     .lock()
                     .map_err(|_| Error::unavailable("headless host stopped"))?;
-                host.active_project().as_deref() != Some(id)
-                    || host.view(id).ok().map(|view| view.document) != session.document
+                host.view(id).ok().map(|view| view.document) != session.document
             } else {
                 false
             }
@@ -982,7 +1313,7 @@ impl McpSession {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
         crate::validation::session("start_session", args)?;
-        let host = self
+        let mut host = self
             .host
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
@@ -1085,6 +1416,40 @@ impl McpSession {
             }
             _ => None,
         };
+        let time = project.as_deref().map_or(0., |id| host.playhead(id));
+        let known_layers = project
+            .as_deref()
+            .map(|id| host.read_document(id))
+            .transpose()?
+            .and_then(|p| p["layers"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| l["id"].as_str().map(str::to_owned))
+            .collect();
+        let focus = project
+            .as_deref()
+            .map(|id| host.view(id).map(|v| v.selection.layers().to_vec()))
+            .transpose()?
+            .unwrap_or_default();
+        let default_comp = project
+            .as_deref()
+            .map(|id| host.view(id).map(|v| v.snapshot.open_comp()))
+            .transpose()?
+            .flatten();
+        self.writer = next_writer();
+        if self.agent_token.is_some()
+            && let Some(id) = project.as_deref()
+        {
+            if let Some(app) = host.coedit_host() {
+                app.record_turn(
+                    id,
+                    pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
+                    "Edit project",
+                );
+            }
+            host.agent_turn(id, self.writer, true)?;
+        }
+        let steer_epoch = project.as_deref().map_or(0, crate::coedit::steer_epoch);
         self.active = Some(Active {
             project,
             document,
@@ -1099,10 +1464,24 @@ impl McpSession {
             committed: false,
             external_actions: false,
             panel_actions: false,
+            time,
+            default_comp: default_comp.clone(),
+            focus_comp: default_comp,
+            comp_focus: Default::default(),
+            known_layers,
+            owned_scopes: Vec::new(),
+            observed_revision: baseline,
+            steer_epoch,
+            focus,
         });
         Ok(result)
     }
     pub fn finish(&mut self, commit: bool) -> Result<Value> {
+        if !self.take_hold(true)? {
+            return Ok(
+                json!({"status":"held","reason":"A write is still waiting for the user. The session remains open; finish again after it resolves."}),
+            );
+        }
         let Some(mut session) = self.active.take() else {
             return Ok(json!({"changed":false}));
         };
@@ -1112,6 +1491,10 @@ impl McpSession {
                 return Ok(json!({"changed":session.committed}));
             };
             assert_project(&session, &host, &id)?;
+            host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
+            if self.agent_token.is_some() {
+                host.agent_turn(&id, self.writer, false)?;
+            }
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };
@@ -1128,12 +1511,13 @@ impl McpSession {
             let mut history_id = None;
             if !commit && changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
-            } else if changed
-                && !session.external_actions
-                && !tx.interleaved
-                && tx.revision == host.revision(&id)?
-            {
-                history_id = host.squash(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
+            } else if changed && !session.external_actions {
+                if self.agent_token.is_some() {
+                    history_id =
+                        host.squash_segments(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
+                } else if !tx.interleaved && tx.revision == host.revision(&id)? {
+                    history_id = host.squash(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
+                }
             }
             Ok(
                 json!({"changed":session.committed||commit&&changed,"historyId":history_id.map(|id|id.to_string())}),
@@ -1271,7 +1655,10 @@ impl McpSession {
         Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
     }
     pub fn close(&mut self) -> Result<()> {
-        let result = self.finish(false).map(|_| ());
+        self.cancel_hold();
+        // In-app Stop preserves every acknowledged edit. Explicit rollback
+        // and external MCP disconnect retain their existing contract.
+        let result = self.finish(self.agent_token.is_some()).map(|_| ());
         self.closed = true;
         result
     }
@@ -1286,16 +1673,87 @@ impl Drop for McpSession {
     }
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
-    if host.active_project().as_deref() != Some(id)
-        || host.view(id).ok().map(|view| view.document) != session.document
-    {
+    if host.view(id).ok().map(|view| view.document) != session.document {
         return Err(Error::conflict(
-            "The active project changed or reopened. All work was preserved. Start a new agent run in this project.",
+            "The bound project closed or reopened. All work was preserved. Start a new agent run in this project.",
         ));
     }
     Ok(())
 }
+fn observe_foreign(session: &mut Active, host: &Automation, id: &str) {
+    let Some(app) = host.coedit_host() else {
+        return;
+    };
+    let Some(publication) = app.kernel.published(id) else {
+        return;
+    };
+    // An open gesture is provisional. Its immutable starting revision is the
+    // committed frontier, even when another composition commits meanwhile.
+    let frontier = publication
+        .entry_before
+        .as_ref()
+        .map_or(publication.revision(), |before| before.revision);
+    let mut human_paths = Vec::new();
+    let mut gesture_paths: Vec<Vec<pm_model::patch::PathPart>> = Vec::new();
+    let mut entry_id = None;
+    for change in publication
+        .changes
+        .iter()
+        .filter(|c| c.revision > session.observed_revision && c.revision <= frontier)
+    {
+        match &change.cause {
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                entry: Some(entry),
+                ..
+            } => {
+                if entry_id != Some(*entry) {
+                    human_paths.append(&mut gesture_paths);
+                    entry_id = Some(*entry);
+                }
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::GestureStep { .. } => {
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::Revert { .. }
+            | pm_kernel::ChangeCause::GestureCancel { .. } => {
+                // Cancel erases only provisional ownership, never an earlier
+                // committed edit to that same path.
+                gesture_paths.retain(|path| {
+                    !change
+                        .ops
+                        .iter()
+                        .any(|op| path.starts_with(op.path()) || op.path().starts_with(path))
+                });
+            }
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Edit {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Restore {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Undo { .. }
+            | pm_kernel::ChangeCause::Redo { .. } => {
+                human_paths.append(&mut gesture_paths);
+                entry_id = None;
+                human_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            _ => {}
+        }
+    }
+    human_paths.append(&mut gesture_paths);
+    session.owned_scopes.extend(human_paths);
+    session.observed_revision = frontier;
+}
 fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
+    observe_foreign(session, host, id);
     let revision = host.revision(id)?;
     session.baseline = revision;
     if let Some(tx) = &mut session.transaction
