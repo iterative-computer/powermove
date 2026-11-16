@@ -1256,7 +1256,11 @@ impl Controller {
         if self.extensions.panels_ready != ready {
             self.extensions.panels_ready = ready;
             self.host.borrow().send_command(
-                if ready { "panels:ready" } else { "panels:waiting" },
+                if ready {
+                    "panels:ready"
+                } else {
+                    "panels:waiting"
+                },
                 vec![],
             );
         }
@@ -1833,6 +1837,19 @@ impl Controller {
         .detach();
     }
     /// A panel body is a hole in GPUI; the shared document shows through it.
+    pub(crate) fn extension_build_rendered(&self, id: &str) -> bool {
+        let bodies = self.host.borrow().native_panels.clone();
+        let bodies = bodies.borrow();
+        let Some((_, body)) = bodies.iter().find(|(panel, _)| panel == id) else {
+            return false;
+        };
+        self.extensions.page_of(id).is_some_and(|page| {
+            page.borrow().panel_layout_applied(
+                id,
+                Rect::new(body.x as f64, body.y as f64, body.w as f64, body.h as f64),
+            )
+        })
+    }
     pub fn extension_panel(
         &mut self,
         id: &str,
@@ -2056,7 +2073,8 @@ impl Controller {
         // editor is occluded, in the editor's window.
         let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
-            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
         if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
@@ -2074,10 +2092,13 @@ impl Controller {
         let owners = self.extensions.owners.clone();
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
+        let clips = shell.native_panel_clips.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
-        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(&shell.tokens)));
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
+            &shell.tokens,
+        )));
         let themed_fill = fill.clone();
         let themed_views = self.extensions.views.clone();
         shell.native_style = Some(Rc::new(move |tokens| {
@@ -2114,8 +2135,15 @@ impl Controller {
                     .collect();
                 // The page shows through each panel's whole body, on the
                 // panels' ground ...
-                let panel_regions = mine.iter().map(|(_, r)| *r).collect();
-                let overlay_regions = stage.as_ref().map(to_rect).into_iter().collect();
+                let clips = clips.borrow();
+                let clipped = |id: &String, r: Rect| {
+                    clips
+                        .iter()
+                        .find(|(key, _)| key == id)
+                        .map_or(r, |(_, clip)| to_rect(clip))
+                };
+                let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
+                let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
                 // ... and its content only within that panel's body and every
                 // place recently sent to the page: a page that has not yet
                 // moved a panel's content (a splitter drag) never shows it
@@ -2125,11 +2153,16 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            if host.panel_layout_applied(id, *r) {
-                                *r
-                            } else {
-                                sent.mask(id, *r)
-                            }
+                            let mask = if host.panel_layout_applied(id, *r) { *r } else { sent.mask(id, *r) };
+                            let clip = clipped(id, *r);
+                            Rect::new(
+                                mask.x.max(clip.x),
+                                mask.y.max(clip.y),
+                                ((mask.x + mask.w).min(clip.x + clip.w) - mask.x.max(clip.x))
+                                    .max(0.),
+                                ((mask.y + mask.h).min(clip.y + clip.h) - mask.y.max(clip.y))
+                                    .max(0.),
+                            )
                         })
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
@@ -2138,7 +2171,9 @@ impl Controller {
                     && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
                 {
                     let _ = host.place_panels(
-                        mine.iter().map(|(id, rect)| ((*id).clone(), *rect)).collect(),
+                        mine.iter()
+                            .map(|(id, rect)| ((*id).clone(), *rect))
+                            .collect(),
                     );
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
@@ -2341,6 +2376,18 @@ impl Controller {
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::DockContent { id, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockContent:{id}"), vec![json!(height)]),
+                    HostEvent::DockScroll { id, delta } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockScroll:{id}"), vec![json!(delta)]),
+                    HostEvent::DockReveal { id, top, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
                     HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
