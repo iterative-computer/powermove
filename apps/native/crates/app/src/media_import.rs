@@ -2,7 +2,7 @@
 //! probing, byte retention and the kernel's reply all wait on a worker.
 use crate::{platform, session::Controller};
 use gpui::Context;
-use pm_builtins::media_import::{ImportRequest, Outcome, extensions};
+use pm_builtins::media_import::{ImportProgress, ImportRequest, Outcome, extensions};
 use serde_json::json;
 use std::{
     path::PathBuf,
@@ -640,6 +640,63 @@ impl Controller {
         })
         .detach();
     }
+    /// The toolbar's task pill while this import runs (v1's TaskPill):
+    /// files read of the total, the file, Cancel; "Done" a moment after it
+    /// ends, then the pill hides unless the next import has taken it.
+    fn show_import_task(
+        &mut self,
+        progress: ImportProgress,
+        sequence: Option<Arc<std::sync::Mutex<String>>>,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let line = sequence
+                    .as_ref()
+                    .and_then(|s| s.lock().ok().map(|s| s.clone()));
+                let running = this
+                    .update(cx, |v, _| {
+                        let current = v
+                            .importing
+                            .as_ref()
+                            .is_some_and(|c| Arc::ptr_eq(c, &cancel));
+                        if current {
+                            let task = import_task(progress.read(), line, v.imports.len());
+                            v.host.borrow_mut().set_task(Some(task));
+                        }
+                        current
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+            }
+            let done = |v: &mut Controller| {
+                if v.importing.is_none() {
+                    Some(v.host.clone())
+                } else {
+                    None
+                }
+            };
+            let Ok(Some(host)) = this.update(cx, |v, _| done(v)) else {
+                return;
+            };
+            host.borrow_mut().set_task(Some(pm_shell::TaskStatus {
+                title: "Import finished".into(),
+                finished: true,
+                ..Default::default()
+            }));
+            cx.background_executor().timer(TASK_DONE_SHOWN).await;
+            if let Ok(Some(host)) = this.update(cx, |v, _| done(v)) {
+                host.borrow_mut().set_task(None);
+            }
+        })
+        .detach();
+    }
     fn next_import(&mut self, cx: &mut Context<Self>) {
         if self.importing.is_some() {
             return;
@@ -671,6 +728,12 @@ impl Controller {
         if let Some(sequence) = &request.sequence {
             self.show_sequence_progress(sequence.progress.clone(), cancel.clone(), cx);
         }
+        self.show_import_task(
+            request.progress.clone(),
+            request.sequence.as_ref().map(|s| s.progress.clone()),
+            cancel.clone(),
+            cx,
+        );
         let document = published.snapshot.doc_id;
         let profile = self.profile.clone();
         let note = request.note.clone();
@@ -710,6 +773,57 @@ impl Controller {
     }
 }
 
+/// How long the pill says "Done" after the last import ends (v1's 3.4 s).
+const TASK_DONE_SHOWN: std::time::Duration = std::time::Duration::from_millis(3400);
+/// The pill for an import: files read of `total` (`done`, the file being
+/// read), or the encode's line for an image sequence; imports waiting
+/// behind it are counted in the title.
+pub(crate) fn import_task(
+    (done, total, file): (usize, usize, String),
+    sequence: Option<String>,
+    queued: usize,
+) -> pm_shell::TaskStatus {
+    let mut title = match (total, &sequence) {
+        (_, Some(_)) | (0, _) => "Importing…".to_owned(),
+        (1, _) => "Importing 1 file".to_owned(),
+        (total, _) => format!("Importing {} of {total}", (done + 1).min(total)),
+    };
+    if queued > 0 {
+        title.push_str(&format!(" · {queued} more waiting"));
+    }
+    pm_shell::TaskStatus {
+        title,
+        detail: sequence.filter(|s| !s.is_empty()).unwrap_or(file),
+        progress: (sequence.is_none() && total > 0).then(|| done.min(total) as f32 / total as f32),
+        finished: false,
+        cancel: Some(("Cancel Import".into(), "cancelImport".into())),
+    }
+}
+#[cfg(test)]
+mod task_tests {
+    use super::import_task;
+    #[test]
+    fn the_pill_counts_files_and_says_which_one_is_read() {
+        let t = import_task((2, 8, "clip.mov".into()), None, 0);
+        assert_eq!(t.title, "Importing 3 of 8");
+        assert_eq!(t.detail, "clip.mov");
+        assert_eq!(t.progress, Some(0.25));
+        assert_eq!(t.pill(), "25%");
+        assert_eq!(t.cancel.as_ref().map(|c| c.1.as_str()), Some("cancelImport"));
+        // Every file read: full, before the project takes them.
+        assert_eq!(import_task((8, 8, String::new()), None, 0).pill(), "100%");
+    }
+    #[test]
+    fn unknown_shares_turn_and_queued_imports_are_counted() {
+        let starting = import_task((0, 0, String::new()), None, 2);
+        assert_eq!(starting.progress, None);
+        assert_eq!(starting.pill(), "");
+        assert_eq!(starting.title, "Importing… · 2 more waiting");
+        let encode = import_task((0, 1, "a_0001.png".into()), Some("Frame 40 of 300".into()), 0);
+        assert_eq!((encode.progress, encode.detail.as_str()), (None, "Frame 40 of 300"));
+        assert_eq!(import_task((0, 1, "a.mov".into()), None, 0).title, "Importing 1 file");
+    }
+}
 /// Whether copied files give the importer anything: a media file, or a
 /// folder (which it reads for media).
 pub(crate) fn pasted_files_hold_media(paths: &[PathBuf]) -> bool {
