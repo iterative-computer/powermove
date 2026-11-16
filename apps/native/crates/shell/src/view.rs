@@ -551,7 +551,12 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        layout::Panels::new(contributed)
+        let remembered = self
+            .integration
+            .as_ref()
+            .map(|i| i.remembered_panel_titles(cx))
+            .unwrap_or_default();
+        layout::Panels::new(contributed).with_remembered(remembered)
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
@@ -2655,6 +2660,17 @@ impl Render for Editor {
                 let mut empty = empty_state(&t, heading, line)
                     .h(px((p.rect.h - m.header).max(0.)))
                     .overflow_hidden();
+                // A panel still on its way (its extension starting): the
+                // loading state under its own title, never an empty body.
+                if coming {
+                    static SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                    let turns = SINCE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+                    empty = empty.child(crate::welcome_view::spinner(
+                        if t.accessibility.reduce_motion { 0. } else { turns },
+                        &t,
+                    ));
+                    w.request_animation_frame();
+                }
                 // Actions run only with an app attached (the bare shell has no importer).
                 if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
                     empty = empty.child(

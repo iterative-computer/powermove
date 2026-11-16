@@ -87,6 +87,11 @@ pub trait Integration {
     fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Titles of panels seen before, for a tab whose panel has not
+    /// registered yet (its extension still starting).
+    fn remembered_panel_titles(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The panels on screen this frame (each tab group's front panel, or the

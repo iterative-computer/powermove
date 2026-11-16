@@ -501,6 +501,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).extensions.contributed.clone()
     }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
