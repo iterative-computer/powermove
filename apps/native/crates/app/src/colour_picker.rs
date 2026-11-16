@@ -27,6 +27,8 @@ enum Track {
     Hue,
 }
 pub struct Picker {
+    /// Full precision picker state. Read this on `Edit::Value` when a caller
+    /// stores normalized RGBA rather than the document hex representation.
     pub color: Color,
     previous: Color,
     hue: f32,
@@ -437,6 +439,20 @@ impl Picker {
         self.set(next, cx);
         self.hue = h;
     }
+    /// Precise normalized RGBA entry point for shared hosts and headless tests.
+    /// Emits the same Begin/Value events as numeric entry; no byte quantization.
+    pub fn edit_rgba(&mut self, rgba: [f32; 4], cx: &mut Context<Self>) {
+        if rgba.iter().all(|v| v.is_finite()) {
+            self.set(Color(rgba.map(|v| v.clamp(0., 1.))), cx);
+        }
+    }
+    /// Numeric field pathway. sRGB fields: OKLCH 0..2, HSL 3..5,
+    /// RGB 6..8 (0..255, fractional values accepted), value/opacity text 9.
+    pub fn input_numeric(&mut self, index: usize, text: &str, cx: &mut Context<Self>) {
+        if index <= 9 {
+            self.input(index, text, cx);
+        }
+    }
     pub fn set(&mut self, c: Color, cx: &mut Context<Self>) {
         if c == self.color {
             return;
@@ -456,7 +472,8 @@ impl Picker {
         cx.emit(Edit::Value(c.hex()));
         cx.notify();
     }
-    fn finish(&mut self, commit: bool, cx: &mut Context<Self>) {
+    /// Close the transaction. True commits; false cancels all live preview.
+    pub fn finish(&mut self, commit: bool, cx: &mut Context<Self>) {
         if commit {
             self.apply_active(cx);
         }

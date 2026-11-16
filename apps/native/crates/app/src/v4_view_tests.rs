@@ -1619,3 +1619,34 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
     });
     assert!(revealed.get(), "keyboard focus reveals the row's actions");
 }
+
+/// The shared picker uses the same keyframe-aware binding as the Properties row.
+#[gpui::test]
+fn colour_picker_live_preview_commits_one_undo_and_keys_animated_color(cx: &mut TestAppContext) {
+    let project=project_json(1).replace("\"w\":100,\"h\":100", "\"w\":100,\"h\":100,\"color\":{\"v\":\"#FF0000\",\"kf\":[{\"t\":0,\"v\":\"#FF0000\"},{\"t\":2,\"v\":\"#0000FF\"}]}");
+    let rig=rig_project("inspector",&project);
+    rig.kernel.call(PROJECT,pm_kernel::Request::new(pm_kernel::Caller::native(),pm_kernel::SelectionCall::Layers{ids:vec!["l0".into()],add:false})).wait().unwrap().unwrap();
+    rig.runtime.update_facts(json!({"time":1.,"playing":false}));
+    for (_,ticket) in rig.runtime.publish() {let ticket=ticket.unwrap();while ticket.try_take().is_none(){std::thread::sleep(Duration::from_millis(1));}}
+    let (view,mut vcx)=window(cx,&rig,publication(&rig),Default::default());
+    vcx.run_until_parked();
+    let before=rig.kernel.published(PROJECT).unwrap().history.entries;
+    let original=rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
+    let picker=vcx.update(|window,cx|view.update(cx,|v,cx| {
+        let id=v.publication.surface.nodes().values().find(|n|Component::of(n)==Some(Component::ColourWell)).expect("Properties colour field").id;
+        v.open_colour(id,window,cx);v.colour.as_ref().unwrap().1.clone()
+    }));
+    picker.update(&mut vcx,|p,cx| {p.input_numeric(6,"127.5",cx);p.input_numeric(7,"63.75",cx);p.input_numeric(8,"191.25",cx);});
+    settle(&mut vcx,|cx|view.read(cx).scrub_gesture.is_some() && !view.read(cx).scrub_busy && view.read(cx).scrub_ops.is_empty());
+    assert_eq!(rig.kernel.published(PROJECT).unwrap().history.entries,before,"live preview has no separate undo entries");
+    picker.update(&mut vcx,|p,cx|p.finish(true,cx));
+    settle(&mut vcx,|cx|view.read(cx).colour.is_none() && !view.read(cx).scrub_busy && view.read(cx).scrub_ops.is_empty());
+    let published=rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(published.history.entries,before+1);
+    let doc=published.snapshot.root().unwrap().to_value();
+    let json: Value=serde_json::from_str(&pm_model::json::to_canonical_string(&doc)).unwrap();
+    let keys=json["layers"][0]["d"]["color"]["kf"].as_array().expect("animated color");
+    assert!(keys.iter().any(|k|k["t"]==json!(1.) && k["v"]==json!("#8040BF")),"{keys:?}");
+    rig.kernel.call(PROJECT,pm_kernel::Request::new(pm_kernel::Caller::native(),pm_kernel::Call::History(pm_kernel::HistoryCall::Undo))).wait().unwrap().unwrap();
+    assert_eq!(rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value(),original);
+}
