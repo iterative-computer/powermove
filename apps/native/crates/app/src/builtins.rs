@@ -158,6 +158,9 @@ pub struct Host {
     /// The media inputs behind `media_runtime`, and the worker observing them.
     media_probed: Option<MediaProbeInputs>,
     media_probe_serial: u64,
+    /// Bumped whenever `media_runtime` is replaced: what the status line's
+    /// offline count is kept by (`FrameFacts::offline`).
+    pub media_observed: u64,
     updating: bool,
     again: bool,
     /// The status line asked for the missing files; the next update hands it
@@ -492,6 +495,7 @@ impl Controller {
             .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
         {
             self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+            self.builtins.media_observed += 1;
             return;
         }
         self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
@@ -521,6 +525,7 @@ impl Controller {
                             Some(p) => observed.rebound(media_stamp(p)),
                             None => observed,
                         };
+                        v.builtins.media_observed += 1;
                         v.update_builtins(cx);
                     }
                     Err(error) => {

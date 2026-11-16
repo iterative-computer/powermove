@@ -103,9 +103,10 @@ impl MenuEntry {
 pub struct MenuState {
     /// Window ▸ Panels: id and title.
     pub panels: Vec<(String, String)>,
-    /// Active composition layers offered by the command palette.
-    pub palette_layers: Vec<(String, String)>,
-    pub palette_effects: Vec<(String, String)>,
+    /// Active composition layers offered by the command palette (shared:
+    /// equal lists compare by pointer, every frame).
+    pub palette_layers: crate::integration::Names,
+    pub palette_effects: crate::integration::Names,
     pub open: Vec<String>,
     /// Window ▸ Workspace: id, name, built-in (built-ins first).
     pub workspaces: Vec<(String, String, bool)>,
