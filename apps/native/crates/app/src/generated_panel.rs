@@ -124,6 +124,7 @@ fn build_frame(
         _ => panel_build::fade(age,0.24),
     };
     let (accent,text,muted)=(t.colors.accent,t.colors.text,t.colors.muted);
+    let radius=t.radius.lg;
     let dim=panel_build::playback(playing).0;
     let _ = fraction;
     div().absolute().inset_0().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
@@ -133,6 +134,7 @@ fn build_frame(
             let opening=panel_build::fade(age,0.48);
             window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}), |window| {
                 for dot in pm_design::dots::aurora(size,age,accent,text,muted) {
+                    if !inside_ground(dot.center,size,radius) {continue;}
                     // The thin initial row expands into a sparse-to-dense slot field.
                     if dot.center[1]>3.+(size[1]-3.)*opening {continue;}
                     if pm_design::dots::hash(dot.center)>opening {continue;}
@@ -153,14 +155,24 @@ fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u3
     t.colors.panel
 }
 
+fn inside_ground(point: [f32;2], size: [f32;2], radius: f32) -> bool {
+    let r=radius.min(size[0].min(size[1])*0.5);
+    let dx=point[0]-point[0].clamp(r,size[0]-r);
+    let dy=point[1]-point[1].clamp(r,size[1]-r);
+    dx*dx+dy*dy <= r*r
+}
+
 fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
     let resolve=build.map_or(1.,|b|b.resolve(std::time::Instant::now()));
     if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().bg(rgb(t.colors.panel));}
     let color=t.colors.panel;
+    let radius=t.radius.lg;
     div().absolute().inset_0().child(canvas(|_,_,_|(),move |bounds,_,window,_| {
         window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}),|window| {
             if resolve>0. {window.paint_quad(PaintQuad::new(bounds).background(pm_shell::kit::ink(color,resolve)));}
-            for dot in pm_design::dots::matrix([f32::from(bounds.size.width),f32::from(bounds.size.height)],4.,|_|[1.;4]) {
+            let dimensions=[f32::from(bounds.size.width),f32::from(bounds.size.height)];
+            for dot in pm_design::dots::matrix(dimensions,4.,|_|[1.;4]) {
+                if !inside_ground(dot.center,dimensions,radius) {continue;}
                 let p=bounds.origin+point(px(dot.center[0]-dot.radius),px(dot.center[1]-dot.radius));
                 window.paint_quad(PaintQuad::new(Bounds::new(p,size(px(dot.radius*2.),px(dot.radius*2.))))
                     .corner_radii(px(dot.radius)).background(pm_shell::kit::ink(color,1.-resolve)));
