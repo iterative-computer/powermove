@@ -491,7 +491,7 @@ impl SurfaceView {
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
-            self.restart();
+            self.restart(cx);
         }
         self.table = compiled.table;
         self.publication = compiled.publication;
@@ -520,7 +520,8 @@ impl SurfaceView {
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
-    fn restart(&mut self) {
+    fn restart(&mut self, cx:&mut Context<Self>) {
+        if let Some((_,picker,_))=self.colour.take() {picker.update(cx,|p,_|p.cancel_pending());}
         self.disclosures.clear();
         self.controls.clear();
         self.fields.clear();
@@ -541,7 +542,7 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         if self.colour.as_ref().is_some_and(|(id,_,_)| !live(id) || self.leases.get(id) != prepared.node(*id).map(|n| &n.binding)) {
-            self.colour=None;
+            if let Some((_,picker,_))=self.colour.take() {picker.update(cx,|p,_|p.cancel_pending());}
             if self.scrub_busy || self.scrub_gesture.is_some() || !self.scrub_ops.is_empty() {self.scrub_ops.push_back(ScrubOp::Finish(false));self.scrub_pump(cx);}
         }
 

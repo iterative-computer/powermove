@@ -533,14 +533,18 @@ impl Picker {
         cx.emit(Edit::Value(c.hex()));
         cx.notify();
     }
+    /// Invalidate pending sampling before a host removes this view.
+    pub fn cancel_pending(&mut self) {
+        self.drag = None;
+        self.generation += 1;
+        self.sampling = false;
+    }
     /// Close the transaction. True commits; false cancels all live preview.
     pub fn finish(&mut self, commit: bool, cx: &mut Context<Self>) {
         if commit {
             self.apply_active(cx);
         }
-        self.drag = None;
-        self.generation += 1;
-        self.sampling = false;
+        self.cancel_pending();
         cx.emit(Edit::Finish(commit));
     }
     fn pick(&mut self, at: Point<Pixels>, kind: Track, b: Bounds<Pixels>, cx: &mut Context<Self>) {
@@ -828,6 +832,10 @@ impl Render for Picker {
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         let _ = moved.update(cx, |p, cx| {
+                            if e.pressed_button != Some(MouseButton::Left) {
+                                p.drag = None;
+                                return;
+                            }
                             if let Some((k, b)) = p.drag {
                                 p.pick(e.position, k, b, cx);
                             }
@@ -835,8 +843,8 @@ impl Render for Picker {
                     }
                 });
                 let up = weak.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
                         let _ = up.update(cx, |p, _| p.drag = None);
                     }
                 });
@@ -1310,6 +1318,7 @@ mod tests {
                 p.generation += 1;
                 let old = p.generation;
                 p.finish(false, cx);
+                p.cancel_pending();
                 let kept = p.color;
                 p.resolve_sample(old, Ok(Ok([0., 1., 0., 1.])), cx);
                 assert_eq!(p.color, kept);
