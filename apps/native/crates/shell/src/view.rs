@@ -2110,6 +2110,15 @@ impl Editor {
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Development builds: a frame as slow as asked, to check that input
+        // keeps its order behind it (PM-465).
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("PM_NATIVE_SLOW_FRAME_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms.min(2000)));
+        }
         let panels = self.panels(cx);
         if let Some(id) = self.integration.as_ref().and_then(|i| i.project_id(cx))
             && self.project != id

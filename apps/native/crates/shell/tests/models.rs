@@ -342,6 +342,36 @@ fn escape_in_a_field_waits_behind_the_keys_typed_before_it() {
     let mut r = Resolver::new();
     assert!(mentions(&r.submit(typed(4, "escape")), 4));
 }
+/// PM-465: input is handled in the order it arrived. A click after ⌘T waits
+/// for ⌘T's command (however slow the frame that answers it) and acts with
+/// the Text tool; the "t" typed after the click goes to the text the click
+/// opened, never to the timeline's T shortcut.
+#[test]
+fn a_click_after_a_tool_key_waits_for_it_and_the_keys_after_it_type() {
+    use pm_shell::keyboard::POINTER;
+    let mut r = Resolver::new();
+    let tool = r.submit(key(1, "cmd+t"));
+    assert!(
+        matches!(&tool[..], [Effect::Dispatch { token: 1, command, .. }] if command == "toolText"),
+        "{tool:?}"
+    );
+    assert!(r.busy(), "⌘T waits on the editor's answer");
+    // The click (down, then up) and a key typed after it queue behind ⌘T.
+    assert!(r.submit(key(2, POINTER)).is_empty(), "the press waits for ⌘T");
+    assert!(r.submit(key(3, POINTER)).is_empty());
+    assert!(r.submit(key(4, "t")).is_empty());
+    // The editor answers ⌘T (however late): the press goes on, alone.
+    assert_eq!(r.resolve(1, true), [Effect::Consumed(1), Effect::Replay(2)]);
+    assert_eq!(r.replayed(2), [Effect::Replay(3)]);
+    // The click opened a text that has the keyboard now.
+    r.retarget(true);
+    assert_eq!(r.replayed(3), [Effect::Replay(4)], "t types into the text");
+    assert!(r.replayed(4).is_empty());
+    assert!(!r.busy());
+    // Unretargeted, the same t would have revealed Opacity on the timeline.
+    let mut r = Resolver::new();
+    assert!(matches!(&r.submit(key(5, "t"))[..], [Effect::Dispatch { .. }]));
+}
 #[test]
 fn escape_decline_bypasses_without_resolving_held_command() {
     let mut r = Resolver::new();
