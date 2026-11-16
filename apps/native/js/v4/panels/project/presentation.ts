@@ -33,7 +33,7 @@ export function status(
     return { overlay: "Loading…", detail: "", tone: "muted" };
   if (availability === "Offline")
     return {
-      overlay: "Media offline",
+      overlay: "Missing",
       detail: a.source_path
         ? `Missing · ${a.source_path}`
         : "Missing · locate the file to relink it",
@@ -170,8 +170,8 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
       NewComposition: "New Composition…",
       ImportFiles: "Import Media…",
     }[command];
-  if ("AddAsset" in command || "NestComposition" in command)
-    return "Add to Timeline";
+  if ("AddAsset" in command) return "Add Layer from Asset";
+  if ("NestComposition" in command) return "Add Composition to Timeline";
   if ("NewCompFromAsset" in command) return "New Comp from Selection";
   if ("Replace" in command)
     return row &&
@@ -189,7 +189,10 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
     return row && "Folder" in row.data ? "New Folder Inside" : "New Folder";
   if ("OpenFolder" in command) return "Open";
   if ("RenameFolder" in command) return "Rename";
-  if ("DeleteFolder" in command) return "Delete Folder";
+  if ("DeleteFolder" in command)
+    return row && "Folder" in row.data && row.data.Folder.link
+      ? "Remove Linked Folder"
+      : "Delete Folder";
   if ("MoveOut" in command) return "Move Out of Folder";
   if ("OpenComposition" in command) return "Open in Timeline";
   if ("CompositionSettings" in command) return "Composition Settings…";
@@ -219,7 +222,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
   if ("Folder" in row.data)
     return [
       {
-        label: "Delete Folder",
+        label: row.data.Folder.link ? "Remove Linked Folder" : "Delete Folder",
         symbol: "trash",
         input: { Invoke: { DeleteFolder: row.data.Folder.id } },
       },
@@ -228,7 +231,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     const c = row.data.Composition;
     return [
       {
-        label: "Add to Timeline",
+        label: "Add Composition to Timeline",
         symbol: "plus",
         input: { Invoke: { NestComposition: c.id } },
         disabled: !c.can_nest,
@@ -251,7 +254,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
         input: { Invoke: { Reveal: a.id } },
       });
     result.push({
-      label: "Add to Timeline",
+      label: "Add Layer from Asset",
       symbol: "plus",
       input: { Invoke: { AddAsset: a.id } },
     });

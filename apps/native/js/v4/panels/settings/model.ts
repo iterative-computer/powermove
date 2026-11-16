@@ -58,6 +58,9 @@ export interface ShortcutRow {
   fixed: boolean;
   /** Its next key is being taken. */
   recording: boolean;
+  /** The key it asked about while recording: another command has it
+   * (pressed again it moves here; `menu`: the menu bar's, never moved). */
+  asked?: { keys: string; other: string; menu: boolean } | null;
 }
 export interface Shortcuts {
   preset: string;
@@ -362,7 +365,7 @@ export class SettingsModel {
     this.window.announce(
       this.matches.count
         ? `${this.matches.count} settings found`
-        : "No settings found",
+        : "No Results. Try a different search.",
     );
     this.changed();
   }

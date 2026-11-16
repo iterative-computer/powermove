@@ -94,6 +94,7 @@ fn precompose(ids: &[&str], mode: PrecomposeMode, adjust: bool) -> Command {
         name: None,
         mode,
         adjust_duration: adjust,
+        size_to_selection: false,
         time: 0.,
     }
     .into()
@@ -716,4 +717,53 @@ fn split_text_refuses_without_fonts_and_non_text_layers() {
     assert!(e.to_string().contains("needs fonts"), "{e}");
     let e = s.execute(split("a"), Origin::Interface).unwrap_err();
     assert!(e.to_string().contains("Not a text layer"), "{e}");
+}
+
+#[test]
+fn precompose_fit_size_adds_an_origin_without_baking_layer_channels() {
+    let mut s = store(&[layer("a", "solid", "")]);
+    let mut command = precompose(&["a"], PrecomposeMode::MoveAll, false);
+    if let Command::Comp(CompCommand::Precompose {
+        size_to_selection, ..
+    }) = &mut command
+    {
+        *size_to_selection = true;
+    }
+    apply(&mut s, command);
+    let inner = comp(&s, "C2");
+    let layers = inner.get("layers").and_then(Value::as_array).unwrap();
+    assert_eq!(layers.len(), 2);
+    assert_eq!(text(&layers[0], "name"), "Pre-comp origin");
+    assert_eq!(text(&layers[1], "group"), text(&layers[0], "id"));
+    assert_eq!((num(&inner, "w"), num(&inner, "h")), (40., 20.));
+    assert_eq!(channel(&layers[0], "position.x"), -100.);
+    assert_eq!(channel(&layers[0], "position.y"), -50.);
+    assert_eq!(channel(&layers[1], "position.x"), 100.);
+    assert_eq!(channel(&layers[1], "position.y"), 50.);
+    let host = host_layers(&s);
+    assert_eq!(channel(find(&host, "P"), "position.x"), 120.);
+    assert_eq!(channel(find(&host, "P"), "position.y"), 60.);
+}
+
+#[test]
+fn precompose_fit_size_refuses_a_3d_ancestor_without_changing_the_document() {
+    let mut s = store(&[
+        layer("rig", "null", ",\"threeD\":true"),
+        layer("a", "solid", ",\"parent\":\"rig\""),
+    ]);
+    let before = root(&s);
+    let mut command = precompose(&["a"], PrecomposeMode::MoveAll, false);
+    if let Command::Comp(CompCommand::Precompose {
+        size_to_selection, ..
+    }) = &mut command
+    {
+        *size_to_selection = true;
+    }
+    let error = s.execute(command, Origin::Interface).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Size to selection currently supports 2D layers.")
+    );
+    assert_eq!(root(&s), before);
 }

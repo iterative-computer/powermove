@@ -40,6 +40,7 @@ mod settings;
 pub mod speech;
 mod timeline_easing;
 pub mod virtualization;
+mod wakers;
 /// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
 pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -972,6 +973,7 @@ impl Builtins {
             .backend(panel)
             .map_err(|_| "The Effects panel closed.".to_owned())?;
         let mut backend = backend.shared();
+        backend.sync()?;
         let caller = backend.caller;
         let request = backend
             .model
@@ -993,6 +995,22 @@ impl Builtins {
             .ok()
             .map(|b| b.shared().native.project.panel.selected_assets().to_vec())
             .unwrap_or_default()
+    }
+    /// Selected Project items for the explicit timeline commands.
+    pub fn project_timeline_items(&self, compositions: bool) -> (Vec<String>, Vec<String>) {
+        let Ok(backend) = self.backend(PROJECT_PANEL) else {
+            return Default::default();
+        };
+        let backend = backend.shared();
+        let panel = &backend.native.project.panel;
+        if compositions {
+            match panel.selected_item() {
+                Some(pm_panel_media::ItemId::Composition(id)) => (vec![], vec![id.clone()]),
+                _ => Default::default(),
+            }
+        } else {
+            (panel.selected_assets().to_vec(), vec![])
+        }
     }
     /// What the Project panel is dragging (its `dragstart`): the items the
     /// timeline or the viewer places when it is dropped there.
@@ -1126,8 +1144,9 @@ impl Builtins {
         carry: Option<AgentCarry>,
     ) -> Result<Self> {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        // Speech model downloads publish Settings › Transcription again.
-        crate::speech::watch(&wake);
+        // Speech model downloads publish Settings › Transcription again, and
+        // the Export sheet's encoder checks the sheet.
+        crate::wakers::watch(&wake);
         let (agent, carried) = match carry.map(AgentCarry::adopt) {
             Some((link, state)) => (link, Some(state)),
             None => Default::default(),
@@ -1518,6 +1537,20 @@ impl Builtins {
         }
         Some(realm.eval("__pmBuiltin.publish()"))
     }
+    /// The Export sheet's encoder checks end on a worker, which only wakes
+    /// the host: the sheet is published again here, once per finished check,
+    /// so its formats and Export Video leave "Checking…" without waiting for
+    /// some other change. The host calls it on every wake.
+    pub fn publish_finished_checks(&self) -> Option<Result<Ticket<Evaluation>>> {
+        let entry = self.broker.entry("export")?;
+        let backend = entry.shared().backend.clone();
+        let probe = backend.shared().native.export_probe.clone();
+        let finished = std::mem::take(&mut probe.lock().unwrap().unpublished);
+        finished.then(|| {
+            self.realm_of("export")
+                .and_then(|realm| realm.eval("__pmBuiltin.publish()"))
+        })
+    }
     pub fn take_publications(&self) -> Vec<Publication> {
         std::mem::take(&mut *self.broker.publications.shared())
             .into_values()
@@ -1539,6 +1572,8 @@ impl Builtins {
             let backend = entry.shared().backend.clone();
             let mut backend = backend.shared();
             backend.native.originals = originals.clone();
+            let mut observed = observed.clone();
+            observed.folders = backend.native.media_runtime.folders.clone();
             if backend.native.media_runtime != observed {
                 backend.native.media_runtime = observed.clone();
                 backend.native.media_sequence += 1;
@@ -2304,6 +2339,7 @@ impl EngineProxy for Broker {
                 .inspector_snapshot()
                 .map_err(Error::Host),
             "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
+            "easing.state" => entry.backend.shared().easing_state().map_err(Error::Host),
             "timeline.frame" => entry
                 .backend
                 .shared()
@@ -2579,4 +2615,32 @@ fn timeline_patch(input: &Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+pub mod linked_folders;
+
+impl Builtins {
+    pub fn update_folder_sync(&self, mut folders: BTreeMap<String, pm_panel_media::FolderSync>) {
+        if let Some(p) = self.broker.kernel.published(&self.broker.project) {
+            if let Some(value) = p.snapshot.document.to_value() {
+                let (all, roots) = linked_folders::linked(&crate::data::wire(&value));
+                for f in all.values() {
+                    for root in &roots {
+                        if f.path.starts_with(&all[root].path) {
+                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.broker.all_entries() {
+            let backend = entry.shared().backend.clone();
+            let mut backend = backend.shared();
+            if backend.native.media_runtime.folders != folders {
+                backend.native.media_runtime.folders = folders.clone();
+                backend.native.media_sequence += 1;
+            }
+        }
+        (self.broker.wake)();
+    }
 }

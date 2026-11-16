@@ -303,6 +303,8 @@ pub fn physical_fallback(key: String, code: u16, shift: bool) -> String {
             42 => Some("\\"),
             41 => Some(";"),
             39 => Some("'"),
+            // Shift-` names its key (Fly navigation), not "~".
+            50 => Some("`"),
             _ => None,
         };
         if let Some(k) = fallback {

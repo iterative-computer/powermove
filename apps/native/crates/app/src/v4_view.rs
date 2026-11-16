@@ -32,10 +32,13 @@ pub struct Natives {
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
+/// The rows sit in a driven scroll layer (P-SCROLL-LAYER) the surface steps
+/// with its own: a wheel step inside the recorded rows replays them shifted.
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
     pub column: Cell<f32>,
+    handle: ScrollHandle,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
     surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
@@ -55,6 +58,11 @@ impl Outline {
                 true
             })
     }
+    fn parent_pick(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
+            surface.update(cx, |s, _| s.press_parent(layer.into(), at));
+        }
+    }
     /// A layer name pressed: the surface may lift it into a reorder (the
     /// row still takes the click).
     fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
@@ -68,14 +76,44 @@ impl Outline {
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
     }
-    fn offset(&self, first: &str) -> f32 {
-        let top = self
-            .scene
+    /// The first JS row's top in the rows' content (all rows' height).
+    fn top(&self, first: &str) -> f32 {
+        self.scene
             .borrow()
             .as_ref()
             .and_then(|s| s.scroll_for(first))
-            .unwrap_or(0.) as f32;
-        top - self.scroll_y.get()
+            .unwrap_or(0.) as f32
+    }
+    fn content_height(&self) -> f32 {
+        self.scene
+            .borrow()
+            .as_ref()
+            .map_or(0., |s| s.content_height()) as f32
+    }
+    /// A wheel step that moved only the rows: the outline's layer replays
+    /// them at `scroll_y` without its view rendering again. False when the
+    /// view has to render (the surface notifies it then, through
+    /// [`Self::scrolled`]).
+    pub fn step(
+        &self,
+        scroll_y: f32,
+        rows: Option<(usize, usize)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let stepped =
+            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
+        if stepped {
+            self.scroll_y.set(scroll_y);
+            // Rows past JS's window are asked for as before; they arrive as
+            // a publication and draw the view.
+            if let (Some(rows), Some(view)) =
+                (rows, self.view.borrow().as_ref().and_then(|v| v.upgrade()))
+            {
+                view.update(cx, |v, cx| v.outline_rows(rows, cx));
+            }
+        }
+        stepped
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
         let moved = self.scroll_y.get() != scroll_y || self.column.get() != column;
@@ -193,6 +231,12 @@ pub struct SurfaceView {
     /// opened or closed: the chevron and the group's content follow the
     /// press in the next frame, the panel's own work after it.
     pub(crate) disclosures: HashMap<Id, bool>,
+    /// A text field to focus once it is mounted (the Agent composer when its
+    /// popover opens) and what was typed before it was.
+    ready_text: Option<(String, String, std::time::Instant)>,
+    /// The control the left button is down on: it shows pressed (a deeper
+    /// wash than hover) until the button comes up, as a Mac button does.
+    pressed: Option<Id>,
     scrolls: BTreeMap<Id, ScrollHandle>,
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
@@ -231,6 +275,9 @@ pub struct SurfaceView {
     grade_drawn: grade::Drawn,
     /// Each wheel's puck on its way to where its values put it.
     grade_motion: grade::Motion,
+    /// Each easing curve's preview run and the curve its drag left, until
+    /// the panel publishes it.
+    ease: grade::EaseState,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -250,6 +297,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// The field the panel last asked to take the keyboard (`focusRequest`).
+    focus_requested: Option<String>,
     /// A semantic id to scroll into view once a publication has it.
     reveal: Option<(String, std::time::Instant)>,
     /// Told when a new tree is installed: the timeline's native timecode
@@ -298,6 +347,8 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            pressed: None,
+            ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
@@ -317,6 +368,7 @@ impl SurfaceView {
             scrub_shown: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
+            ease: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -327,6 +379,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            focus_requested: None,
             reveal: None,
             installed: None,
             grows: false,
@@ -480,6 +533,8 @@ impl SurfaceView {
             self.reconcile(window, cx);
         }
         self.try_focus_text(cx);
+        self.follow_focus_request(cx);
+        self.take_ready(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
             let _ = installed.try_send(());
@@ -518,6 +573,9 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
+        if self.pressed.is_some_and(|id| !live(&id)) {
+            self.pressed = None;
+        }
         self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
@@ -861,16 +919,18 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the
                     // bezel. `quiet` is the borderless title in the
                     // secondary ink, for an option bar under a composer.
-                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
+                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet" | "pulldown"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
                     well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
+                    pull: crate::v4_compile::variant(node) == Some("pulldown"),
                     tint: None,
                     symbol: None,
-                    // `data-pm-variant="glass"`: a segmented control in the
-                    // system's capsule at the large size.
-                    glass: crate::v4_compile::variant(node) == Some("glass")
-                        && matches!(kind, crate::v4_control::Kind::Segmented),
+                    // Every segmented control is the kit's one: the system's
+                    // Liquid Glass capsule at the large size (PM-409).
+                    // Settings keeps the plain AppKit control of its pages.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
+                        && self.publication.panel != "settings",
                 },
                 &tokens,
                 window,
@@ -1009,7 +1069,16 @@ impl SurfaceView {
             .props
             .get("metadata")
             .is_some_and(|m| m.get("submitOnReturn") == Some(&Value::Bool(true)));
-        let kind = if number {
+        // A form's field (Settings, `metadata.form`): AppKit's bordered field
+        // shown at all times; a number one may carry a stepper.
+        let meta = node.props.get("metadata");
+        let form = meta.and_then(|m| m.get("form")) == Some(&Value::Bool(true));
+        let stepper = meta.and_then(|m| m.get("stepper")) == Some(&Value::Bool(true));
+        let kind = if form && number {
+            TextKind::FormNumber
+        } else if form && node.r#type != "textarea" {
+            TextKind::Form
+        } else if number {
             TextKind::DenseNumber
         } else if node.r#type == "textarea" && composer {
             TextKind::Composer
@@ -1030,122 +1099,126 @@ impl SurfaceView {
             field.set_ink(Self::ink(view));
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
+            field.set_stepper(stepper);
             field
         });
-        self.subscriptions.entry(id).or_default().push(cx.subscribe_in(
-            &field,
-            window,
-            move |this, _, event, window, cx| {
-                // A multiline field hands Tab on: focus moves to the next
-                // (or previous) control, as from any other field.
-                match event {
-                    TextEvent::Key("tab") => return window.focus_next(cx),
-                    TextEvent::Key("backtab") => return window.focus_prev(cx),
-                    _ => {}
-                }
-                if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
-                    return;
-                }
-                match event {
-                    TextEvent::Changed(value) => {
-                        if this
-                            .publication
-                            .surface
-                            .node(id)
-                            .is_some_and(|n| n.listeners.contains_key("input"))
-                        {
-                            this.send(
-                                id,
-                                "input",
-                                EventDetail {
-                                    value: Some(json!(value)),
-                                    ..Default::default()
-                                },
-                                cx,
-                            );
-                        }
+        self.subscriptions
+            .entry(id)
+            .or_default()
+            .push(
+                cx.subscribe_in(&field, window, move |this, _, event, window, cx| {
+                    // A multiline field hands Tab on: focus moves to the next
+                    // (or previous) control, as from any other field.
+                    match event {
+                        TextEvent::Key("tab") => return window.focus_next(cx),
+                        TextEvent::Key("backtab") => return window.focus_prev(cx),
+                        _ => {}
                     }
-                    TextEvent::Committed(value) => {
-                        let value = if number {
-                            match value.parse::<f64>() {
-                                Ok(n) if n.is_finite() => json!(n),
-                                _ => {
-                                    this.error = Some("Enter a finite number".into());
-                                    cx.notify();
-                                    return;
-                                }
-                            }
-                        } else {
-                            json!(value)
-                        };
-                        this.change(id, value, cx);
+                    if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
+                        return;
                     }
-                    // Return in a composer: the panel sees the text as typed,
-                    // then the key, as a keyboard would deliver them.
-                    TextEvent::Submitted(value) => {
-                        let listens = |event: &str| {
-                            this.publication
+                    match event {
+                        TextEvent::Changed(value) => {
+                            if this
+                                .publication
                                 .surface
                                 .node(id)
-                                .is_some_and(|n| n.listeners.contains_key(event))
-                        };
-                        let (input, keydown) = (listens("input"), listens("keydown"));
-                        if input {
-                            let detail = EventDetail {
-                                value: Some(json!(value)),
-                                ..Default::default()
+                                .is_some_and(|n| n.listeners.contains_key("input"))
+                            {
+                                this.send(
+                                    id,
+                                    "input",
+                                    EventDetail {
+                                        value: Some(json!(value)),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                        TextEvent::Committed(value) => {
+                            let value = if number {
+                                match value.parse::<f64>() {
+                                    Ok(n) if n.is_finite() => json!(n),
+                                    _ => {
+                                        this.error = Some("Enter a finite number".into());
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                json!(value)
                             };
-                            this.send(id, "input", detail, cx);
+                            this.change(id, value, cx);
                         }
-                        if keydown {
-                            let detail = EventDetail {
-                                key: Some("Enter".into()),
-                                ..Default::default()
+                        // Return in a composer: the panel sees the text as typed,
+                        // then the key, as a keyboard would deliver them.
+                        TextEvent::Submitted(value) => {
+                            let listens = |event: &str| {
+                                this.publication
+                                    .surface
+                                    .node(id)
+                                    .is_some_and(|n| n.listeners.contains_key(event))
                             };
-                            this.send(id, "keydown", detail, cx);
+                            let (input, keydown) = (listens("input"), listens("keydown"));
+                            if input {
+                                let detail = EventDetail {
+                                    value: Some(json!(value)),
+                                    ..Default::default()
+                                };
+                                this.send(id, "input", detail, cx);
+                            }
+                            if keydown {
+                                let detail = EventDetail {
+                                    key: Some("Enter".into()),
+                                    ..Default::default()
+                                };
+                                this.send(id, "keydown", detail, cx);
+                            }
                         }
-                    }
-                    TextEvent::Cancelled => {
-                        if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
-                            this.change(id, json!(""), cx);
+                        TextEvent::Cancelled => {
+                            if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
+                                this.change(id, json!(""), cx);
+                            }
                         }
-                    }
-                    // Escape in a composer reaches its panel as the key
-                    // (the Agent's shortcuts menu, then its popover).
-                    TextEvent::Key("escape") => {
-                        if this
-                            .publication
-                            .surface
-                            .node(id)
-                            .is_some_and(|n| n.listeners.contains_key("keydown"))
+                        // Escape in a composer reaches its panel as the key
+                        // (the Agent's shortcuts menu, then its popover).
+                        TextEvent::Key("escape") => {
+                            if this
+                                .publication
+                                .surface
+                                .node(id)
+                                .is_some_and(|n| n.listeners.contains_key("keydown"))
+                            {
+                                let detail = EventDetail {
+                                    key: Some("Escape".into()),
+                                    ..Default::default()
+                                };
+                                this.send(id, "keydown", detail, cx);
+                            }
+                        }
+                        // Up and Down in a number field step its value (Shift:
+                        // ten steps) and write it, as a spin field does.
+                        TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown"))
+                            if number =>
                         {
-                            let detail = EventDetail {
-                                key: Some("Escape".into()),
-                                ..Default::default()
+                            let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
+                                return;
                             };
-                            this.send(id, "keydown", detail, cx);
+                            let Some(field) = this.fields.get(&id).cloned() else {
+                                return;
+                            };
+                            let typed = field.read(cx).editing_text();
+                            let next = arrow_step(&typed, facts, key);
+                            let shown = facts.text(next);
+                            field.update(cx, |f, cx| f.replace_text(&shown, cx));
+                            this.change(id, json!(next), cx);
                         }
+                        // Canvas editors only.
+                        TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
                     }
-                    // Up and Down in a number field step its value (Shift:
-                    // ten steps) and write it, as a spin field does.
-                    TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown")) if number => {
-                        let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
-                            return;
-                        };
-                        let Some(field) = this.fields.get(&id).cloned() else {
-                            return;
-                        };
-                        let typed = field.read(cx).editing_text();
-                        let next = arrow_step(&typed, facts, key);
-                        let shown = facts.text(next);
-                        field.update(cx, |f, cx| f.replace_text(&shown, cx));
-                        this.change(id, json!(next), cx);
-                    }
-                    // Canvas editors only.
-                    TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
-                }
-            },
-        ));
+                }),
+            );
         if let Some(focus) = self.focus.get(&id) {
             let subscription = cx.on_focus(focus, window, move |v, _, cx| {
                 if let Some(field) = v.fields.get(&id) {
@@ -1409,6 +1482,77 @@ impl SurfaceView {
     pub fn focus_text(&mut self, layer: String, cx: &mut Context<Self>) {
         self.focus_text = Some((layer, std::time::Instant::now()));
         self.try_focus_text(cx);
+        self.take_ready(cx);
+    }
+    /// Focuses the text field `semantic` as soon as it is mounted; keys typed
+    /// before then (`type_early`) land in it, in order, as typing does.
+    pub(crate) fn focus_when_ready(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        self.ready_text = Some((semantic.into(), String::new(), std::time::Instant::now()));
+        self.take_ready(cx);
+    }
+    /// Text typed while the field asked for is not mounted yet; false when
+    /// nothing is waiting for it (a field that never came, after 2 s, waits
+    /// no more: keys go where they would).
+    pub(crate) fn type_early(&mut self, text: &str) -> bool {
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
+        match &mut self.ready_text {
+            Some((_, typed, _)) => {
+                typed.push_str(text);
+                true
+            }
+            None => false,
+        }
+    }
+    fn take_ready(&mut self, cx: &mut Context<Self>) {
+        // Asked for by an open that is over (the popover closed before its
+        // composer came): never focus a field later, docked or elsewhere.
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
+        let Some(id) = self
+            .ready_text
+            .as_ref()
+            .and_then(|(semantic, _, _)| self.prepared.semantics.get(semantic).copied())
+        else {
+            return;
+        };
+        let Some(field) = self.fields.get(&id).cloned() else {
+            return;
+        };
+        let Some((_, typed, _)) = self.ready_text.take() else {
+            return;
+        };
+        let value = field.update(cx, |f, cx| {
+            f.begin_editing(cx);
+            if typed.is_empty() {
+                return None;
+            }
+            let value = format!("{}{typed}", f.editing_text());
+            f.replace_text(&value, cx);
+            Some(value)
+        });
+        // The panel's model hears it as it hears typing.
+        if let Some(value) = value {
+            self.send(
+                id,
+                "input",
+                EventDetail {
+                    value: Some(json!(value)),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
     }
     fn try_focus_text(&mut self, cx: &mut Context<Self>) {
         if self
@@ -1436,6 +1580,53 @@ impl SurfaceView {
             .runtime
             .bound_layers(&self.publication.panel, &binding)?;
         (*bound == [layer.clone()]).then_some(id)
+    }
+    /// A panel names the field that should take the keyboard (`focusRequest`,
+    /// a field's own id): the field takes it once each time the request
+    /// appears or changes, so a search button that opens its field puts the
+    /// caret in it and typed letters never fire shortcuts on the way (PM-402).
+    fn follow_focus_request(&mut self, cx: &mut Context<Self>) {
+        let request = self
+            .publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("focusRequest").and_then(Value::as_str))
+            .filter(|r| !r.is_empty())
+            .find(|r| {
+                self.prepared
+                    .semantics
+                    .get(*r)
+                    .is_some_and(|id| self.fields.contains_key(id))
+            })
+            .map(str::to_owned);
+        if request == self.focus_requested {
+            return;
+        }
+        self.focus_requested = request.clone();
+        let field = request
+            .and_then(|r| self.prepared.semantics.get(&r).copied())
+            .and_then(|id| self.fields.get(&id).cloned());
+        if let Some(field) = field {
+            field.update(cx, |f, cx| f.begin_editing(cx));
+        }
+    }
+    /// The text field `semantic` lets go of the keyboard (the editor has it).
+    pub(crate) fn blur_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        if let Some((s, _, _)) = &self.ready_text
+            && s == semantic
+        {
+            self.ready_text = None;
+        }
+        if let Some(field) = self
+            .prepared
+            .semantics
+            .get(semantic)
+            .and_then(|id| self.fields.get(id))
+            .cloned()
+        {
+            field.update(cx, |f, cx| f.blur(cx));
+        }
     }
     pub fn focus_semantic(&self, semantic: &str, window: &mut Window, cx: &mut App) {
         if let Some(id) = self.prepared.semantics.get(semantic) {
@@ -2178,7 +2369,7 @@ impl SurfaceView {
                 .absolute()
                 .left(px(0.))
                 .right(px(0.))
-                .top(px(self.natives.outline.offset(first)));
+                .top(px(self.natives.outline.top(first)));
         }
         #[cfg(test)]
         {
@@ -2374,7 +2565,15 @@ impl SurfaceView {
             if let Some(h) = self.grade_height(id, &node.kit) {
                 element = element.h(px(h));
             }
-            if !node.disabled {
+            // A thumbnail is a drawing: its press goes to what holds it.
+            let thumbnail = matches!(
+                node.kit,
+                Kit::Ease {
+                    thumbnail: true,
+                    ..
+                }
+            );
+            if !node.disabled && !thumbnail {
                 element = element.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, event: &MouseDownEvent, window, cx| {
@@ -2415,9 +2614,14 @@ impl SurfaceView {
             );
         }
         let wash = self.motion.hovers.amount(id);
-        if wash > 0. && !node.disabled {
+        let pressed = self.pressed == Some(id);
+        if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
-            let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+            let alpha = if pressed {
+                (t.translucency.selected * 255.).round() as u32
+            } else {
+                (t.translucency.hover * wash * 255.).round() as u32
+            };
             let mut layer = div().absolute().inset_0();
             layer.style().corner_radii = node.style.corner_radii.clone();
             children.push(
@@ -2494,7 +2698,33 @@ impl SurfaceView {
         if node.sheet_body && in_fitted_sheet {
             return self.sheet_body(element.into_any_element(), id);
         }
-        self.place(element.into_any_element(), node, window, cx)
+        let placed = self.place(element.into_any_element(), node, window, cx);
+        if node.outline_first.is_some() {
+            return self.outline_layer(id, placed);
+        }
+        placed
+    }
+    /// The timeline outline's rows in a layer the surface scrolls: all
+    /// rows' height of content at the surface's offset, JS's window of rows
+    /// placed at its first row's top.
+    fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
+        let outline = &self.natives.outline;
+        outline
+            .handle
+            .set_offset(point(px(0.), px(-outline.scroll_y.get())));
+        div()
+            .id(("v4-outline-rows", id))
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .overflow_y_scroll()
+            .track_scroll(&outline.handle)
+            .scroll_layer_driven()
+            .child(div().w_full().h(px(outline.content_height())))
+            .child(rows)
+            .into_any_element()
     }
     /// A sheet shown in its own window (Export) is the whole window.
     fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {
@@ -2841,6 +3071,14 @@ impl SurfaceView {
                 }),
             );
         }
+        if let Some(layer) = node.timeline_parent_pick.clone() {
+            let outline = self.natives.outline.clone();
+            element =
+                element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                    outline.parent_pick(&layer, event.position, cx);
+                    cx.stop_propagation();
+                });
+        }
         if let Some(layer) = node.timeline_layer_drag.clone() {
             let outline = self.natives.outline.clone();
             element =
@@ -2920,6 +3158,33 @@ impl SurfaceView {
                 })
         });
         let wash = clickable && (node.component.is_some() || control_role);
+        if wash {
+            // Pressed while the button is down on it; any release ends it.
+            element = element
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                        v.pressed = Some(id);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                );
+        }
         if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 if wash {
@@ -3127,6 +3392,7 @@ impl SurfaceView {
                                 this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
                             },
                         )
+                        .animate_when_visible()
                         .into_any_element()
                 });
             }
@@ -3173,7 +3439,7 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } => {}
+            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures
@@ -3664,9 +3930,10 @@ fn native_options(node: &pm_surface::Node) -> Vec<Value> {
                 .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"));
             // A row's checkmark and its second line (the menu item subtitle).
             for key in ["checked", "detail"] {
-                if let (Some(value), Some(o)) =
-                    (row.and_then(|m| m.get(key)).cloned(), option.as_object_mut())
-                {
+                if let (Some(value), Some(o)) = (
+                    row.and_then(|m| m.get(key)).cloned(),
+                    option.as_object_mut(),
+                ) {
                     o.insert(key.into(), value);
                 }
             }
@@ -3686,7 +3953,9 @@ fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Ve
         .and_then(|m| m.get("pmKit"))
         .and_then(|m| m.get("log"))
         == Some(&Value::Bool(true));
-    vec![json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log})]
+    vec![
+        json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log}),
+    ]
 }
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
@@ -3704,6 +3973,13 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
             Some(Kind::Search)
         }
         Some(Component::Slider) => Some(Kind::Slider),
+        // A colour well its panel marks native (Settings): AppKit's own.
+        Some(Component::ColourWell)
+            if node.props.get("metadata").and_then(|m| m.get("native"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::Well)
+        }
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node

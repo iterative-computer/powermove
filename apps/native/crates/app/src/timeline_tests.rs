@@ -21,6 +21,8 @@ pub(crate) struct Recorder {
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
+    /// Ruler scrubs starting (`true`) and ending, as the app hears them.
+    pub scrubs: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -28,6 +30,8 @@ pub(crate) struct Recorder {
     pub moved: std::cell::Cell<usize>,
     /// Effects dropped from the Effects panel.
     pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
+    /// Finder files and Project items dropped on the timeline.
+    pub media_drops: RefCell<Vec<crate::timeline_surface::MediaDrop>>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -47,8 +51,14 @@ impl Delegate for Recording {
     fn skim(&self, seconds: Option<f64>, _: &mut App) {
         self.0.skims.borrow_mut().push(seconds);
     }
+    fn scrubbing(&self, on: bool, _: &mut App) {
+        self.0.scrubs.borrow_mut().push(on);
+    }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, _: &mut App) {
+        self.0.media_drops.borrow_mut().push(drop);
     }
     fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
         self.0.effect_drops.borrow_mut().push(drop);
@@ -112,6 +122,24 @@ pub(crate) fn stage(cx: &mut TestAppContext, layers: usize) -> Stage {
     stage_project(cx, crate::v4_view_tests::project_json(layers))
 }
 pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
+    stage_with(cx, project, false)
+}
+/// The panel in a cached slot, as a dock holds it: a frame that renders no
+/// view replays the panel's last one.
+struct Docked {
+    child: Entity<SurfaceView>,
+}
+impl gpui::Render for Docked {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div().size_full().child(
+            self.child
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let rig = crate::v4_view_tests::rig_project("timeline", &project);
     let first = publication(&rig);
     let natives = Natives::default();
@@ -135,7 +163,20 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
         .borrow_mut()
         .insert("timeline".into(), surface.clone().into());
     let outline = natives.outline.clone();
-    let (view, vcx) = window(cx, &rig, first, natives);
+    let (view, vcx) = if docked {
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let child =
+                cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
+            Docked { child }
+        });
+        let vcx = vcx.clone();
+        vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
+    } else {
+        window(cx, &rig, first, natives)
+    };
     outline.bind(view.downgrade());
     let mut stage = Stage {
         rig,
@@ -438,6 +479,120 @@ fn control_and_the_wheel_zoom_the_time(cx: &mut TestAppContext) {
     s.idle(cx);
     assert_ne!(s.surface.read_with(&s.vcx, |t, _| t.pps()), pps);
 }
+/// v1: a double-click on a key opens the Keyframe Value editor.
+#[gpui::test]
+fn a_double_click_on_a_key_opens_its_value_editor(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: key,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx
+        .simulate_mouse_up(key, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .commands
+            .borrow()
+            .iter()
+            .any(|c| c == "keyframeValue"),
+        "{:?}",
+        s.recorder.commands.borrow()
+    );
+}
+/// v1: ⌥-dragging the last of the selected keys stretches their timing from
+/// the first; the first stays where it is.
+#[gpui::test]
+fn option_dragging_the_last_selected_key_stretches_the_keys(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let key = op_center(&mut s, "key:");
+    // Both keys, by a marquee from empty space.
+    let start = s.at(0, 3.);
+    s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps()) as f32;
+    let last = point(s.at(0, 1.).x, key.y);
+    s.drag(
+        cx,
+        last,
+        last + point(px(pps / 2.), px(0.)),
+        Modifiers::alt(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(
+        (key_time(&s, &ids[0]) - 0.5).abs() < 1e-6,
+        "{}",
+        key_time(&s, &ids[0])
+    );
+    assert!(key_time(&s, &ids[1]) > 1.3, "{}", key_time(&s, &ids[1]));
+}
+/// v1: a property row's name offers its lane's menu, Separate Dimensions on
+/// Position.
+#[gpui::test]
+fn a_property_rows_name_offers_its_lane_menu(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:p", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: row.center(),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .map(|m| {
+            m.iter()
+                .filter_map(|r| r["label"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for label in ["Add Keyframe", "Paste Keyframes", "Separate Dimensions"] {
+        assert!(labels.iter().any(|l| l == label), "{labels:?}");
+    }
+}
+/// v1's pointers: ↔ over the ruler, a hand over a key, an open hand over a
+/// clip's body.
+#[gpui::test]
+fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5]);
+    let cursor = |s: &mut Stage, at: Point<Pixels>, cx: &mut TestAppContext| {
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| t.cursor_style())
+    };
+    let ruler = point(
+        s.at(0, 1.).x,
+        s.origin().y + px(tokens().metrics.ruler / 2.),
+    );
+    assert_eq!(
+        cursor(&mut s, ruler, cx),
+        gpui::CursorStyle::ResizeLeftRight
+    );
+    let key = op_center(&mut s, "key:");
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::PointingHand);
+    let body = s.at(1, 1.5);
+    assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
+}
 /// Layer ids in stacking order (top first), and each layer's group.
 fn stack(s: &Stage) -> Vec<(String, Option<String>)> {
     s.surface.read_with(&s.vcx, |t, _| {
@@ -643,6 +798,412 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(ease(&s), before);
 }
+/// Chike's stray box: in the Graph view a layer bar hidden under the graph
+/// drew its hover outline and trim grip over the curves. A bar the graph
+/// covers is never hovered (nor trimmed); out of Graph view it is.
+#[gpui::test]
+fn a_bar_the_graph_covers_is_never_hovered(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.5]);
+    let bar = s.at(0, 1.);
+    s.vcx.simulate_mouse_move(bar, None, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.hovered_clip())
+            .is_some(),
+        "the bar hovers in the dope sheet"
+    );
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_move(bar + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.hovered_clip()),
+        None,
+        "a bar under the graph is hidden"
+    );
+    // And what is drawn there is the graph's own ground first.
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(ops.first().map(|o| o.id.as_str()), Some("graph-ground"));
+}
+/// Window position of graph key `id`'s centre, as painted now.
+fn graph_key_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let key = ops
+        .iter()
+        .find(|o| o.id == format!("graph-key:{id}"))
+        .unwrap_or_else(|| panic!("graph key {id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((key.x + key.width / 2.) as f32),
+            px((key.y + key.height / 2.) as f32),
+        )
+}
+/// Chike's "keys jump when you drag them": a key pressed in the Value Graph
+/// (unselected, so the press selects it and shows its handles), dragged in
+/// small steps in value and time, stays under the pointer at every step, and
+/// stays where it was released: nothing rescales under it.
+#[gpui::test]
+fn a_dragged_graph_key_stays_under_the_pointer_and_lands_where_released(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let start = graph_key_at(&mut s, &ids[1]);
+    s.vcx
+        .simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let pressed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (pressed.y - start.y).abs() < px(0.5),
+        "pressing (selecting) the key moved it: {start:?} -> {pressed:?}"
+    );
+    let (pps, fps) = s.surface.read_with(&s.vcx, |t, _| {
+        (t.frame().unwrap().viewport.pps, t.model().index.fps)
+    });
+    let frame = (pps / fps) as f32;
+    // Down 12 points and right 3 frames, in 12 steps, as a slow hand moves.
+    let to = start + point(px(frame * 3.), px(12.));
+    let mut last_y = start.y;
+    for step in 1..=12 {
+        let k = step as f32 / 12.;
+        let at = start + point((to.x - start.x) * k, (to.y - start.y) * k);
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let travel = at - start;
+        if f32::from(travel.x).hypot(f32::from(travel.y)) < tokens().metrics.drag_threshold + 0.5 {
+            continue; // Under the drag threshold: nothing moves yet.
+        }
+        let key = graph_key_at(&mut s, &ids[1]);
+        assert!(
+            (key.y - at.y).abs() < px(1.),
+            "step {step}: key y {:?} left the pointer y {:?}",
+            key.y,
+            at.y
+        );
+        assert!(
+            (key.x - at.x).abs() <= px(frame / 2. + 0.5),
+            "step {step}: key x {:?} left the pointer x {:?} (frame {frame})",
+            key.x,
+            at.x
+        );
+        assert!(
+            key.y >= last_y - px(0.01),
+            "step {step}: the key went back up"
+        );
+        last_y = key.y;
+    }
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let landed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (landed.y - to.y).abs() < px(1.) && (landed.x - to.x).abs() <= px(frame / 2. + 0.5),
+        "the key jumped on release: released at {to:?}, shown at {landed:?}"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert!(value < 51., "dragged down: {value}");
+    s.undo(cx);
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 51.);
+}
+/// In the Speed Graph the vertical axis is speed: dragging a key up there
+/// raises its speed and leaves its value (and so the Value Graph) alone, as
+/// v1 did. It used to add the speed change to the key's value.
+#[gpui::test]
+fn a_speed_graph_drag_changes_speed_not_value(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.speed", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    let speed = |s: &Stage| {
+        let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        graph.curves()[0].points[0].point.value
+    };
+    let before = speed(&s);
+    s.drag(cx, at, at - point(px(0.), px(20.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let values: Vec<f64> = ids
+        .iter()
+        .map(|id| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model().index.key(id).unwrap().2.value.as_f64().unwrap()
+            })
+        })
+        .collect();
+    assert_eq!(values, vec![50., 51.], "a speed drag changed the values");
+    let after = speed(&s);
+    assert!(after > before + 1e-3, "speed {before} -> {after}");
+    s.undo(cx);
+    assert!((speed(&s) - before).abs() < 1e-6);
+}
+/// Window position of graph op `id`'s centre, as painted now.
+fn graph_op_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let b = ops
+        .iter()
+        .find(|o| o.id == id)
+        .unwrap_or_else(|| panic!("{id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((b.x + b.width / 2.) as f32),
+            px((b.y + b.height / 2.) as f32),
+        )
+}
+/// A stored key side's ease speed (`inEase` or `outEase`).
+fn ease_speed(s: &Stage, id: &str, side: &str) -> f64 {
+    s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(id)
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get(side)
+            .and_then(|e| e.get("speed"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN)
+    })
+}
+/// v1's transform box: two selected keys get a dashed box with eight grips;
+/// dragging the east grip scales their times about the west edge, from where
+/// the grip was (nothing jumps), as one Undo step.
+#[gpui::test]
+fn the_transform_box_scales_selected_keys_about_the_far_edge(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let second = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(second, Modifiers::shift());
+    s.idle(cx);
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.id.starts_with("graph-transform-handle:"))
+            .count(),
+        8
+    );
+    let east = graph_op_at(&mut s, "graph-transform-handle:3");
+    let pps = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps) as f32;
+    s.drag(
+        cx,
+        east,
+        east + point(px(pps * 0.5), px(0.)),
+        Modifiers::none(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert_eq!(key_time(&s, &ids[0]), 0.5, "the west edge stays");
+    assert!(
+        (key_time(&s, &ids[1]) - 2.).abs() < 0.05,
+        "{}",
+        key_time(&s, &ids[1])
+    );
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[1]), 1.5);
+}
+/// v1: the wheel over the graph pans its values (the keys don't change);
+/// Fit Selected Curves frames them again.
+#[gpui::test]
+fn the_wheel_over_the_graph_pans_its_values(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let range = |s: &Stage| {
+        let g = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        (g.min, g.max)
+    };
+    let before = range(&s);
+    let at = graph_key_at(&mut s, &ids[0]) + point(px(40.), px(20.));
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(30.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let panned = range(&s);
+    assert!(
+        (panned.0 - before.0).abs() > 1e-6,
+        "{before:?} -> {panned:?}"
+    );
+    assert!(
+        ((panned.1 - panned.0) - (before.1 - before.0)).abs() < 1e-9,
+        "a pan, not a zoom"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50.);
+    // A rebuild keeps the panned range for this view.
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(range(&s), panned);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.fit", 0., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(range(&s), before);
+}
+/// v1: ⇧ on a graph key drag keeps it on its main axis (and snaps).
+#[gpui::test]
+fn shift_keeps_a_graph_key_drag_on_its_main_axis(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    s.drag(cx, at, at + point(px(30.), px(8.)), Modifiers::shift());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50., "sideways: the value stays");
+    assert!(key_time(&s, &ids[0]) > 0.5);
+}
+/// v1's handles: ⇧ lays a handle flat; without ⌥ the other handle stays on
+/// the same tangent through the key.
+#[gpui::test]
+fn handles_flatten_with_shift_and_mirror_without_option(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1., 1.5]);
+    let first = op_center(&mut s, "key:");
+    s.vcx.simulate_click(first, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    let middle = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(middle, Modifiers::none());
+    s.idle(cx);
+    let speed = |s: &Stage, side: &str| ease_speed(s, &ids[1], side);
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(25.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let (o, i) = (speed(&s, "outEase"), speed(&s, "inEase"));
+    assert!(
+        o.is_finite() && (o - i).abs() < 1e-3,
+        "mirrored: out {o} in {i}"
+    );
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(20.)), Modifiers::shift());
+    assert!(
+        speed(&s, "outEase").abs() < 1e-6,
+        "flat: {}",
+        speed(&s, "outEase")
+    );
+}
+/// v1: a double-click on a graph key edits its value; a right-click opens
+/// the keyframe menu with v1's easing names.
+#[gpui::test]
+fn graph_keys_edit_on_double_click_and_ease_from_their_menu(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .effects
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, HostEffect::EditKeyValues(_))),
+        "{:?}",
+        s.recorder.effects.borrow()
+    );
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_owned))
+        .collect();
+    for label in ["Edit Value…", "Easy Ease", "Exponential Out", "Overshoot"] {
+        assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+    }
+}
 #[gpui::test]
 fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
@@ -773,9 +1334,9 @@ fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppCon
     let mut s = stage(cx, 2);
     let m = tokens().metrics;
     let least = crate::timeline_surface::least_layer_column(&m);
-    // Number, disclosure, badge, three slots of name and three switches.
+    // Number, disclosure, badge, three slots of name and five switches.
     let gap = m.gap as f64;
-    let row = 6. * gap + 8. * m.hit as f64 + m.kind_badge as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
     assert!(least >= row && least >= 320., "{least} < {row}");
     let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
     assert!(column >= least);
@@ -1106,6 +1667,152 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
     assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
     assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
 }
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
+/// PM-310: a sideways wheel step moves the tracks and the ruler as they were
+/// drawn (their scroll layers), with no render of the panel, as the steps up
+/// and down do; the frame hit-testing reads is at the new time at once. The
+/// first step of a sideways scroll draws them past each side (other draws
+/// leave that out: it costs them); the panel renders once the steps stop and
+/// at once for a step past the tracks' width drawn. A skimmer showing stays
+/// under the pointer at the time there, drawn outside the panel.
+#[gpui::test]
+fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, delta: Point<Pixels>, modifiers: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let time = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    // Zoomed in, so the time has somewhere to scroll; the view it wrote
+    // is back from the worker.
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
+    let before = time(&s);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered, "the first sideways step draws past each side");
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 60. / pps)).abs() < 1e-9);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_time, time(&s));
+    // Shift with the wheel scrolls sideways too; then up and down.
+    wheel(&mut s, point(px(0.), px(-20.)), Modifiers::shift());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 80. / pps)).abs() < 1e-9);
+    wheel(&mut s, point(px(0.), px(-30.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past the tracks' width drawn: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    // A zoom draws no further than the view again: the next sideways step
+    // draws.
+    wheel(&mut s, point(px(0.), px(-10.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    s.idle(cx);
+    // The skimmer showing (drawn with the playhead, outside the panel): a
+    // step moves the time under it with no panel draw, and the skim follows.
+    // Back at the start, zoomed in, the sideways layers recorded.
+    wheel(&mut s, point(px(5000.), px(0.)), Modifiers::none());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    wheel(&mut s, point(px(-10.), px(0.)), Modifiers::none());
+    settle(&mut s);
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let (pps, start, _) = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let over = s.at(2, start + 300. / pps);
+    s.vcx.simulate_mouse_move(over, None, Modifiers::none());
+    settle(&mut s);
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let (x, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
+    let rendered = renders(&s);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: over,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        ..Default::default()
+    });
+    s.vcx.run_until_parked();
+    assert_eq!(renders(&s), rendered);
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now > skimmed, "the time under the pointer: later after a scroll on");
+    // Still under the pointer (within the frame it snaps to).
+    let (moved, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    assert!((moved - x).abs() <= pps / 30. + 1., "{x} -> {moved}");
+    // Once the steps stop, the panel draws again.
+    settle(&mut s);
+    assert!(renders(&s) > rendered);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
@@ -1355,6 +2062,69 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
         s.rig.kernel.published(PROJECT).unwrap().revision(),
         revision
     );
+    // The app hears the scrub start before its first seek and end on
+    // release (PM-310: only Properties follows each frame meanwhile).
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
+}
+/// PM-310 scrub: a ruler scrub seeks only when the pointer reaches another
+/// frame. Zoomed in, a frame is many points wide and most moves stay in one:
+/// each seek is the viewer's command, the app's tick and the extensions'
+/// time, so a move inside the frame sought sends none.
+#[gpui::test]
+fn a_ruler_scrub_seeks_once_per_frame_it_reaches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let at = s.at(0, 1.);
+    // Zoomed in about the pointer until a frame is several points wide.
+    for _ in 0..4 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::control(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let frame = pps / 30.;
+    assert!(frame >= 8., "a frame is {frame} points");
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let y = px(tokens().metrics.ruler / 2.);
+    let start = origin + point(px(column + 40.), y);
+    s.vcx.simulate_mouse_move(start, None, Modifiers::none());
+    s.vcx.simulate_event(MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.vcx.run_until_parked();
+    let first = s.recorder.seeks.borrow().len();
+    assert!(first >= 1);
+    // Point by point across three frames.
+    let span = (frame * 3.).ceil() as i32;
+    for dx in 1..=span {
+        s.vcx.simulate_mouse_move(
+            start + point(px(dx as f32), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+    }
+    s.vcx.simulate_event(MouseUpEvent {
+        position: start + point(px(span as f32), px(0.)),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.idle(cx);
+    let seeks = s.recorder.seeks.borrow().clone();
+    let during = &seeks[first - 1..];
+    assert!(
+        (3..=4).contains(&during.len()),
+        "{span} moves over three frames sought {during:?}"
+    );
+    assert!(during.windows(2).all(|w| w[0] != w[1]), "{during:?}");
 }
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
@@ -1622,6 +2392,41 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
     );
     assert_eq!(selected(&s), ["l1".to_string()]);
 }
+/// As the app holds the panel (a cached view in its dock, the outline's rows
+/// in their scroll layer): a double-click on a layer's name opens its field.
+#[gpui::test]
+fn a_docked_panel_opens_a_layers_name_field_on_double_click(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(2), true);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+}
 /// A double-click on an unselected layer's name, as a person makes it: the
 /// second click lands before the first one's selection has re-rendered the
 /// row, and still opens the name field, whose name typed is the layer's.
@@ -1653,8 +2458,9 @@ fn a_double_click_on_an_unselected_name_opens_its_field(cx: &mut TestAppContext)
         .view
         .read_with(&s.vcx, |v, _| v.cancellable_field())
         .expect("the name field opened");
-    s.view
-        .update(&mut s.vcx, |v, cx| v.change(field, serde_json::json!("Logo"), cx));
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.change(field, serde_json::json!("Logo"), cx)
+    });
     s.idle(cx);
     s.idle(cx);
     let p = s.rig.kernel.published(PROJECT).unwrap();
@@ -1920,6 +2726,33 @@ fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_
     s.idle(cx);
     assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
 }
+/// Finder files dropped on the tracks land on the timeline (v1.2.0): the
+/// drag reaches the timeline through the window's file drop (the rows'
+/// scroll layer and the canvases over them do not take it).
+#[gpui::test]
+fn finder_files_dropped_on_the_tracks_reach_the_timeline(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let at = s.at(1, 1.0);
+    let paths = vec![
+        std::path::PathBuf::from("/media/drop-a.mov"),
+        std::path::PathBuf::from("/media/drop-b.png"),
+    ];
+    s.vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: gpui::ExternalPaths(paths.clone().into()),
+    });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Pending { position: at });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Submit { position: at });
+    s.idle(cx);
+    let drops = s.recorder.media_drops.borrow().clone();
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert!(
+        matches!(&drops[0].what, crate::timeline_surface::Dropped::Files { paths: p, .. } if *p == paths),
+        "{drops:?}"
+    );
+}
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays
 /// from the playhead, not from a stale skimmer (review).
@@ -2039,4 +2872,213 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
             layer: Some(layer),
         }]
     );
+}
+
+fn axis_project() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(1)).unwrap();
+    let properties = project["layers"][0]["p"].as_object_mut().unwrap();
+    for (from, to) in [
+        ("x", "position.x"),
+        ("y", "position.y"),
+        ("sx", "scale.x"),
+        ("sy", "scale.y"),
+    ] {
+        let value = properties.remove(from).unwrap();
+        properties.insert(to.into(), value);
+    }
+    project.to_string()
+}
+
+/// v1 axisValueIndex/dragPropertyValue: a joined row edits only its grabbed axis.
+#[gpui::test]
+fn joined_position_value_columns_scrub_one_axis_and_undo(cx: &mut TestAppContext) {
+    for path in ["position.x", "position.y"] {
+        let mut s = stage_project(cx, axis_project());
+        let values = |s: &Stage| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                ["position.x", "position.y"].map(|p| {
+                    t.model()
+                        .index
+                        .channel("l0", p)
+                        .unwrap()
+                        .value
+                        .as_f64()
+                        .unwrap()
+                })
+            })
+        };
+        let before = values(&s);
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, _| {
+            t.press_property("l0".into(), path.into(), at)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let after = values(&s);
+        let axis = usize::from(path == "position.y");
+        assert_eq!(after[axis], before[axis] + 10.);
+        assert_eq!(after[1 - axis], before[1 - axis]);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(values(&s), before);
+    }
+}
+
+#[gpui::test]
+fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let origin = s.at(0, 0.5);
+    let target = s.at(1, 1.);
+    // Escape cancels the pick without changing either layer.
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| {
+        t.model().index.layer("l0").unwrap().parent.is_none()
+    }));
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let parent = |s: &Stage, id| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.layer(id).unwrap().parent.clone()
+        })
+    };
+    assert_eq!(parent(&s, "l0").as_deref(), Some("l1"));
+    assert!(s.recorder.reports.borrow().is_empty());
+    // Parenting the parent to its child would make a cycle.
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l1".into(), target));
+    s.vcx
+        .simulate_mouse_move(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(parent(&s, "l1"), None);
+    s.undo(cx);
+    assert_eq!(parent(&s, "l0"), None);
+}
+
+#[gpui::test]
+fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, axis_project());
+    let at = s.at(0, 0.5);
+    s.surface.update(&mut s.vcx, |t, _| {
+        t.press_property("l0".into(), "position.y".into(), at)
+    });
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(&*s.recorder.commands.borrow(), &["timeline.propertyEdit"]);
+    assert!(s.recorder.reports.borrow().is_empty());
+}
+
+#[gpui::test]
+fn scale_axis_columns_follow_the_linked_ratio_and_undo(cx: &mut TestAppContext) {
+    for linked in [false, true] {
+        let mut project: serde_json::Value = serde_json::from_str(&axis_project()).unwrap();
+        project["layers"][0]["scaleLinked"] = serde_json::json!(linked);
+        project["layers"][0]["p"]["scale.y"]["v"] = serde_json::json!(50.);
+        let mut s = stage_project(cx, project.to_string());
+        let value = |s: &Stage, path| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model()
+                    .index
+                    .channel("l0", path)
+                    .unwrap()
+                    .value
+                    .as_f64()
+                    .unwrap()
+            })
+        };
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, _| {
+            t.press_property("l0".into(), "scale.x".into(), at)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(value(&s, "scale.x"), 110.);
+        assert!((value(&s, "scale.y") - if linked { 55. } else { 50. }).abs() < 1e-9);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(value(&s, "scale.x"), 100.);
+        assert_eq!(value(&s, "scale.y"), 50.);
+    }
+}
+
+#[gpui::test]
+fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, duration, mapping, end) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.duration,
+            t.time_mapping(),
+            t.model().index.work[1],
+        )
+    });
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    s.drag(
+        cx,
+        point(x_of(end) - px(2.), y),
+        point(x_of(end - 2.), y),
+        Modifiers::none(),
+    );
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.model().index.duration, duration);
+        assert_eq!(t.time_mapping(), mapping);
+        assert!(t.model().index.work[1] < end);
+    });
+}
+
+/// PM-367: the shell's first word on the timeline's focus (unfocused, at the
+/// first layout) is a change, so the scene and the panel's rows both take
+/// the neutral selection; the accent comes back with the keyboard.
+#[gpui::test]
+fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let focused = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().map(|scene| scene.focused))
+    };
+    assert_eq!(focused(&s), Some(true));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert_eq!(focused(&s), Some(false));
+    assert!(!s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
+    assert_eq!(focused(&s), Some(true));
 }

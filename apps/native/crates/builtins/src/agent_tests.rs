@@ -246,12 +246,19 @@ impl Agent {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             self.text();
-            if let Some(r) = self
-                .panels
-                .take_platform_requests()
-                .into_iter()
-                .find(|r| r.operation == operation)
-            {
+            let mut found = None;
+            for r in self.panels.take_platform_requests() {
+                // New rows for a menu still open after a provider pick: the
+                // app puts them in that menu; here the person closes it.
+                if r.operation == "agentMenu" && r.input["update"] == true {
+                    self.panels.platform_reply(r.id, Ok(Value::Null));
+                    continue;
+                }
+                if found.is_none() && r.operation == operation {
+                    found = Some(r);
+                }
+            }
+            if let Some(r) = found {
                 return r;
             }
             assert!(Instant::now() < deadline, "no {operation} request");
@@ -1021,6 +1028,53 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
     panel.panels.close();
 }
 #[test]
+fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
+    // The reported bug: every Full access send failed with "Computer access
+    // requires fresh approval for this run", and Try Again looped it.
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    panel.click("agent-access");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    let ask = panel.request("agent.consent");
+    panel
+        .panels
+        .agent_consent(ask.input["effect"].as_u64().unwrap(), true)
+        .unwrap();
+    {
+        let state = agent.lock().unwrap();
+        let s = state.panel.session(state.panel.active_id()).unwrap();
+        assert_eq!(s.settings.access, pm_agents::Access::Computer);
+        assert!(s.computer_consent, "the card's answer is kept for the thread");
+    }
+    panel.send("Hi");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(text.contains("Saw: Hi"), "the run reached the provider: {text}");
+    assert!(
+        !text.contains("fresh approval"),
+        "no dead-end refusal: {text}"
+    );
+    // Leaving Full access drops the consent; choosing it again asks again.
+    panel.choose("agent-access", "auto");
+    assert!({
+        let state = agent.lock().unwrap();
+        !state
+            .panel
+            .session(state.panel.active_id())
+            .unwrap()
+            .computer_consent
+    });
+    panel.click("agent-access");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    panel.request("agent.consent");
+    panel.panels.close();
+}
+#[test]
 fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
@@ -1293,6 +1347,26 @@ fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
         .unwrap();
     assert_eq!(cancelled["threadId"], json!(thread));
     panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+/// The composer's Select part of the screen (v1's, PM-399): the panel asks
+/// the window for the crosshair; what is selected comes back as an
+/// attachment through `agent_attach`.
+#[test]
+fn select_part_of_the_screen_asks_the_window_for_a_pick() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.panels.take_platform_requests();
+    panel.click("agent-pick-region");
+    let requests = panel.panels.take_platform_requests();
+    assert_eq!(
+        requests.iter().filter(|r| r.operation == "agent.pickRegion").count(),
+        1,
+        "{:?}",
+        requests.iter().map(|r| &r.operation).collect::<Vec<_>>()
+    );
     panel.panels.close();
 }
 #[test]

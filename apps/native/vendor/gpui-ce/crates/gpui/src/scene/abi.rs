@@ -136,9 +136,13 @@ const _: () = {
     assert!(std::mem::size_of::<ShaderBool>() == 4);
     assert!(std::mem::size_of::<BorderStyle>() == 4);
     assert!(std::mem::size_of::<crate::AtlasTextureKind>() == 4);
-    assert!(std::mem::size_of::<ContentMask<ScaledPixels>>() == 32);
+    assert!(std::mem::size_of::<ContentMask<ScaledPixels>>() == 80);
     assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, bounds) == 0);
     assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, fade_out) == 16);
+    assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, shape) == 32);
+    assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, corner_radii) == 48);
+    assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, corner_smoothing) == 64);
+    assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, padding) == 68);
     assert!(std::mem::size_of::<Point<ScaledPixels>>() == 8);
     assert!(std::mem::offset_of!(Point<ScaledPixels>, x) == 0);
     assert!(std::mem::offset_of!(Point<ScaledPixels>, y) == 4);

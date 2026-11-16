@@ -175,7 +175,7 @@ pub enum DeltaPrepared {
     /// Library state is merged; `delta_media` finishes the capture.
     MediaPending,
 }
-fn lease(native: &Path) -> Result<File> {
+pub(crate) fn lease(native: &Path) -> Result<File> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -385,8 +385,9 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
     }
 }
 
-/// App launch path: an unchanged source costs a metadata walk, nothing else.
-/// A pending capture from an interrupted launch still gets finished.
+/// An unchanged source costs a metadata walk, nothing else; a changed one is
+/// captured and merged. Not the app's launch path: launches only finish a
+/// capture already taken (`later::resume_pending`).
 pub fn delta_if_changed(
     config: &Config,
     mut hook: impl FnMut(Event) -> Result<()>,
@@ -509,12 +510,17 @@ impl Merge<'_> {
         };
         Ok(())
     }
+    /// The native copy as it stands: a Home rename of it while closed (its
+    /// row's name, marked) is native work too, though the body is unchanged.
     fn stored_fingerprint(&self, id: &str) -> Result<Option<String>> {
-        Ok(self
-            .writer
-            .store()
-            .load(id)?
-            .map(|p| fingerprint(&p.project, p.history.as_ref())))
+        let store = self.writer.store();
+        let renamed = store.renamed(id)?;
+        Ok(store.load(id)?.map(|mut p| {
+            if let (Some(name), KernelValue::Object(m)) = (&renamed, &mut p.project) {
+                m.insert("name", KernelValue::from(name.as_str()));
+            }
+            fingerprint(&p.project, p.history.as_ref())
+        }))
     }
     fn projects(&mut self, hook: &mut impl FnMut(Event) -> Result<()>) -> Result<()> {
         let store = self.next_store();

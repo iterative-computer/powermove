@@ -134,7 +134,9 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                     serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json"))
                         .unwrap();
                 let mut tools = main["tools"].as_array().unwrap().clone();
-                let projects: Value = serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
+                let projects: Value =
+                    serde_json::from_str(include_str!("../fixtures/project-native-catalog.json"))
+                        .unwrap();
                 let media: Value =
                     serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
                         .unwrap();
@@ -149,6 +151,11 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                         .iter_mut()
                         .find(|t| t["name"] == replacement["name"])
                         .unwrap() = replacement.clone();
+                }
+                for tool in &mut tools {
+                    if catalog::COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap()) {
+                        tool["inputSchema"]["properties"]["compositionId"] = json!({"type":"string","minLength":1,"description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."});
+                    }
                 }
                 // The native window tools follow the pinned catalog.
                 tools.extend(catalog::native_tools().iter().cloned());
@@ -186,7 +193,11 @@ fn source_bodies_match_state_and_timeline_pages() {
             "source-pairs.mjs",
             Some(&json!({"project":project,"selection":selection,"tool":tool,"arguments":args})),
         );
-        assert_eq!(value(session.call(tool, args)), expected, "{tool}");
+        let mut actual = value(session.call(tool, args));
+        if tool == "get_project_state" {
+            actual.as_object_mut().unwrap().remove("compositions");
+        }
+        assert_eq!(actual, expected, "{tool}");
     }
 }
 #[test]

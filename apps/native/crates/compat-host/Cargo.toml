@@ -9,6 +9,7 @@ publish = false
 macos-probes = []
 
 [dependencies]
+pm-design = { path = "../design" }
 pm-remote-dom = { path = "../remote-dom" }
 pm-store-host = { path = "../store-host" }
 serde = { version = "1", features = ["derive"] }

@@ -128,8 +128,12 @@ pub fn left_button_held() -> bool {
     unsafe extern "C" {
         fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     }
-    // kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft.
-    unsafe { CGEventSourceButtonState(1, 0) }
+    // Held only while both the hardware (kCGEventSourceStateHIDSystemState)
+    // and the session (kCGEventSourceStateCombinedSessionState, which also
+    // sees posted events) say so: a release over an extension's own window
+    // (a native panel body) never reaches the editor view, and a drag must
+    // still end there with its drop (PM-289).
+    unsafe { CGEventSourceButtonState(1, 0) && CGEventSourceButtonState(0, 0) }
 }
 pub fn tokens() -> Tokens {
     let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {
@@ -152,9 +156,10 @@ pub fn tokens() -> Tokens {
 /// that was in front in front again. With no session, one new window.
 fn restore_session(cx: &mut App) {
     let mut front = None;
-    let plan = view::session_path()
-        .filter(|p| p.exists())
-        .and_then(|p| match session::Session::load(&p) {
+    let path = view::session_path().filter(|p| p.exists());
+    let plan = path
+        .as_ref()
+        .and_then(|p| match session::Session::load(p) {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("Window session could not be restored: {e}");
@@ -162,14 +167,27 @@ fn restore_session(cx: &mut App) {
             }
         })
         .map(|s| {
-            front = s.key;
-            if crate::tabs_mode() {
-                s.restore_plan_tabs(keeps_windows())
-            } else {
-                s.restore_plan(keeps_windows())
-            }
+            let plan = s.launch_plan(crate::tabs_mode(), keeps_windows());
+            front = s.key.filter(|k| plan.iter().any(|w| w.id == *k));
+            plan
         })
         .unwrap_or_default();
+    // The file holds what this launch reopens and nothing older: entries an
+    // earlier build left behind go (PM-392). Queued before any window
+    // writes its own state.
+    if let Some(path) = &path
+        && !plan.is_empty()
+    {
+        session::write(
+            path,
+            session::Change::Replace(session::Session {
+                version: 1,
+                windows: plan.clone(),
+                key: front,
+                complete: true,
+            }),
+        );
+    }
     if plan.is_empty() {
         open_editor_window(cx, true, None, None);
         return;
@@ -268,6 +286,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {
                 let h = host.borrow();
@@ -359,6 +378,28 @@ fn open_editor_window(
 /// Development builds only: `--open a,b` (`PM_NATIVE_REVIEW_OPEN`) runs those
 /// commands in the first editor window once it has settled, so design review
 /// captures reach Settings, sheets and the palette without the menu bar or focus.
+#[cfg(debug_assertions)]
+pub(crate) fn review_splitter(
+    action: &str,
+    x: f32,
+    y: f32,
+    offset: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    thread_local! { static ORIGIN: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) }; }
+    ORIGIN.with(|origin| {
+        if action == "press" {
+            origin.set(Some((x, y)));
+        }
+        if let Some((x, y)) = origin.get() {
+            review_pointer(&format!("{action}:{x}:{}", y + offset), window, cx);
+        }
+        if action == "release" {
+            origin.set(None);
+        }
+    });
+}
 /// Development builds: `pointer:x:y`, `click:x:y`, `dblclick:x:y` and
 /// `drag:x:y:x:y` (window points) as GPUI input, so a review can hover,
 /// click and drag without the real pointer; `press:x:y`, `move:x:y` and
@@ -477,12 +518,16 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                 let _ = handle.update(cx, |_, window, cx| {
                     editor.update(cx, |v, cx| v.command(cmd, window, cx))
                 });
+                if name.starts_with("reviewSplitter:") {
+                    wait = 1;
+                }
             }
         })
         .detach();
     });
 }
 struct Settings {
+    motion: crate::motion::Motion<u64>,
     tokens: Tokens,
     selected: usize,
     focus: FocusHandle,
@@ -494,60 +539,70 @@ const SECTIONS: [&str; 5] = [
     "Transcription",
     "Extensions",
 ];
+impl Settings {
+    fn motion(&mut self) -> &mut crate::motion::Motion<u64> {
+        &mut self.motion
+    }
+}
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = &self.tokens;
-        let mut sidebar = div()
-            .flex()
-            .flex_col()
-            .w(px(t.metrics.settings_sidebar))
-            .p(px(t.metrics.inset))
-            .gap(px(t.metrics.gap));
-        for (i, s) in SECTIONS.iter().enumerate() {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
+        let t = self.tokens.clone();
+        let kit = crate::kit::Kit::new(&t, &self.motion, Self::motion, window, cx);
+        let mut sidebar = kit.utility_sidebar();
+        for (i, section) in SECTIONS.iter().enumerate() {
+            let symbol = [
+                "folder",
+                "gearshape",
+                "person.crop.circle",
+                "waveform",
+                "puzzlepiece.extension",
+            ][i];
             sidebar = sidebar.child(
-                div()
-                    .id(i)
-                    .rounded(px(t.metrics.control_radius))
-                    .p(px(t.metrics.gap))
-                    .bg(rgb(if i == self.selected {
-                        t.colors.selected_fill
-                    } else {
-                        t.colors.panel_secondary
-                    }))
-                    .child(*s)
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        v.selected = i;
-                        cx.notify();
-                    })),
+                kit.nav_row(
+                    format!("settings-{i}"),
+                    symbol,
+                    (*section).into(),
+                    None,
+                    i == self.selected,
+                )
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    v.selected = i;
+                    cx.notify();
+                })),
             );
         }
-        div()
+        // This fallback is reachable when the shell has no Controller integration.
+        // The app Controller continues to open its full Settings page.
+        let body = div()
             .size_full()
             .flex()
-            .bg(rgb(t.colors.panel))
-            .text_color(rgb(t.colors.text))
-            .font_family(pm_design::TEXT_FONT)
-            .text_size(px(t.typography.body))
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
-                match e.keystroke.key.as_str() {
-                    "up" => v.selected = v.selected.saturating_sub(1),
-                    "down" => v.selected = (v.selected + 1).min(SECTIONS.len() - 1),
-                    "home" => v.selected = 0,
-                    "end" => v.selected = SECTIONS.len() - 1,
-                    "escape" => w.remove_window(),
-                    _ => {}
-                }
-                cx.notify();
-            }))
-            .child(sidebar)
-            .child(
-                div()
-                    .flex_1()
-                    .p(px(t.metrics.inset))
-                    .text_size(px(t.typography.display))
-                    .child(SECTIONS[self.selected]),
-            )
+            .items_center()
+            .justify_center()
+            .child(kit.empty_state(
+                "gearshape",
+                SECTIONS[self.selected],
+                "Open a project to change its settings.",
+            ));
+        kit.utility_window(
+            "Settings",
+            Some(sidebar.into_any_element()),
+            vec![],
+            body.into_any_element(),
+            vec![],
+        )
+        .track_focus(&self.focus)
+        .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
+            match e.keystroke.key.as_str() {
+                "up" => v.selected = v.selected.saturating_sub(1),
+                "down" => v.selected = (v.selected + 1).min(SECTIONS.len() - 1),
+                "home" => v.selected = 0,
+                "end" => v.selected = SECTIONS.len() - 1,
+                "escape" => w.remove_window(),
+                _ => {}
+            }
+            cx.notify();
+        }))
     }
 }
 pub(crate) fn open_settings(cx: &mut App) {
@@ -573,6 +628,7 @@ pub(crate) fn open_settings(cx: &mut App) {
             )))),
         |w, cx| {
             let entity = cx.new(|cx| Settings {
+                motion: crate::motion::Motion::default(),
                 tokens: t,
                 selected: 0,
                 focus: cx.focus_handle(),
@@ -582,4 +638,17 @@ pub(crate) fn open_settings(cx: &mut App) {
             entity
         },
     );
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_settings() {
+    crate::utility_capture_tests::capture("settings-stub", |_, cx| {
+        cx.new(|cx| Settings {
+            motion: crate::motion::Motion::default(),
+            tokens: tokens(),
+            selected: 0,
+            focus: cx.focus_handle(),
+        })
+    });
 }

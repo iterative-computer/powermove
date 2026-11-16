@@ -186,6 +186,13 @@ fn structured(layer: &Value, channel: &str) -> Option<Vec<Step>> {
         let (mask_id, rest) = rest.split_once('.')?;
         let i = index_by_id(layer.get("masks"), mask_id)?;
         (vec![key("masks"), Step::Index(i), key("path")], rest)
+    } else if let Some((prefix, field)) = [("ta.", "animators"), ("ts.", "styles")]
+        .into_iter()
+        .find(|(prefix, _)| channel.starts_with(prefix))
+    {
+        let (id, rest) = channel.strip_prefix(prefix)?.split_once('.')?;
+        let i = index_by_id(layer.get("d").and_then(|d| d.get(field)), id)?;
+        (vec![key("d"), key(field), Step::Index(i)], rest)
     } else {
         return None;
     };
@@ -204,7 +211,10 @@ fn structured(layer: &Value, channel: &str) -> Option<Vec<Step>> {
 /// `PM.findProp(layer, key) || layer.p[key]`, read only.
 pub(crate) fn find(layer: &Value, channel: &str) -> Option<Vec<Step>> {
     let found = |path: Vec<Step>| get(layer, &path).filter(|v| is_property(v)).map(|_| path);
-    if channel.starts_with("g.") || channel.starts_with("mp.") {
+    if ["g.", "mp.", "ta.", "ts."]
+        .iter()
+        .any(|prefix| channel.starts_with(prefix))
+    {
         return structured(layer, channel);
     }
     for edge in ["transitionIn", "transitionOut"] {
@@ -284,6 +294,31 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
             let k = k.to_string_lossy();
             if can_animate_content(layer, &k) && is_property(v) {
                 out.push((format!("c.{k}"), vec![key("d"), Step::Key(k)]));
+            }
+        }
+        // Text animator/style channels keep their authored ids and key data.
+        for (field, prefix) in [("animators", "ta"), ("styles", "ts")] {
+            for (i, item) in d
+                .get(field)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let Some(id) = item.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(p) = item.get("p").and_then(Value::as_object) {
+                    for (name, value) in p.iter() {
+                        if is_property(value) {
+                            let name = name.to_string_lossy();
+                            out.push((
+                                format!("{prefix}.{id}.{name}"),
+                                vec![key("d"), key(field), Step::Index(i), key("p"), key(&name)],
+                            ));
+                        }
+                    }
+                }
             }
         }
         for (group, prefix) in [("uniforms", "u."), ("params", "x.")] {

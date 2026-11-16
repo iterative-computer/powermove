@@ -34,7 +34,8 @@ pub const SEQUENCE_PIPELINE: u32 = 2;
 impl ProxyRecipe {
     /// 4: every colour field is tagged with the original's reading
     /// (untagged originals' proxies were read by their own size).
-    pub const VERSION: u32 = 4;
+    /// 5: retain VP8/VP9 alpha and fit portrait HD previews in 1080×1920.
+    pub const VERSION: u32 = 5;
 
     pub fn new(
         requested_format: ProxyFormat,
@@ -57,7 +58,13 @@ impl ProxyRecipe {
             // Fit the whole HD box, including ultrawide and portrait media.
             // VideoToolbox memory follows coded pixels, not the viewer crop.
             ProxySize::P1080 => {
-                ((u64::from(source_height) * 1920) / u64::from(source_width)).clamp(1, 1080) as u32
+                let (box_width, box_height) = if source_height > source_width {
+                    (1080, 1920)
+                } else {
+                    (1920, 1080)
+                };
+                ((u64::from(source_height) * box_width) / u64::from(source_width))
+                    .clamp(1, box_height) as u32
             }
             ProxySize::P720 => 720,
         };
@@ -386,9 +393,38 @@ pub fn free_bytes(path: &Path) -> Result<(u64, u64)> {
     ))
 }
 
-/// Generation pauses when free bytes are below max(20 GiB, 10% capacity).
+/// Keep max(5 GiB, 1% capacity) free, plus room for the pending output.
 pub fn disk_guard(available: u64, capacity: u64) -> bool {
     available >= disk_reserve(capacity)
+}
+
+/// Encoded-size planning estimate, in bytes per output pixel per frame.
+/// Keep this profile-specific: raw RGBA size would reject long compressed
+/// movies even on volumes large enough for their actual rendition. The
+/// encoder still checks available space throughout writing.
+pub fn estimated_output_bytes(recipe: &ProxyRecipe, frames: u64) -> u64 {
+    let (numerator, denominator) = match recipe.codec() {
+        "prores_proxy" => (1, 4),
+        "prores_lt" => (1, 2),
+        "prores_hq" => (1, 1),
+        "prores_4444" => (2, 1),
+        "hevc_10" => (1, 8),
+        _ => (2, 1),
+    };
+    u64::from(recipe.width)
+        .saturating_mul(u64::from(recipe.height))
+        .saturating_mul(frames.max(1))
+        .saturating_mul(numerator)
+        .div_ceil(denominator)
+        .saturating_add(1 << 20)
+}
+
+pub fn required_free_bytes(capacity: u64, output_bytes: u64) -> u64 {
+    disk_reserve(capacity).saturating_add(output_bytes)
+}
+
+pub fn disk_guard_for_job(available: u64, capacity: u64, output_bytes: u64) -> bool {
+    available >= required_free_bytes(capacity, output_bytes)
 }
 
 /// Test-only: replaces the guard's reserve (bytes) so proxy tests that are
@@ -425,7 +461,7 @@ fn disk_reserve(capacity: u64) -> u64 {
             return reserve;
         }
     }
-    (20u64 << 30).max(capacity / 10)
+    (5u64 << 30).max(capacity / 100)
 }
 
 #[cfg(test)]
@@ -436,14 +472,15 @@ mod cancel_tests {
         for (w, h, expected) in [
             (3840, 2160, (1920, 1080)),
             (3840, 1080, (1920, 540)),
-            (2160, 3840, (608, 1080)),
+            // Portrait fits the portrait HD box (recipe 5): the same pixels.
+            (2160, 3840, (1080, 1920)),
             (640, 360, (640, 360)),
         ] {
             let recipe =
                 ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false)
                     .unwrap();
             assert_eq!((recipe.width, recipe.height), expected);
-            assert!(recipe.width <= 1920 && recipe.height <= 1080);
+            assert!(u64::from(recipe.width) * u64::from(recipe.height) <= 1920 * 1080);
         }
     }
     use super::*;

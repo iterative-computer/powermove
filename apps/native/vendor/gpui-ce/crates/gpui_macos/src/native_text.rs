@@ -22,6 +22,12 @@ pub enum TextKind {
     Multiline,
     DenseText,
     DenseNumber,
+    /// A form's text field (Settings): AppKit's own bordered, rounded field,
+    /// shown at all times, as System Settings has it.
+    Form,
+    /// A form's number field: as `Form`, the value right-aligned in tabular
+    /// digits; it may carry a stepper (`NativeTextSlot::set_stepper`).
+    FormNumber,
     /// On-canvas text: an invisible `NSTextView` owns typing, IME, dictation,
     /// emoji and spelling while the host draws the text, caret and selection
     /// from its own layout. Clicks pass through to the host; blurring reports
@@ -36,7 +42,15 @@ impl TextKind {
     fn dense(self) -> bool {
         matches!(self, Self::DenseText | Self::DenseNumber)
     }
+    fn number(self) -> bool {
+        matches!(self, Self::DenseNumber | Self::FormNumber)
+    }
+    fn form(self) -> bool {
+        matches!(self, Self::Form | Self::FormNumber)
+    }
 }
+/// A form number field's stepper: its width beside the field, and the gap.
+const STEPPER: (f64, f64) = (13., 4.);
 #[derive(Clone, Debug, PartialEq)]
 pub enum TextEvent {
     Changed(String),
@@ -95,6 +109,11 @@ struct State {
     /// inspector (Option-Tab still types a tab).
     tab_inserts: Cell<bool>,
     focus_pending: Cell<bool>,
+    /// A composer takes the keyboard only when the person asked for it: a
+    /// press on it, Tab to it, or the host beginning to edit it (an explicit
+    /// open). Never AppKit handing a window's keyboard to the first text
+    /// view it finds (Powermove: Space then typed instead of playing).
+    armed: Cell<bool>,
     original: RefCell<String>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
@@ -109,6 +128,8 @@ struct State {
     /// Canvas: where input method candidates open (GPUI points): the host's
     /// caret on the visible text, never this view's own unwrapped layout.
     input_rect: Cell<Option<NSRect>>,
+    /// A form number field's stepper, at the field's trailing edge.
+    stepper: RefCell<Option<Retained<NSStepper>>>,
 }
 impl State {
     fn emit(&self, event: TextEvent) {
@@ -124,7 +145,7 @@ impl State {
         }
         let value = self.editor.value();
         // Validate only the committed value. Intermediate IME/number strings stay untouched.
-        if cancel || (self.kind == TextKind::DenseNumber && !valid_number(&value)) {
+        if cancel || (self.kind.number() && !valid_number(&value)) {
             self.editor.set(&self.original.borrow());
             self.emit(TextEvent::Cancelled);
         } else {
@@ -172,9 +193,18 @@ define_class!(
             let staged = self.ivars().borrow().upgrade().and_then(|s| s.input_rect.get());
             match (staged, self.window()) {
                 (Some(rect), Some(window)) => {
-                    let h = window.contentView().map_or(0., |v| v.bounds().size.height);
+                    // From GPUI's view (P-EMBED): its frame in the window.
+                    let s = self.ivars().borrow().upgrade();
+                    let g = s.as_ref().map(|s| {
+                        let v = &s.gpui;
+                        v.convertRect_toView(v.bounds(), None)
+                    });
+                    let g = g.unwrap_or_else(|| window.contentView().map_or(NSRect::ZERO, |v| v.bounds()));
                     let flipped = NSRect::new(
-                        NSPoint::new(rect.origin.x, h - rect.origin.y - rect.size.height),
+                        NSPoint::new(
+                            g.origin.x + rect.origin.x,
+                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
+                        ),
                         rect.size,
                     );
                     window.convertRectToScreen(flipped)
@@ -234,6 +264,53 @@ impl CanvasTextView {
     }
 }
 define_class!(
+    /// A composer (the Agent's prompt): an ordinary text view that becomes
+    /// first responder only for the person (`State::armed`, `ComposerTextView::wanted`).
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMComposerTextView"]
+    #[ivars = RefCell<Weak<State>>]
+    struct ComposerTextView;
+    unsafe impl NSObjectProtocol for ComposerTextView {}
+    impl ComposerTextView {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            if self.wanted() {
+                unsafe { msg_send![super(self), becomeFirstResponder] }
+            } else {
+                false
+            }
+        }
+    }
+);
+impl ComposerTextView {
+    /// The person's press on it or Tab to it (the event AppKit is handling
+    /// now), or the host's own `begin_editing`.
+    fn wanted(&self) -> bool {
+        if self.ivars().borrow().upgrade().is_some_and(|s| s.armed.get()) {
+            return composer_takes_keyboard(true, None);
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let event = NSApplication::sharedApplication(mtm).currentEvent();
+        composer_takes_keyboard(
+            false,
+            event.as_ref().map(|e| match e.r#type() {
+                NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+                    Asking::Press
+                }
+                NSEventType::KeyDown => Asking::Key(e.keyCode()),
+                _ => Asking::Other,
+            }),
+        )
+    }
+}
+#[path = "native_text_keyboard.rs"]
+mod composer_keyboard;
+pub(crate) use composer_keyboard::{Asking, composer_takes_keyboard};
+
+define_class!(
     /// Holds the canvas editor without taking any pointer event.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -247,6 +324,28 @@ define_class!(
         }
     }
 );
+/// A composer's lines are `COMPOSER_LEADING` times its type apart (v1's
+/// prompt reads at 1.5), centred in that height: the gap past the font's own
+/// line goes between lines and half of it above the first.
+pub const COMPOSER_LEADING: f64 = 1.5;
+fn composer_leading(v: &NSTextView, points: f64) {
+    use objc2_app_kit::{NSLayoutManager, NSMutableParagraphStyle, NSParagraphStyleAttributeName};
+    let font = NSFont::systemFontOfSize(points);
+    let natural = NSLayoutManager::new().defaultLineHeightForFont(&font);
+    let gap = (points * COMPOSER_LEADING - natural).max(0.);
+    let style = NSMutableParagraphStyle::new();
+    style.setLineSpacing(gap);
+    v.setDefaultParagraphStyle(Some(&style));
+    let mut typing = v.typingAttributes().to_owned();
+    unsafe {
+        let mutable: Retained<objc2_foundation::NSMutableDictionary<objc2_foundation::NSAttributedStringKey, objc2::runtime::AnyObject>> =
+            objc2_foundation::NSMutableDictionary::dictionaryWithDictionary(&typing);
+        mutable.setObject_forKey(&style, ProtocolObject::from_ref(NSParagraphStyleAttributeName));
+        typing = Retained::cast_unchecked(mutable);
+        v.setTypingAttributes(&typing);
+    }
+    v.setTextContainerInset(NSSize::new(4., 3. + gap / 2.));
+}
 pub fn valid_number(value: &str) -> bool {
     value.trim().parse::<f64>().is_ok_and(f64::is_finite)
 }
@@ -263,10 +362,19 @@ define_class!(
     unsafe impl NSTextFieldDelegate for TextDelegate {}
     unsafe impl NSTextViewDelegate for TextDelegate {}
     impl TextDelegate {
+        /// The stepper beside a form number field: a step up or down, as
+        /// Up and Down in the field (the host owns the value and its step).
+        /// It rests in the middle of its range, so it never stops.
+        #[unsafe(method(stepped:))]
+        fn stepped(&self, sender: &NSStepper) {
+            let value = sender.doubleValue();
+            sender.setDoubleValue(1.);
+            self.ivars().emit(TextEvent::Key(if value > 1. { "up" } else { "down" }));
+        }
         #[unsafe(method(controlTextDidBeginEditing:))]
         fn field_begin(&self, _: &NSNotification) {
             self.ivars().editing.set(true);
-            if let Editor::Field(v)=&self.ivars().editor {if let Some(ed)=v.currentEditor() {configure_editor(&ed,self.ivars().kind!=TextKind::DenseNumber);}}
+            if let Editor::Field(v)=&self.ivars().editor {if let Some(ed)=v.currentEditor() {configure_editor(&ed,!self.ivars().kind.number());}}
         }
         #[unsafe(method(textDidBeginEditing:))]
         fn text_begin(&self, _: &NSNotification) { self.ivars().editing.set(true); }
@@ -279,6 +387,7 @@ define_class!(
         #[unsafe(method(textDidEndEditing:))]
         fn text_end(&self, _: &NSNotification) {
             let s = self.ivars();
+            s.armed.set(false);
             if s.kind == TextKind::Canvas {
                 s.editing.set(false);
                 s.emit(TextEvent::Blurred);
@@ -323,7 +432,7 @@ impl TextDelegate {
         }
         // A number field steps with Up and Down (Shift: ten steps), as a
         // spin field does; the host owns the value and its step.
-        if self.ivars().kind == TextKind::DenseNumber {
+        if self.ivars().kind.number() {
             let key = match command {
                 c if c == objc2::sel!(moveUp:) => Some("up"),
                 c if c == objc2::sel!(moveDown:) => Some("down"),
@@ -412,6 +521,35 @@ pub struct NativeTextSlot {
     _delegate: Retained<TextDelegate>,
 }
 impl NativeTextSlot {
+    /// A form number field gets a stepper at its trailing edge (Frame Rate):
+    /// a click is a step, as Up or Down in the field.
+    pub fn set_stepper(&self, on: bool) {
+        let state = &self.state;
+        if on == state.stepper.borrow().is_some() || state.kind != TextKind::FormNumber {
+            return;
+        }
+        if !on {
+            if let Some(stepper) = state.stepper.borrow_mut().take() {
+                stepper.removeFromSuperview();
+            }
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+        stepper.setMinValue(0.);
+        stepper.setMaxValue(2.);
+        stepper.setIncrement(1.);
+        stepper.setDoubleValue(1.);
+        stepper.setValueWraps(false);
+        unsafe {
+            stepper.setTarget(Some(&self._delegate));
+            stepper.setAction(Some(objc2::sel!(stepped:)));
+        }
+        state.wrapper.addSubview(&stepper);
+        *state.stepper.borrow_mut() = Some(stepper);
+    }
     /// Keep Tab as a typed character (a code editor) instead of moving focus.
     pub fn set_tab_inserts(&self, inserts: bool) {
         self.state.tab_inserts.set(inserts);
@@ -419,6 +557,7 @@ impl NativeTextSlot {
     pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
         let mut canvas = None;
+        let mut composer = None;
         let editor = if kind == TextKind::Canvas {
             let this = CanvasTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
             let v: Retained<CanvasTextView> =
@@ -446,7 +585,15 @@ impl NativeTextSlot {
             }
             Editor::Multiline(v)
         } else if matches!(kind, TextKind::Multiline | TextKind::Composer) {
-            let v = NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO);
+            let v = if kind == TextKind::Composer {
+                let this = ComposerTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
+                let v: Retained<ComposerTextView> =
+                    unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+                composer = Some(v.clone());
+                Retained::into_super(v)
+            } else {
+                NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO)
+            };
             v.setRichText(false);
             v.setImportsGraphics(false);
             v.setAllowsUndo(true);
@@ -457,6 +604,7 @@ impl NativeTextSlot {
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(4., 3.));
             if kind == TextKind::Composer {
+                composer_leading(&v, 13.);
                 // A prompt is not prose to rewrite: no Writing Tools badge
                 // beside the empty field (NSWritingToolsBehaviorNone).
                 unsafe {
@@ -477,6 +625,19 @@ impl NativeTextSlot {
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setFocusRingType(NSFocusRingType::None);
+            if kind.form() {
+                // AppKit's own rounded field; no accent focus ring (owner
+                // rule), the field's caret shows it has the keyboard.
+                v.setBezeled(true);
+                v.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
+                v.setDrawsBackground(true);
+            }
+            if kind == TextKind::FormNumber {
+                v.setAlignment(NSTextAlignment::Right);
+                v.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(13., unsafe {
+                    NSFontWeightRegular
+                })));
+            }
             // AppKit configures its shared field editor for this control.
             unsafe {
                 let _: () = msg_send![&*v, setAllowsEditingTextAttributes: false];
@@ -530,6 +691,7 @@ impl NativeTextSlot {
             editing: Cell::new(false),
             tab_inserts: Cell::new(false),
             focus_pending: Cell::new(false),
+            armed: Cell::new(false),
             original: RefCell::new(initial.into()),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
@@ -551,9 +713,13 @@ impl NativeTextSlot {
             }),
             caret_staged: Cell::new(None),
             input_rect: Cell::new(None),
+            stepper: RefCell::new(None),
         });
         if let Some(canvas) = &canvas {
             *canvas.ivars().borrow_mut() = Rc::downgrade(&state);
+        }
+        if let Some(composer) = &composer {
+            *composer.ivars().borrow_mut() = Rc::downgrade(&state);
         }
         let delegate = TextDelegate::alloc(mtm).set_ivars(state.clone());
         let delegate: Retained<TextDelegate> = unsafe { msg_send![super(delegate), init] };
@@ -565,7 +731,9 @@ impl NativeTextSlot {
         }
         // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
         // No input-context replacement or keyDown override is installed.
-        if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
+        // In GPUI's view's parent: the window's content view, or the detail
+        // view of a split view hosting GPUI's view (P-EMBED).
+        if let Some(content) = unsafe { gpui.superview() } {
             // As a hosted control: it keeps its distance from the window's
             // top edge until the next paint places it.
             let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
@@ -601,7 +769,12 @@ impl NativeTextSlot {
         let font = NSFont::systemFontOfSize(points);
         match &self.state.editor {
             Editor::Field(v) => v.setFont(Some(&font)),
-            Editor::Multiline(v) => v.setFont(Some(&font)),
+            Editor::Multiline(v) => {
+                v.setFont(Some(&font));
+                if self.state.kind == TextKind::Composer {
+                    composer_leading(v, points);
+                }
+            }
         }
     }
     /// Placeholder for single-line fields (AppKit draws it while editing).
@@ -650,7 +823,29 @@ impl NativeTextSlot {
         if !self.state.editing.replace(true) {
             *self.state.original.borrow_mut() = self.value();
         }
+        self.state.armed.set(true);
         self.state.focus_pending.set(true);
+    }
+    /// Ends editing (its text kept) and gives the keyboard back to the GPUI
+    /// view it sits on, the editor: what Escape in a docked composer and a
+    /// press elsewhere do.
+    pub fn blur(&self) {
+        self.state.focus_pending.set(false);
+        self.state.armed.set(false);
+        let view: Retained<NSView> = match &self.state.editor {
+            Editor::Field(v) => Retained::into_super(Retained::into_super(v.clone())),
+            Editor::Multiline(v) => Retained::into_super(Retained::into_super(v.clone())),
+        };
+        let Some(w) = view.window() else {
+            return;
+        };
+        let first = w.firstResponder().is_some_and(|r| {
+            std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(&view) as *const AnyObject)
+        });
+        if first {
+            w.makeFirstResponder(Some(&self.state.gpui));
+        }
+        self.state.finish(false);
     }
     pub fn take_events(&self) -> Vec<TextEvent> {
         std::mem::take(&mut *self.state.events.borrow_mut())
@@ -902,14 +1097,14 @@ fn place(key: usize, apply: bool) -> bool {
             }
             continue;
         };
-        let h = state
-            .gpui
-            .window()
-            .and_then(|w| w.contentView())
-            .map_or(0., |v| v.bounds().size.height);
+        // From GPUI's frame in its parent (P-EMBED).
+        let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
         let frame = NSRect::new(
-            NSPoint::new(visible.origin.x, h - visible.origin.y - visible.size.height),
+            NSPoint::new(
+                g.origin.x + visible.origin.x,
+                g.origin.y + g.size.height - visible.origin.y - visible.size.height,
+            ),
             visible.size,
         );
         if state.wrapper.frame() != frame {
@@ -940,10 +1135,27 @@ fn place(key: usize, apply: bool) -> bool {
                     view.frame().size.height.max(size.height),
                 ));
             }
-        } else if state.editor.view().frame() != local {
-            moved = true;
-            if apply {
-                state.editor.view().setFrame(local);
+        } else {
+            // A stepper takes the field's trailing edge.
+            let mut field = local;
+            if let Some(stepper) = state.stepper.borrow().as_ref() {
+                field.size.width = (local.size.width - STEPPER.0 - STEPPER.1).max(0.);
+                let at = NSRect::new(
+                    NSPoint::new(local.origin.x + local.size.width - STEPPER.0, local.origin.y),
+                    NSSize::new(STEPPER.0, local.size.height),
+                );
+                if stepper.frame() != at {
+                    moved = true;
+                    if apply {
+                        stepper.setFrame(at);
+                    }
+                }
+            }
+            if state.editor.view().frame() != field {
+                moved = true;
+                if apply {
+                    state.editor.view().setFrame(field);
+                }
             }
         }
         let hidden = visible.size.width <= 0.
@@ -957,17 +1169,16 @@ fn place(key: usize, apply: bool) -> bool {
             }
         }
         if let Some((host, indicator)) = &state.caret {
-            let content_h = state
-                .gpui
-                .window()
-                .and_then(|w| w.contentView())
-                .map_or(0., |v| v.bounds().size.height);
+            let g = state.gpui.frame();
             let focused = state.editing.get();
             match state.caret_staged.get().filter(|_| focused) {
                 Some((rect, clip)) => {
                     let shown = intersection(rect, clip);
                     let frame = NSRect::new(
-                        NSPoint::new(rect.origin.x, content_h - rect.origin.y - rect.size.height),
+                        NSPoint::new(
+                            g.origin.x + rect.origin.x,
+                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
+                        ),
                         rect.size,
                     );
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
@@ -1009,7 +1220,7 @@ fn place(key: usize, apply: bool) -> bool {
                         v.selectText(None);
                     }
                     if let Some(ed) = v.currentEditor() {
-                        configure_editor(&ed, state.kind != TextKind::DenseNumber);
+                        configure_editor(&ed, !state.kind.number());
                     }
                 }
             }

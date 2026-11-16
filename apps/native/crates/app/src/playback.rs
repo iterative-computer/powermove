@@ -22,6 +22,24 @@ impl PanelClock {
     }
 }
 
+/// The clock the head and timecode show: paused during a ruler scrub, the
+/// time the scrub last asked for (`asked`, seconds), not yet the viewer's.
+pub fn scrub_shown(
+    mut clock: pm_protocol::clock::ClockSample,
+    playing: bool,
+    asked: Option<f64>,
+) -> pm_protocol::clock::ClockSample {
+    if !playing
+        && let Some(seconds) = asked.filter(|s| s.is_finite() && *s >= 0.)
+        && let Ok(ticks) = pm_protocol::common::Ticks::new(
+            (seconds * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
+        )
+    {
+        clock.media_time = ticks;
+    }
+    clock
+}
+
 /// The host instant a playing playhead and timecode stand for: the next
 /// vsync (`vsync`, CADisplayLink host seconds, the same clock as
 /// `HostMicros`), never before the sample's own `host_time`. Paused, the
@@ -120,6 +138,48 @@ impl Drop for FrameOutline {
     }
 }
 
+/// The picture a project's viewer shows from when its viewer is bound until
+/// its first real frame (PM-384): the frame the viewer last showed for it
+/// (`crate::poster::last_frame_files`), drawn over the viewer's layer, as
+/// the viewer fits its picture. Gone with the first frame of the project.
+struct Placeholder {
+    layer: Retained<AnyObject>,
+    doc_id: u64,
+}
+impl Placeholder {
+    fn over(viewer: &metal::MetalLayer, poster: &std::path::Path, doc_id: u64) -> Option<Self> {
+        let path = objc2_foundation::NSString::from_str(&poster.to_string_lossy());
+        let image = objc2_app_kit::NSImage::initWithContentsOfFile(
+            <objc2_app_kit::NSImage as objc2::AnyThread>::alloc(),
+            &path,
+        )?;
+        unsafe {
+            let layer: Retained<AnyObject> =
+                Retained::from_raw(msg_send![objc2::class!(CALayer), new])?;
+            let parent = foreign_types::ForeignType::as_ptr(viewer) as *mut AnyObject;
+            let bounds: NSRect = msg_send![parent, bounds];
+            let _: () = msg_send![objc2::class!(CATransaction), begin];
+            let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
+            // A layer on macOS takes an NSImage as its contents.
+            let _: () = msg_send![&*layer, setContents: &*image];
+            let _: () = msg_send![&*layer, setContentsGravity: objc2_quartz_core::kCAGravityResizeAspect];
+            let _: () = msg_send![&*layer, setFrame: bounds];
+            // Width and height follow the viewer (kCALayerWidthSizable | kCALayerHeightSizable).
+            let _: () = msg_send![&*layer, setAutoresizingMask: 0x2u32 | 0x10u32];
+            let _: () = msg_send![parent, addSublayer: &*layer];
+            let _: () = msg_send![objc2::class!(CATransaction), commit];
+            Some(Self { layer, doc_id })
+        }
+    }
+}
+impl Drop for Placeholder {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![&*self.layer, removeFromSuperlayer];
+        }
+    }
+}
+
 pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let layers = PlaybackLayers::new(MainThreadMarker::new().unwrap());
     // The viewer bar's time while playing: the timeline's timecode, again.
@@ -127,6 +187,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         unsafe { Retained::from_raw(msg_send![objc2::class!(CATextLayer), new]).unwrap() };
     let host = entity.read(cx).host.clone();
     let mut playhead = None;
+    let mut skimmer = None;
     if let Some(parent) = host.borrow().gpui.layer() {
         unsafe {
             let _: () = msg_send![&*parent,addSublayer:&*layers.timecode];
@@ -147,6 +208,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 msg_send![&*viewer_time,setAlignmentMode:objc2_quartz_core::kCAAlignmentLeft];
             let _: () = msg_send![&*viewer_time,setFont:font_ref];
             let _: () = msg_send![&*viewer_time,setHidden:true];
+            skimmer = Some(crate::playhead::Skimmer::new(&parent, &t));
             playhead = Some(crate::playhead::Playhead::new(
                 &parent,
                 layers.playhead.clone(),
@@ -216,14 +278,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // The display link's next vsync (host seconds): where a playing playhead
     // and timecode will be seen, rather than where the last sample stood.
     let mut vsync = None::<f64>;
+    let mut placeholder = None::<Placeholder>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
             if weak.update(cx, |v,cx| {
                 let Some(viewer)=&v.viewer else{
-                    link.set_paused(true); *current.borrow_mut()=None; binding=None;
+                    link.set_paused(true); *current.borrow_mut()=None; binding=None; placeholder=None;
                     // A closed project (Home stays in the window) leaves no playhead.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];let _:()=msg_send![&*viewer_time,setHidden:true];}
+                    if let Some(s)=&mut skimmer { s.hide(); }
                     return
                 };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
@@ -235,6 +299,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         publish_output.clone(),
                     ));
                     binding.as_ref().unwrap().sync();
+                    // The opening project's last picture stands in until its first frame.
+                    placeholder = v.viewer_poster.take().zip(v.published.as_ref().map(|p| p.snapshot.doc_id))
+                        .and_then(|(poster, doc)| Placeholder::over(&host.borrow().viewer_layer(), &poster, doc));
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
@@ -250,6 +317,15 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     v.update_builtins(cx);
                 }
                 v.tell_presented(status.frame.as_ref());
+                if placeholder.as_ref().is_some_and(|p| status.frame.as_ref().is_some_and(|f| f.stamp.doc_id == p.doc_id)) {
+                    placeholder = None;
+                }
+                if !status.layer_failures.is_empty() {
+                    let contributions = v.extensions.host.as_ref().and_then(|host| host.contributions());
+                    record_layer_failures(&mut v.errors.borrow_mut(), &status.layer_failures, |failure| {
+                        layer_failure_source(failure, v.published.as_deref(), contributions.as_deref())
+                    });
+                }
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
                 // One readable line; a longer report goes to Window ▸ Error Log.
@@ -281,6 +357,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // tick lands on. A sample's own time only moves when a new one
                     // arrives, so a late sample held the head a frame, then jumped two.
                     // Never before the sample itself (a run's pre-roll is ahead).
+                    // Scrubbing the ruler, the head and timecode stand where the
+                    // pointer asked, each refresh: the viewer's clock lands with
+                    // its picture, which may come later (PM-310).
+                    let clock=scrub_shown(clock,playing,v.builtins.scrubbing.then_some(v.builtins.scrub_time).flatten());
                     let at=shown_at(&clock,vsync,playing);
                     let head_time=clock.media_time_at(at);
                     let fraction=(head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration()).clamp(0.,1.);
@@ -354,6 +434,15 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 else { p.hide(); }
                             }
                         }
+                        // The skimmer, as the head: outside GPUI, so a scroll under a
+                        // resting pointer moves the time under it with no panel draw.
+                        let skim=v.builtins.timeline.as_ref().and_then(|t|t.read(cx).skimmer_mark());
+                        if let Some(s)=&mut skimmer {
+                            match (geometry,skim) {
+                                (Some((r,y)),Some((x,code)))=>s.place(r.x as f64+x,(r.y+y) as f64,(r.y+r.h) as f64,&code,height,scale,&host.tokens),
+                                _=>s.hide(),
+                            }
+                        }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];
                     }
                 } else if v.builtins.timeline_place.is_none() {
@@ -361,10 +450,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // timeline that is not on screen.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];}
                     if let Some(p)=&mut playhead { p.hide(); }
+                    if let Some(s)=&mut skimmer { s.hide(); }
                 }
             }).is_err(){break;}
         }
         drop(playhead);
+        drop(skimmer);
         unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];let _:()=msg_send![&*viewer_time,removeFromSuperlayer];}
     }).detach();
 }
@@ -396,14 +487,17 @@ fn failures_line(
     Some(match (ids.len(), name) {
         (1, Some(name)) => format!("“{name}” isn’t drawn. Select it to see why in Properties."),
         (1, None) => "1 layer isn’t drawn. Select it to see why in Properties.".into(),
-        (n, Some(name)) => format!("“{name}” and {} more aren’t drawn. Select one to see why in Properties.", n - 1),
+        (n, Some(name)) => format!(
+            "“{name}” and {} more aren’t drawn. Select one to see why in Properties.",
+            n - 1
+        ),
         (n, None) => format!("{n} layers aren’t drawn. Select one to see why in Properties."),
     })
 }
 
 #[cfg(test)]
 mod shown_at_tests {
-    use super::shown_at;
+    use super::{scrub_shown, shown_at};
     use pm_protocol::clock::{ClockSample, TransportState};
     use pm_protocol::common::{HostMicros, TICKS_PER_SECOND};
 
@@ -440,4 +534,99 @@ mod shown_at_tests {
         assert_eq!(shown_at(&paused, Some(5.0), false), paused.host_time);
         assert_eq!(shown_at(&c, None, true), c.host_time);
     }
+
+    /// PM-310: scrubbing, the head shows the time the pointer asked for
+    /// while the viewer's clock still has the last picture's; playing, or
+    /// with no scrub, the clock's own.
+    #[test]
+    fn a_scrub_shows_the_asked_time_before_the_viewer_lands() {
+        let paused = sample(TransportState::Stopped, 1_000_000, 3);
+        let shown = scrub_shown(paused, false, Some(4.5));
+        assert_eq!(
+            shown.media_time_at(shown.host_time).get(),
+            9 * TICKS_PER_SECOND / 2
+        );
+        assert_eq!(scrub_shown(paused, false, None), paused);
+        let playing = sample(TransportState::Playing, 1_000_000, 3);
+        assert_eq!(scrub_shown(playing, true, Some(4.5)), playing);
+    }
 }
+
+/// Per-layer compilation failures are not viewer-wide errors: record them
+/// before Properties points the person at the Error Log.
+fn record_layer_failures(
+    log: &mut crate::error_log::Log,
+    failures: &[pm_render::LayerFailure],
+    source: impl Fn(&pm_render::LayerFailure) -> String,
+) {
+    for failure in failures {
+        let source = source(failure);
+        if !log
+            .entries
+            .iter()
+            .any(|entry| entry.source == source && entry.message == failure.message)
+        {
+            log.push(&source, &failure.message);
+        }
+    }
+}
+fn definition_failure_source(
+    layer: &str,
+    definition: &str,
+    contributions: Option<&serde_json::Value>,
+) -> String {
+    let owner = contributions
+        .and_then(|value| value["layers"].as_array())
+        .and_then(|layers| layers.iter().find(|item| item["id"] == definition))
+        .and_then(|item| item["owner"].as_str())
+        .unwrap_or(definition);
+    format!("Extension {owner} ({definition}), layer {layer}")
+}
+fn layer_failure_source(
+    failure: &pm_render::LayerFailure,
+    published: Option<&pm_kernel::Published>,
+    contributions: Option<&serde_json::Value>,
+) -> String {
+    let layer = published.and_then(|p| {
+        let root = p.snapshot.root()?;
+        let comp = pm_kernel::model::comp_node(root, Some(&failure.composition)).unwrap_or(root);
+        let at = pm_kernel::model::find_layer(comp, &failure.layer)?;
+        Some(pm_kernel::model::layer_at(comp, &at)?.to_value())
+    });
+    match layer
+        .as_ref()
+        .and_then(|layer| layer.get("d"))
+        .and_then(|data| data.get("definition"))
+        .and_then(pm_model::Value::as_str)
+    {
+        Some(definition) => definition_failure_source(&failure.layer, definition, contributions),
+        None => format!("Layer {}", failure.layer),
+    }
+}
+#[cfg(test)]
+mod extension_compile_log_tests {
+    use super::{definition_failure_source, record_layer_failures};
+    #[test]
+    fn failed_extension_layers_log_the_owner_and_full_compiler_message_once() {
+        let contributions =
+            serde_json::json!({"layers":[{"id":"macos.cursor","owner":"macos-cursor"}]});
+        let source = definition_failure_source("cursor-1", "macos.cursor", Some(&contributions));
+        assert!(source.contains("macos-cursor"));
+        let failures = vec![pm_render::LayerFailure {
+            composition: "main".into(),
+            layer: "cursor-1".into(),
+            message: "shader compile failed\nline 33: cannot compare bool and float".into(),
+        }];
+        let mut log = crate::error_log::Log::default();
+        for _ in 0..3 {
+            record_layer_failures(&mut log, &failures, |_| source.clone());
+        }
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].message, failures[0].message);
+        assert_eq!(log.entries[0].source, source);
+    }
+}
+
+#[cfg(test)]
+#[path = "cursor_render_tests.rs"]
+mod cursor_render_tests;

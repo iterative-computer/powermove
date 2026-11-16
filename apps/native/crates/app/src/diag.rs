@@ -184,7 +184,8 @@ fn report_activation() {
 pub static EDITORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub fn install_probe(cx: &mut gpui::App) {
-    if !enabled() {
+    // High frequency latency sampling is opt-in, even when trace logging is on.
+    if !enabled() || std::env::var_os("PM_NATIVE_RESPONSIVENESS_PROBE").is_none() {
         return;
     }
     let timer = cx.background_executor().clone();
@@ -377,4 +378,36 @@ mod tests {
         queue.push("line 6".into());
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["line 6"]);
     }
+}
+
+/// PM-401: what showed the app again after the person hid it. AppKit unhides
+/// a hidden app the moment one of its windows is ordered in, so the main
+/// thread's stack at that moment names the caller (an ordering of ours, or the
+/// person's click on the Dock). Logged only with the diagnostics on.
+#[cfg(target_os = "macos")]
+pub fn trace_unhide() {
+    if !enabled() {
+        return;
+    }
+    let block = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        let stack = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = stack
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("at ") && !l.is_empty())
+            .take(48)
+            .collect();
+        line(serde_json::json!({ "unhide": frames }));
+    });
+    let token = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSApplicationWillUnhideNotification),
+                None,
+                None,
+                &block,
+            )
+    };
+    // Kept for the life of the process.
+    std::mem::forget(token);
 }

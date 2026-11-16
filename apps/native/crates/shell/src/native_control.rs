@@ -37,6 +37,9 @@ pub enum Kind {
     /// back to the window's content and are sent as `{"key": …}` (`Enter`,
     /// `Escape`, `ArrowDown`) for the view to act on.
     Search,
+    /// AppKit's colour well in its minimal style (a swatch with a chevron
+    /// that opens the system's colours): the value is `#rrggbb`.
+    Well,
 }
 /// A slider's value range. A logarithmic one moves its track in ln(value),
 /// so each equal pull multiplies the value (brightness, size).
@@ -134,11 +137,12 @@ define_class!(
         #[unsafe(method(act:))]
         fn act(&self,sender:&AnyObject){
             let value=match self.ivars().kind{
-                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|row_value(o).clone()).unwrap_or(Value::Null)},
+                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};let pulls:bool=unsafe{msg_send![sender,pullsDown]};let index=index-isize::from(pulls);self.ivars().options.borrow().get(index as usize).map(|o|row_value(o).clone()).unwrap_or(Value::Null)},
                 Kind::Checkbox|Kind::Radio|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
                 Kind::Push=>Value::Null,
+                Kind::Well=>sender.downcast_ref::<NSColorWell>().map_or(Value::Null,|w|json!(colour_hex(&w.color()))),
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
             let _=self.ivars().sender.try_send(value);
@@ -197,6 +201,7 @@ enum Control {
     Segmented(Retained<NSSegmentedControl>),
     Slider(Retained<NSSlider>),
     Search(Retained<NSSearchField>),
+    Well(Retained<NSColorWell>),
 }
 impl Control {
     fn view(&self) -> &NSView {
@@ -207,6 +212,7 @@ impl Control {
             Self::Segmented(v) => v.as_ref(),
             Self::Slider(v) => v.as_ref(),
             Self::Search(v) => v.as_ref(),
+            Self::Well(v) => v.as_ref(),
         }
     }
     fn enabled(&self, enabled: bool) {
@@ -217,10 +223,31 @@ impl Control {
             Self::Segmented(v) => v.setEnabled(enabled),
             Self::Slider(v) => v.setEnabled(enabled),
             Self::Search(v) => v.setEnabled(enabled),
+            Self::Well(v) => v.setEnabled(enabled),
         }
     }
     fn value(&self, value: &Value, options: &[Value]) {
         match self {
+            Self::Popup(v) if v.pullsDown() => {
+                let title = options
+                    .iter()
+                    .find(|o| row_value(o) == value)
+                    .map(row_title)
+                    .unwrap_or_else(|| NSString::from_str(""));
+                if let Some(item) = v.itemAtIndex(0) {
+                    item.setTitle(&title);
+                }
+                // The value's row is ticked (a pull-down selects none).
+                for (i, option) in options.iter().enumerate() {
+                    if let Some(item) = v.itemAtIndex(i as isize + 1) {
+                        item.setState(if row_value(option) == value {
+                            NSControlStateValueOn
+                        } else {
+                            NSControlStateValueOff
+                        });
+                    }
+                }
+            }
             Self::Popup(v) => {
                 if let Some(index) = options.iter().position(|o| row_value(o) == value) {
                     v.selectItemAtIndex(index as isize);
@@ -243,6 +270,11 @@ impl Control {
             }),
             Self::Segmented(v) => {
                 v.setSelectedSegment(value.as_i64().map_or(-1, |i| i as isize));
+            }
+            Self::Well(v) => {
+                if let Some(colour) = value.as_str().and_then(hex_colour) {
+                    v.setColor(&colour);
+                }
             }
             Self::Slider(v) => {
                 let range = Range::of(options);
@@ -326,6 +358,9 @@ pub struct ControlSpec<'a> {
     /// content it qualifies (a composer's option bar, a list's sort). A bar
     /// of controls keeps the primary ink, so its titles never read disabled.
     pub quiet: bool,
+    /// A pull-down (the menu drops below a title that names the value, as
+    /// the Project header's picker): its first item is the title.
+    pub pull: bool,
     /// The view's one accent action: a push button tinted with this colour.
     pub tint: Option<u32>,
     /// A push button's leading SF Symbol. On a search field, its shortcut
@@ -389,6 +424,7 @@ impl NativeControl {
             destructive,
             inline,
             quiet,
+            pull,
             tint,
             symbol,
             glass,
@@ -425,7 +461,7 @@ impl NativeControl {
                 let v = NSPopUpButton::initWithFrame_pullsDown(
                     NSPopUpButton::alloc(mtm),
                     NSRect::ZERO,
-                    false,
+                    pull,
                 );
                 add_items(&v, &options);
                 unsafe {
@@ -433,7 +469,24 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 watch_menu(&target, &v);
-                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+                let font = if pull {
+                    // A header's title: the name it heads, in its type.
+                    unsafe {
+                        NSFont::systemFontOfSize_weight(
+                            t.typography.heading as f64,
+                            objc2_app_kit::NSFontWeightSemibold,
+                        )
+                    }
+                } else {
+                    NSFont::systemFontOfSize(t.typography.body as f64)
+                };
+                v.setFont(Some(&font));
+                if pull {
+                    // The title is a heading; its menu lists in menu type.
+                    if let Some(menu) = v.menu() {
+                        unsafe { menu.setFont(Some(&NSFont::menuFontOfSize(0.))) };
+                    }
+                }
                 if inline || well {
                     v.setBordered(false);
                 }
@@ -628,6 +681,15 @@ impl NativeControl {
                     v.addSubview(&hint);
                 }
                 Control::Search(v)
+            }
+            Kind::Well => {
+                let v = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
+                v.setColorWellStyle(NSColorWellStyle::Minimal);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                }
+                Control::Well(v)
             }
             Kind::Switch => {
                 let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
@@ -989,6 +1051,18 @@ fn row_title(option: &Value) -> Retained<NSString> {
 fn add_items(popup: &NSPopUpButton, options: &[Value]) {
     let Some(menu) = popup.menu() else { return };
     let mtm = MainThreadMarker::new().expect("main thread");
+    // A pull-down's first item is its title (`Control::value` names it).
+    if popup.pullsDown() {
+        let title = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        menu.addItem(&title);
+    }
     for option in options {
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -1020,8 +1094,9 @@ fn checks(popup: &NSPopUpButton, options: &[Value]) {
     if !options.iter().any(|o| o.get("checked").is_some()) {
         return;
     }
+    let first = isize::from(popup.pullsDown());
     for (i, option) in options.iter().enumerate() {
-        if let Some(item) = popup.itemAtIndex(i as isize) {
+        if let Some(item) = popup.itemAtIndex(i as isize + first) {
             item.setState(if option.get("checked") == Some(&Value::Bool(true)) {
                 NSControlStateValueOn
             } else {
@@ -1050,9 +1125,10 @@ fn set_rows(target: &Target, popup: &NSPopUpButton, next: &[Value], value: &Valu
     if same_rows {
         state.pending.take();
         if shown.as_slice() != next {
+            let first = isize::from(popup.pullsDown());
             for (index, option) in next.iter().enumerate() {
                 let title = row_title(option);
-                if let Some(item) = popup.itemAtIndex(index as isize) {
+                if let Some(item) = popup.itemAtIndex(index as isize + first) {
                     if item.title() != title {
                         item.setTitle(&title);
                     }
@@ -1201,5 +1277,25 @@ pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
             f32::from(b.size.width) as f64,
             f32::from(b.size.height) as f64,
         ),
+    )
+}
+
+/// `#rrggbb` as an sRGB colour.
+fn hex_colour(hex: &str) -> Option<Retained<NSColor>> {
+    let v = u32::from_str_radix(hex.trim_start_matches('#').get(..6)?, 16).ok()?;
+    let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
+    Some(NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.))
+}
+/// A colour as `#rrggbb` in sRGB.
+fn colour_hex(colour: &NSColor) -> String {
+    let srgb = colour
+        .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+        .unwrap_or_else(|| objc2::Message::retain(colour));
+    let c = |v: f64| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        c(srgb.redComponent()),
+        c(srgb.greenComponent()),
+        c(srgb.blueComponent())
     )
 }

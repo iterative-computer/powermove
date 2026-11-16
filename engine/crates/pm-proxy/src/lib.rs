@@ -31,7 +31,7 @@ pub use policy::{
 pub use store::set_test_disk_reserve;
 pub use store::{
     ProxyKey, ProxyRecipe, ProxyStore, SEQUENCE_PIPELINE, StoredProxy, TEST_DISK_RESERVE_ENV,
-    disk_guard, free_bytes,
+    disk_guard, disk_guard_for_job, estimated_output_bytes, free_bytes, required_free_bytes,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -100,13 +100,10 @@ const STATES: [StripState; 5] = [
     StripState::Dragging,
     StripState::Disabled,
 ];
-/// A hidden or muted layer's name is quieter, and still reads.
-fn floor(state: StripState) -> f64 {
-    if state == StripState::Disabled {
-        3.
-    } else {
-        4.5
-    }
+/// Strip names are semibold (large-bold text): 3:1 in every state, a
+/// hidden or muted layer's included.
+fn floor(_state: StripState) -> f64 {
+    3.
 }
 #[test]
 fn strip_labels_read_on_every_layer_colour_and_state() {
@@ -165,9 +162,10 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     }
     let lightness = |c| pm_design::color::to_oklch(c).0;
     assert!(
-        lightness(m.bottom) > lightness(m.top),
-        "the lower half is the more luminous"
+        lightness(m.top) > lightness(m.bottom),
+        "lit from above: the top is the slab's lightest"
     );
+    assert!(m.opacity < 1., "glass: the grid and the row behind show through");
     let hover = dark.strip(green, StripState::Hover);
     assert_eq!(
         (hover.top, hover.bottom),
@@ -189,7 +187,9 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     // never the dark canvas's slab.
     assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));
     assert!(lightness(pale.foreground) < 0.45);
-    assert!(lightness(m.top) < 0.45 && lightness(m.foreground) > 0.8);
+    // The dark canvas's slab: vivid glass, lit at its top, never the light
+    // canvas's pale tint, under a pale name.
+    assert!(lightness(m.top) < 0.7 && lightness(m.foreground) > 0.8);
     assert!(
         lightness(ringed.top) < lightness(pale.top),
         "selected is a step deeper"

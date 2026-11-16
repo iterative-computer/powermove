@@ -37,34 +37,11 @@ pub const COMPAT_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.j
 pub const STORE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/store.js"));
 pub const PAGE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/page.js"));
 
-/// The page script with the shipped app's theme variables for this appearance.
-/// v1–3 panels style themselves with them (`--tx`, `--bg-field`, `--line`, …);
-/// in Electron they came from the app's own stylesheet. The editions are
-/// generated from pm-design's tokens.
-pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: bool) -> String {
-    macro_rules! edition {
-        ($name:literal) => {
-            include_str!(concat!("../../../js/themes/editions/v1/", $name))
-        };
-    }
-    let css = match (dark, increase_contrast, reduce_transparency) {
-        (false, false, false) => edition!("light.css"),
-        (false, false, true) => edition!("light-solid.css"),
-        (false, true, false) => edition!("light-contrast.css"),
-        (false, true, true) => edition!("light-contrast-solid.css"),
-        (true, false, false) => edition!("dark.css"),
-        (true, false, true) => edition!("dark-solid.css"),
-        (true, true, false) => edition!("dark-contrast.css"),
-        (true, true, true) => edition!("dark-contrast-solid.css"),
-    };
-    let scheme = if dark { "dark" } else { "light" };
-    // The theme's variables, then the kit's look for plain controls an
-    // extension leaves to the browser (zero specificity: its own rules win).
-    let css = format!("{css}\n{}", include_str!("extension-base.css"));
+/// Production page applier. Presentation is injected by compat-host from resolved tokens.
+pub fn page_bundle(dark: bool, _increase_contrast: bool, _reduce_transparency: bool) -> String {
     format!(
-        "{PAGE_BUNDLE}\n(()=>{{const s=document.createElement('style');s.textContent={};document.head.prepend(s);document.documentElement.dataset.theme={};}})();",
-        serde_json::to_string(&css).expect("CSS is a string"),
-        serde_json::to_string(scheme).expect("scheme is a string"),
+        "{PAGE_BUNDLE}\n document.documentElement.dataset.theme={};",
+        serde_json::to_string(if dark { "dark" } else { "light" }).unwrap()
     )
 }
 
@@ -1961,19 +1938,13 @@ mod tests {
 
 #[cfg(test)]
 mod page_style_tests {
-    /// Extension panels' plain controls take the kit's look in every
-    /// appearance, after the theme's variables they are written in.
     #[test]
-    fn every_page_bundle_carries_the_base_stylesheet_after_the_theme() {
+    fn presentation_is_owned_by_compat_host() {
         for dark in [false, true] {
-            for contrast in [false, true] {
-                for solid in [false, true] {
-                    let page = super::page_bundle(dark, contrast, solid);
-                    let base = page.find("select.sel").expect("base stylesheet");
-                    let theme = page.find("--bg-field").expect("theme variables");
-                    assert!(theme < base, "the theme comes first");
-                }
-            }
+            let page = super::page_bundle(dark, false, false);
+            assert!(!page.contains("document.head.prepend(s)"));
+            assert!(!page.contains("select.sel"));
+            assert!(page.contains("document.documentElement.dataset.theme="));
         }
     }
 }

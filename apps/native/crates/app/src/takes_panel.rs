@@ -85,6 +85,14 @@ fn kernel_value(value: &pm_model::Value) -> Value {
 fn model_value(value: &Value) -> Option<pm_model::Value> {
     pm_model::json::parse(&value.to_string()).ok()
 }
+/// Route Save Take independently of native window construction.
+pub(crate) fn dispatch(command: &str, save: impl FnOnce()) -> bool {
+    if command != "native.saveTake" {
+        return false;
+    }
+    save();
+    true
+}
 /// Records the project as it stands as a new take named `label`.
 pub fn save(kernel: &KernelHandle, p: &Published, label: String) -> Result<String, String> {
     let root = p.snapshot.root().ok_or("No project is open.")?;
@@ -99,6 +107,12 @@ pub fn save(kernel: &KernelHandle, p: &Published, label: String) -> Result<Strin
     projects::save_take(&mut Store(kernel), &before, take)
         .map_err(|e| e.diagnostic().to_string())?;
     Ok(label)
+}
+/// Save without opening Takes; read the store so the default name is current.
+pub fn save_default(kernel: &KernelHandle, p: &Published) -> Result<String, String> {
+    let project = document_id(p).ok_or("This project has no id.")?;
+    let count = rows_for(&read(kernel)?, &project).len();
+    save(kernel, p, format!("Take {}", count + 1))
 }
 /// Restores `row` over the project `p` shows, as one Undo step.
 pub fn restore(
@@ -257,8 +271,7 @@ impl Controller {
         }
         self.takes.busy = true;
         let kernel = self.kernel.clone();
-        let label = format!("Take {}", self.takes.rows.len() + 1);
-        let work = cx.background_spawn(async move { save(&kernel, &p, label) });
+        let work = cx.background_spawn(async move { save_default(&kernel, &p) });
         self.after_take_write(work, |label| format!("Saved {label}"), cx);
     }
     pub fn restore_take(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -299,10 +312,7 @@ impl Controller {
             let result = work.await;
             let _ = this.update(cx, |v, cx| {
                 v.takes.busy = false;
-                v.takes.status = match result {
-                    Ok(label) => done(label),
-                    Err(e) => e,
-                };
+                take_write_feedback(&mut v.takes.status, &mut v.message, result, done);
                 v.load_takes(cx);
                 cx.notify();
             });
@@ -479,4 +489,36 @@ fn render(
         );
     }
     body.into_any_element()
+}
+
+fn take_write_feedback(
+    panel: &mut String,
+    window: &mut String,
+    result: Result<String, String>,
+    done: impl FnOnce(String) -> String,
+) {
+    let message = match result {
+        Ok(label) => done(label),
+        Err(error) => error,
+    };
+    *panel = message.clone();
+    *window = message;
+}
+#[cfg(test)]
+mod take_feedback_tests {
+    use super::take_write_feedback;
+    #[test]
+    fn completed_take_writes_report_success_and_failure_in_the_window() {
+        for (result, expected) in [
+            (Ok("Opening shot".into()), "Saved Opening shot"),
+            (Err("The disk is full".into()), "The disk is full"),
+        ] {
+            let (mut panel, mut window) = (String::new(), String::new());
+            take_write_feedback(&mut panel, &mut window, result, |label| {
+                format!("Saved {label}")
+            });
+            assert_eq!(window, expected);
+            assert_eq!(panel, expected);
+        }
+    }
 }

@@ -222,6 +222,9 @@ impl Chrome {
 pub struct SettingsChrome {
     chrome: Retained<Chrome>,
     window: Retained<NSWindow>,
+    /// The page's ground, beside the sidebar (under the toolbar too): nothing
+    /// opaque sits under the sidebar's glass.
+    ground: Retained<NSView>,
     /// The window's own keys (⌘F, typing in the sidebar).
     monitor: Option<Retained<AnyObject>>,
 }
@@ -372,15 +375,37 @@ impl SettingsChrome {
             scroll.bottomAnchor().constraintEqualToAnchor(&sidebar.bottomAnchor()),
         ]);
 
-        // The detail: GPUI's view below the toolbar (the safe area).
+        // The detail: GPUI's view in the safe area, below the toolbar and
+        // beside the sidebar; the detail itself runs under both (below).
         gpui.setTranslatesAutoresizingMaskIntoConstraints(false);
         activate(&[
             gpui.topAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().topAnchor()),
-            gpui.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()),
+            gpui.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
             gpui.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
             gpui.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
         ]);
         content.setWantsLayer(true);
+        // The page's ground: beside the sidebar and up under the toolbar,
+        // never under the sidebar (the detail runs under it, unpainted, so
+        // its glass shows what is behind the window).
+        let ground = NSView::new(mtm);
+        ground.setWantsLayer(true);
+        ground.setTranslatesAutoresizingMaskIntoConstraints(false);
+        content.addSubview_positioned_relativeTo(&ground, NSWindowOrderingMode::Below, Some(&gpui));
+        activate(&[
+            ground.topAnchor().constraintEqualToAnchor(&content.topAnchor()),
+            ground.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
+            ground.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
+            ground.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
+        ]);
+        // The sidebar is the system's own material, blended with what is
+        // behind the window: GPUI made the window opaque with an opaque
+        // background (the window server then has nothing behind it to show),
+        // so the window is clear and only the page's ground is painted.
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0., 0., 0., 0.0001, // not clearColor: that drops the window's shadow
+        )));
 
         // The split view: the content view leaves the window for the detail
         // item (the window holds a stand-in meanwhile).
@@ -396,6 +421,12 @@ impl SettingsChrome {
         let detail = NSViewController::new(mtm);
         detail.setView(&content);
         let detail = NSSplitViewItem::splitViewItemWithViewController(&detail);
+        // The system's sidebar sits over the detail, which runs under it
+        // (macOS 26 and later) unpainted: its glass shows what is behind the
+        // window, as System Settings' does.
+        if detail.respondsToSelector(sel!(setAutomaticallyAdjustsSafeAreaInsets:)) {
+            detail.setAutomaticallyAdjustsSafeAreaInsets(true);
+        }
         split.addSplitViewItem(&side);
         split.addSplitViewItem(&detail);
         window.setContentViewController(Some(&split));
@@ -444,7 +475,7 @@ impl SettingsChrome {
         if let Some(content) = window.contentView() {
             content.layoutSubtreeIfNeeded();
         }
-        Some(SettingsChrome { chrome, window, monitor })
+        Some(SettingsChrome { chrome, window, ground, monitor })
     }
 
     /// The sidebar lists `sections` with `active` selected; the title names it.
@@ -503,12 +534,52 @@ impl SettingsChrome {
 
     /// The window's appearance (live): the rows' icon set, and the ground
     /// the detail shows under the toolbar, as the page's own.
+    /// What the window is made of, for a check against any build (the test,
+    /// and `PM_NATIVE_SETTINGS_PROBE=<file>` in a release bundle): whether
+    /// the window is clear, whether the sidebar is inside the system's glass,
+    /// and whether anything under the sidebar is painted.
+    pub fn report(&self) -> serde_json::Value {
+        let alpha = |c: &NSColor| {
+            c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .map_or(1., |c| c.alphaComponent())
+        };
+        let painted = |v: &NSView| {
+            v.layer()
+                .and_then(|l| l.backgroundColor())
+                .and_then(|c| NSColor::colorWithCGColor(&c))
+                .is_some_and(|c| alpha(&c) > 0.01)
+        };
+        let mut glass = false;
+        let mut detail_painted = false;
+        if let Some(outline) = self.chrome.ivars().outline.borrow().as_ref()
+            && let Some(class) = objc2::runtime::AnyClass::get(c"NSGlassEffectView")
+        {
+            let mut up = unsafe { outline.superview() };
+            while let Some(v) = up {
+                glass |= v.isKindOfClass(class);
+                up = unsafe { v.superview() };
+            }
+        }
+        if let Some(detail) = unsafe { self.ground.superview() } {
+            detail_painted = painted(&detail);
+        }
+        let ground = self.ground.convertRect_toView(self.ground.bounds(), None);
+        serde_json::json!({
+            "opaque": self.window.isOpaque(),
+            "backgroundAlpha": alpha(&self.window.backgroundColor()),
+            "sidebarInGlass": glass,
+            "glassAvailable": objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some(),
+            "detailPainted": detail_painted,
+            "groundX": ground.origin.x,
+            "sidebarWidth": SIDEBAR_WIDTH,
+        })
+    }
     pub fn set_scheme(&self, dark: bool, ground: u32) {
         let state = self.chrome.ivars();
         if state.ground.replace(Some(ground)) != Some(ground) {
-            let c = |shift: u32| f64::from((ground >> shift) & 0xff) / 255.;
-            let colour = NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.);
-            self.window.setBackgroundColor(Some(&colour));
+            if let Some(layer) = self.ground.layer() {
+                layer.setBackgroundColor(Some(&crate::native::native_color(ground).CGColor()));
+            }
         }
         if state.dark.replace(dark) == dark {
             return;
@@ -530,8 +601,12 @@ impl SettingsChrome {
     }
 
     /// The search field shows `text` (a search ended from the page).
+    /// The field shows the panel's query, except while the person is typing
+    /// in it: what they typed is newer than any answer (an answer to "pr"
+    /// arriving after "pro" was typed dropped the "o").
     pub fn set_search(&self, text: &str) {
         if let Some(search) = self.chrome.ivars().search.borrow().as_ref()
+            && search.currentEditor().is_none()
             && search.stringValue().to_string() != text
         {
             search.setStringValue(&NSString::from_str(text));

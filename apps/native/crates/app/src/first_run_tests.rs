@@ -410,43 +410,215 @@ fn failure_details_and_classes_stay_generic() {
         Finished::Failed(Failure::Unknown, _)
     ));
 }
-#[test]
-fn a_finished_launch_opens_without_a_gate_and_brings_later_changes_in() {
-    let (_temp, home) = home();
+/// A first launch that imported the original library, then onboarding, then
+/// work in the original app: the state Chike's Mac was in.
+fn migrated_then_original_changed(home: &Path) -> Plan {
     let support = home.join(APPLICATION_SUPPORT);
     source(&support);
     write(
         &support.join("Powermove/onboarding-v1.json"),
         &json!({"version":1}),
     );
-    let mut flow = Flow::new(plan(&home));
+    // The first launch: the full migration, once.
+    let first = plan(home);
+    assert_eq!(first.launch, Launch::Migrate);
+    let mut flow = Flow::new(first);
+    assert!(flow.visible());
     start(&mut flow);
-    let later = plan(&home);
+    // The original app is used afterwards: its stamp changes.
+    write(&support.join("Powermove/store/theme.json"), &json!("light"));
+    let later = plan(home);
     assert_eq!(later.launch, Launch::Later);
     assert!(!later.onboard);
+    later
+}
+fn theme(config: &Config) -> Option<String> {
+    pm_kernel::LibraryStore::open(&config.native_profile)
+        .read("theme")
+        .unwrap()
+        .and_then(|v| v.as_str().map(str::to_owned))
+}
+#[test]
+fn a_later_launch_with_newer_original_work_shows_no_screen_and_takes_no_capture() {
+    let (_temp, home) = home();
+    let later = migrated_then_original_changed(&home);
+    let config = later.config.clone().unwrap();
+    assert!(later::newer_work(&config).unwrap());
     let mut flow = Flow::new(later.clone());
     // The original app is there, so startup looks for extensions first:
     // none, so it opens without a window.
     assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
     assert!(!flow.visible());
-    let scanned = crate::extension_transfer::scan(later.config.as_ref().unwrap());
+    let scanned = crate::extension_transfer::scan(&config);
     assert_eq!(
         flow.message(Message::Extensions(Update::Scanned(scanned))),
         vec![Effect::Enter(None)]
     );
     assert!(!flow.visible());
-    assert!(!later_store(&later, |_| panic!("nothing changed")).unwrap());
-    write(&support.join("Powermove/store/theme.json"), &json!("light"));
-    assert!(later_store(&later, |_| Ok(())).unwrap());
-    let config = later.config.unwrap();
-    pm_first_launch::delta_media(&config, |_| Ok(())).unwrap();
+    // Before the library attaches: no capture, no events, nothing merged.
+    assert!(!later_store(&later, |_| panic!("a launch must not capture")).unwrap());
+    let deltas = config.native_profile.join("first-launch-deltas");
+    assert!(!deltas.join("pending").exists());
+    assert!(!deltas.join("pending.capture").exists());
+    assert_eq!(theme(&config).as_deref(), Some("dark"));
+    // Still there to offer on Home and in Settings › Storage.
+    assert!(later::newer_work(&config).unwrap());
+}
+#[test]
+fn asked_for_recent_work_runs_on_screen_then_opens_the_library() {
+    let (_temp, home) = home();
+    let later = migrated_then_original_changed(&home);
+    let config = later.config.clone().unwrap();
+    later::request(&config.native_profile).unwrap();
+    let mut flow = Flow::new(later);
+    assert_eq!(flow.start(), vec![Effect::BringIn]);
+    assert!(flow.visible());
+    let frame = flow.frame();
+    titled(&frame, "Bringing In Recent Work");
+    assert_eq!(frame.line, "Your original app stays unchanged.");
+    assert!(frame.spinner);
+    assert_eq!(frame.buttons.len(), 1);
+    assert_eq!(frame.buttons[0].id, "quit");
+    // The worker, as `spawn_bring_in` runs it; its steps show as they start.
+    let mut events = vec![];
+    let outcome = later::bring_in(&config, |event| {
+        events.push(event);
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Complete { .. }));
+    for event in events {
+        if matches!(event, Event::Started(Step::Library)) {
+            flow.message(Message::Event(event));
+            assert_eq!(
+                flow.frame().status.as_deref(),
+                Some("Bringing in projects…")
+            );
+        } else {
+            flow.message(Message::Event(event));
+        }
+    }
     assert_eq!(
-        pm_kernel::LibraryStore::open(&config.native_profile)
-            .read("theme")
-            .unwrap()
-            .unwrap()
-            .as_str(),
-        Some("light")
+        flow.message(Message::Recent(RecentEnd::Done)),
+        vec![Effect::Enter(None)]
+    );
+    assert_eq!(theme(&config).as_deref(), Some("light"));
+    assert!(!later::requested(&config.native_profile));
+    assert!(!later::newer_work(&config).unwrap());
+    // The launch after: nothing asked, nothing on screen.
+    let mut again = Flow::new(plan(&home));
+    assert_ne!(again.start(), vec![Effect::BringIn]);
+    assert!(!again.visible());
+}
+#[test]
+fn a_failed_bring_in_is_recorded_and_no_launch_tries_it_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, home) = home();
+    let later = migrated_then_original_changed(&home);
+    let config = later.config.clone().unwrap();
+    // A file the capture can't read.
+    let locked = config.electron_profile.join("store/project.q.json");
+    write(&locked, &json!({"v":"1.2.0"}));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    later::request(&config.native_profile).unwrap();
+    let error = later::bring_in(&config, |_| Ok(())).unwrap_err();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    let failure = later::last_failure(&config.native_profile).unwrap();
+    assert_eq!(
+        failure.reason,
+        "Some of the original app’s files couldn’t be read."
+    );
+    assert!(!later::requested(&config.native_profile));
+    // On screen: why, and the way on.
+    let mut flow = Flow::new(later.clone());
+    flow.recent = Some(Recent::Running {
+        step: None,
+        progress: None,
+    });
+    flow.message(Message::Recent(RecentEnd::Failed {
+        reason: failure.reason.clone(),
+        low_disk: None,
+        details: format!("{error:#}"),
+    }));
+    let frame = flow.frame();
+    titled(&frame, "Recent Work Couldn’t Come In");
+    assert!(
+        frame
+            .line
+            .starts_with("Some of the original app’s files couldn’t be read.")
+    );
+    assert_eq!(frame.default_action(), Some("open_native"));
+    assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
+    // The next launch: no screen, no new capture, the record stays.
+    let mut next = Flow::new(plan(&home));
+    assert_ne!(next.start(), vec![Effect::BringIn]);
+    assert!(!next.visible());
+    assert!(
+        !later_store(&later, |_| panic!(
+            "a failed capture is not retried at launch"
+        ))
+        .unwrap()
+    );
+    assert_eq!(later::last_failure(&config.native_profile), Some(failure));
+}
+#[test]
+fn a_taken_capture_finishes_at_launch_unless_its_last_attempt_failed() {
+    let (_temp, home) = home();
+    let later = migrated_then_original_changed(&home);
+    let config = later.config.clone().unwrap();
+    // An earlier attempt took the capture and merged it; its media is left.
+    assert!(matches!(
+        pm_first_launch::delta_store(&config, |_| Ok(())).unwrap(),
+        DeltaPrepared::MediaPending
+    ));
+    assert!(later_store(&later, |_| Ok(())).unwrap());
+    // Had it failed, the launch leaves it for the person to ask again.
+    later::record_failure(
+        &config.native_profile,
+        &anyhow::Error::new(LowDisk {
+            needed: 8,
+            available: 6,
+        }),
+    )
+    .unwrap();
+    assert!(!later_store(&later, |_| panic!("failed capture")).unwrap());
+    pm_first_launch::delta_media(&config, |_| Ok(())).unwrap();
+    assert_eq!(theme(&config).as_deref(), Some("light"));
+}
+#[test]
+fn a_low_disk_stop_and_a_running_original_app_say_so() {
+    let (_temp, home) = home();
+    let mut plan = plan(&home);
+    plan.onboard = false;
+    plan.launch = Launch::Later;
+    let mut flow = Flow::new(plan);
+    flow.recent = Some(Recent::Running {
+        step: None,
+        progress: None,
+    });
+    assert!(flow.visible());
+    flow.message(Message::Recent(RecentEnd::WaitingForElectron));
+    let frame = flow.frame();
+    titled(&frame, "Quit the Original App");
+    assert!(frame.spinner);
+    assert_eq!(
+        flow.action("open_native"),
+        vec![Effect::WithdrawRequest, Effect::Enter(None)]
+    );
+    flow.entry = Entry::Waiting;
+    flow.recent = Some(Recent::Running {
+        step: None,
+        progress: None,
+    });
+    flow.message(Message::Recent(RecentEnd::Failed {
+        reason: "There wasn’t enough free space on this Mac.".into(),
+        low_disk: Some((8_000_000_000, 6_000_000_000)),
+        details: "migration paused".into(),
+    }));
+    assert!(
+        flow.frame()
+            .line
+            .starts_with("It needs 8.0 GB free on this Mac, and there’s 6.0 GB.")
     );
 }
 #[test]
@@ -466,20 +638,16 @@ fn the_kernel_can_start_before_the_copy_without_spoiling_the_destination() {
     actor.shutdown();
 }
 #[test]
-fn a_slow_merge_explains_itself_with_a_way_out() {
+fn a_later_launch_never_shows_a_screen_while_the_library_opens() {
     let (_temp, home) = home();
     let mut flow = Flow::new(plan(&home));
     flow.plan.onboard = false;
     flow.plan.launch = Launch::Later;
-    flow.start();
+    assert_eq!(flow.start(), vec![Effect::Enter(None)]);
     assert!(!flow.visible());
-    flow.updating();
-    assert!(flow.visible());
-    let frame = flow.frame();
-    assert!(frame.spinner);
-    assert_eq!(frame.buttons[0].id, "quit");
-    assert_eq!(frame.default_action(), None);
-    assert_eq!(flow.action("quit"), vec![Effect::Quit]);
+    // A second press while it opens does nothing; there is nothing to press.
+    assert!(flow.action("quit").contains(&Effect::Quit));
+    assert!(!flow.visible());
 }
 /// A finished copy with something to review, as the worker sends it.
 fn review(flow: &mut Flow, report: Result<pm_first_launch::surfaces::migration::Report, String>) {
@@ -926,4 +1094,108 @@ fn synthetic_runs_can_disable_original_discovery() {
         )
         .is_none()
     );
+}
+
+/// Headless pictures of the later-launch screens, for review. Run on demand:
+/// `PM_WELCOME_CAPTURE=<dir> cargo test -p pm-native-app capture_recent_work_frames -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set PM_WELCOME_CAPTURE"]
+fn capture_recent_work_frames() {
+    use gpui::{AppContext, HeadlessAppContext, px, size};
+    use pm_design::{Accessibility, Scheme, Tokens};
+    let dir = std::env::var("PM_WELCOME_CAPTURE").unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    // Before: the frame a later launch showed past a second of merging
+    // (removed; its values as they were).
+    let before = Frame {
+        surface: "N001".into(),
+        title: "Updating Your Library".into(),
+        line: "Your original app stays unchanged.".into(),
+        status: Some("Bringing in your recent work…".into()),
+        spinner: true,
+        buttons: vec![pm_shell::welcome::Button::new("quit", "Quit Powermove").leading()],
+        ..Frame::default()
+    };
+    let frames = [
+        ("before-updating-your-library", before),
+        (
+            "after-asked-bringing-in",
+            recent_frame(&Recent::Running {
+                step: Some(Step::Library),
+                progress: Some((3, 12)),
+            }),
+        ),
+        (
+            "after-asked-waiting-for-original",
+            recent_frame(&Recent::Waiting),
+        ),
+        (
+            "after-asked-low-disk",
+            recent_frame(&Recent::Failed {
+                reason: "There wasn’t enough free space on this Mac.".into(),
+                low_disk: Some(("6.9 GB".into(), "6.2 GB".into())),
+                details: "migration paused: 6 GiB free space reserve required".into(),
+            }),
+        ),
+    ];
+    for (name, frame) in frames {
+        objc2::rc::autoreleasepool(|_| {
+            let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+            let m = tokens.metrics;
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let window = cx
+                .open_window(size(px(m.welcome_width), px(m.welcome_height)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut view = pm_shell::welcome_view::WelcomeView::new(
+                            tokens.clone(),
+                            frame,
+                            Rc::new(|_, _| {}),
+                            cx,
+                        );
+                        view.clock = Some(1.);
+                        view
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into()).unwrap();
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            image.save(format!("{dir}/{name}.png")).unwrap();
+        });
+    }
+}
+
+#[test]
+fn pm348_refused_worker_updates_without_a_window() {
+    let (_temp, home) = home();
+    let support = home.join(APPLICATION_SUPPORT);
+    source(&support);
+    let isolated = home.join("synthetic-review-profile");
+    let plan = Plan::resolve(
+        Some(isolated.clone()),
+        Some(support.join("Powermove")),
+        Some(home.as_os_str().to_owned()),
+    )
+    .unwrap();
+    assert_eq!(plan.launch, Launch::Migrate);
+    let mut flow = Flow::new(plan);
+    assert!(start(&mut flow).is_empty());
+    titled(&flow.frame(), "Powermove Can’t Start");
+    assert!(!flow.frame().spinner);
+    assert!(flow.frame().details.is_some());
+    assert!(!isolated.exists());
 }

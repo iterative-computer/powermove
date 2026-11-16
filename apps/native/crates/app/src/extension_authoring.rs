@@ -79,6 +79,10 @@ const PACK: &[(&str, &str)] = &[
         include_str!("../../../js/compat/api-pack/samples/gradient-tint/README.md"),
     ),
     (
+        "v3/samples/kit-panel.svelte",
+        include_str!("../../../js/compat/api-pack/samples/kit-panel.svelte"),
+    ),
+    (
         "v3/samples/media-browser/manifest.json",
         include_str!("../../../js/compat/api-pack/samples/media-browser/manifest.json"),
     ),

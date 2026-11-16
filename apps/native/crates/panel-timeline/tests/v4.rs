@@ -1055,3 +1055,31 @@ fn the_graph_menu_fits_the_curves_shown() {
     let effects = dispatch(&mut c, json!({"type":"graphMenu","action":"graph.fit"})).unwrap();
     assert!(effects.iter().any(|e| matches!(e, HostEffect::FitCurves(..))), "{effects:?}");
 }
+
+#[test]
+fn option_disclosure_hides_and_shows_all_layers() {
+    let (_actor, mut c) = client();
+    for open in [true, false, true] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id("a:[]"),"open":open,"all":true}),
+        )
+        .unwrap();
+        assert!(c.model.reveal.layers.values().all(|d| d.collapsed == !open));
+    }
+}
+#[test]
+fn revealed_properties_can_be_hidden_by_the_twirl() {
+    let (_actor, mut c) = client();
+    c.model
+        .reveal_property('u', false, 0, &Default::default())
+        .unwrap();
+    for open in [false, true, false] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id("a:[]"),"open":open}),
+        )
+        .unwrap();
+        assert_eq!(c.model.reveal.layers["a:[]"].collapsed, !open);
+    }
+}

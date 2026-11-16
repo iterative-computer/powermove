@@ -247,14 +247,20 @@ pub(crate) fn intersect(
         }
     };
     let (ab, bb) = (&a.bounds, &b.bounds);
+    // `b` is the clip the recording shows through, `a` a recorded mask inside it.
+    let (shape, corner_radii, corner_smoothing) = b.shape_within(a);
     ContentMask {
         bounds: ab.intersect(bb),
+        shape,
+        corner_radii,
+        corner_smoothing,
         fade_out: Edges {
             top: fade(ab.top().0, bb.top().0, a.fade_out.top, b.fade_out.top, |x, y| x > y),
             right: fade(ab.right().0, bb.right().0, a.fade_out.right, b.fade_out.right, |x, y| x < y),
             bottom: fade(ab.bottom().0, bb.bottom().0, a.fade_out.bottom, b.fade_out.bottom, |x, y| x < y),
             left: fade(ab.left().0, bb.left().0, a.fade_out.left, b.fade_out.left, |x, y| x > y),
         },
+        ..Default::default()
     }
 }
 
@@ -268,5 +274,6 @@ pub(crate) fn recording_mask(clip: &ContentMask<Pixels>, reach: Point<Pixels>) -
             Point::new(b.right() + reach.x, b.bottom() + reach.y),
         ),
         fade_out: Edges::default(),
+        ..Default::default()
     }
 }

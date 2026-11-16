@@ -166,15 +166,30 @@ pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
 /// paused one from settling (it may then delay one of the playing frames).
 pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
+/// A drag that went back to full and was slow again at once (a full frame
+/// that just misses its refresh, a reduced one far under it) needs this many
+/// quick reduced frames in a row before full again, doubling with each such
+/// return up to [`MOST_QUICK_STILLS`]: Auto otherwise flips between full and
+/// half every few frames, and every flip converts the clips' frames again.
+const QUICK_STILLS: u32 = 8;
+const MOST_QUICK_STILLS: u32 = 32;
 /// Playing frames at full resolution slower than their content frame this
 /// many times in a row put Auto's playback at [`AUTO_FLOOR`].
 const LATE_PLAYS: u32 = 3;
-/// At the floor, a playing frame this far under its content frame predicts
-/// a full one inside it (half resolution measured at 0.16 to 0.38 of full).
-const PLAY_UNDER: f64 = 0.25;
-/// ...this many times in a row (about a second at 24 fps) before playback
-/// goes back to full resolution: one cheap frame does not flip it back.
+/// The first frames of a run of playback (after a play, a pause or a seek)
+/// open media and fill caches: they say nothing about the pace, and are not
+/// judged. A run starts when a playing frame comes this long after the last.
+const WARMING_PLAYS: u32 = 12;
+const NEW_RUN_S: f64 = 0.5;
+/// At the floor, a playing frame predicts what it would cost at full
+/// resolution: its GPU work grows with the pixels, the rest (CPU, waits for
+/// media) does not. Playback goes back to full when, of the last
+/// [`QUICK_PLAYS`] reduced frames (about a second), [`FITTING_PLAYS`] would
+/// fit in this share of their content frame: one cheap frame does not flip
+/// it back, one dear frame does not hold it at half.
+const FULL_FITS: f64 = 0.8;
 const QUICK_PLAYS: u32 = 24;
+const FITTING_PLAYS: u32 = 18;
 
 /// Auto's adaptive resolution (After Effects' Adaptive Resolution). While the
 /// playhead is dragged, a full-resolution still that took longer than a
@@ -189,11 +204,23 @@ pub struct AutoQuality {
     /// Dragged frames are slow at half resolution too: they drag at
     /// [`AUTO_DRAG_FLOOR`].
     slower_stills: bool,
+    /// Quick reduced drag frames in a row, and how many bring a drag back to
+    /// full (one, until a drag is slow again just after coming back).
+    quick_stills: u32,
+    stills_needed: u32,
+    /// The last reduced drag frame brought it back to full.
+    came_back: bool,
     slow_play: bool,
     /// Consecutive full playing frames over their content frame.
     late_plays: u32,
-    /// Consecutive reduced playing frames under [`PLAY_UNDER`].
-    quick_plays: u32,
+    /// Of the last reduced playing frames (one bit each, newest lowest),
+    /// which would fit at full resolution ([`FULL_FITS`]), and how many there are.
+    fitting: u32,
+    reduced_plays: u32,
+    /// Frames of this run of playback not judged yet ([`WARMING_PLAYS`]),
+    /// and when the last playing frame was drawn (seconds).
+    warming: u32,
+    last_play: Option<f64>,
 }
 impl AutoQuality {
     pub fn reset(&mut self) {
@@ -206,26 +233,62 @@ impl AutoQuality {
         if !cost_ms.is_finite() || !interval_ms.is_finite() || interval_ms <= 0. {
             return;
         }
+        let needed = self.stills_needed.max(1);
         if scale >= 1. {
             self.slow_stills = cost_ms > interval_ms;
-            self.slower_stills = false;
+            // A slow full frame (a paused one between two drags) says nothing
+            // about half: the next drag starts where the last one had to go,
+            // instead of drawing at half first and converting every clip's
+            // frames again on the way down (a 200 ms gap at each drag's start).
+            // Only a full frame inside the refresh forgets it.
+            if !self.slow_stills {
+                self.slower_stills = false;
+            }
+            self.quick_stills = 0;
+            if self.slow_stills && self.came_back {
+                // Slow again at once: the next way back takes a run.
+                self.stills_needed = (needed * QUICK_STILLS).min(MOST_QUICK_STILLS);
+            } else if !self.slow_stills {
+                self.stills_needed = 1;
+            }
+            self.came_back = false;
         } else if scale >= AUTO_FLOOR {
             if cost_ms < UNDER * interval_ms {
-                self.slow_stills = false;
+                self.quick_stills += 1;
+                if self.quick_stills >= needed {
+                    self.slow_stills = false;
+                    self.came_back = true;
+                    self.quick_stills = 0;
+                }
+            } else {
+                self.quick_stills = 0;
             }
             self.slower_stills = cost_ms > SLOW_REDUCED * interval_ms;
         } else if cost_ms < 0.5 * interval_ms {
             self.slower_stills = false;
         }
     }
-    /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done)
-    /// against its content frame of `frame_ms`.
-    pub fn record_play(&mut self, cost_ms: f64, frame_ms: f64, scale: f64) {
+    /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done),
+    /// `gpu_ms` of it the GPU's own work, against its content frame of
+    /// `frame_ms`; drawn at `at_s` (seconds).
+    pub fn record_play(&mut self, cost_ms: f64, gpu_ms: f64, frame_ms: f64, scale: f64, at_s: f64) {
         if !cost_ms.is_finite() || !frame_ms.is_finite() || frame_ms <= 0. {
             return;
         }
+        if self
+            .last_play
+            .is_none_or(|last| !(at_s - last).is_finite() || at_s - last > NEW_RUN_S)
+        {
+            self.warming = WARMING_PLAYS;
+        }
+        self.last_play = Some(at_s);
+        if self.warming > 0 {
+            self.warming -= 1;
+            return;
+        }
         if scale >= 1. {
-            self.quick_plays = 0;
+            self.fitting = 0;
+            self.reduced_plays = 0;
             self.late_plays = if cost_ms > frame_ms {
                 self.late_plays + 1
             } else {
@@ -237,14 +300,19 @@ impl AutoQuality {
             }
         } else if self.slow_play {
             self.late_plays = 0;
-            self.quick_plays = if cost_ms < PLAY_UNDER * frame_ms {
-                self.quick_plays + 1
+            let gpu = if gpu_ms.is_finite() {
+                gpu_ms.clamp(0., cost_ms.max(0.))
             } else {
-                0
+                0.
             };
-            if self.quick_plays >= QUICK_PLAYS {
+            let full = cost_ms + gpu * (1. / (scale * scale) - 1.);
+            let mask = (1u32 << QUICK_PLAYS) - 1;
+            self.fitting = ((self.fitting << 1) | u32::from(full < FULL_FITS * frame_ms)) & mask;
+            self.reduced_plays = (self.reduced_plays + 1).min(QUICK_PLAYS);
+            if self.reduced_plays >= QUICK_PLAYS && self.fitting.count_ones() >= FITTING_PLAYS {
                 self.slow_play = false;
-                self.quick_plays = 0;
+                self.fitting = 0;
+                self.reduced_plays = 0;
             }
         }
     }
@@ -302,19 +370,57 @@ mod tests {
             "a fixed quality stays"
         );
     }
+    /// A drag that had to go to a quarter, then a pause whose full frames
+    /// are slow: the next drag starts at a quarter, not at half and down
+    /// again (each change of scale converts the clips' frames again). A full
+    /// frame inside the refresh starts the next drag at full.
+    #[test]
+    fn the_next_drag_starts_where_the_last_one_had_to_go() {
+        let refresh = 1000. / 60.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(80., refresh, 1.);
+        auto.record_still(40., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR);
+        // Paused between drags: full frames, still slow.
+        auto.record_still(70., refresh, 1.);
+        auto.record_still(65., refresh, 1.);
+        assert_eq!(
+            drag(&auto),
+            AUTO_DRAG_FLOOR,
+            "the next drag starts at a quarter"
+        );
+        auto.record_still(10., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
+    }
+    /// Playback in Auto: a run's first frames (media opening, caches filling)
+    /// are not judged; three late full frames in a row go to half; half goes
+    /// back to full once most of a second of reduced frames would fit at full
+    /// (their GPU work grown by the pixels, the rest as it is), not on one
+    /// cheap frame, and one dear frame does not hold it at half.
     #[test]
     fn slow_playback_plays_at_half_with_hysteresis() {
         let frame = 1000. / 24.;
         let mut auto = AutoQuality::default();
+        let mut at = 0.;
+        let play_frame = |auto: &mut AutoQuality, at: &mut f64, cost: f64, gpu: f64, scale: f64| {
+            *at += frame / 1000.;
+            auto.record_play(cost, gpu, frame, scale, *at);
+        };
         let play = |auto: &AutoQuality| Quality::Auto.scale(auto, Moment::Playing);
-        // Two late frames (a first frame, a seek) are not slow playback.
-        auto.record_play(120., frame, 1.);
-        auto.record_play(120., frame, 1.);
-        auto.record_play(20., frame, 1.);
-        auto.record_play(120., frame, 1.);
+        // A run's first frames are slow and not judged.
+        for _ in 0..WARMING_PLAYS {
+            play_frame(&mut auto, &mut at, 120., 10., 1.);
+        }
+        assert_eq!(play(&auto), 1., "the start of a run is not its pace");
+        // Two late frames are not slow playback.
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 20., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
         assert_eq!(play(&auto), 1.);
-        auto.record_play(120., frame, 1.);
-        auto.record_play(120., frame, 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
+        play_frame(&mut auto, &mut at, 120., 10., 1.);
         assert_eq!(play(&auto), AUTO_FLOOR, "three late frames in a row");
         assert_eq!(
             Quality::Auto.scale(&auto, Moment::Paused),
@@ -333,24 +439,32 @@ mod tests {
                 "{fixed:?} is always respected"
             );
         }
-        // Reduced frames that would not leave room for a full one keep it
-        // reduced; a run of cheap ones broken by one dear frame starts over.
+        // Reduced frames whose GPU work, four times over, would not fit stay
+        // reduced (10 + 8 x 3 = 34 ms > 0.8 of 41.7).
         for _ in 0..40 {
-            auto.record_play(15., frame, AUTO_FLOOR);
+            play_frame(&mut auto, &mut at, 10., 8., AUTO_FLOOR);
         }
         assert_eq!(play(&auto), AUTO_FLOOR);
-        for _ in 0..23 {
-            auto.record_play(5., frame, AUTO_FLOOR);
+        // Frames with room at full go back, a few dear ones among them or not
+        // (8 + 4 x 3 = 20 ms fits).
+        for i in 0..QUICK_PLAYS {
+            let dear = i % 6 == 0;
+            play_frame(
+                &mut auto,
+                &mut at,
+                if dear { 60. } else { 8. },
+                4.,
+                AUTO_FLOOR,
+            );
         }
-        auto.record_play(15., frame, AUTO_FLOOR);
-        for _ in 0..23 {
-            auto.record_play(5., frame, AUTO_FLOOR);
+        assert_eq!(play(&auto), 1., "most of a second would fit at full");
+        // A pause starts a new run: its first frames are not judged again.
+        at += 2.;
+        for _ in 0..WARMING_PLAYS {
+            play_frame(&mut auto, &mut at, 200., 10., 1.);
         }
-        assert_eq!(play(&auto), AUTO_FLOOR);
-        auto.record_play(5., frame, AUTO_FLOOR);
-        assert_eq!(play(&auto), 1., "a second of cheap reduced frames");
+        assert_eq!(play(&auto), 1.);
     }
-
     #[test]
     fn a_slow_still_drags_at_half_and_stops_exact() {
         let mut auto = AutoQuality::default();
@@ -389,6 +503,46 @@ mod tests {
         auto.record_still(300., 16.67, 1.);
         auto.record_still(0.8, 16.67, AUTO_FLOOR);
         assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1.);
+    }
+
+    /// A drag whose full frames just miss the refresh and whose reduced ones
+    /// are far under it does not flip between full and half every few
+    /// frames: slow again right after coming back, it stays reduced for a run
+    /// of quick frames (longer each time), and a full frame that fits the
+    /// refresh makes one quick frame enough again.
+    #[test]
+    fn a_drag_does_not_flip_between_full_and_half() {
+        let refresh = 1000. / 120.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(
+            drag(&auto),
+            1.,
+            "an isolated slow frame costs one reduced frame"
+        );
+        auto.record_still(12., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR, "slow again at once");
+        for _ in 0..QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+            assert_eq!(drag(&auto), AUTO_FLOOR, "a run of quick frames first");
+        }
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(12., refresh, 1.);
+        for _ in 0..MOST_QUICK_STILLS - 1 {
+            auto.record_still(1., refresh, AUTO_FLOOR);
+        }
+        assert_eq!(drag(&auto), AUTO_FLOOR, "longer the second time");
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1.);
+        auto.record_still(5., refresh, 1.);
+        assert_eq!(drag(&auto), 1., "a full frame inside the refresh");
+        auto.record_still(12., refresh, 1.);
+        auto.record_still(1., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), 1., "and one quick frame is enough again");
     }
 
     #[test]

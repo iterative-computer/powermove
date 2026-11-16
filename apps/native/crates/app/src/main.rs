@@ -61,6 +61,7 @@ mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
+mod linked_sync;
 mod media_thumbs;
 mod quick_look;
 mod media_sequence;
@@ -73,6 +74,8 @@ mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
 mod panel_capture_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod project_capture_tests;
 mod panel_library;
 mod ghost;
 mod panels;
@@ -81,6 +84,7 @@ mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;
+mod popover_drag;
 mod play_range;
 mod playback;
 mod playhead;
@@ -92,8 +96,10 @@ mod providers;
 mod publish;
 mod raster_overrides;
 mod render_frames;
+mod recent_work;
 mod rows;
 mod session;
+mod region_attach;
 mod settings_window;
 mod shader_panel;
 mod shape_tool;
@@ -274,6 +280,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(debug_assertions))]
     let _ = lane_flags;
+    diag::trace_unhide();
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
@@ -352,6 +359,7 @@ fn main() -> Result<()> {
             fonts: jobs_broker,
         });
         mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
+        tools.keep_for_stills();
         {
             let mut automation = tools.automation.lock().unwrap();
             automation.surfaces = Some(Arc::new(bridge));
@@ -532,7 +540,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
 /// while the app is inactive; with `--open` it also stands them for review
 /// captures. Read from this process's own command-line flags only: an
 /// inherited environment variable never turns it on.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn sheet_hold(flags: &[&str]) -> Option<bool> {
     flags
         .contains(&"PM_NATIVE_DRAW_OCCLUDED")
@@ -594,3 +602,6 @@ mod review_override_tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod utility_capture_tests;

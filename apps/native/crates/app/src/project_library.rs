@@ -19,7 +19,7 @@ use gpui::{prelude::*, *};
 use pm_design::{Elevation, Text, Tokens, motion::Preset};
 use pm_kernel::{KernelHandle, session::ShellReply};
 use pm_shell::{
-    kit::{self, Button, Item, Kit, Recipes, ink},
+    kit::{self, Button, Kit, Recipes, ink},
     native_control::{ControlSpec, Kind, NativeControl},
     symbol::Weight,
 };
@@ -33,6 +33,11 @@ pub struct ThumbnailSource {
     pub dir: PathBuf,
     /// One frame of the open project as PNG, through the engine's frame path.
     pub renderer: Option<pm_compat_runner::FrameRenderer>,
+    /// The profile whose library holds the projects (posters drawn at idle
+    /// read their stored version from it, `idle_poster`).
+    pub profile: PathBuf,
+    /// A frame renderer for any project, given a publication of it.
+    pub factory: Option<Rc<dyn Fn(&str) -> Option<pm_compat_runner::FrameRenderer>>>,
 }
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -90,6 +95,12 @@ pub struct ProjectLibrary {
     /// (project, the modification it was started for).
     posters_read: std::collections::HashSet<String>,
     posters_started: std::collections::HashSet<(String, i64)>,
+    /// Projects with no poster, waiting for one drawn at idle, and those
+    /// already tried this session (a project that cannot be drawn is not
+    /// tried again and again).
+    idle_posters: std::collections::VecDeque<(String, (u32, u32), Option<f64>)>,
+    idle_tried: std::collections::HashSet<String>,
+    idle_running: bool,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
     gallery_native: Vec<Entity<NativeControl>>,
@@ -107,6 +118,17 @@ pub struct ProjectLibrary {
     editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     /// v1's `projectsView`.
     pub layout: Layout,
+    /// The grid/list switch: the system's segmented control.
+    view_switch: Option<Entity<NativeControl>>,
+    /// The order the cards had when an open began: while it runs (a v1
+    /// project is migrated, and so edited, as it opens) nothing moves under
+    /// the pointer, so a double-click lands on the card it was aimed at.
+    held_order: Option<Vec<String>>,
+    /// Titles more than one shown card has: those cards also say how long
+    /// they run, so they tell apart.
+    repeated: std::collections::HashSet<String>,
+    /// Every shown card's title (`fit_title` tells apart those a cut makes alike).
+    titles: Vec<String>,
     search: Option<Entity<pm_shell::text::TextField>>,
     /// New Project, the system's glass button: the header's one raised
     /// action. The rest of the header is drawn.
@@ -181,6 +203,9 @@ impl ProjectLibrary {
             thumbnails: None,
             posters_read: Default::default(),
             posters_started: Default::default(),
+            idle_posters: Default::default(),
+            idle_tried: Default::default(),
+            idle_running: false,
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
@@ -190,6 +215,10 @@ impl ProjectLibrary {
             grid: (0, 0),
             editor,
             layout,
+            view_switch: None,
+            held_order: None,
+            repeated: Default::default(),
+            titles: Vec::new(),
             search: None,
             new_project: None,
             active: None,
@@ -468,6 +497,10 @@ impl ProjectLibrary {
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.layout = layout;
         self.persist("projectsView", layout.key());
+        if let Some(switch) = &self.view_switch {
+            let index = json!(usize::from(layout == Layout::List));
+            switch.update(cx, |s, cx| s.update(&index, &view_options(), false, cx));
+        }
         cx.notify();
     }
     fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -624,6 +657,70 @@ const CARD: f32 = 240.;
 /// A card's round "more" button.
 const MORE: f32 = 24.;
 const CARD_LEAST: f32 = 160.;
+/// A card's title, `fits` characters at most. Cut at its end it would read
+/// like another title cut there ("Accept — Recovered — …" six times), so it
+/// keeps its start and its end and drops the middle, which the others share.
+fn fit_title(title: &str, titles: &[String], fits: usize) -> String {
+    let chars: Vec<char> = title.chars().collect();
+    if chars.len() <= fits {
+        return title.to_owned();
+    }
+    let head: String = chars[..fits - 1].iter().collect();
+    let alike = titles
+        .iter()
+        .any(|other| other != title && other.starts_with(&head));
+    if !alike {
+        return title.to_owned();
+    }
+    let keep = fits - 1;
+    // The end tells them apart: most of the room goes to it.
+    let start = keep / 4;
+    let end = keep - start;
+    format!(
+        "{}…{}",
+        chars[..start].iter().collect::<String>(),
+        chars[chars.len() - end..].iter().collect::<String>()
+    )
+}
+#[cfg(test)]
+mod fit_title_tests {
+    #[test]
+    fn titles_a_cut_makes_alike_keep_their_ends() {
+        let titles: Vec<String> = [
+            "Accept — Recovered — Native",
+            "Accept — Recovered — Native — Native",
+            "Accept — Recovered — Native 2",
+            "Paper",
+        ]
+        .map(String::from)
+        .to_vec();
+        let a = super::fit_title(&titles[1], &titles, 20);
+        let b = super::fit_title(&titles[2], &titles, 20);
+        assert_ne!(a, b);
+        assert!(a.ends_with("Native — Native") && a.contains('…'), "{a}");
+        assert!(b.ends_with("Native 2"), "{b}");
+        // Short or alone: as it is (the card cuts its end if it must).
+        assert_eq!(super::fit_title("Paper", &titles, 20), "Paper");
+        let alone = ["A long title nobody else shares at all".to_owned()];
+        assert_eq!(super::fit_title(&alone[0], &alone, 20), alone[0]);
+    }
+}
+/// A moment as the system writes a short day and time ("Nov 14, 11:12 PM").
+fn exact_time(at_ms: i64) -> String {
+    use objc2_foundation::{NSDate, NSDateFormatter, NSString};
+    let formatter = NSDateFormatter::new();
+    formatter.setLocalizedDateFormatFromTemplate(&NSString::from_str("MMMdjmm"));
+    formatter
+        .stringFromDate(&NSDate::dateWithTimeIntervalSince1970(at_ms as f64 / 1000.))
+        .to_string()
+}
+/// The grid/list switch's segments: a symbol each, the name as its tip.
+fn view_options() -> Vec<Value> {
+    vec![
+        json!({"label": "Grid", "symbol": "square.grid.2x2"}),
+        json!({"label": "List", "symbol": "list.bullet"}),
+    ]
+}
 impl ProjectLibrary {
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
         &mut self.motion
@@ -637,32 +734,8 @@ impl ProjectLibrary {
         count: Option<usize>,
         selected: bool,
     ) -> Stateful<Div> {
-        let t = &kit.t;
-        let (c, m) = (&t.colors, &t.metrics);
-        kit.row(id, selected)
+        kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
-            .text_size(px(t.typography.reading))
-            .role(Role::Button)
-            .aria_label(match count {
-                Some(n) => format!("{label}, {n}"),
-                None => label.clone(),
-            })
-            .child(kit.symbol(
-                symbol,
-                m.symbol_panel,
-                Weight::Regular,
-                if selected { c.text } else { c.muted },
-            ))
-            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
-            .children(count.map(|n| {
-                div()
-                    .flex_none()
-                    .text_role(t, Text::Caption)
-                    .font_features(kit::tabular())
-                    // On system glass: a step that reads over any desktop.
-                    .text_color(rgb(c.muted))
-                    .child(n.to_string())
-            }))
     }
     /// Opens or closes a button menu; it enters on the `Enter` spring.
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
@@ -891,6 +964,8 @@ impl ProjectLibrary {
         };
         let (id, stamp) = (row.id.clone(), row.modified_ms.unwrap_or(0));
         let (file, stamp_file) = crate::poster::files(&source.dir, &id);
+        // What a poster render needs, so drawing one at idle can borrow the view.
+        let (renderer, dir) = (source.renderer.clone(), source.dir.clone());
         let fade = kit::key(&format!("poster-{id}"));
         let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
             v.thumbs.insert(
@@ -931,16 +1006,28 @@ impl ProjectLibrary {
             }
             return image;
         }
+        // None at all, and the project is not open anywhere: drawn at idle
+        // from its stored version (PM-285).
+        if cached.as_ref().is_none_or(|(_, image)| image.is_none())
+            && self.active.as_deref() != Some(id.as_str())
+            && !row.open
+            && !row.trashed
+            && self.idle_tried.insert(id.clone())
+        {
+            let size = row.dimensions().unwrap_or((1920, 1080));
+            let duration = row.summary.as_ref().and_then(|s| s.duration_seconds);
+            self.idle_posters.push_back((id.clone(), size, duration));
+            self.next_idle_poster(cx);
+        }
         // Taken at or after the project last changed on disk.
         let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 >= stamp);
         if !fresh
             && self.active.as_deref() == Some(id.as_str())
-            && let Some(renderer) = source.renderer.clone()
+            && let Some(renderer) = renderer
             && self.posters_started.insert((id.clone(), stamp))
         {
             let size = row.dimensions().unwrap_or((1920, 1080));
             let duration = row.summary.as_ref().and_then(|s| s.duration_seconds);
-            let dir = source.dir.clone();
             let taken = crate::poster::now_ms().max(stamp);
             cx.spawn(async move |this, cx| {
                 let poster = id.clone();
@@ -960,6 +1047,65 @@ impl ProjectLibrary {
             .detach();
         }
         image
+    }
+    /// Draws the next waiting poster (one at a time, a moment after the last,
+    /// while Home shows and nothing is opening): the project's stored version
+    /// is read from the library and drawn from a publication registered
+    /// nowhere, so the project is not opened, edited or redated.
+    fn next_idle_poster(&mut self, cx: &mut Context<Self>) {
+        if self.idle_running || self.controller.opening().is_some() {
+            return;
+        }
+        let Some(source) = &self.thumbnails else {
+            return;
+        };
+        let Some(factory) = source.factory.clone() else {
+            return;
+        };
+        let Some((id, size, duration)) = self.idle_posters.pop_front() else {
+            return;
+        };
+        let (dir, profile) = (source.dir.clone(), source.profile.clone());
+        self.idle_running = true;
+        cx.spawn(async move |this, cx| {
+            // Idle: a breath after Home settled or the last poster.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1200))
+                .await;
+            let Some(renderer) = this.update(cx, |_, _| factory(&id)).ok().flatten() else {
+                let _ = this.update(cx, |v, cx| {
+                    v.idle_running = false;
+                    v.next_idle_poster(cx);
+                });
+                return;
+            };
+            let poster = id.clone();
+            let taken = crate::poster::now_ms();
+            let png = cx
+                .background_executor()
+                .spawn(async move {
+                    let stored = pm_kernel::LibraryStore::open(&profile).load(&poster).ok()??;
+                    let published = Arc::new(pm_kernel::detached_publication(&poster, stored.project));
+                    crate::poster::write(&renderer, Some(published), &dir, &poster, taken, size, duration)
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.idle_running = false;
+                if let Some(png) = png {
+                    v.thumbs.insert(
+                        id.clone(),
+                        (taken as usize, Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))),
+                    );
+                    v.motion
+                        .values
+                        .borrow_mut()
+                        .insert(kit::key(&format!("poster-{id}")), pm_design::motion::Animated::unit(0.));
+                    cx.notify();
+                }
+                v.next_idle_poster(cx);
+            });
+        })
+        .detach();
     }
     /// Click selects; double-click (or Return) opens, ⌥ in a new window;
     /// right-click selects and shows the row's menu.
@@ -982,6 +1128,33 @@ impl ProjectLibrary {
                 v.row_menu(id.clone(), window, cx);
             })
         })
+    }
+    /// A card's line of facts. Cards whose titles repeat tell apart: the
+    /// edit (or, in the Trash, the deletion) is the exact day and time
+    /// ("Edited Nov 14, 11:12 PM") instead of "15 h ago", and the length
+    /// follows when it is known.
+    fn facts(&self, row: &Row, now: i64) -> String {
+        let facts = row.facts(now);
+        if !self.repeated.contains(&row.title()) {
+            return facts;
+        }
+        let (verb, at) = if row.trashed {
+            ("Deleted", row.deleted_ms.or(row.modified_ms))
+        } else {
+            ("Edited", row.modified_ms)
+        };
+        let facts = match at {
+            Some(at) => facts.replacen(
+                &format!("{verb} {}", ago(Some(at), now)),
+                &format!("{verb} {}", exact_time(at)),
+                1,
+            ),
+            None => facts,
+        };
+        match row.length() {
+            Some(length) => format!("{facts} · {length}"),
+            None => facts,
+        }
     }
     /// v1's tag beside the name: Active (this window) or Open (elsewhere).
     fn tag(&self, row: &Row) -> Option<&'static str> {
@@ -1085,9 +1258,12 @@ impl ProjectLibrary {
     }
     /// Under the poster: the name, with a small mark when the project is
     /// open (the accent when it is this window's), over one line of facts.
-    fn caption(&self, kit: &Kit, row: &Row, facts: &str) -> Div {
+    fn caption(&self, kit: &Kit, row: &Row, facts: &str, width: f32) -> Div {
         let t = &kit.t;
         let c = &t.colors;
+        // About how many characters of a title fit the card.
+        let fits = (width / (t.typography.title * 0.55)).floor().max(8.) as usize;
+        let title = fit_title(&row.title(), &self.titles, fits);
         let active = self.active.as_deref() == Some(row.id.as_str());
         div()
             .flex()
@@ -1104,7 +1280,7 @@ impl ProjectLibrary {
                             .truncate()
                             .text_role(t, Text::Title)
                             .text_color(rgb(c.text))
-                            .child(row.name.clone()),
+                            .child(title),
                     )
                     .children(self.tag(row).map(|_| {
                         div()
@@ -1141,7 +1317,7 @@ impl ProjectLibrary {
         let t = &kit.t;
         let c = &t.colors;
         let selected = self.controller.selected.as_ref() == Some(&row.id);
-        let facts = row.facts(now);
+        let facts = self.facts(row, now);
         let thumbnail = self.thumbnail(row, cx);
         let fade = kit.animate(
             kit::key(&format!("poster-{}", row.id)),
@@ -1150,16 +1326,15 @@ impl ProjectLibrary {
         );
         let hover = kit::key(&format!("card-{}", row.id));
         let over = kit.hovered(hover);
-        // A frame of ink around the page, corners concentric: the page's
-        // corner plus the frame. Under the pointer the frame deepens a step;
-        // selected, it carries a ring of ink inside its edge.
-        let frame = t.space.xs;
-        let inner = t.radius.xl;
+        // v1's card: the picture fills a rounded frame with a hairline inside
+        // its edge. Under the pointer the edge firms up and the frame lifts
+        // off the sheet; selected, the edge is a ring of ink.
+        let inner = t.radius.lg;
         let place = (width, (width * 9. / 16.).round());
         let (w, h) = row.dimensions().unwrap_or((16, 9));
         let aspect = w.max(1) as f32 / h.max(1) as f32;
-        // A picture in the frame's own shape fills the page; any other
-        // stands whole on the viewer's ground.
+        // A picture in the frame's own shape fills it; any other stands
+        // whole on the viewer's ground.
         let fills = (aspect / (place.0 / place.1) - 1.).abs() < 0.03;
         let tr = t.translucency;
         let page = div()
@@ -1199,8 +1374,8 @@ impl ProjectLibrary {
             div()
                 .id(SharedString::from(format!("project-more-{}", row.id)))
                 .absolute()
-                .top(px(frame + t.space.md))
-                .right(px(frame + t.space.md))
+                .top(px(t.space.md))
+                .right(px(t.space.md))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1209,7 +1384,7 @@ impl ProjectLibrary {
                 .bg(rgba(if open { 0x000000a6 } else { 0x00000073 }))
                 .opacity(reveal)
                 .role(Role::Button)
-                .aria_label(format!("More actions for {}", row.name))
+                .aria_label(format!("More actions for {}", row.title()))
                 .tooltip(kit::tooltip(t, "More"))
                 .child(kit.symbol(
                     "ellipsis",
@@ -1237,33 +1412,43 @@ impl ProjectLibrary {
                     v.toggle_menu(Menu::Row, cx);
                 }))
         });
+        let dark = t.scheme == pm_design::Scheme::Dark;
+        let (edge, edge_ink) = if selected {
+            (1.5, 0.72)
+        } else {
+            (0.5 + 0.5 * over, 0.1 + 0.22 * over)
+        };
         let poster = div()
             .relative()
             .flex()
             .flex_none()
             .w(px(place.0))
             .h(px(place.1))
-            .p(px(frame))
-            .corner(t, inner + frame)
-            .bg(rgb(pm_design::color::mix(
-                c.panel,
-                c.text,
-                if selected {
-                    tr.pressed
-                } else {
-                    tr.hover + (tr.selected - tr.hover) * over
-                },
-            )))
-            .when(selected, |poster| {
+            .corner(t, inner)
+            .bg(rgb(c.viewer))
+            .when(over > 0.01, |poster| {
                 poster.shadow(vec![BoxShadow {
-                    color: ink(c.text, 0.72).into(),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(frame / 2.),
-                    inset: true,
+                    color: ink(0x000000, if dark { 0.34 } else { 0.14 } * over).into(),
+                    offset: point(px(0.), px(6. * over)),
+                    blur_radius: px(18.),
+                    spread_radius: px(0.),
+                    inset: false,
                 }])
             })
             .child(page)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(inner))
+                    .shadow(vec![BoxShadow {
+                        color: ink(if selected || !dark { c.text } else { 0xffffff }, edge_ink).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(edge),
+                        inset: true,
+                    }]),
+            )
             .children(more);
         let card = div()
             .id(SharedString::from(format!("project-{}", row.id)))
@@ -1276,11 +1461,11 @@ impl ProjectLibrary {
             .role(Role::ListItem)
             .aria_selected(selected)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.name),
-                None => format!("{}, {facts}", row.name),
+                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
+                None => format!("{}, {facts}", row.title()),
             })
             .child(poster)
-            .child(self.caption(kit, row, &facts).px(px(frame)));
+            .child(self.caption(kit, row, &facts, width).px(px(t.space.hair)));
         let card = kit.track_hover(card, hover);
         self.interactive(card, &row.id, cx)
     }
@@ -1293,7 +1478,7 @@ impl ProjectLibrary {
     ) -> Stateful<Div> {
         let t = &kit.t;
         let selected = self.controller.selected.as_ref() == Some(&row.id);
-        let facts = row.facts(now);
+        let facts = self.facts(row, now);
         let thumbnail = self.thumbnail(row, cx);
         let height = t.metrics.row + t.space.lg;
         let d = kit
@@ -1303,8 +1488,8 @@ impl ProjectLibrary {
             .gap(px(t.space.lg))
             .role(Role::ListItem)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.name),
-                None => format!("{}, {facts}", row.name),
+                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
+                None => format!("{}, {facts}", row.title()),
             })
             .child(self.frame(
                 kit,
@@ -1330,7 +1515,7 @@ impl ProjectLibrary {
                             .truncate()
                             .text_role(t, Text::Title)
                             .text_color(rgb(t.colors.text))
-                            .child(row.name.clone()),
+                            .child(row.title()),
                     )
                     .children(self.tag(row).map(|tag| {
                         div()
@@ -1390,19 +1575,11 @@ impl Render for ProjectLibrary {
             self.search = Some(search);
         }
         let section = self.controller.query.section;
-        let live = self
-            .controller
-            .snapshot
-            .rows
-            .iter()
-            .filter(|r| !r.trashed)
-            .count();
-        let trash = self.controller.snapshot.rows.len() - live;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        // Sidebar (v1): Recents and Trash with counts, Store, then the
-        // account at the foot. Navigation only, on the window's own material.
+        // Sidebar (v1): Recents and Trash, Store, then the account at the
+        // foot; quiet rows with no counts. Navigation only, on the window's own material.
         let account = crate::cloud::fact(cx);
         let identity = account
             .get("identity")
@@ -1438,7 +1615,7 @@ impl Render for ProjectLibrary {
                     &kit,
                     "home-recents",
                     ("clock", "Recents".into()),
-                    Some(live.min(12)),
+                    None,
                     section != Section::Deleted,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Recents, cx))),
@@ -1448,7 +1625,7 @@ impl Render for ProjectLibrary {
                     &kit,
                     "home-trash",
                     ("trash", "Trash".into()),
-                    Some(trash),
+                    None,
                     section == Section::Deleted,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Deleted, cx))),
@@ -1497,6 +1674,8 @@ impl Render for ProjectLibrary {
             .opening()
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
+        // Newer work in the original app: one quiet line, never in the way.
+        let recent = opening.is_none() && crate::recent_work::newer();
         let tr = t.translucency;
         if self.new_project.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
@@ -1513,6 +1692,7 @@ impl Render for ProjectLibrary {
                         destructive: false,
                         inline: false,
                         quiet: false,
+                        pull: false,
                         tint: None,
                         symbol: Some("plus"),
                         glass: true,
@@ -1618,63 +1798,48 @@ impl Render for ProjectLibrary {
                             .into_any_element(),
                         }),
                 );
-        let list = self.layout == Layout::List;
-        let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .relative()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .w(px(VIEW_CELL.0))
-                .h(px(VIEW_CELL.1))
-                .role(Role::RadioButton)
-                .aria_label(label)
-                .aria_selected(on)
-                .tooltip(kit::tooltip(&t, label))
-                .child(kit.symbol(
-                    symbol,
-                    m.symbol_toolbar,
-                    Weight::Regular,
-                    if on { c.text } else { c.secondary },
-                ))
-        };
-        // The on fill glides between the two cells.
-        let at = kit
-            .animate(kit::key("home-view"), f32::from(list), Some(Preset::Layout))
-            .clamp(-0.1, 1.1);
+        if self.view_switch.is_none() && pm_shell::text::available(window) {
+            let tokens = t.clone();
+            let index = json!(usize::from(self.layout == Layout::List));
+            let switch = cx.new(|cx| {
+                NativeControl::new(
+                    ControlSpec {
+                        kind: Kind::Segmented,
+                        label: "Project layout",
+                        identifier: "home.layout",
+                        value: &index,
+                        options: view_options(),
+                        disabled: false,
+                        default: false,
+                        destructive: false,
+                        inline: false,
+                        quiet: false,
+                        pull: false,
+                        tint: None,
+                        symbol: None,
+                        glass: true,
+                        well: false,
+                    },
+                    &tokens,
+                    window,
+                    cx,
+                )
+            });
+            cx.subscribe(&switch, |v: &mut Self, _, value: &Value, cx| {
+                let layout = if value.as_u64() == Some(1) { Layout::List } else { Layout::Grid };
+                if layout != v.layout {
+                    v.set_layout(layout, cx);
+                }
+            })
+            .detach();
+            self.view_switch = Some(switch);
+        }
+        // Until the window can host the system's control (the first frame),
+        // its place stays empty: no drawn stand-in (PM-409).
         let view_switch = div()
-            .id("home-layout")
-            .relative()
-            .flex()
             .flex_none()
-            .items_center()
-            .gap(px(t.space.hair))
-            .p(px(m.border))
-            .rounded(px(t.radius.md))
-            .bg(rgb(c.raised))
-            .elevated(&t, Elevation::Raised)
-            .role(Role::RadioGroup)
-            .aria_label("Project layout")
-            .child(
-                div()
-                    .absolute()
-                    .top(px(m.border))
-                    .left(px(m.border + at * (VIEW_CELL.0 + t.space.hair)))
-                    .w(px(VIEW_CELL.0))
-                    .h(px(VIEW_CELL.1))
-                    .rounded(px(t.radius.nested(t.radius.md, m.border + t.space.hair)))
-                    .bg(ink(c.text, tr.selected)),
-            )
-            .child(
-                cell("home-grid", "square.grid.2x2", "Grid view", !list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::Grid, cx))),
-            )
-            .child(
-                cell("home-list", "list.bullet", "List view", list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::List, cx))),
-            );
+            .w(px(2. * VIEW_CELL.0 + t.space.hair + 2. * m.border))
+            .h(px(VIEW_CELL.1 + 2. * m.border));
         let controls_row = div()
             .flex()
             .flex_none()
@@ -1701,6 +1866,37 @@ impl Render for ProjectLibrary {
                     .role(Role::Status)
                     .aria_label(name.clone())
                     .child(name)
+            }))
+            .children(recent.then(|| {
+                div()
+                    .id("home-recent-work")
+                    .debug_selector(|| "home-recent-work".into())
+                    .flex()
+                    .min_w(px(0.))
+                    .gap(px(t.space.sm))
+                    .text_role(&t, Text::Body)
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{} {}",
+                        crate::recent_work::NOTICE,
+                        crate::recent_work::NOTICE_ACTION
+                    ))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(rgb(c.secondary))
+                            .child(crate::recent_work::NOTICE),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(c.accent))
+                            .child(crate::recent_work::NOTICE_ACTION),
+                    )
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        (v.sink)(Outbound::Command("bringInRecentWork"), cx)
+                    }))
             }))
             .child(div().flex_1())
             // The sort is a text action: it opens our menu.
@@ -1734,7 +1930,10 @@ impl Render for ProjectLibrary {
                 ),
             )
             .child(div().flex_none().w(px(t.space.md)))
-            .child(view_switch);
+            .child(match &self.view_switch {
+                Some(switch) => switch.clone().into_any_element(),
+                None => view_switch.into_any_element(),
+            });
         let header = div()
             .flex()
             .flex_col()
@@ -1820,7 +2019,23 @@ impl Render for ProjectLibrary {
                 })
                 .into_any_element(),
             Content::Projects => {
-                let rows = self.controller.rows.clone();
+                let mut rows = self.controller.rows.clone();
+                let mut seen = std::collections::HashSet::new();
+                self.titles = rows.iter().map(Row::title).collect();
+                self.repeated = rows
+                    .iter()
+                    .map(Row::title)
+                    .filter(|title| !seen.insert(title.clone()))
+                    .collect();
+                if self.controller.opening().is_some() {
+                    let held = self
+                        .held_order
+                        .get_or_insert_with(|| rows.iter().map(|r| r.id.clone()).collect());
+                    // Cards keep their places; a new one goes at the end.
+                    rows.sort_by_key(|r| held.iter().position(|id| *id == r.id).unwrap_or(usize::MAX));
+                } else {
+                    self.held_order = None;
+                }
                 let list = div()
                     .id("home-projects")
                     .flex_1()
@@ -1925,9 +2140,10 @@ impl Render for ProjectLibrary {
                                 destructive: false,
                                 inline: false,
                                 quiet: false,
+                                pull: false,
                                 tint,
                                 symbol: None,
-                                glass: false,
+                                glass: true,
                                 well: false,
                             },
                             &tokens,
@@ -1996,7 +2212,6 @@ impl ProjectLibrary {
                 )
         };
         let line = || div().flex().flex_wrap().items_center().gap(px(t.space.md));
-        let none = |_: usize, _: &mut Window, _: &mut App| {};
         let buttons = |disabled: bool| {
             let row = line()
                 .child(kit.button(
@@ -2131,41 +2346,13 @@ impl ProjectLibrary {
                     .child(buttons(true)),
             )
             .child(
-                section("Icon buttons, segmented control, tabs")
+                section("Icon buttons")
                     .child(
                         line()
                             .child(kit.icon_button("g-icon-a", "magnifyingglass", "Search", false))
                             .child(kit.icon_button("g-icon-b", "plus", "Add", false))
-                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true))
-                            .child(kit.segmented(
-                                "g-seg-symbols",
-                                &[
-                                    Item::Symbol("square.grid.2x2", "Grid view"),
-                                    Item::Symbol("list.bullet", "List view"),
-                                ],
-                                0,
-                                false,
-                                none,
-                            ))
-                            .child(kit.segmented(
-                                "g-seg-titles",
-                                &[Item::Title("Layers"), Item::Title("Tracks")],
-                                0,
-                                false,
-                                none,
-                            )),
-                    )
-                    .child(kit.segmented(
-                        "g-tabs",
-                        &[
-                            Item::Title("Project"),
-                            Item::Title("Effect Controls"),
-                            Item::Title("Notes"),
-                        ],
-                        0,
-                        true,
-                        none,
-                    )),
+                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true)),
+                    ),
             )
             .child(
                 section("Search, switch, checkbox, radio, slider, progress")

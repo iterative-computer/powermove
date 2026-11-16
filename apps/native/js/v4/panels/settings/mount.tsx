@@ -89,6 +89,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         "extensionSearch",
         "extensionType",
         "project",
+        "commandSearch",
       ])}
       window={{
         project: (id) => {

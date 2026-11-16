@@ -887,6 +887,11 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    frame_requested: bool,
+    idle_cleanup: Option<gpui::Task<()>>,
+    /// Powermove P-IDLE-WAKE: the link is paused because the window was idle
+    /// (PM-407); the first input that wakes it draws at once (PM-310).
+    idle: bool,
     /// GPUI painted since hosted views were last placed.
     painted: bool,
     /// Drawables from the layer, taken off the main thread, for frames
@@ -1067,7 +1072,19 @@ impl MacWindowState {
         }
     }
 
+    /// A size/scale/visibility change invalidates the presented surface even
+    /// when GPUI was clean or a resize callback is temporarily taken. Force
+    /// fresh layout and wake the paused source, rather than stretching the
+    /// previous Metal frame under newly positioned AppKit controls.
+    fn request_surface_frame(&mut self) {
+        self.force_render_pending = true;
+        self.start_display_link();
+    }
+
     fn start_display_link(&mut self) {
+        self.frame_requested = true;
+        self.idle = false;
+        self.idle_cleanup.take();
         // Core Animation follows the layer/view's display and refresh timing.
         // Metal updates also provide a drawable and a CPU submission deadline.
         unsafe {
@@ -1483,6 +1500,9 @@ impl MacWindow {
                 frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
+                frame_requested: false,
+                idle_cleanup: None,
+                idle: false,
                 painted: false,
                 #[cfg(not(feature = "wgpu"))]
                 direct_source: None,
@@ -2363,6 +2383,15 @@ impl PlatformWindow for MacWindow {
         unsafe { window.styleMask().contains(NSWindowStyleMask::FullScreen) }
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(state) = state.upgrade() {
+                state.lock().start_display_link();
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }
@@ -3186,6 +3215,14 @@ unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            // Powermove hotfix 9.1: the private/SF Symbol cursor path aborted the app
+            // inside resetCursorRects (panic across the Objective-C boundary). Use
+            // stock AppKit cursors only until that path is rebuilt and tested.
+            CursorStyle::Move => msg_send![class!(NSCursor), openHandCursor],
+            CursorStyle::Rotate => msg_send![class!(NSCursor), crosshairCursor],
+            CursorStyle::ZoomIn | CursorStyle::ZoomOut => {
+                msg_send![class!(NSCursor), arrowCursor]
+            }
         };
 
         let bounds: Objc2NSRect = msg_send![this as *const Objc2Object as ObjcId, bounds];
@@ -3291,7 +3328,10 @@ unsafe extern "C" fn handle_key_equivalent(
 }
 
 unsafe extern "C" fn handle_key_down(this: &Objc2Object, _: Sel, native_event: ObjcId) {
+    let window_state = unsafe { get_window_state(this) };
+    let was_idle = window_state.lock().idle;
     unsafe { handle_key_event(this, native_event, false) };
+    wake_frame(this, &window_state, was_idle);
 }
 
 unsafe extern "C" fn handle_key_up(this: &Objc2Object, _: Sel, native_event: ObjcId) {
@@ -3517,6 +3557,7 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();
+    let was_idle = lock.idle;
     let window_height = lock.content_size().height;
     let native_event_type = unsafe { native_event.eventType() };
     match native_event_type {
@@ -3687,6 +3728,20 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
             callback(event);
             window_state.lock().event_callback = Some(callback);
         }
+        wake_frame(this, &window_state, was_idle);
+    }
+}
+
+/// Powermove P-IDLE-WAKE: an input that wakes an idle window (its link
+/// paused, PM-407) draws its frame now rather than when the restarted link
+/// first steps, a refresh or more later (PM-310). Only from idle: a running
+/// link is the one source of frames, as two sources pace unevenly.
+/// `PM_GPUI_IDLE_WAKE=0` waits for the link (a measurement).
+fn wake_frame(view: &Objc2Object, window_state: &Arc<Mutex<MacWindowState>>, was_idle: bool) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os("PM_GPUI_IDLE_WAKE").is_none_or(|v| v != "0"));
+    if on && was_idle && window_state.lock().frame_requested {
+        step(view as *const Objc2Object as *mut c_void);
     }
 }
 
@@ -3700,7 +3755,7 @@ unsafe extern "C" fn window_did_change_occlusion_state(this: &Objc2Object, _: Se
             .contains(NSWindowOcclusionState::Visible)
         {
             lock.move_traffic_light();
-            lock.start_display_link();
+            lock.request_surface_frame();
         } else if !draws_occluded() {
             lock.stop_display_link();
         }
@@ -3717,7 +3772,9 @@ fn draws_occluded() -> bool {
 
 unsafe extern "C" fn window_did_resize(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    window_state.as_ref().lock().move_traffic_light();
+    let mut lock = window_state.as_ref().lock();
+    lock.move_traffic_light();
+    lock.request_surface_frame();
 }
 
 unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
@@ -3799,6 +3856,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -3990,6 +4048,7 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -4085,16 +4144,45 @@ extern "C" fn step(view: *mut c_void) {
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
 
+        // Dirty views and animations mark demand through frame_waker while
+        // GPUI serves this frame. Keep a running animation's link uninterrupted.
         if let Some(mut callback) = lock.request_frame_callback.take() {
+            // A nested tick with no callback must not erase the outer
+            // frame's demand and let it pause with work still outstanding.
+            lock.frame_requested = false;
             let request = lock.next_frame_request();
             drop(lock);
             gpui_apple::feel::set_frame_start();
             callback(request);
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
-            // The link keeps stepping a visible window that has nothing new
-            // to draw: an unchanged window gives back its full-window
-            // intermediates until it draws again.
+            // Device recovery can demand a forced retry during presentation.
+            if lock.force_render_pending {
+                lock.start_display_link();
+            }
+            // Only pause once GPUI has finished and no next frame was asked
+            // for. The legacy CV source has different callback threading.
+            if !lock.frame_requested {
+                if let Some(link) = &lock.ca_display_link {
+                    let _: () = msg_send![&**link, setPaused: true];
+                    lock.idle = true;
+                    // Preserve the existing delayed GPU-target release without
+                    // keeping a display link alive to check its deadline.
+                    #[cfg(not(feature = "wgpu"))]
+                    {
+                        let weak = Arc::downgrade(&window_state);
+                        let timer = lock.background_executor.timer(IDLE_TARGETS);
+                        lock.idle_cleanup = Some(lock.foreground_executor.spawn(async move {
+                            timer.await;
+                            if let Some(state) = weak.upgrade() {
+                                state.lock().renderer.release_idle_targets(IDLE_TARGETS);
+                            }
+                        }));
+                    }
+                }
+            }
+            // Release intermediates when a continuing animation has left
+            // them unused. A fully idle window no longer ticks this callback.
             #[cfg(not(feature = "wgpu"))]
             lock.renderer.release_idle_targets(IDLE_TARGETS);
             #[cfg(not(feature = "wgpu"))]
@@ -4363,11 +4451,30 @@ fn is_drag_from_this_window(this: &Objc2Object, dragging_info: ObjcId) -> bool {
     !window.is_null() && std::ptr::eq(source as *const Objc2Object, window as *const Objc2Object)
 }
 
+/// A window with a sheet takes no drops: the sheet is modal to it.
+/// `this` is the window, or its drawing view.
+fn covered_by_sheet(this: &Objc2Object) -> bool {
+    let is_view: bool = unsafe { msg_send![this, isKindOfClass: class!(NSView)] };
+    let window: ObjcId = if is_view {
+        unsafe { msg_send![this, window] }
+    } else {
+        this as *const Objc2Object as ObjcId
+    };
+    if window.is_null() {
+        return false;
+    }
+    let sheet: ObjcId = unsafe { msg_send![window, attachedSheet] };
+    !sheet.is_null()
+}
+
 unsafe extern "C" fn dragging_entered(
     this: &Objc2Object,
     _: Sel,
     dragging_info: ObjcId,
 ) -> NSDragOperation {
+    if covered_by_sheet(this) {
+        return NSDragOperationNone;
+    }
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
@@ -4390,6 +4497,11 @@ unsafe extern "C" fn dragging_updated(
 ) -> NSDragOperation {
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
+    if covered_by_sheet(this) {
+        // A sheet that came up mid-drag: the window lets go of it.
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+        return NSDragOperationNone;
+    }
     let position = drag_event_position(&window_state, dragging_info);
     if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
         if is_source_window {
@@ -4413,6 +4525,10 @@ unsafe extern "C" fn perform_drag_operation(
     dragging_info: ObjcId,
 ) -> Bool {
     let window_state = unsafe { get_window_state(this) };
+    if covered_by_sheet(this) {
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+        return Bool::NO;
+    }
     let position = drag_event_position(&window_state, dragging_info);
     Bool::new(send_file_drop_event(
         window_state,
