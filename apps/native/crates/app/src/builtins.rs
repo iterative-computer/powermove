@@ -400,6 +400,8 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            // No panel shows its ghost any more: its picture goes.
+            self.ghost_retire();
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
             // Bound to the open that brought `project`: they run only if this
