@@ -92,8 +92,12 @@ pub const BESIDE_SHEET: [&str; 9] = [
     "checkForUpdates",
     "help",
 ];
-pub fn runs_beside_sheet(command: &str) -> bool {
-    BESIDE_SHEET.contains(&command) || command.starts_with("context")
+/// Whether `command` stays in the menu while a sheet is up. The Edit
+/// commands (Undo, Cut, Copy, Paste, Select All) stay only while one of the
+/// sheet's own fields is being edited (`field_editing`): the project under
+/// the sheet never takes them.
+pub fn runs_beside_sheet(command: &str, field_editing: bool) -> bool {
+    BESIDE_SHEET.contains(&command) || (field_editing && command.starts_with("context"))
 }
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
 pub const SUBMENUS: [&str; 7] = [
@@ -813,9 +817,21 @@ mod sheet_tests {
             "store",
             "renameProject",
         ] {
-            assert!(!runs_beside_sheet(held), "{held}");
+            assert!(!runs_beside_sheet(held, true), "{held}");
         }
-        assert!(runs_beside_sheet("contextUndo"));
+        // The Edit commands only for a field in the sheet.
+        for edit in [
+            "contextUndo",
+            "contextRedo",
+            "contextCut",
+            "contextCopy",
+            "contextPaste",
+            "contextSelectAll",
+        ] {
+            assert!(runs_beside_sheet(edit, true), "{edit}");
+            assert!(!runs_beside_sheet(edit, false), "{edit}");
+        }
+        assert!(runs_beside_sheet("settings", false));
     }
 }
 
