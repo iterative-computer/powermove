@@ -29,6 +29,8 @@ pub struct Scene {
 }
 /// The viewer's rendered-frame cache (RGBA16F surfaces).
 const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+/// The most output surfaces the engine keeps, of every size together.
+const POOL_BOUND: usize = 11;
 /// The most a paused composition-size surface may take: half the frame
 /// cache, so it always holds two.
 pub const PAUSED_FULL_BYTES: u64 = FRAME_CACHE_BYTES / 2;
@@ -2218,6 +2220,20 @@ impl Engine {
                 break;
             }
         }
+        // The bound counts every size, so at the bound with none of this
+        // size free, cached frames of any size go, oldest first: a paused
+        // viewer's large pictures held a scrub's small surfaces out of the
+        // pool, every frame, until playback emptied the cache (PM-444).
+        while self.pool.len() >= POOL_BOUND
+            && !self
+                .pool
+                .iter()
+                .any(|s| s.size == size && Arc::strong_count(s) == 1)
+            && self.cache.pop_front().is_some()
+        {
+            self.pool
+                .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        }
         let free = self
             .pool
             .iter()
@@ -2226,7 +2242,7 @@ impl Engine {
         Ok(match free {
             Some(s) => s,
             None => {
-                anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                anyhow::ensure!(self.pool.len() < POOL_BOUND, "bounded source pool exhausted");
                 let s = Arc::new(ExportedSurface::create(
                     &self.gpu.device,
                     &SurfaceRequest {
@@ -3338,6 +3354,78 @@ mod lifetime_tests {
 #[cfg(test)]
 mod playback_pool_tests {
     use super::*;
+
+    /// PM-444: a paused viewer's cache full of large pictures, the one it
+    /// shows and the one its report holds, then a scrub of small surfaces
+    /// with three in flight and the newest one held by its report: every
+    /// scrub frame finds a surface. (The pool's bound counts every size;
+    /// only cached frames of the asked size were given back, so the large
+    /// ones held the scrub out of the pool, every frame, until playback
+    /// emptied the cache.)
+    #[test]
+    fn a_scrub_finds_surfaces_past_a_cache_of_large_paused_pictures() {
+        let mut engine =
+            Engine::without_definitions(Gpu::new("scrub-past-paused").unwrap(), None).unwrap();
+        let large = Size::new(1920, 1080);
+        let small = Size::new(480, 270);
+        let project = pm_model::json::parse(r##"{"id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":2,"layers":[],"comps":{},"assets":{}}"##).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::default(),
+            content: 1,
+        };
+        let output = Output {
+            width: large.width,
+            height: large.height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut key = engine.cache_key(&scene, &FrameSpec::exact(Ticks::ZERO, output), large);
+        let mut time = 0;
+        let mut cache = |engine: &mut Engine, surface: &Arc<ExportedSurface>| {
+            time += 1;
+            key.time = time;
+            engine.cache.push_back(CachedFrame {
+                key,
+                composition: scene.comp.clone(),
+                surface: surface.clone(),
+                failures: Arc::default(),
+            });
+        };
+        // Paused pictures cached, and the settled picture shown and the
+        // one being settled, held beside the cache.
+        for _ in 0..12 {
+            let surface = engine.cache_surface(large).unwrap();
+            cache(&mut engine, &surface);
+        }
+        let held = [
+            engine.cache_surface(large).unwrap(),
+            engine.cache_surface(large).unwrap(),
+        ];
+        // The scrub: three frames in flight; each one done is cached, and
+        // the newest done is the one the viewer's report holds.
+        let mut flights = VecDeque::new();
+        let mut reported = None;
+        for step in 0..120 {
+            if flights.len() == 3 {
+                let done: Arc<ExportedSurface> = flights.pop_front().unwrap();
+                cache(&mut engine, &done);
+                reported = Some(done);
+            }
+            match engine.cache_surface(small) {
+                Ok(surface) => flights.push_back(surface),
+                Err(e) => panic!("scrub step {step}: {e} (pool {})", engine.pool.len()),
+            }
+        }
+        assert!(reported.is_some());
+        assert!(engine.pool.len() <= POOL_BOUND);
+        drop(held);
+    }
 
     #[test]
     fn a_playing_pool_returns_surplus_without_increasing_its_grant() {
