@@ -905,27 +905,6 @@ impl Layout {
             }
         };
         if !group {
-            // The viewer (it takes no tabs): its left and right quarters put
-            // the panel in a column of its own on that side, the rest splits
-            // it into above and below at its middle.
-            let across = (x - r.x) / r.w.max(1.);
-            let side = (across < EDGE_ZONE)
-                .then_some(false)
-                .or_else(|| (across > 1. - EDGE_ZONE).then_some(true));
-            if let Some(after) = side.filter(|_| !is_band(&self.docks[p.dock].id)) {
-                return DropPreview {
-                    target: DropTarget::Beside {
-                        dock: p.dock,
-                        after,
-                    },
-                    rect: Rect {
-                        x: if after { r.x + r.w * (1. - EDGE_ZONE) } else { r.x },
-                        w: r.w * EDGE_ZONE,
-                        ..r
-                    },
-                    near: Near::Beside(p.dock, p.group, after),
-                };
-            }
             return split(relative >= 0.5);
         }
         if relative < BODY_EDGE {
@@ -996,11 +975,7 @@ impl Layout {
             preview = self.panel_zone(geometry, p, at.0, at.1, t, false);
         }
         let mut next = self.clone();
-        let moved = if stack {
-            next.move_stack_to(id, preview.target)
-        } else {
-            next.move_panel_to(id, preview.target)
-        };
+        let moved = next.apply_drop(id, &preview, stack);
         if moved.is_err() {
             return DropOutcome::Nowhere;
         }
@@ -1022,6 +997,32 @@ impl Layout {
             }
             None => DropOutcome::Nowhere,
         }
+    }
+    /// The tab that shows in group `g` of dock `d` once `moving` (one tab,
+    /// unless `stack`) has left it: what a drop against that group is named
+    /// after and lands beside.
+    pub fn shown_after(&self, d: usize, g: usize, moving: &str, stack: bool) -> Option<String> {
+        let group = self.docks.get(d)?.groups.get(g)?;
+        if stack || group.active() != moving || group.tabs.len() < 2 {
+            return Some(group.active().to_owned());
+        }
+        let rest: Vec<&String> = group.tabs.iter().filter(|t| *t != moving).collect();
+        rest.get(group.active.min(rest.len() - 1)).map(|t| (*t).clone())
+    }
+    /// The panel a drop's preview names as the one it lands against (above
+    /// or below it).
+    pub fn neighbour(&self, near: Near, moving: &str, stack: bool) -> Option<String> {
+        match near {
+            Near::Above(d, g) | Near::Below(d, g) => self.shown_after(d, g, moving, stack),
+            _ => None,
+        }
+    }
+    /// A release over `preview`: the move, then the neighbour's share
+    /// (`drop_panel`). The preview is worked out with this same call, so the
+    /// panel lands exactly where the chip and the preview said.
+    pub fn apply_drop(&mut self, id: &str, preview: &DropPreview, stack: bool) -> anyhow::Result<()> {
+        let neighbour = self.neighbour(preview.near, id, stack);
+        self.drop_panel(id, preview.target, stack, neighbour.as_deref())
     }
     /// Validated, atomic move. Destination indices address the original layout.
     pub fn move_panel_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
@@ -1303,6 +1304,69 @@ impl Layout {
     }
     /// A dock's size as its workspace shipped it (the original app's
     /// double-click on a dock's splitter); false for a divider between panels.
+    /// A double-click on a divider between two panels: each goes back to
+    /// its height in the workspace as shipped (a panel the preset has in
+    /// this dock), else the two share their room equally. The rest of the
+    /// dock keeps what it shows.
+    pub fn reset_split(&mut self, divider: &Divider, bounds: Rect, t: &Tokens) -> bool {
+        let Some(i) = divider.group else {
+            return false;
+        };
+        let geometry = self.geometry(bounds, t);
+        let height = |group: usize| {
+            geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (divider.dock, group))
+                .map(|p| p.rect.h)
+        };
+        let (Some(a), Some(b)) = (height(i), height(i + 1)) else {
+            return false;
+        };
+        let total = a + b;
+        let preset = Layout::preset(&self.workspace);
+        let id = self.docks[divider.dock].id.clone();
+        let shipped = |g: &Group| {
+            preset
+                .docks
+                .iter()
+                .find(|d| d.id == id)
+                .and_then(|d| {
+                    d.groups
+                        .iter()
+                        .find(|p| p.tabs.iter().any(|tab| g.tabs.contains(tab)))
+                })
+                .and_then(|p| p.size)
+        };
+        let groups = &self.docks[divider.dock].groups;
+        let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[i + 1], t));
+        let upper = match (shipped(&groups[i]), shipped(&groups[i + 1])) {
+            (Some(s), _) => s,
+            (None, Some(s)) => total - s,
+            (None, None) => total / 2.,
+        };
+        let upper = if total >= least_a + least_b {
+            upper.clamp(least_a, total - least_b)
+        } else {
+            a
+        };
+        if (upper - a).abs() < 0.5 {
+            return false;
+        }
+        let d = &mut self.docks[divider.dock];
+        let flexible = d
+            .groups
+            .iter()
+            .position(|g| g.size.is_none())
+            .unwrap_or(d.groups.len() - 1);
+        for (gi, g) in d.groups.iter_mut().enumerate() {
+            g.size = height(gi);
+        }
+        d.groups[i].size = Some(upper);
+        d.groups[i + 1].size = Some(total - upper);
+        d.groups[flexible].size = None;
+        true
+    }
     pub fn reset_dock(&mut self, divider: &Divider) -> bool {
         if divider.group.is_some() {
             return false;
@@ -1815,8 +1879,6 @@ pub enum Near {
     Tab(usize, usize),
     Above(usize, usize),
     Below(usize, usize),
-    /// A column of its own beside the panel: right of it when `true`.
-    Beside(usize, usize, bool),
     Dock(usize),
     Edge(Edge),
 }
