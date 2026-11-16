@@ -195,10 +195,14 @@ test("native AX labels, selected/expanded/disabled values and single list Tab st
       role: "TextInput",
       label: "Search effects",
     }); // SearchInput missing in kit.
+    // v1's category rail: a list, the chosen category selected.
     expect(ax(ids.scope)).toMatchObject({
-      role: "ComboBox",
-      label: "Category, All",
-      value: "All",
+      role: "List",
+      label: "Effect categories",
+    });
+    expect(ax(`${ids.scope}:all`)).toMatchObject({
+      label: "All",
+      selected: true,
     });
     expect(ax(ids.list)).toMatchObject({ role: "Tree", label: "Effects" });
     const row = itemRow(model);
@@ -299,11 +303,12 @@ test("native scope, disclosure and hover observations update the same model and 
     await e.render(<EffectsPanel model={model} bindings={bindings} />);
     await model.setQuery("blur");
     await e.flush();
-    await e.event(ids.scope, "change", { value: "group:Stylize" });
+    // A category on the rail: one click.
+    await e.event(`${ids.scope}:group:Stylize`, "click");
     expect(model.query).toBe("");
     expect(model.scope).toBe("group:Stylize");
     expect(model.rows()).toHaveLength(1);
-    await e.event(ids.scope, "change", { value: "all" });
+    await e.event(`${ids.scope}:all`, "click");
     const row = itemRow(model);
     expect(e.find(ids.add(row.key))).toBeUndefined();
     await e.event(ids.row(row.key), "pointermove");
