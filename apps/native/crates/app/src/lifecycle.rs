@@ -45,6 +45,15 @@ fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<Strin
     }
     p?.entry.as_ref().map(|e| e.label.clone())
 }
+/// The window's status line when its close is held by something only the
+/// person can end: a question on screen, or an open the window is busy with.
+fn held_note(intent: Intent, asking: bool) -> &'static str {
+    match (intent, asking) {
+        (Intent::Quit, true) => "Powermove didn’t quit: answer this window’s question, then quit again.",
+        (Intent::Quit, false) => "Powermove didn’t quit: finish what this window is doing, then quit again.",
+        _ => "Finish the active edit, open or recovery decision before closing.",
+    }
+}
 /// What a Quit waits for at a window that cannot close this moment, when
 /// that is work which ends on its own: a save in flight, a project still
 /// opening, another project operation. The quit goes on when it has ended
@@ -914,6 +923,26 @@ impl Controller {
             });
         }
     }
+    /// A quit stopped at a question in this window: the app comes forward
+    /// (unhidden, active) with this window key and its tab chosen, and beeps.
+    fn bring_forward(&self) {
+        let window = self.host.borrow().window.clone();
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if gpui_macos::child_window::would_hold() {
+            // A development lane launch in the background takes no focus.
+            return;
+        }
+        app.unhide(None);
+        app.activate();
+        if let Some(group) = window.tabGroup() {
+            group.setSelectedWindow(Some(&window));
+        }
+        window.makeKeyAndOrderFront(None);
+        objc2_app_kit::NSBeep();
+    }
     /// A close or quit met an edit the kernel still holds open (`label`):
     /// the person finishes it (sealed as one step they can undo, then the
     /// close goes on, asking about unsaved changes as usual) or cancels. A
@@ -1104,10 +1133,17 @@ impl Controller {
                 return;
             }
             CloseState::Busy => {
-                self.message =
-                    "Finish the active edit, open or recovery decision before closing.".into();
-                // What holds the close is in this window: show it.
-                self.show_window();
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":format!("{intent:?}"), "asking":asking}));
+                // What holds the close is in this window: show it. A quit can
+                // come while the app is behind another (the Dock, a script):
+                // the app comes forward too, with this window's tab chosen,
+                // and the beep says the quit stopped.
+                if intent == Intent::Quit {
+                    self.bring_forward();
+                } else {
+                    self.show_window();
+                }
                 cancel_quit(cx);
                 cx.notify();
                 return;
@@ -1452,6 +1488,17 @@ mod tests {
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// A quit a question stops says so in that window, by name: never the
+    /// generic close note, never nothing.
+    #[test]
+    fn a_quit_held_by_a_question_says_so() {
+        assert!(held_note(Intent::Quit, true).starts_with("Powermove didn’t quit"));
+        assert!(held_note(Intent::Quit, true).contains("question"));
+        assert!(held_note(Intent::Quit, false).starts_with("Powermove didn’t quit"));
+        assert!(!held_note(Intent::Window, true).contains("quit"));
+        // A question is not work that ends on its own: the quit stops at it.
+        assert_eq!(quit_waits_for(CloseState::Busy, true, true, true), None);
     }
     /// A Quit at a window that is opening a project, saving, or behind
     /// another project operation waits for it; one at a window that asks
