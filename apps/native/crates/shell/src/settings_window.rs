@@ -547,8 +547,12 @@ impl SettingsChrome {
     }
 
     /// The search field shows `text` (a search ended from the page).
+    /// The field shows the panel's query, except while the person is typing
+    /// in it: what they typed is newer than any answer (an answer to "pr"
+    /// arriving after "pro" was typed dropped the "o").
     pub fn set_search(&self, text: &str) {
         if let Some(search) = self.chrome.ivars().search.borrow().as_ref()
+            && search.currentEditor().is_none()
             && search.stringValue().to_string() != text
         {
             search.setStringValue(&NSString::from_str(text));
