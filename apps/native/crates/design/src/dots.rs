@@ -4,8 +4,8 @@ pub struct Dot { pub center: [f32; 2], pub radius: f32, pub alpha: f32, pub colo
 pub const REFINE_SECONDS: f32 = 0.82;
 pub const RESOLVE_SECONDS: f32 = 0.7;
 pub fn detail(age: f32) -> f32 {
-    let p = (age / REFINE_SECONDS).clamp(0., 1.);
-    4. * p.powf(2.2)
+    if age <= 0.4 { return 0.7 * (age / 0.4).clamp(0.,1.); }
+    0.7 + 3.3 * ((age - 0.4) / (REFINE_SECONDS - 0.4)).clamp(0.,1.).powf(1.6)
 }
 pub fn resolve(age: f32) -> f32 {
     let p = (age / RESOLVE_SECONDS).clamp(0., 1.);
