@@ -963,6 +963,15 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
+        // The Export sheet's checks finished on their worker: its new state
+        // is published, then drained as any other publication.
+        if let Some(Ok(ticket)) = runtime.publish_finished_checks() {
+            cx.spawn(async move |this, cx| {
+                let _ = ticket.await;
+                let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
         let mut mounted = false;
         for id in runtime.take_cleared_overlays() {
             if let Some(overlays) = &self.builtins.overlays {
