@@ -1830,11 +1830,16 @@ impl Render for Editor {
             (Some(h), Some(r)) if h.borrow().viewer_split.get() > 1 => {
                 let tiles = crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
                 let first = tiles[0];
+                // The first pane is top-left: it has the body's bottom-left
+                // corner when it reaches the bottom, never the bottom-right.
+                let bottom = (first.y + first.h - (r.y + r.h)).abs() < 0.5;
+                h.borrow().viewer_corners.set([bottom, false]);
                 *h.borrow().viewer_tiles.borrow_mut() = tiles;
                 Some(first)
             }
             (Some(h), _) => {
                 h.borrow().viewer_tiles.borrow_mut().clear();
+                h.borrow().viewer_corners.set([true, true]);
                 viewer
             }
             _ => viewer,

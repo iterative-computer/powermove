@@ -580,17 +580,17 @@ impl SlotView {
             msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]
         }
     }
-    fn clip(&self, rects: Vec<Rect>) {
+    /// Shows the page only within `rects` (window points from the top), each
+    /// with continuous bottom corners of `radius` (a panel body's corners).
+    fn clip(&self, rects: Vec<Rect>, radius: f64) {
         let path = CGMutablePath::new();
         let h = self.bounds().size.height;
         for r in &rects {
-            unsafe {
-                CGMutablePath::add_rect(
-                    Some(&path),
-                    std::ptr::null(),
-                    NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
-                );
-            }
+            add_bottom_rounded(
+                &path,
+                NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
+                radius,
+            );
         }
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
@@ -601,6 +601,54 @@ impl SlotView {
         if let Some(layer) = self.layer() {
             unsafe { layer.setMask(Some(&mask)) }
         }
+    }
+}
+
+/// How far a continuous (Apple "squircle") corner of radius 1 reaches along
+/// each side, and its control points: the corner AppKit draws for
+/// `CALayerCornerCurve.continuous`.
+const CONTINUOUS_REACH: f64 = 1.528_664_8;
+
+/// Adds `rect` (y up) to `path` with continuous corners of `radius` at its
+/// bottom (min y) corners and square top ones, wound as `CGPathAddRect`.
+fn add_bottom_rounded(path: &CGMutablePath, rect: NSRect, radius: f64) {
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+    let r = radius.min(rect.size.width.min(rect.size.height) / 2. / CONTINUOUS_REACH);
+    unsafe {
+        if r <= 0. {
+            CGMutablePath::add_rect(Some(path), std::ptr::null(), rect);
+            return;
+        }
+        let k = CONTINUOUS_REACH * r;
+        // One corner at `c`, from `c + a·k` to `c + b·k` (`a`, `b` unit
+        // vectors along its two sides, away from it).
+        let corner = |c: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+            let at = |u: f64, v: f64| (c.0 + (a.0 * u + b.0 * v) * r, c.1 + (a.1 * u + b.1 * v) * r);
+            let curve = |p1: (f64, f64), p2: (f64, f64), to: (f64, f64)| {
+                CGMutablePath::add_curve_to_point(
+                    Some(path),
+                    std::ptr::null(),
+                    p1.0,
+                    p1.1,
+                    p2.0,
+                    p2.1,
+                    to.0,
+                    to.1,
+                )
+            };
+            curve(at(1.088_493, 0.), at(0.868_407, 0.), at(0.669_934, 0.064_413));
+            curve(at(0.372_824, 0.188_345), at(0.188_345, 0.372_824), at(0.064_413, 0.669_934));
+            curve(at(0., 0.868_407), at(0., 1.088_493), at(0., 1.528_665));
+        };
+        CGMutablePath::move_to_point(Some(path), std::ptr::null(), x0 + k, y0);
+        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x1 - k, y0);
+        corner((x1, y0), (-1., 0.), (0., 1.));
+        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x1, y1);
+        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x0, y1);
+        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x0, y0 + k);
+        corner((x0, y0), (0., 1.), (1., 0.));
+        CGMutablePath::close_subpath(Some(path));
     }
 }
 
@@ -634,6 +682,9 @@ pub struct MacDomHost {
     /// Draws the fill within `fill_regions`: the slot layer's first sublayer,
     /// under the page's.
     ground: Retained<objc2_quartz_core::CAShapeLayer>,
+    /// The continuous radius of each region's bottom corners
+    /// (`set_corner_radius`): the panels' bodies end in their corners.
+    corner_radius: f64,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -769,6 +820,7 @@ impl MacDomHost {
             fill: None,
             fill_regions: None,
             ground,
+            corner_radius: 0.,
         };
         host.load();
         Ok(host)
@@ -985,6 +1037,15 @@ impl MacDomHost {
         );
         refuse_drags(&self.web);
     }
+    /// The continuous radius of every region's bottom corners: a panel's body
+    /// ends in the panel's own rounded corners, so the page is clipped there
+    /// as the shell clips its own content.
+    pub fn set_corner_radius(&mut self, radius: f64) {
+        if self.corner_radius != radius {
+            self.corner_radius = radius;
+            self.shared.geometry_dirty.set(true);
+        }
+    }
     /// Shell rectangles the shared document shows through this frame.
     pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
         if regions.len() > 256 || regions.iter().any(|r| !r.valid()) {
@@ -1094,7 +1155,7 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot.clip(self.shared.panels.borrow().visible());
+        self.slot.clip(self.shared.panels.borrow().visible(), self.corner_radius);
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field

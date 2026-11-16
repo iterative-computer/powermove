@@ -3561,7 +3561,7 @@ impl Render for TimelineSurface {
                             window.with_content_mask(
                                 Some(ContentMask {
                                     bounds: band,
-                                    fade_out: Default::default(),
+                                    ..Default::default()
                                 }),
                                 |w| paint(edge, bounds.origin, &fixed_tokens, w, cx),
                             );
@@ -3636,7 +3636,7 @@ impl Render for TimelineSurface {
                                     window.with_content_mask(
                                         mask.map(|bounds| ContentMask {
                                             bounds,
-                                            fade_out: Default::default(),
+                                            ..Default::default()
                                         }),
                                         |w| strip_hover(op, *x, origin, &rows_tokens, w),
                                     );
@@ -3955,7 +3955,7 @@ fn paint_ops(
                 .with_content_mask(
                     Some(ContentMask {
                         bounds: mask,
-                        fade_out: Default::default(),
+                        ..Default::default()
                     }),
                     |w| paint(op, origin, tokens, w, cx),
                 ),
@@ -4098,7 +4098,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: area,
-                    fade_out: Default::default(),
+                    ..Default::default()
                 }),
                 |window| {
                     let mut x = x0 - h;
@@ -4528,7 +4528,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         Some(bounds) => window.with_content_mask(
             Some(ContentMask {
                 bounds,
-                fade_out: Default::default(),
+                ..Default::default()
             }),
             |w| draw(w, cx),
         ),

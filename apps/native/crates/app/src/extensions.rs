@@ -1976,6 +1976,12 @@ impl Controller {
             let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
             [channel(16), channel(8), channel(0), f64::from(t.translucency.panel)]
         };
+        // A body stops short of its panel's sides and bottom (the shell's
+        // native body inset), so its corners are the panel's less that inset.
+        let corner = {
+            let m = &shell.tokens.metrics;
+            f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
+        };
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -2012,6 +2018,7 @@ impl Controller {
                         .collect()
                 });
                 let _ = host.set_regions(regions);
+                host.set_corner_radius(corner);
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill));

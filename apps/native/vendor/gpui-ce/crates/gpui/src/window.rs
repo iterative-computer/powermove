@@ -54,7 +54,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem,
-    ops::{DerefMut, Range},
+    ops::{Add, DerefMut, Range, Sub},
     rc::Rc,
     sync::{
         Arc, Weak,
@@ -2221,9 +2221,11 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future. Edge fades are evaluated in
-/// window space against these axis-aligned bounds and are not transform-aware.
+/// rendered: outside its `bounds`, and outside its rounded `shape` when that has corner radii (an
+/// element that hides its overflow and has rounded corners clips its children to that shape, with
+/// the continuous-corner smoothing of `Style::corner_smoothing`). The shape keeps its own rectangle,
+/// so a clip inset inside a rounded one still takes the outer corner. Edge fades are evaluated in
+/// window space against the axis-aligned bounds and are not transform-aware.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2231,6 +2233,57 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Edge fade distances. A zero distance leaves that edge fully opaque.
     pub fade_out: Edges<P>,
+    /// The rounded rectangle content is clipped to (unused while its radii are zero).
+    pub shape: Bounds<P>,
+    /// Radii of the shape's corners (zero: no rounded clip).
+    pub corner_radii: Corners<P>,
+    /// Continuous-corner smoothing of those corners, as a ratio held in `P`'s
+    /// float (0: circular arcs); never scaled.
+    pub corner_smoothing: P,
+    /// GPU layout padding (a uniform buffer member is a multiple of 16 bytes).
+    pub padding: [P; 3],
+}
+
+impl<P> ContentMask<P>
+where
+    P: Copy + Debug + Default + PartialEq + PartialOrd + Add<Output = P> + Sub<Output = P>,
+{
+    /// Whether the mask clips to rounded corners.
+    pub fn is_rounded(&self) -> bool {
+        let r = self.corner_radii;
+        let zero = P::default();
+        r.top_left > zero || r.top_right > zero || r.bottom_right > zero || r.bottom_left > zero
+    }
+
+    /// The rounded shape the intersection with `inner` (a clip nested in this
+    /// one) keeps; a rounded rectangle holds one. The inner shape when it lies
+    /// within this one's (a rounded card inside a rounded panel): inside the
+    /// bounds and, at each corner, rounded at least as much as this corner
+    /// still reaches past the inset; otherwise this, the outer, shape.
+    pub(crate) fn shape_within(&self, inner: &Self) -> (Bounds<P>, Corners<P>, P) {
+        let outer = (self.shape, self.corner_radii, self.corner_smoothing);
+        let nested = (inner.shape, inner.corner_radii, inner.corner_smoothing);
+        if !inner.is_rounded() {
+            return outer;
+        }
+        if !self.is_rounded() {
+            return nested;
+        }
+        let (o, i) = (self.shape, inner.shape);
+        let (o_end, i_end) = (o.bottom_right(), i.bottom_right());
+        let inside = i.origin.x >= o.origin.x
+            && i.origin.y >= o.origin.y
+            && i_end.x <= o_end.x
+            && i_end.y <= o_end.y;
+        let min = |a: P, b: P| if a < b { a } else { b };
+        let covers = |inset: P, inner_r: P, outer_r: P| inner_r + inset >= outer_r;
+        let (ro, ri) = (self.corner_radii, inner.corner_radii);
+        let corners_inside = covers(min(i.origin.x - o.origin.x, i.origin.y - o.origin.y), ri.top_left, ro.top_left)
+            && covers(min(o_end.x - i_end.x, i.origin.y - o.origin.y), ri.top_right, ro.top_right)
+            && covers(min(o_end.x - i_end.x, o_end.y - i_end.y), ri.bottom_right, ro.bottom_right)
+            && covers(min(i.origin.x - o.origin.x, o_end.y - i_end.y), ri.bottom_left, ro.bottom_left);
+        if inside && corners_inside { nested } else { outer }
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -2239,13 +2292,18 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             fade_out: self.fade_out.scale(factor),
+            shape: self.shape.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
+            corner_smoothing: ScaledPixels(self.corner_smoothing.0),
+            padding: [ScaledPixels(0.); 3],
         }
     }
 
-    /// Intersect the content mask with the given content mask.
+    /// Intersect the content mask with the given content mask (one nested in it).
     ///
     /// For each edge, the mask that actually clips at that edge contributes its
     /// fade; when both masks clip at the same coordinate, the stronger fade wins.
+    /// The rounded shape is [`ContentMask::shape_within`].
     pub fn intersect(&self, other: &Self) -> Self {
         fn edge_fade(
             a: Pixels,
@@ -2263,8 +2321,13 @@ impl ContentMask<Pixels> {
             }
         }
 
+        let (shape, corner_radii, corner_smoothing) = self.shape_within(other);
         ContentMask {
             bounds: self.bounds.intersect(&other.bounds),
+            shape,
+            corner_radii,
+            corner_smoothing,
+            padding: [Pixels::ZERO; 3],
             fade_out: Edges {
                 top: edge_fade(
                     self.bounds.top(),
@@ -2310,6 +2373,7 @@ mod content_mask_tests {
                 left: px(fade_left),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -3184,7 +3248,7 @@ impl Window {
         let mask = self.content_mask();
         ContentMask {
             bounds: self.cover_bounds(mask.bounds),
-            fade_out: mask.fade_out.scale(self.scale_factor()),
+            ..mask.scale(self.scale_factor())
         }
     }
 
@@ -4489,6 +4553,7 @@ impl Window {
             content_mask: ContentMask {
                 bounds,
                 fade_out: Edges::default(),
+                ..Default::default()
             },
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,
@@ -5178,7 +5243,7 @@ impl Window {
                 self.next_frame.scene.insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
-                        ..Default::default()
+                        ..quad.content_mask
                     },
                     ..quad
                 });
