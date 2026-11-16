@@ -70,6 +70,10 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
+    /// The project's Home poster, shown in the opening viewer's frame until
+    /// the viewer draws: the first picture waits for the open and for the
+    /// extensions the project draws with (PM-384).
+    pub(crate) ghost_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -796,6 +800,7 @@ impl Controller {
             busy: None,
             opening_name: None,
             ghost_aspect: None,
+            ghost_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -971,6 +976,7 @@ impl Controller {
         self.ghosted.clear();
         self.revealed.clear();
         self.ghost_aspect = None;
+        self.ghost_poster = None;
         self.host
             .borrow()
             .set_document_metadata("Untitled", "", false, None);
@@ -1733,6 +1739,17 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        // Its Home poster stands in the opening viewer, where one was kept.
+        self.ghost_poster = Some(
+            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
+        )
+        .filter(|poster| poster.is_file());
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if !matches!(source, SessionSource::New(_)) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
         let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
@@ -1892,6 +1909,8 @@ impl Controller {
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
                         v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
                     }
                 }
                 match result {
