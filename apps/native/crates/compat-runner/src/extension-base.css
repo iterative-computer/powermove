@@ -10,6 +10,12 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* The host body starts on the same inset as a native panel's rows.
+   An authored layout can still provide its own padding, as with controls. */
+:where([data-pm-panel-body]) {
+  padding: var(--panel-edge-inset);
+}
+
 /* Text buttons: one height, the label on one line. A button holding more
    than text (a card with its picture, a game's stage) keeps the layout its
    extension gave it. */

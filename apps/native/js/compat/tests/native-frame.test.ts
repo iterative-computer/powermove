@@ -9,7 +9,9 @@ test("native panel frame: page roots reveal the host surface, controls keep PM-2
   const base = readFileSync(new URL("../../../crates/compat-runner/src/extension-base.css", import.meta.url), "utf8");
   for (const scheme of ["light", "dark"]) {
     const theme = readFileSync(new URL(`../../themes/editions/v1/${scheme}.css`, import.meta.url), "utf8");
-    const dom = new JSDOM(`<style>${theme}\n${css}\n${base}</style><section data-pm-contribution><div data-pm-panel-body><button>Apply</button></div></section>`);
+    const inset = [...theme.matchAll(/--panel-edge-inset:([^;]+);/g)].at(-1)![1].trim();
+    const resolvedBase = base.replaceAll("var(--panel-edge-inset)", inset);
+    const dom = new JSDOM(`<style>${theme}\n${css}\n${resolvedBase}</style><section data-pm-contribution><div data-pm-panel-body><button>Apply</button></div></section>`);
     const frame = [...dom.window.document.querySelectorAll("[data-pm-contribution], [data-pm-panel-body]")].map(el => {
       const s = dom.window.getComputedStyle(el);
       expect(s.backgroundColor).toBe("rgba(0, 0, 0, 0)");
@@ -17,6 +19,7 @@ test("native panel frame: page roots reveal the host surface, controls keep PM-2
       expect(s.borderRadius).toBe("0");
       return { background: s.backgroundColor, border: s.borderTopWidth, radius: s.borderRadius };
     });
+    expect(dom.window.getComputedStyle(dom.window.document.querySelector("[data-pm-panel-body]")!).padding).toBe(inset);
     expect(base).toContain("background: var(--bg-field)");
     if (process.env.PM_FRAME_CAPTURE_DIR) writeFileSync(`${process.env.PM_FRAME_CAPTURE_DIR}/${scheme}-frame.json`, JSON.stringify({ scheme, frame, surface: "colors.panel", alpha: "translucency.panel", corner: "metrics.panel_radius", header: "metrics.header", padding: "metrics.inset" }, null, 2));
     dom.window.close();
