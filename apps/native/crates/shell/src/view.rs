@@ -4084,6 +4084,18 @@ mod tests {
                     } else {
                         (r.x + thick + reach - 0.5, r.y + length / 2.)
                     };
+                    // An offscreen splitter has no press target, just as it
+                    // has no cursor target in the sweep above.
+                    if d.group.is_some()
+                        && view.read_with(cx, |v, _| {
+                            v.geometry
+                                .side_docks
+                                .get(&d.dock)
+                                .is_some_and(|clip| !clip.contains(x, y))
+                        })
+                    {
+                        continue;
+                    }
                     if dividers
                         .iter()
                         .enumerate()

@@ -766,4 +766,3 @@ fn resetting_a_side_split_updates_fluid_bases_without_moving_its_neighbour() {
     );
     assert!(layout.docks[di].groups.iter().all(|g| g.size.is_none()));
 }
-
