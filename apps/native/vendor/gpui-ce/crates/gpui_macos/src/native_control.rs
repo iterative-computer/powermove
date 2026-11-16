@@ -145,70 +145,15 @@ impl NativeControlSlot {
     /// gives no 32-bit bitmap or the control has no size. `size` is where
     /// the paint puts it, in points: the size a present would give it.
     pub fn picture(&self, size: NSSize) -> Option<SlotPicture> {
-        use objc2::{msg_send, runtime::AnyObject};
         if size.width < 1. || size.height < 1. {
             return None;
         }
-        let control = &self.state.control;
-        if control.frame().size != size {
-            control.setFrameSize(size);
-        }
-        let bounds = control.bounds();
         // A control never shown yet joins the window (still hidden), so it
         // draws in the window's appearance and key state, as it will show.
         if unsafe { self.state.wrapper.superview() }.is_none() {
             self.state.attach();
         }
-        objc2::rc::autoreleasepool(|_| unsafe {
-            let rep: *mut AnyObject =
-                msg_send![&**control, bitmapImageRepForCachingDisplayInRect: bounds];
-            let rep = rep.as_ref()?;
-            let _: () = msg_send![&**control, cacheDisplayInRect: bounds, toBitmapImageRep: rep];
-            let width: isize = msg_send![rep, pixelsWide];
-            let height: isize = msg_send![rep, pixelsHigh];
-            let row: isize = msg_send![rep, bytesPerRow];
-            let bits: isize = msg_send![rep, bitsPerPixel];
-            let samples: isize = msg_send![rep, samplesPerPixel];
-            let format: usize = msg_send![rep, bitmapFormat];
-            let data: *const u8 = msg_send![rep, bitmapData];
-            if data.is_null() || bits != 32 || samples != 4 || width <= 0 || height <= 0 {
-                return None;
-            }
-            // NSBitmapFormat: alpha first (1 << 0), not premultiplied (1 << 1),
-            // floating point (1 << 2).
-            if format & 0b100 != 0 {
-                return None;
-            }
-            let alpha_first = format & 0b1 != 0;
-            let straight = format & 0b10 != 0;
-            let (w, h, row) = (width as usize, height as usize, row as usize);
-            let src = std::slice::from_raw_parts(data, row * h);
-            let mut bgra = Vec::with_capacity(w * h * 4);
-            for y in 0..h {
-                for x in 0..w {
-                    let p = &src[y * row + x * 4..y * row + x * 4 + 4];
-                    let (r, g, b, a) = if alpha_first {
-                        (p[1], p[2], p[3], p[0])
-                    } else {
-                        (p[0], p[1], p[2], p[3])
-                    };
-                    // Straight alpha, GPUI's sprite format.
-                    let out = |c: u8| {
-                        if straight || a == 0 || a == 255 {
-                            c
-                        } else {
-                            ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
-                        }
-                    };
-                    bgra.extend_from_slice(&[out(b), out(g), out(r), a]);
-                }
-            }
-            Some(SlotPicture {
-                width: w as u32,
-                height: h as u32,
-                bgra,
-            })
-        })
+        picture_of(&self.state.control, size)
     }
     /// Stages nothing: the next present hides the control (a picture of it
     /// stands in the scene). [`Self::keep`] keeps it hidden.
@@ -216,6 +161,69 @@ impl NativeControlSlot {
         self.state.stage(None);
         self.state.staged.set(None);
     }
+}
+/// `view` drawn by AppKit into a bitmap at `size` points, wherever it is
+/// and whether shown or not (P-SLOT-PICTURE).
+pub(crate) fn picture_of(view: &NSView, size: NSSize) -> Option<SlotPicture> {
+    use objc2::{msg_send, runtime::AnyObject};
+    if size.width < 1. || size.height < 1. {
+        return None;
+    }
+    if view.frame().size != size {
+        view.setFrameSize(size);
+    }
+    let control = view;
+    let bounds = view.bounds();
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let rep: *mut AnyObject =
+            msg_send![control, bitmapImageRepForCachingDisplayInRect: bounds];
+        let rep = rep.as_ref()?;
+        let _: () = msg_send![control, cacheDisplayInRect: bounds, toBitmapImageRep: rep];
+        let width: isize = msg_send![rep, pixelsWide];
+        let height: isize = msg_send![rep, pixelsHigh];
+        let row: isize = msg_send![rep, bytesPerRow];
+        let bits: isize = msg_send![rep, bitsPerPixel];
+        let samples: isize = msg_send![rep, samplesPerPixel];
+        let format: usize = msg_send![rep, bitmapFormat];
+        let data: *const u8 = msg_send![rep, bitmapData];
+        if data.is_null() || bits != 32 || samples != 4 || width <= 0 || height <= 0 {
+            return None;
+        }
+        // NSBitmapFormat: alpha first (1 << 0), not premultiplied (1 << 1),
+        // floating point (1 << 2).
+        if format & 0b100 != 0 {
+            return None;
+        }
+        let alpha_first = format & 0b1 != 0;
+        let straight = format & 0b10 != 0;
+        let (w, h, row) = (width as usize, height as usize, row as usize);
+        let src = std::slice::from_raw_parts(data, row * h);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &src[y * row + x * 4..y * row + x * 4 + 4];
+                let (r, g, b, a) = if alpha_first {
+                    (p[1], p[2], p[3], p[0])
+                } else {
+                    (p[0], p[1], p[2], p[3])
+                };
+                // Straight alpha, GPUI's sprite format.
+                let out = |c: u8| {
+                    if straight || a == 0 || a == 255 {
+                        c
+                    } else {
+                        ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                    }
+                };
+                bgra.extend_from_slice(&[out(b), out(g), out(r), a]);
+            }
+        }
+        Some(SlotPicture {
+            width: w as u32,
+            height: h as u32,
+            bgra,
+        })
+    })
 }
 impl Drop for NativeControlSlot {
     fn drop(&mut self) {
@@ -276,6 +284,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             if !state.wrapper.isHidden() {
                 state.wrapper.setHidden(true);
                 moved = true;
+                if std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control hide-untargeted"); }
             }
             continue;
         };
@@ -285,6 +294,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
             moved |= !unseen;
+            if !unseen && std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control frame hidden={hidden} was_hidden={}", state.wrapper.isHidden()); }
         }
         if state.control.frame() != local {
             state.control.setFrame(local);
@@ -294,6 +304,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             state.attach();
         }
         if state.wrapper.isHidden() != hidden {
+            if std::env::var_os("PM_SLOT_TRACE").is_some() { eprintln!("PM_SLOT control show={}", !hidden); }
             state.wrapper.setHidden(hidden);
             moved = true;
             crate::composition_accessibility::changed(key);

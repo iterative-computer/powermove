@@ -291,6 +291,7 @@ pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     };
     if let Some((present, fresh)) = hook {
         let change = gpui_util::measure("native composition", || present());
+        if std::env::var_os("PM_SLOT_TRACE").is_some() && (change.moved() || fresh) { eprintln!("PM_SLOT host moved={} fresh={fresh}", change.moved()); }
         transaction.change = change.or(fresh.into());
     }
     if painted {

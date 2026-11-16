@@ -238,7 +238,7 @@ pub struct SurfaceView {
     /// While the body scrolls, the controls show as pictures of themselves
     /// (P-SLOT-PICTURE); `pictures_at` counts the scroll's steps, so only
     /// the last one's rest lets them go.
-    pictures: crate::v4_control::PictureHold,
+    pictures: pm_shell::picture::PictureHold,
     pictures_at: u64,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
@@ -1261,6 +1261,7 @@ impl SurfaceView {
                 f.begin_editing_selecting_all(cx);
             });
         }
+        field.update(cx, |f, _| f.picture_with(&self.pictures));
         self.fields.insert(id, field);
     }
     /// Ask JS for the row window that covers native scroll, when it left the
@@ -1711,7 +1712,7 @@ impl SurfaceView {
     /// themselves until the scroll has rested `PICTURE_REST` (the scroll
     /// layer's settle), then as themselves again (P-SLOT-PICTURE).
     pub fn scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.controls.is_empty() {
+        if self.controls.is_empty() && self.fields.is_empty() {
             return;
         }
         self.pictures_at += 1;
@@ -1732,6 +1733,9 @@ impl SurfaceView {
     fn hold_changed(&self, cx: &mut Context<Self>) {
         for control in self.controls.values() {
             control.update(cx, |c, cx| c.hold_changed(cx));
+        }
+        for field in self.fields.values() {
+            field.update(cx, |f, cx| f.hold_changed(cx));
         }
     }
     /// Whether the controls show as pictures (a scroll is moving).
