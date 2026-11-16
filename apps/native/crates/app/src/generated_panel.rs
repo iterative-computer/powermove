@@ -1440,7 +1440,7 @@ mod panel_build_capture {
                     {"type":"slider","label":"Warmth","def":5600,"min":2000,"max":8000},
                     {"type":"slider","label":"Tint","def":-4,"min":-10,"max":20}]});
                 let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
-                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: if stage == panel_build::Stage::Wake { 0.12 } else { 1. }, elapsed, definition })).unwrap();
+                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: name.strip_prefix("frame-").and_then(|n|n.parse::<f32>().ok()).map_or(if stage == panel_build::Stage::Wake {elapsed}else{1.},|n|n/15.), elapsed, definition })).unwrap();
                 for _ in 0..4 { cx.run_until_parked(); }
                 cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
                 cx.run_until_parked();
