@@ -788,11 +788,6 @@ impl Backend {
                     (true, Some("local")) => "Custom",
                     _ => "Installed",
                 };
-                // D11 Stop turns it off for this run, not in the saved preference.
-                let stopped = host
-                    .and_then(|h| h.get("stopped"))
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true);
                 // Its folder can't be reached (an unmounted volume): kept, said so.
                 let about = if host
                     .and_then(|h| h.get("unavailable"))
@@ -804,7 +799,8 @@ impl Backend {
                     text("about").unwrap_or_default()
                 };
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
-                    "enabled":e.enabled && !stopped,"about":about,"includes":includes,
+                    // A D11 Stop turns it off for this run, not in the saved choice.
+                    "enabled":e.enabled && !e.stopped_this_run(),"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
