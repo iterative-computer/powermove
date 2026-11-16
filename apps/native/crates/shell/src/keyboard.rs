@@ -121,9 +121,16 @@ impl Resolver {
         if key.compat {
             return vec![Effect::Replay(key.token)];
         }
+        // Escape typed into a text field waits behind the keys typed before
+        // it: ahead of them it ended the edit (blurField) with the last keys
+        // still queued, and they then reached the editor as shortcuts.
+        let typed_behind = key.field
+            && key.chord == "escape"
+            && (!self.queue.is_empty() || self.pending.is_some() || self.waiting_replay.is_some());
         if matches!(key.chord.as_str(), "escape" | "cmd+." | "cmd+q")
             && !key.up
             && !self.bypass_lane
+            && !typed_behind
         {
             if key.chord == "cmd+q" {
                 return vec![Effect::Dispatch {
@@ -254,6 +261,10 @@ impl Resolver {
         } else {
             vec![]
         }
+    }
+    /// The key posted for replay that has not been reported replayed.
+    pub fn waiting_replay(&self) -> Option<u64> {
+        self.waiting_replay
     }
     pub fn pending_token(&self) -> Option<u64> {
         self.pending.as_ref().map(|p| p.0.token)
