@@ -915,6 +915,20 @@ impl GizmoSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// Whether a Blender key of View ▸ 3D in `group` belongs to the viewer
+    /// (PM-367): the composition shows Studio 3D layers, the viewer has the
+    /// keyboard (`canvas`, or the gizmos' own focus), and for the view keys
+    /// the 3D side of 2D | 3D is showing. Otherwise the key goes on to its
+    /// next meaning; the menus and the bar still run the command.
+    pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
+        let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        focused
+            && self.studio.active()
+            && match group {
+                "look" | "fly" => true,
+                _ => self.studio.free_look,
+            }
+    }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
         self.rulers.shown = shown;

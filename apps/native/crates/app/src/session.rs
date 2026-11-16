@@ -3197,6 +3197,15 @@ impl Controller {
                         .to_owned()
                 };
                 let (group, value) = (arg(0), arg(1));
+                if cmd.token.is_some() {
+                    let canvas = self.host.borrow().canvas_focus.get();
+                    let takes = self.builtins.gizmos.as_ref().is_some_and(|g| {
+                        g.read(cx).studio_takes_key(&group, canvas, window)
+                    });
+                    if !takes {
+                        return false;
+                    }
+                }
                 if let Some(g) = self.builtins.gizmos.clone() {
                     cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
                 }
