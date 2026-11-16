@@ -18,7 +18,7 @@ pub(super) struct Drag {
     time: f64,
     pub active: bool,
     pub removed: bool,
-    color_channel: Option<usize>,
+    pub(super) color_channel: Option<usize>,
 }
 impl Control {
     fn stop_key(&self) -> Option<&str> {
