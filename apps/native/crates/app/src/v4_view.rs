@@ -4970,7 +4970,6 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::v4_view_tests::{PROJECT, project_json, publication, rig_project, settle, window};
-        use gpui::AppContext;
         use pm_surface::kit::Component;
         use serde_json::Value;
         use std::time::Duration;
@@ -5028,9 +5027,7 @@ mod tests {
             p.input_numeric(8, "191.25", cx);
         });
         settle(&mut vcx, |cx| {
-            view.read(cx).scrub_gesture.is_some()
-                && !view.read(cx).scrub_busy
-                && view.read(cx).scrub_ops.is_empty()
+            view.read_with(cx, |v, _| v.scrub_gesture.is_some() && !v.scrub_busy && v.scrub_ops.is_empty())
         });
         assert_eq!(
             rig.kernel.published(PROJECT).unwrap().history.entries,
@@ -5039,9 +5036,7 @@ mod tests {
         );
         picker.update(&mut vcx, |p, cx| p.finish(true, cx));
         settle(&mut vcx, |cx| {
-            view.read(cx).colour.is_none()
-                && !view.read(cx).scrub_busy
-                && view.read(cx).scrub_ops.is_empty()
+            view.read_with(cx, |v, _| v.colour.is_none() && !v.scrub_busy && v.scrub_ops.is_empty())
         });
         let published = rig.kernel.published(PROJECT).unwrap();
         assert_eq!(published.history.entries, before + 1);

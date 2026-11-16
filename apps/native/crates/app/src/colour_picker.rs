@@ -729,21 +729,15 @@ impl Picker {
                     move |bounds, _, window, _| {
                         let opaque = |c: Color| {
                             let c = if p3 { Color::from_p3(c) } else { c };
-                            Rgba {
-                                r: c.0[0],
-                                g: c.0[1],
-                                b: c.0[2],
-                                a: 1.,
-                            }
+                            Rgba::new(c.0[0], c.0[1], c.0[2], 1.)
                         };
                         let gradient = |angle, from: Rgba, to: Rgba| {
-                            let mut bg = linear_gradient(
+                            let bg = linear_gradient(
                                 angle,
                                 linear_color_stop(from, 0.),
                                 linear_color_stop(to, 1.),
                             );
-                            bg.color_space = ColorSpace::Srgb;
-                            bg
+                            bg.color_space(ColorSpace::Srgb)
                         };
                         match kind {
                             Track::Plane => {
@@ -808,7 +802,7 @@ impl Picker {
                                 }
                                 let c = opaque(color);
                                 let mut transparent = c;
-                                transparent.a = 0.;
+                                transparent.alpha = 0.;
                                 window.paint_quad(fill(bounds, gradient(180., c, transparent)));
                             }
                         }
@@ -905,12 +899,7 @@ impl Render for Picker {
         .inset_0();
         let mut details = div().flex().flex_col().gap(px(t.space.sm)).flex_1();
         let swatch = |c: Color| {
-            let ink = Rgba {
-                r: c.0[0],
-                g: c.0[1],
-                b: c.0[2],
-                a: c.0[3],
-            };
+            let ink = Rgba::new(c.0[0], c.0[1], c.0[2], c.0[3]);
             let t = t.clone();
             div().relative().flex_1().h(px(t.metrics.control)).child(
                 canvas(
@@ -1313,11 +1302,11 @@ mod tests {
             })
         });
         vcx.run_until_parked();
-        let renders = picker.read_with(&vcx, |p, _| p.renders);
+        let renders = picker.read_with(vcx, |p, _| p.renders);
         assert!(renders > 0, "picker rendered before checking idle frames");
         vcx.run_until_parked();
         assert_eq!(
-            picker.read_with(&vcx, |p, _| p.renders),
+            picker.read_with(vcx, |p, _| p.renders),
             renders,
             "idle picker schedules no redraw"
         );
@@ -1366,13 +1355,13 @@ mod tests {
                 })
             });
             vcx.run_until_parked();
-            assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
+            assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
         }
         for source in [
             None,
             Some(std::rc::Rc::new(|_, _: &App| Err("No viewer pixel".into())) as SampleSource),
         ] {
-            picker.update(&mut vcx, |p, cx| {
+            picker.update(vcx, |p, cx| {
                 p.sample_source = source;
                 p.sampling = true;
                 p.request_sample(point(px(0.), px(0.)), cx);
@@ -1380,16 +1369,16 @@ mod tests {
                 assert!(!p.status.is_empty());
             });
             vcx.run_until_parked();
-            assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
+            assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
         }
-        picker.update(&mut vcx, |p, cx| {
+        picker.update(vcx, |p, cx| {
             p.sampling = true;
             p.cancel_sample(cx);
             assert!(!p.sampling);
             assert!(p.status.is_empty());
         });
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 21);
+        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
         vcx.update(|_, cx| {
             picker.update(cx, |p, cx| {
                 p.sampling = true;
@@ -1424,7 +1413,7 @@ mod tests {
                 cx,
             )
         });
-        picker.update(&mut vcx, |p, cx| {
+        picker.update(vcx, |p, cx| {
             p.draft = Some((9, "#34C759 / 50%".into()));
             p.focus_index = 4;
             p.finish(true, cx);
@@ -1448,24 +1437,24 @@ mod tests {
             picker.update(cx, |p, cx| p.stops[5].focus(w, cx));
         });
         vcx.simulate_keystrokes("left shift-left");
-        assert!((picker.read_with(&vcx, |p, _| p.hsv()[1]) - 0.89).abs() < 0.0001);
+        assert!((picker.read_with(vcx, |p, _| p.hsv()[1]) - 0.89).abs() < 0.0001);
         vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[6].focus(w, cx)));
         vcx.simulate_keystrokes("shift-down");
-        assert!((picker.read_with(&vcx, |p, _| p.color.0[3]) - 0.9).abs() < 0.0001);
+        assert!((picker.read_with(vcx, |p, _| p.color.0[3]) - 0.9).abs() < 0.0001);
         vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[7].focus(w, cx)));
         vcx.simulate_keystrokes("right");
-        assert!((picker.read_with(&vcx, |p, _| p.hue) - 1.).abs() < 0.0001);
-        picker.update(&mut vcx, |p, cx| p.edit_rgba([1., 1., 1., 1.], cx));
+        assert!((picker.read_with(vcx, |p, _| p.hue) - 1.).abs() < 0.0001);
+        picker.update(vcx, |p, cx| p.edit_rgba([1., 1., 1., 1.], cx));
         vcx.simulate_keystrokes("right");
-        assert!((picker.read_with(&vcx, |p, _| p.hue) - 2.).abs() < 0.0001);
-        assert_eq!(picker.read_with(&vcx, |p, _| p.color.hex()), "#FFFFFF");
+        assert!((picker.read_with(vcx, |p, _| p.hue) - 2.).abs() < 0.0001);
+        assert_eq!(picker.read_with(vcx, |p, _| p.color.hex()), "#FFFFFF");
         vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[22].focus(w, cx)));
         vcx.simulate_keystrokes("tab");
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 0);
+        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 0);
         vcx.simulate_keystrokes("shift-tab");
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(&vcx, |p, _| p.focus_index), 22);
+        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 22);
     }
     struct CaptureRoot {
         picker: Entity<Picker>,
