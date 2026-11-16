@@ -7,6 +7,7 @@
 mod common;
 
 use common::*;
+use pm_kernel::commands::layers::LayerCommand;
 use pm_kernel::model::{derived_key_id, is_derived_key_id};
 use pm_kernel::project_io::{SaveOptions, SaveTarget};
 use pm_kernel::{Command, DocumentStore, KeyframeCommand, Origin};
@@ -44,7 +45,12 @@ fn keys(store: &DocumentStore, axis: &str) -> Vec<Value> {
     let loc = pm_kernel::model::find_layer(root, "L").unwrap();
     let layer = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
     let path = format!("d.paths.outline.vertices.v0.p.{axis}");
-    lookup(&layer, &path).get("kf").unwrap().as_array().unwrap().clone()
+    lookup(&layer, &path)
+        .get("kf")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 /// `path` (as a derived id names it: records by id) inside `v`.
@@ -81,7 +87,9 @@ fn ids(keys: &[Value]) -> Vec<String> {
 }
 
 fn times(keys: &[Value]) -> Vec<f64> {
-    keys.iter().map(|k| k.get("t").unwrap().as_f64().unwrap()).collect()
+    keys.iter()
+        .map(|k| k.get("t").unwrap().as_f64().unwrap())
+        .collect()
 }
 
 fn run(store: &mut DocumentStore, command: KeyframeCommand) {
@@ -94,7 +102,12 @@ fn run(store: &mut DocumentStore, command: KeyframeCommand) {
 /// The stored project of a file.
 fn stored(path: &std::path::Path) -> Value {
     let file = std::fs::File::open(path).unwrap();
-    project_of(&read_container(&file, ReadOptions::default()).unwrap().document).clone()
+    project_of(
+        &read_container(&file, ReadOptions::default())
+            .unwrap()
+            .document,
+    )
+    .clone()
 }
 
 /// Every key under the open composition's stored layers (v1's status line
@@ -157,11 +170,16 @@ fn keys_stored_without_ids_are_named_on_read_and_keep_their_names() {
         },
     );
     assert_eq!(
-        keys(&store, "x")[1].get("outInterp").and_then(Value::as_str),
+        keys(&store, "x")[1]
+            .get("outInterp")
+            .and_then(Value::as_str),
         Some("hold")
     );
     store.undo().unwrap();
-    assert_eq!(to_canonical_string(&store.root().unwrap().to_value()), before);
+    assert_eq!(
+        to_canonical_string(&store.root().unwrap().to_value()),
+        before
+    );
 
     // A move past its neighbour: the key keeps its id, so the selection and
     // the commands after it still name it.
@@ -185,11 +203,17 @@ fn keys_stored_without_ids_are_named_on_read_and_keep_their_names() {
             value: Some(Value::from(12.0)),
         },
     );
-    assert_eq!(keys(&store, "x")[2].get("v").and_then(Value::as_f64), Some(12.0));
+    assert_eq!(
+        keys(&store, "x")[2].get("v").and_then(Value::as_f64),
+        Some(12.0)
+    );
     store.undo().unwrap();
     store.undo().unwrap();
     assert_eq!(store.selection().keys(), [id(1)]);
-    assert_eq!(to_canonical_string(&store.root().unwrap().to_value()), before);
+    assert_eq!(
+        to_canonical_string(&store.root().unwrap().to_value()),
+        before
+    );
 
     // Delete takes the key and its selection; the neighbours keep theirs.
     run(
@@ -228,6 +252,54 @@ fn a_saved_file_keeps_keys_without_ids_and_a_reopen_names_them_the_same() {
     assert_eq!(ids(&keys(&store, "x")), [id(0), id(2), id(1)]);
     drop(reopened);
     edit_one_and_compare(&path, &id(1));
+}
+
+#[test]
+fn a_duplicated_layer_gets_its_own_key_ids() {
+    let mut store = DocumentStore::new_untitled(project());
+    store
+        .execute(
+            Command::Layer(LayerCommand::Duplicate {
+                layer_ids: vec!["L".into()],
+                new_ids: vec!["L2".into()],
+            }),
+            Origin::Interface,
+        )
+        .unwrap();
+    let all = key_ids(&store);
+    // Three x keys, two y keys and the opacity key on each layer.
+    assert_eq!(all.len(), 12, "{all:?}");
+}
+
+/// History saved with a file names keys by where they stood in that
+/// session. Read again, a key an Undo brings back may carry a derived id
+/// another key now has: it is named afresh, and no two keys share an id.
+#[test]
+fn an_undo_after_a_reopen_never_leaves_two_keys_one_id() {
+    let dir = TempDir::new("pathless-keys-undo");
+    let path = dir.path("paths.pmv");
+    let mut store = DocumentStore::new_untitled(project());
+    run(
+        &mut store,
+        KeyframeCommand::Delete {
+            key_ids: vec![id(1)],
+        },
+    );
+    save_as(&mut store, &path).unwrap();
+    drop(store);
+    let mut reopened = open_store(&path);
+    assert_eq!(ids(&keys(&reopened, "x")), [id(0), id(1)]);
+    reopened.undo().expect("the delete is in the saved history");
+    let x = keys(&reopened, "x");
+    assert_eq!(times(&x), [0.0, 1.0, 2.0]);
+    let named = ids(&x);
+    let unique: std::collections::HashSet<_> = named.iter().collect();
+    assert_eq!(unique.len(), 3, "{named:?}");
+    assert!(named.iter().all(|i| is_derived_key_id(i)), "{named:?}");
+    // And the file the undo leads to is stored without ids.
+    let again = dir.path("again.pmv");
+    save_as(&mut reopened, &again).unwrap();
+    assert_eq!(counts(&stored(&again)), (6, 5));
 }
 
 /// Opens `path`, edits the key `id` (stored without an id) to a new value,
@@ -270,7 +342,10 @@ fn edit_one_and_compare(path: &std::path::Path, id: &str) {
     let mut differ = Vec::new();
     differences(&before, &after, &mut String::new(), &mut differ);
     differ.retain(|d| !(d.starts_with(".assets.") && d.ends_with(".videoColor added")));
-    assert!(differ.is_empty(), "changed beyond the edited key: {differ:?}");
+    assert!(
+        differ.is_empty(),
+        "changed beyond the edited key: {differ:?}"
+    );
 }
 
 /// The stored key `index` of `property` on layer `layer`, in any

@@ -1197,10 +1197,27 @@ impl DocumentStore {
         reverse: &Arc<[Op]>,
         cause: ChangeCause,
     ) -> Result<HistoryStep, TransactionError> {
-        let staged = self.stage_history_ops(ops)?;
+        let mut staged = self.stage_history_ops(ops)?;
         let skipped = staged.forward.len() != ops.len();
+        // A key the step brought back without an id, or under a derived id
+        // its track already has, is named (see `model::naming_ops`).
+        let naming = staged
+            .document
+            .root()
+            .map(|root| model::naming_ops(root, Some(&staged.forward)))
+            .unwrap_or_default();
+        if !naming.is_empty() {
+            let revision = staged.document.revision();
+            let mut root = staged.document.root().cloned();
+            for op in &naming {
+                root = apply_one(root, op, revision)?.0;
+            }
+            staged.document = Document::from_root(root, revision);
+        }
+        let mut published = staged.forward.clone();
+        published.extend(naming);
         let applied: Arc<[Op]> = staged.forward.into();
-        self.publish(staged.document, applied.clone(), cause);
+        self.publish(staged.document, published.into(), cause);
         if !skipped {
             return Ok((applied, reverse.clone()));
         }
@@ -1582,7 +1599,11 @@ impl DocumentStore {
             state_token: self.state_token,
             outside_writes: self.outside_writes,
             // Ids given to keys stored without one stay in memory.
-            document: model::without_derived_key_ids(&self.current),
+            document: if unchanged.is_some() {
+                self.current.clone()
+            } else {
+                model::without_derived_key_ids(&self.current)
+            },
             had_comps: self.file.envelope.had_comps,
             history,
             workspace: self.file.envelope.workspace.clone(),

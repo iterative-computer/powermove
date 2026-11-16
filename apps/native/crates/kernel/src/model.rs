@@ -500,6 +500,191 @@ pub fn derived_key_id(comp: &str, layer: &str, path: &str, index: usize) -> Stri
     format!("~{comp}~{layer}~{path}~{index}")
 }
 
+/// The [`derived_key_id`] for place `index` of a track of `len` keys, or
+/// the first one after it (`index + len`, `index + 2 len`, ...) no key of
+/// the track (`taken`) has; taken from then on.
+fn free_key_id(
+    taken: &mut std::collections::HashSet<String>,
+    comp: &str,
+    layer: &str,
+    path: &str,
+    index: usize,
+    len: usize,
+) -> String {
+    let mut n = index;
+    loop {
+        let id = derived_key_id(comp, layer, path, n);
+        if taken.insert(id.clone()) {
+            return id;
+        }
+        n += len.max(1);
+    }
+}
+
+/// Operations naming the keys an Undo or Redo (`ops`) left without an id,
+/// or with a derived id another key of their track already has (history
+/// written before a save names them by older places): each gets a free
+/// [`derived_key_id`]. Only the layers `ops` reach are walked.
+pub(crate) fn naming_ops(root: &Node, ops: Option<&[pm_model::Op]>) -> Vec<pm_model::Op> {
+    use pm_model::Value;
+    // The layers the operations reach: (composition or "" for project-level
+    // layers, layer index); every layer for a whole layer list or more, or
+    // without operations.
+    let mut every = ops.is_none();
+    let ops = ops.unwrap_or_default();
+    let mut touched: std::collections::HashSet<(String, usize)> = Default::default();
+    let key_of = |p: &PathPart| p.property_key().to_string_lossy();
+    for op in ops {
+        let path = op.path();
+        let (comp, rest) = match path.first().map(key_of).as_deref() {
+            Some("comps") if path.len() >= 3 && key_of(&path[2]) == "layers" => {
+                (key_of(&path[1]), &path[3..])
+            }
+            Some("layers") => (String::new(), &path[1..]),
+            Some("comps") if path.len() < 3 => {
+                every = true;
+                continue;
+            }
+            _ => continue,
+        };
+        match rest.first() {
+            Some(PathPart::Index(i)) => {
+                touched.insert((comp, *i as usize));
+            }
+            _ => every = true,
+        }
+    }
+    if !every && touched.is_empty() {
+        return Vec::new();
+    }
+    fn walk(
+        node: &Node,
+        at: &mut Vec<PathPart>,
+        name: &mut String,
+        comp: &str,
+        layer: &str,
+        out: &mut Vec<pm_model::Op>,
+    ) {
+        match node.kind() {
+            NodeKind::Object(map) => {
+                if let Some(NodeKind::Array(keys)) = map.get("kf".as_bytes()).map(Node::kind) {
+                    let mut taken = std::collections::HashSet::new();
+                    let ids: Vec<Option<&str>> =
+                        keys.iter().map(|k| k.get("i").and_then(str_of)).collect();
+                    // A stored id is kept; a derived one only the first time.
+                    for id in ids.iter().flatten().filter(|i| !is_derived_key_id(i)) {
+                        taken.insert((*id).to_owned());
+                    }
+                    for (index, id) in ids.iter().enumerate() {
+                        let keep = id.is_some_and(|i| !is_derived_key_id(i) || taken.insert(i.to_owned()));
+                        if keep || !matches!(keys[index].kind(), NodeKind::Object(_)) {
+                            continue;
+                        }
+                        let fresh = free_key_id(&mut taken, comp, layer, name, index, keys.len());
+                        let mut path = at.clone();
+                        path.extend([
+                            PathPart::Key(JsString::from("kf")),
+                            PathPart::Index(index as f64),
+                            PathPart::Key(JsString::from("i")),
+                        ]);
+                        out.push(pm_model::Op::Leaf(pm_model::patch::Patch::set(
+                            path,
+                            Value::from(fresh.as_str()),
+                        )));
+                    }
+                }
+                for (k, child) in map.iter() {
+                    if k.as_bytes() == b"kf"
+                        || !matches!(child.kind(), NodeKind::Object(_) | NodeKind::Array(_))
+                    {
+                        continue;
+                    }
+                    let len = name.len();
+                    if !name.is_empty() {
+                        name.push('.');
+                    }
+                    name.push_str(&k.to_string_lossy());
+                    at.push(PathPart::Key(k.clone()));
+                    walk(child, at, name, comp, layer, out);
+                    at.pop();
+                    name.truncate(len);
+                }
+            }
+            NodeKind::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    if !matches!(child.kind(), NodeKind::Object(_) | NodeKind::Array(_)) {
+                        continue;
+                    }
+                    let len = name.len();
+                    if !name.is_empty() {
+                        name.push('.');
+                    }
+                    match child.get("id").and_then(str_of) {
+                        Some(id) => name.push_str(id),
+                        None => name.push_str(&i.to_string()),
+                    }
+                    at.push(PathPart::Index(i as f64));
+                    walk(child, at, name, comp, layer, out);
+                    at.pop();
+                    name.truncate(len);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut lists: Vec<(String, Vec<PathPart>, &Node)> = Vec::new();
+    if let Some(layers) = root.get("layers") {
+        lists.push((String::new(), vec![PathPart::Key(JsString::from("layers"))], layers));
+    }
+    if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+        for (cid, comp) in comps.iter() {
+            if let Some(layers) = comp.get("layers") {
+                let at = vec![
+                    PathPart::Key(JsString::from("comps")),
+                    PathPart::Key(cid.clone()),
+                    PathPart::Key(JsString::from("layers")),
+                ];
+                lists.push((cid.to_string_lossy(), at, layers));
+            }
+        }
+    }
+    for (comp, at, layers) in lists {
+        let NodeKind::Array(items) = layers.kind() else {
+            continue;
+        };
+        for (i, layer) in items.iter().enumerate() {
+            if !every && !touched.contains(&(comp.clone(), i)) {
+                continue;
+            }
+            let id = layer.get("id").and_then(str_of).unwrap_or_default().to_owned();
+            let mut path = at.clone();
+            path.push(PathPart::Index(i as f64));
+            walk(layer, &mut path, &mut String::new(), &comp, &id, &mut out);
+        }
+    }
+    out
+}
+
+/// The canonical hash of the document a reopen of `document` as written
+/// would read (its derived ids taken off, then given again by place), or
+/// `None` when it has no key stored without an id (its own hash is that).
+/// A recovery journal's base is that document: a session whose keys moved
+/// since they were named differs from it.
+pub(crate) fn reopened_hash(document: &std::sync::Arc<pm_model::Document>) -> Option<String> {
+    let stripped = without_derived_key_ids(document);
+    let root_stripped = stripped.root()?;
+    let naming = naming_ops(root_stripped, None);
+    if naming.is_empty() {
+        // Nothing stored without an id: the document is what a reopen reads.
+        return None;
+    }
+    let revision = stripped.revision();
+    let mut named = pm_model::Document::from_root(Some(root_stripped.clone()), revision);
+    named.apply_ops_at(&naming, revision + 1).ok()?;
+    named.canonical_hash()
+}
+
 /// Whether `id` is a [`derived_key_id`] (never stored).
 pub fn is_derived_key_id(id: &str) -> bool {
     id.strip_prefix('~')
@@ -518,11 +703,16 @@ pub fn name_keys_without_ids(project: &mut pm_model::Value) {
         match v {
             Value::Object(m) => {
                 if let Some(Value::Array(keys)) = m.get_mut("kf") {
+                    let mut taken: std::collections::HashSet<String> = keys
+                        .iter()
+                        .filter_map(|k| k.get("i").and_then(Value::as_str).map(str::to_owned))
+                        .collect();
+                    let len = keys.len();
                     for (index, key) in keys.iter_mut().enumerate() {
                         if let Value::Object(k) = key
                             && k.get("i").is_none()
                         {
-                            let id = derived_key_id(comp, layer, path, index);
+                            let id = free_key_id(&mut taken, comp, layer, path, index, len);
                             k.insert("i", Value::from(id.as_str()));
                         }
                     }
@@ -672,4 +862,51 @@ pub fn without_derived_key_ids(
         stripped = pm_model::Document::new(Some(value), revision);
     }
     std::sync::Arc::new(stripped)
+}
+
+#[cfg(test)]
+mod derived_key_tests {
+    use super::*;
+    use pm_model::json::parse;
+
+    /// A recovery base names keys as a reopen does: the hash of a session
+    /// whose keys stayed put equals a reopen's; once a key moved it differs.
+    #[test]
+    fn a_reopened_hash_matches_a_reopen() {
+        let stored = parse(
+            r##"{"id":"P","compId":"C","w":10,"h":10,"fps":30,"dur":4,"assets":{},"comps":{"D":{"id":"D","layers":[{"id":"M","p":{"x":{"v":0,"kf":[{"t":0,"v":1},{"t":1,"v":2,"i":"k"}]}}}]}},
+            "layers":[{"id":"L","d":{"paths":[{"id":"o","vertices":[{"id":"v0","p":{"x":{"v":0,"kf":[{"t":0,"v":0},{"t":1,"v":1},{"t":2,"v":2}]}}},{"p":{"y":{"v":0,"kf":[{"t":0,"v":0,"i":"~C~L~d.paths.o.vertices.1.p.y~0"},{"t":1,"v":1}]}}}]}]}}]}"##,
+        )
+        .unwrap();
+        let reopen = |v: &pm_model::Value| {
+            std::sync::Arc::new(pm_model::Document::new(Some(to_canonical(v.clone())), 1))
+        };
+        let session = reopen(&stored);
+        assert_eq!(
+            reopened_hash(&session),
+            session.canonical_hash(),
+            "nothing moved: the session is what a reopen reads"
+        );
+        // Move the first vertex key to the end, as an edit would.
+        let mut moved = session.root().unwrap().to_value();
+        fn at<'a>(v: &'a mut pm_model::Value, path: &[&str]) -> &'a mut pm_model::Value {
+            path.iter().fold(v, |v, step| match step.parse::<usize>() {
+                Ok(i) => &mut v.as_array_mut().unwrap()[i],
+                Err(_) => v.as_object_mut().unwrap().get_mut(*step).unwrap(),
+            })
+        }
+        let kf = at(
+            &mut moved,
+            &["comps", "C", "layers", "0", "d", "paths", "0", "vertices", "0", "p", "x", "kf"],
+        )
+        .as_array_mut()
+        .unwrap();
+        let first = kf.remove(0);
+        kf.push(first);
+        let moved = std::sync::Arc::new(pm_model::Document::new(Some(moved), 2));
+        let written = without_derived_key_ids(&moved);
+        let read_back = reopen(&written.root().unwrap().to_value());
+        assert_eq!(reopened_hash(&moved), read_back.canonical_hash());
+        assert_ne!(reopened_hash(&moved), moved.canonical_hash());
+    }
 }
