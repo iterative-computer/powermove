@@ -2398,9 +2398,24 @@ mod build_slot_tests {
             workspace: "test".into(),
             docks: vec![],
         };
-        reserve_build(&mut l, "panel-build-a", &serde_json::json!({"dock":"left"}), 250.);
-        reserve_build(&mut l, "inspector", &serde_json::json!({"tab_in":"panel-build-a"}), 250.);
-        reserve_build(&mut l, "panel-build-b", &serde_json::json!({"dock":"left"}), 250.);
+        reserve_build(
+            &mut l,
+            "panel-build-a",
+            &serde_json::json!({"dock":"left"}),
+            250.,
+        );
+        reserve_build(
+            &mut l,
+            "inspector",
+            &serde_json::json!({"tab_in":"panel-build-a"}),
+            250.,
+        );
+        reserve_build(
+            &mut l,
+            "panel-build-b",
+            &serde_json::json!({"dock":"left"}),
+            250.,
+        );
         l.flex_bases.insert("panel-build-a".into(), 300.);
         l.flex_bases.insert("panel-build-b".into(), 200.);
         remove_build(&mut l, "panel-build-a");
