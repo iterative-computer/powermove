@@ -155,6 +155,12 @@ export function ProjectView(props: ProjectViewProps) {
     layout.rowHeight <= 0
   )
     throw new RangeError("Invalid native media grid layout");
+  // The header's choice draws the list or the grid, whatever the width: a
+  // grid one card wide is still cards (PM-447). Without a choice, one column
+  // is the list.
+  const asList = props.viewMode
+    ? props.viewMode === "list"
+    : layout.columns === 1;
   const [searchOpen, setSearchOpen] = useState(false);
   // The field shows the query that filters the list: the model's, except
   // for what was just typed and is not answered yet (an answer to an earlier
@@ -665,12 +671,19 @@ export function ProjectView(props: ProjectViewProps) {
     const f = facts(row);
     const hover = !view?.drag && (hovered === itemKey(row.id) || row.focused);
     const actions = hover ? cardActions(row, view!.composition_count) : [];
+    // A linked folder says what its Finder folder is doing, as its card
+    // does; otherwise a folder shows its count.
+    const missing = f.folder?.sync === "NotFound";
     const trailing = f.state?.overlay
       ? f.state.overlay
       : f.folder
-        ? f.folder.items
-          ? String(f.folder.items)
-          : ""
+        ? missing
+          ? "Folder not found"
+          : f.folder.sync === "Syncing"
+            ? "Syncing…"
+            : f.folder.items
+              ? String(f.folder.items)
+              : ""
         : f.duration !== null && f.duration !== undefined
           ? clock(f.duration)
           : "";
@@ -715,7 +728,14 @@ export function ProjectView(props: ProjectViewProps) {
               flexShrink: 0,
               whiteSpace: "nowrap",
               color: token(
-                trailingInk(f.attention ? f.state : null, row.selected),
+                trailingInk(
+                  missing
+                    ? { overlay: trailing, tone: "danger" }
+                    : f.attention
+                      ? f.state
+                      : null,
+                  row.selected,
+                ),
               ),
             }}
           >
@@ -1031,12 +1051,8 @@ export function ProjectView(props: ProjectViewProps) {
         style={{
           ...target,
           // List rows inset their own selection by `gap`; grid cards sit at `inset`.
-          paddingLeft: token(
-            layout.columns === 1 ? "metrics.gap" : "metrics.inset",
-          ),
-          paddingRight: token(
-            layout.columns === 1 ? "metrics.gap" : "metrics.inset",
-          ),
+          paddingLeft: token(asList ? "metrics.gap" : "metrics.inset"),
+          paddingRight: token(asList ? "metrics.gap" : "metrics.inset"),
           paddingTop: token("metrics.gap"),
         }}
         preventDefault={{ keydown: [...gridKeys, "F2"] }}
@@ -1101,7 +1117,7 @@ export function ProjectView(props: ProjectViewProps) {
             count={count}
             range={[start, end]}
             itemSize={layout.rowHeight}
-            metadata={{ fixedItems: layout.columns > 1 }}
+            metadata={{ fixedItems: !asList }}
             onRangeChange={(e) => {
               if (typeof e.width === "number") props.onWidth?.(e.width);
               if (!e.range) return;
@@ -1148,13 +1164,13 @@ export function ProjectView(props: ProjectViewProps) {
                   key={start + index}
                   style={{
                     display: "flex",
-                    // One column stacks full-width list rows; more columns lay cards out.
-                    flexDirection: layout.columns === 1 ? "column" : "row",
-                    flexGrow: layout.columns === 1 ? null : 1,
+                    // The list stacks full-width rows; the grid lays cards out.
+                    flexDirection: asList ? "column" : "row",
+                    flexGrow: asList ? null : 1,
                     gap: token("metrics.inset"),
                   }}
                 >
-                  {layout.columns === 1
+                  {asList
                     ? rows.map(renderRow)
                     : [
                         ...rows.map(renderCard),
