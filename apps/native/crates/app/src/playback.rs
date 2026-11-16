@@ -523,7 +523,7 @@ fn layer_failure_source(
 }
 #[cfg(test)]
 mod extension_compile_log_tests {
-    use super::*;
+    use super::{definition_failure_source, record_layer_failures};
     #[test]
     fn failed_extension_layers_log_the_owner_and_full_compiler_message_once() {
         let contributions = serde_json::json!({"layers":[{"id":"macos.cursor","owner":"macos-cursor"}]});
