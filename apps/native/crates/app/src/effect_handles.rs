@@ -902,7 +902,7 @@ mod captures {
     fn capture_gradient_handles() {
         let dir = std::env::var("PM_GRADIENT_CAPTURE").expect("PM_GRADIENT_CAPTURE");
         std::fs::create_dir_all(&dir).unwrap();
-        for radial in [false, true] {
+        for (radial, picker) in [(false, false), (true, false), (true, true)] {
             let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
             let ch = |v: serde_json::Value| serde_json::json!({"v":v,"kf":[]});
             let source = serde_json::json!({"id":"capture-project","compId":"capture-comp","w":640,"h":360,"fps":30,"dur":2,"bg":"#000000","assets":{},"comps":{},"layers":[{
@@ -997,7 +997,7 @@ mod captures {
                         assert_eq!(g.effect_points(), vec![[160., 100.], [460., 100.]]);
                         assert_eq!(g.effect_stop_values().len(), 3);
                         g.effect_stop = Some((0, 1));
-                        if radial {
+                        if picker {
                             g.effects_open_colour(0, 1, window, cx);
                         }
                         g
@@ -1013,7 +1013,13 @@ mod captures {
                 .unwrap()
                 .save(format!(
                     "{dir}/{}.png",
-                    if radial { "radial" } else { "linear" }
+                    if picker {
+                        "picker"
+                    } else if radial {
+                        "radial"
+                    } else {
+                        "linear"
+                    }
                 ))
                 .unwrap();
         }
