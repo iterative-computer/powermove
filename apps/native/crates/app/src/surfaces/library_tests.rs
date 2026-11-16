@@ -1154,6 +1154,8 @@ fn an_untitled_project_in_a_file_is_titled_by_the_file() {
     assert_eq!(r.title(), "Untitled film");
     r.summary.as_mut().unwrap().duration_seconds = Some(62.4);
     assert_eq!(r.length().as_deref(), Some("1:02"));
+}
+#[test]
 fn a_new_project_opens_under_the_name_typed_in_its_sheet() {
     use pm_kernel::{locks::OpenDecision, session::ShellReply};
     let mut c = ready();
