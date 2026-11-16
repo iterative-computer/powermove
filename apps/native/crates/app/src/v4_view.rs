@@ -3266,7 +3266,7 @@ impl SurfaceView {
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }
-        if node.outline_retained {
+        if node.outline_retained && self.natives.outline.scene.borrow().is_some() {
             let start = self.natives.outline.rows.get().0;
             let top = self.natives.outline.scene.borrow().as_ref()
                 .and_then(|s| s.span(start).map(|(_, top, _)| top)).unwrap_or(0.);
@@ -3705,7 +3705,8 @@ impl SurfaceView {
         } else {
             usize::MAX
         };
-        let (start, end) = if node.outline_retained {
+        // A standalone surface has no native timeline scene to supply a range.
+        let (start, end) = if node.outline_retained && self.natives.outline.scene.borrow().is_some() {
             self.natives.outline.rows.get()
         } else { (0, usize::MAX) };
         for child in node.children.iter().take(shown.min(end)).skip(start) {

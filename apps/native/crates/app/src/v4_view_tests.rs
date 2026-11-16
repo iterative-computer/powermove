@@ -1338,15 +1338,9 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
     let rig = rig("export", 1);
     wait(rig.runtime.show("export").unwrap());
     let (view, mut first) = window(cx, &rig, publication(&rig), Default::default());
-    let texts = |cx: &mut TestAppContext| {
-        view.read_with(cx, |v, _| {
-            v.publication
-                .surface
-                .nodes()
-                .values()
-                .map(|n| n.text.clone())
-                .collect::<Vec<_>>()
-        })
+    let shown = |cx: &mut TestAppContext, id: &str| {
+        view.read_with(cx, |v, _| v.publication.surface.nodes().values()
+            .any(|node| node.props.get("id").and_then(Value::as_str) == Some(id)))
     };
     let deliver = |cx: &mut TestAppContext| {
         for p in rig.runtime.take_publications() {
@@ -1361,7 +1355,7 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
     );
     deliver(cx);
     settle(cx, |cx| {
-        texts(cx).iter().any(|t| t.starts_with("Exporting"))
+        shown(cx, "export.current")
     });
     // It finishes: the app closes the sheet's window, then the realm
     // publishes the finished run; the person opens Export again and the
@@ -1380,8 +1374,12 @@ fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAp
     let kept = view.clone();
     cx.add_window(|_, _| SheetWindow(kept));
     settle(cx, |cx| {
-        let texts = texts(cx);
-        !texts.iter().any(|t| t.starts_with("Exporting")) && texts.iter().any(|t| t == "Export")
+        !shown(cx, "export.current") && view.read_with(cx, |v, _| {
+            v.publication.surface.nodes().values().any(|node| {
+                node.props.get("id").and_then(Value::as_str) == Some("export.sheet")
+                    && node.props.get("label").and_then(Value::as_str) == Some("Export")
+            })
+        })
     });
 }
 
