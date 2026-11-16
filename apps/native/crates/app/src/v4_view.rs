@@ -527,6 +527,9 @@ impl SurfaceView {
         self.table = compiled.table;
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        // Where rows were is the old tree's (a search moved them up); their
+        // heights stay good guesses. Rows left out by old tops never showed.
+        self.cull.forget_tops();
         self.settle_disclosures();
         {
             let _span = crate::diag::span("panel.reconcile");

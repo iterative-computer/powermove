@@ -845,7 +845,11 @@ function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
   if (rest) caps.push(rest);
   return (
     <div
-      style={{ display: "flex", alignItems: "center", gap: t("metrics.pill_inset") }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: t("metrics.pill_inset"),
+      }}
     >
       {caps.map((cap, i) => (
         <div
@@ -883,18 +887,18 @@ function ShortcutKeys({
   row: import("./model").ShortcutRow;
   onRecord: () => void;
 }) {
-  // A menu bar command keeps its own key and takes none: dimmed, with
-  // nothing to press (no "None" that reads like an empty, recordable key).
+  // macOS's own items (Hide, Quit) keep their keys: dimmed, with nothing to
+  // press (no "None" that reads like an empty, recordable key).
   if (row.fixed)
     return (
       <div
         role="group"
         label={
           row.keys.length
-            ? `${row.label}: the menu bar's key, not assignable`
+            ? `${row.label}: macOS's key, not assignable`
             : `${row.label}: not assignable`
         }
-        title="Menu bar commands keep their own keys"
+        title="macOS keeps this key"
         style={trailing}
       >
         {row.keys.length ? (
@@ -930,7 +934,7 @@ function Recording({ onCancel }: { onCancel: () => void }) {
   return (
     <button
       tabIndex={0}
-      label="Type a shortcut. Press to stop."
+      label="Type a shortcut. Escape cancels."
       style={{
         display: "flex",
         alignItems: "center",
@@ -1022,7 +1026,19 @@ function Shortcuts({
           : rowStyle
       }
     >
-      <div style={copyColumn}>
+      {/* The command's name takes a click too: it starts listening, as a
+       * click on its keys does (the keys stay the keyboard's target). */}
+      <button
+        tabIndex={-1}
+        label={row.label}
+        disabled={row.fixed}
+        style={{
+          ...copyColumn,
+          minWidth: t("metrics.hit"),
+          minHeight: t("metrics.hit"),
+        }}
+        onClick={() => act("record", row.id)}
+      >
         <div style={titleLine}>
           <text
             style={{
@@ -1034,7 +1050,7 @@ function Shortcuts({
             {row.label}
           </text>
         </div>
-      </div>
+      </button>
       <div style={trailing}>
         {row.changed && !row.fixed && !row.recording ? (
           <Button
