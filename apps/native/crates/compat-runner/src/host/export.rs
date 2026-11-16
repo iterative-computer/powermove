@@ -30,12 +30,14 @@ use std::time::{Duration, Instant};
 const LAYOUT: &str = "An extension measures text in the export's page, which stopped answering; the export would draw it in the wrong place";
 /// How long an export realm's first answers wait for its page to start
 /// reading. Without a page the realm answers after this, and any layout read
-/// fails the export.
-const PAGE_WAIT: Duration = Duration::from_secs(8);
+/// fails the export. A loaded machine starts a web page slowly, so this is
+/// long: only a page that never starts fails the export.
+const PAGE_WAIT: Duration = Duration::from_secs(60);
 /// How long a layout read waits for the page. An export waits for its
 /// answers (the viewer's realm gives up after 250 ms and draws on): a read
-/// answered with nothing is remembered by the extension as the layout.
-const READ_WAIT: Duration = Duration::from_secs(10);
+/// answered with nothing is remembered by the extension as the layout. Long
+/// for the same reason as [`PAGE_WAIT`].
+const READ_WAIT: Duration = Duration::from_secs(60);
 
 pub(super) enum RunInput {
     /// A batch of an export frame's needs: `[{composition, layer, seconds, scale}]`.
@@ -303,6 +305,9 @@ struct Run {
     last_execution: Option<u64>,
 }
 
+/// How long an export waits for the shared isolate account to admit its
+/// extensions' realm with no change in the account at all.
+const ADMISSION_WAIT: Duration = Duration::from_secs(120);
 /// Runs one export realm on the calling thread until its export or window ends.
 pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInput>) {
     let events = Arc::new(Events {
@@ -336,7 +341,14 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
     };
 
     if let Err(error) = run.boot() {
-        run.failure = Some(format!("The export's extensions could not start: {error}"));
+        run.failure = Some(match error {
+            pm_runtime_v8::Error::Quota("isolate admission") => format!(
+                "The export's extensions could not start: the memory set aside for extensions \
+                 stayed full for {} s (other open projects' extensions hold it)",
+                ADMISSION_WAIT.as_secs()
+            ),
+            error => format!("The export's extensions could not start: {error}"),
+        });
     }
     loop {
         if run.start.cancel.load(Ordering::Acquire) || run.start.closing.load(Ordering::Acquire) {
@@ -421,7 +433,34 @@ impl Run {
         }));
         host.set_frames(self.start.frames.clone());
         let pool = crate::pool(&format!("export:{}", self.start.job), host.clone())?;
-        let realm = pool.realm(RealmKind::Compat)?;
+        // The shared isolate account may be full for a moment (other
+        // windows' realms, one being replaced): the export waits for room,
+        // saying so, rather than failing. It waits while the account changes
+        // (other realms start, grow, trim or end), each change a step for the
+        // app's wait; this long with no change at all, it is stuck.
+        let account = pm_runtime_v8::Admission::cage();
+        let mut seen = (account.used(), account.isolates());
+        let mut changed = Instant::now();
+        let realm = loop {
+            let now = (account.used(), account.isolates());
+            if now != seen {
+                seen = now;
+                changed = Instant::now();
+                self.events.progress.step();
+            }
+            match pool.realm(RealmKind::Compat) {
+                Err(pm_runtime_v8::Error::Quota("isolate admission"))
+                    if changed.elapsed() < ADMISSION_WAIT
+                        && !self.start.cancel.load(Ordering::Acquire) =>
+                {
+                    self.events
+                        .progress
+                        .note("waiting for memory for the export's extensions".into());
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                other => break other?,
+            }
+        };
         crate::boot_realm(&realm, &host, "")?;
         self.router = Some(
             RemoteDomPanel::new(
