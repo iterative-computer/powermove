@@ -384,41 +384,31 @@ impl Default for OpenOptions {
     }
 }
 
-/// `hashProjectFile`: the SHA-256 of the whole file, verifying the given
-/// (already validated, non-overlapping) media ranges in the same pass.
-fn hash_project_file(
+/// `hashProjectFile`: the SHA-256 of the whole file. It reads beside the
+/// container's parse (`open_project`); media checksums, which need the
+/// container's index, are verified after it (`verify_media`).
+fn hash_project_file(file: &File, path: &Path, size: u64) -> Result<String, ProjectIoError> {
+    durable::reading_whole(path);
+    let mut whole = Sha256::new();
+    read_range(file, path, 0, size, |bytes| whole.update(bytes))?;
+    Ok(durable::hex(&whole.finalize()))
+}
+
+/// Reads `length` bytes of `file` from `offset` a megabyte at a time.
+fn read_range(
     file: &File,
     path: &Path,
-    size: u64,
-    media: &[&MediaRecord],
-) -> Result<String, ProjectIoError> {
-    durable::reading_whole(path);
-    let bad = || {
-        ProjectIoError::Container(pm_model::container::ContainerError::Invalid(
-            "The project media checksum does not match.",
-        ))
-    };
-    let empty = durable::hex(&Sha256::digest([]));
-    for record in media {
-        if record.length == 0 && record.sha256.as_deref().is_some_and(|s| s != empty) {
-            return Err(bad());
-        }
-    }
-    let mut ranges: Vec<&MediaRecord> = media
-        .iter()
-        .copied()
-        .filter(|r| r.length > 0 && r.sha256.is_some())
-        .collect();
-    ranges.sort_by_key(|r| r.offset);
-    let mut whole = Sha256::new();
-    let mut index = 0;
-    let mut media_hash = Sha256::new();
-    let mut buf = vec![0u8; (1usize << 20).min(size.max(1) as usize)];
-    let mut position = 0u64;
+    offset: u64,
+    length: u64,
+    mut take: impl FnMut(&[u8]),
+) -> Result<(), ProjectIoError> {
+    let mut buf = vec![0u8; (1usize << 20).min(length.max(1) as usize)];
+    let end = offset + length;
+    let mut position = offset;
     #[cfg(unix)]
     use std::os::unix::fs::FileExt;
-    while position < size {
-        let want = (buf.len() as u64).min(size - position) as usize;
+    while position < end {
+        let want = (buf.len() as u64).min(end - position) as usize;
         #[cfg(unix)]
         let n = durable::read_retry(|| file.read_at(&mut buf[..want], position))
             .map_err(|e| io_err(path, e))?;
@@ -435,35 +425,42 @@ fn hash_project_file(
                 pm_model::container::ContainerError::Invalid("The project container is truncated."),
             ));
         }
-        let end = position + n as u64;
-        whole.update(&buf[..n]);
-        while index < ranges.len() {
-            let record = ranges[index];
-            if record.offset >= end {
-                break;
-            }
-            let start = position.max(record.offset);
-            let stop = end.min(record.offset + record.length);
-            if stop > start {
-                media_hash.update(&buf[(start - position) as usize..(stop - position) as usize]);
-            }
-            if record.offset + record.length > end {
-                break;
-            }
-            let digest = durable::hex(&std::mem::take(&mut media_hash).finalize());
-            if Some(digest.as_str()) != record.sha256.as_deref() {
-                return Err(bad());
-            }
-            index += 1;
+        take(&buf[..n]);
+        position += n as u64;
+    }
+    Ok(())
+}
+
+/// Verifies the given (already validated) media ranges against their
+/// checksums, records in parallel.
+fn verify_media(file: &File, path: &Path, media: &[&MediaRecord]) -> Result<(), ProjectIoError> {
+    let bad = || {
+        ProjectIoError::Container(pm_model::container::ContainerError::Invalid(
+            "The project media checksum does not match.",
+        ))
+    };
+    let empty = durable::hex(&Sha256::digest([]));
+    for record in media {
+        if record.length == 0 && record.sha256.as_deref().is_some_and(|s| s != empty) {
+            return Err(bad());
         }
-        position = end;
     }
-    if index != ranges.len() {
-        return Err(ProjectIoError::Container(
-            pm_model::container::ContainerError::Invalid("The project container is truncated."),
-        ));
-    }
-    Ok(durable::hex(&whole.finalize()))
+    let ranges: Vec<&MediaRecord> = media
+        .iter()
+        .copied()
+        .filter(|r| r.length > 0 && r.sha256.is_some())
+        .collect();
+    pm_model::parallel::map(ranges.len(), |i| {
+        let record = ranges[i];
+        let mut hash = Sha256::new();
+        read_range(file, path, record.offset, record.length, |bytes| hash.update(bytes))?;
+        if Some(durable::hex(&hash.finalize()).as_str()) != record.sha256.as_deref() {
+            return Err(bad());
+        }
+        Ok(())
+    })
+    .into_iter()
+    .collect()
 }
 
 /// Opens a project file. **Blocking**: run it off the UI thread.
@@ -494,24 +491,33 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
     if durable::file_head_held_back(&file) {
         return Err(ProjectIoError::StillCopying);
     }
-    // Index and document checksums are always verified by the reader; media
-    // checksums are verified below, in the single hashing pass.
-    let container = read_container(
-        &file,
-        ReadOptions {
-            verify_media: false,
-        },
-    )?;
-    let verify: Vec<&MediaRecord> = if options.verify_media {
-        container
+    // Index and document checksums are always verified by the reader. The
+    // whole file's hash needs nothing from it, so it reads beside the parse
+    // (a 285 MB project: both are hundreds of milliseconds); media
+    // checksums need the index, so they are verified after it.
+    let (container, hash) = std::thread::scope(|scope| {
+        let whole = scope.spawn(|| hash_project_file(&file, path, before.size));
+        let container = read_container(
+            &file,
+            ReadOptions {
+                verify_media: false,
+            },
+        );
+        let hash = whole
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (container, hash)
+    });
+    let container = container?;
+    let hash = hash?;
+    if options.verify_media {
+        let records: Vec<&MediaRecord> = container
             .media
             .iter()
             .chain(&container.archived_media)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let hash = hash_project_file(&file, path, before.size, &verify)?;
+            .collect();
+        verify_media(&file, path, &records)?;
+    }
     let after = durable::stat_of(&file.metadata().map_err(|e| io_err(path, e))?);
     if before.size != after.size
         || before.mtime_ns != after.mtime_ns

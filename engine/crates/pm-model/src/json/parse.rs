@@ -337,6 +337,20 @@ where
         offset: e.valid_up_to(),
         message: "invalid UTF-8",
     })?;
+    parse_text_parallel(text, builder, prebuilt, complete)
+}
+
+/// [`parse_bytes_parallel_prebuilt`] of text already known to be UTF-8.
+fn parse_text_parallel<B: TreeBuilder + Clone + Send + Sync>(
+    text: &str,
+    builder: &mut B,
+    prebuilt: Vec<Prebuilt<B::Out>>,
+    complete: bool,
+) -> Result<B::Out, ParseError>
+where
+    B::Out: Send,
+{
+    let bytes = text.as_bytes();
     if prebuilt.is_empty() && (bytes.len() < PARALLEL_MIN_BYTES || crate::parallel::workers() < 2) {
         return parse_with(text, builder);
     }
@@ -418,10 +432,17 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Value, ParseError> {
 /// Decodes bytes the way the app reads files (`new TextDecoder().decode`: a
 /// leading UTF-8 byte order mark is dropped and invalid sequences become
 /// U+FFFD), then parses.
+/// [`parse`] on several threads for a large input ([`parse_bytes_parallel`]):
+/// the same value and the same errors.
+pub fn parse_parallel(text: &str) -> Result<Value, ParseError> {
+    parse_text_parallel(text, &mut ValueBuilder, Vec::new(), false)
+}
+
+/// A large file parses on several threads ([`parse_bytes_parallel`]): the
+/// same value and the same errors.
 pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    let text = String::from_utf8_lossy(bytes);
-    parse(&text)
+    parse_parallel(&String::from_utf8_lossy(bytes))
 }
 
 /// `Object.keys` of the object at `path` in JSON text this module already
@@ -1003,6 +1024,28 @@ mod tests {
                 .unwrap()
                 .as_str(),
             Some("M4")
+        );
+    }
+
+    /// A large file reads as the same value on several threads, with a byte
+    /// order mark and with invalid UTF-8 decoded as `TextDecoder` does.
+    #[test]
+    fn a_large_file_parses_to_the_same_value() {
+        let text = large_document();
+        let mut file = vec![0xef, 0xbb, 0xbf];
+        file.extend_from_slice(text.as_bytes());
+        assert!(parse_file_text(&file).unwrap() == parse(&text).unwrap());
+        // An invalid byte inside a string becomes U+FFFD.
+        let at = text.find("\"M4\"").unwrap() + 2;
+        let mut broken = text.clone().into_bytes();
+        broken[at] = 0xff;
+        let lossy = String::from_utf8_lossy(&broken).into_owned();
+        assert!(parse_file_text(&broken).unwrap() == parse(&lossy).unwrap());
+        // A malformed file reports the sequential parse's error.
+        let cut = &text.as_bytes()[..text.len() - 1];
+        assert_eq!(
+            parse_file_text(cut).unwrap_err(),
+            parse(core::str::from_utf8(cut).unwrap()).unwrap_err()
         );
     }
 
