@@ -1,19 +1,19 @@
-//! Settings and the Store open inside the editor window as pages (owner
-//! feedback S2, H6), not as windows of their own: each is a cell in the
-//! toolbar's strip after the projects, and while one shows it fills the
-//! window below the toolbar as Home does. A project's tab (or Home) leaves
-//! it; its cell's close button closes it.
+//! The Store opens inside the editor window as a page (owner feedback H6),
+//! not as a window of its own: a cell in the toolbar's strip after the
+//! projects, and while it shows it fills the window below the toolbar as
+//! Home does. A project's tab (or Home) leaves it; its cell's close button
+//! closes it. (Settings is a window of its own again, PM-375.)
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 
-/// The pages a window can show, in the order their cells are added.
-const TITLES: [(&str, &str); 2] = [("settings", "Settings"), ("store", "Store")];
+/// The pages a window can show (Settings is a window of its own).
+const TITLES: [(&str, &str); 1] = [("store", "Store")];
 
-fn title(id: &str) -> &'static str {
+fn title(id: &str) -> Option<&'static str> {
     TITLES
         .iter()
         .find(|(page, _)| *page == id)
-        .map_or("Settings", |(_, title)| title)
+        .map(|(_, title)| *title)
 }
 
 /// The pages open in one window's strip, in the order they opened, and the
@@ -27,8 +27,12 @@ pub(crate) struct Pages {
     pub previous: Option<String>,
 }
 impl Pages {
-    /// Opens `id` (or brings it forward).
+    /// Opens `id` (or brings it forward); an id that is not a page opens
+    /// nothing.
     pub fn open(&mut self, id: &str) {
+        if title(id).is_none() {
+            return;
+        }
         if !self.open.iter().any(|p| p == id) {
             self.open.push(id.to_owned());
         }
@@ -75,7 +79,7 @@ impl Pages {
         let cells = self
             .open
             .iter()
-            .map(|id| (id.clone(), title(id).to_owned()))
+            .filter_map(|id| Some((id.clone(), title(id)?.to_owned())))
             .collect();
         (cells, shown)
     }
@@ -154,11 +158,6 @@ impl Controller {
         // The shell then reports no panel shown, which takes the timeline's
         // native playhead and timecode away (as under Home).
         self.host.borrow().set_home(self.home_shown());
-        let size = window.viewport_size();
-        let (top, header) = {
-            let host = self.host.borrow();
-            (host.toolbar_inset(), host.tokens.metrics.header)
-        };
         match id.as_str() {
             "store" => {
                 let store = match self.store.clone() {
@@ -184,17 +183,7 @@ impl Controller {
                 };
                 Some(store.into_any_element())
             }
-            _ => {
-                // The Settings surface lays out its own sidebar and sheet;
-                // like a docked panel it is given its header's room too.
-                let rect = pm_shell::layout::Rect {
-                    x: 0.,
-                    y: 0.,
-                    w: f32::from(size.width),
-                    h: f32::from(size.height) - top + header,
-                };
-                self.builtin_panel(&id, rect, window, cx)
-            }
+            _ => None,
         }
     }
 }
@@ -204,54 +193,38 @@ mod tests {
     use super::{Pages, parse_command};
 
     #[test]
-    fn pages_open_show_leave_and_close_as_tabs_do() {
+    fn the_store_opens_shows_leaves_and_closes_as_a_tab_does() {
         let mut p = Pages::default();
-        p.open("settings");
         p.open("store");
-        assert_eq!(p.open, ["settings", "store"]);
+        assert_eq!(p.open, ["store"]);
         assert_eq!(p.shown.as_deref(), Some("store"));
-        // Opening one already open brings it forward, in the same place.
-        p.open("settings");
-        assert_eq!(p.open, ["settings", "store"]);
+        // Opening it again keeps the one cell.
+        p.open("store");
+        assert_eq!(p.open, ["store"]);
         let (cells, shown) = p.strip();
-        assert_eq!(cells[0], ("settings".into(), "Settings".into()));
-        assert_eq!(cells[1].1, "Store");
+        assert_eq!(cells, [("store".to_owned(), "Store".to_owned())]);
         assert_eq!(shown, Some(0));
         // A project's tab leaves the page; it stays in the strip.
         assert!(p.leave());
         assert!(!p.leave());
         assert_eq!(p.strip().1, None);
-        assert_eq!(p.open.len(), 2);
-        // Closing the one showing shows what it covered.
+        assert_eq!(p.at(0), Some("store"));
+        // The toolbar's item again: forward, then closed back to the project.
+        assert!(!p.toggle_closes("store"));
         p.open("store");
+        assert!(p.toggle_closes("store"));
         p.close("store");
         assert_eq!(p.shown, None);
-        assert_eq!(p.open, ["settings"]);
-        assert_eq!(p.at(0), Some("settings"));
-        assert_eq!(p.at(1), None);
+        assert!(p.open.is_empty());
     }
 
     #[test]
-    fn closing_a_page_returns_to_what_it_came_forward_over() {
+    fn settings_is_never_a_page() {
+        // Settings is a window of its own in either Open Projects In mode.
         let mut p = Pages::default();
-        // From the project: Settings, then the gear again, is the project.
         p.open("settings");
-        assert!(p.toggle_closes("settings"));
-        p.close("settings");
+        assert!(p.open.is_empty());
         assert_eq!(p.shown, None);
-        // From the Store: Settings closes back to the Store.
-        p.open("store");
-        p.open("settings");
-        p.close("settings");
-        assert_eq!(p.shown.as_deref(), Some("store"));
-        // Settings open behind a project's tab comes forward first.
-        p.open("settings");
-        assert!(p.leave());
-        assert!(!p.toggle_closes("settings"));
-        p.open("settings");
-        assert!(p.toggle_closes("settings"));
-        p.close("settings");
-        assert_eq!(p.shown, None, "back to the project it came forward over");
     }
 
     #[test]

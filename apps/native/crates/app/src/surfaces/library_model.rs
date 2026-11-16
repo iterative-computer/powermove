@@ -333,6 +333,25 @@ pub fn delete_alert(name: &str) -> Alert<bool> {
     )
     .critical()
 }
+/// Why Home's Rename was refused, for a project it cannot rename closed.
+pub fn rename_refused_alert(failure: &Failure, name: &str) -> Option<Alert<bool>> {
+    let (message, detail) = match failure {
+        Failure::UnsavedWork => (
+            format!("“{name}” has changes that weren’t saved."),
+            "Open it to recover them, then rename it.",
+        ),
+        Failure::RenameByOpening => (
+            format!("“{name}” is saved as a file."),
+            "Open it to rename it.",
+        ),
+        _ => return None,
+    };
+    Some(Alert::new(
+        message,
+        detail,
+        vec![Button::new("OK", false).default()],
+    ))
+}
 pub fn error_alert(code: ServiceErrorCode, name: &str) -> Alert<bool> {
     // Use the approved generic error for a vanished, unnamed target.
     let code = if name.is_empty()
@@ -355,4 +374,9 @@ pub enum Failure {
     Unsupported(&'static str),
     Stale,
     Busy,
+    /// Rename refused: the project has work a session left without saving,
+    /// which its next open offers to recover.
+    UnsavedWork,
+    /// Rename refused: the project is a file, renamed by opening it.
+    RenameByOpening,
 }

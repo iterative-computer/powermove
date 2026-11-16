@@ -292,22 +292,24 @@ async function event(
     detail,
   );
 }
-test("native search input, sidebar activation and window shortcuts reach the model", async () => {
+test("the window's native search and sidebar reach the model; its shortcuts stay on the page", async () => {
   const { model, effects } = fixture();
   model.show();
   const { root, commits } = recorder();
   const render = () =>
     root.render(<SettingsPanel model={model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Search", "text-field").id, "input", {
-    value: "instant",
-  });
-  await Promise.resolve();
+  // AppKit's search field and source list (PM-375) act on the model.
+  expect(root.inspect().nodes.some((n) => n.props.label === "Search")).toBe(
+    false,
+  );
+  await model.search("instant");
   await render();
   expect(model.visibleSections).toEqual(["general"]);
   await model.search("");
   await render();
-  await event(root, find(root, "Accounts", "list-item").id, "click");
+  model.select("accounts");
+  await render();
   expect(model.active).toBe("accounts");
   await event(root, find(root, "Settings").id, "keydown", {
     key: "f",
@@ -383,16 +385,10 @@ test("AX contract has labelled groups, selected neutral sidebar, search/list fir
   expect(nodes.find((n) => n.props.id === "settings")?.props.role).toBe(
     "group",
   );
-  expect(find(root, "Settings sections", "list").props.role).toBe("list");
-  expect(find(root, "General", "list-item").props["aria-selected"]).toBe(true);
-  expect(find(root, "General", "list-item").props.style).toHaveProperty(
-    "background",
-    { token: "colors.fill_strong" },
-  );
-  expect(row.focusOrder.slice(0, 2)).toEqual([
-    find(root, "Search", "text-field").id,
-    find(root, "Settings sections", "list").id,
-  ]);
+  // The sections and the search field are AppKit's, beside the page.
+  expect(nodes.some((n) => n.props.label === "Settings sections")).toBe(false);
+  expect(find(root, "General").props.role).toBe("group");
+  expect(row.focusOrder.length).toBeGreaterThan(0);
   expect(
     nodes
       .filter((n) => n.props["data-pm-component"] === "text-field")
@@ -466,19 +462,12 @@ test("actual AccessKit projection contains every node, group labels, selection a
   expect(ax).toHaveLength(root.inspect().nodes.length);
   expect(ax.find((n) => n.label === "Settings")?.role).toBe("Group");
   expect(
-    ax.find((n) => n.label === "Settings sections" && n.role === "List"),
+    ax.find((n) => n.label === "General" && n.role === "Group"),
   ).toBeDefined();
-  expect(
-    ax.find((n) => n.label === "General" && n.role === "ListItem")?.selected,
-  ).toBe(true);
   expect(
     ax.find((n) => n.label === "Appearance" && n.role === "Group"),
   ).toBeDefined();
-  expect(ax.find((n) => n.label === "Search")?.role).toBe("TextInput");
-  expect(focusOrder.slice(0, 2)).toEqual([
-    find(root, "Search", "text-field").id,
-    find(root, "Settings sections", "list").id,
-  ]);
+  expect(focusOrder.length).toBeGreaterThan(0);
   root.dispose();
   f.model.dispose();
 });
@@ -543,7 +532,14 @@ test("view visual values are pm-design tokens, never lane-authored numbers or co
   const visit = (node: ts.Node) => {
     if (ts.isPropertyAssignment(node) && visual.test(node.name.getText(ast))) {
       const v = node.initializer;
-      if (!ts.isCallExpression(v) || v.expression.getText(ast) !== "t")
+      // A zero least size is structural (the kit validator's rule too).
+      const zeroLeast =
+        /^min(Width|Height)$/.test(node.name.getText(ast)) &&
+        v.getText(ast) === "0";
+      if (
+        !zeroLeast &&
+        (!ts.isCallExpression(v) || v.expression.getText(ast) !== "t")
+      )
         problems.push(node.getText(ast));
     }
     ts.forEachChild(node, visit);
@@ -563,7 +559,7 @@ test("frozen-contract native key delivery never requests retroactive cancellatio
   // Plan cancellation from actual accepted listener flags instead of marking
   // every synthetic event already canceled. Modifier-aware native planning is
   // a shell/API request, not a synchronous JS decision.
-  const target = find(root, "Search", "text-field").id;
+  const target = find(root, "Settings").id;
   await root.drive(target, "keydown", { key: "f", metaKey: true });
   expect(f.effects.at(-1)).toEqual(["focus"]);
   expect(root.inspect().fenced).toBe(false);
@@ -572,4 +568,66 @@ test("frozen-contract native key delivery never requests retroactive cancellatio
   replay(commits);
   root.dispose();
   f.model.dispose();
+});
+
+test("a search matching hundreds of commands lists a page the host takes: forty rows a section and the rest counted", async () => {
+  const { model } = fixture();
+  model.show();
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    id: `command${i}`,
+    menu: ["File", "Edit", "Layer", "Playback"][i % 4],
+    label: `Play Command ${i}`,
+    keys: [`⌥⌘${i % 10}`],
+    chords: [],
+    changed: i % 3 === 0,
+    fixed: false,
+    recording: false,
+  }));
+  model.publish({
+    ...model.publication,
+    revision: 2,
+    shortcuts: { preset: "after-effects", changed: true, rows, conflicts: [] },
+  });
+  const { root, commits } = recorder();
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  await model.search("p");
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  const nodes = root.inspect().nodes;
+  const shown = nodes.filter((n) =>
+    String(n.props.id ?? "").startsWith("settings.shortcut."),
+  );
+  expect(shown).toHaveLength(40);
+  expect(
+    nodes.some(
+      (n) =>
+        n.text === "360 more in Shortcuts. Keep typing to narrow the search.",
+    ),
+  ).toBe(true);
+  // Every commit fits the host's argument quota (1 MiB) with room.
+  for (const commit of commits)
+    expect(JSON.stringify(commit).length).toBeLessThan(512 * 1024);
+  root.dispose();
+  model.dispose();
+});
+
+test("the installed extensions take their rows' height (PM-386): every row up to forty in the page, a forty-row list past that", async () => {
+  for (const [count, floor] of [
+    [39, 39],
+    [60_000, 40],
+  ] as const) {
+    const f = fixture({
+      extensions: Array.from({ length: count }, (_, i) => extension(i)),
+    });
+    f.model.show("extensions");
+    const { root } = recorder();
+    await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+    const list = root
+      .inspect()
+      .nodes.find((n) => n.props.id === "settings.extensions");
+    expect((list?.props.metadata as { rowFloor?: number })?.rowFloor).toBe(
+      floor,
+    );
+    root.dispose();
+    f.model.dispose();
+  }
 });

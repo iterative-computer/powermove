@@ -119,6 +119,15 @@ pub enum ShellCall {
         id: String,
         name: String,
     },
+    /// Renames a library project no window has open (Home's Rename): its
+    /// saved name and its row. Refused, with [`ShellReply::HasUnsavedWork`],
+    /// while it has work from a session that ended without saving, which its
+    /// next open offers to recover; refused with `AlreadyOpen` when it is
+    /// open (a window renames it as an edit).
+    Rename {
+        project: String,
+        name: String,
+    },
     /// The library's takes (v1's `takes` store), newest first.
     Takes,
     /// Replaces the takes only while they still equal `expected` (what the
@@ -346,6 +355,9 @@ pub enum ShellReply {
     /// (`computer`, `user`, `at` in milliseconds) where the record says.
     Leftovers(Vec<Value>),
     Changed(bool),
+    /// [`ShellCall::Rename`] of a project with work a session left without
+    /// saving: open it to recover that work first.
+    HasUnsavedWork,
 }
 pub(crate) enum Destination {
     Library(String),
@@ -1072,6 +1084,7 @@ impl Kernel {
                     .restore(&id)
                     .map_err(failure)?,
             )),
+            ShellCall::Rename { project, name } => self.rename_closed(&project, &name),
             ShellCall::Duplicate { project, id, name } => {
                 let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
                 if w.store().load(&id).map_err(failure)?.is_some() {
@@ -1367,6 +1380,50 @@ impl Kernel {
             recovery_copy: None,
             displaced,
         })
+    }
+    /// [`ShellCall::Rename`].
+    fn rename_closed(&mut self, project: &str, name: &str) -> Result<ShellReply, KernelFailure> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(failure("A project needs a name"));
+        }
+        if let Some(s) = self.sessions.values().find(|s| {
+            s.handle.project == project
+                || matches!(&s.destination, Destination::Library(slot) if slot == project)
+        }) {
+            return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
+        }
+        let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
+        let Some(p) = w.store().load(project).map_err(failure)? else {
+            // A file's entry: the file holds the name, renamed by opening it.
+            return Ok(ShellReply::Changed(false));
+        };
+        // Work a session left without saving is replayed onto what the slot
+        // holds; a rename would change that base, and the next open could
+        // not offer the work. A copy of another project keeps its journal
+        // under that project's id (PM-360).
+        let journals = [Some(project.to_owned()), p
+            .session
+            .as_ref()
+            .and_then(|m| m.get("copyOf")?.get("entry")?.as_str())
+            .map(str::to_owned)];
+        let unsaved = journals.iter().flatten().any(|id| {
+            self.project_dir(id)
+                .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty())
+        });
+        if unsaved || p.journal_applied > 0 {
+            return Ok(ShellReply::HasUnsavedWork);
+        }
+        let w = self.library.as_ref().unwrap();
+        w.save_project(
+            project,
+            with_identity(p.project, project, Some(name)),
+            p.history.unwrap_or(Value::Null),
+            p.workspace.unwrap_or(Value::Null),
+            p.session.unwrap_or(Value::Null),
+        )
+        .map_err(failure)?;
+        Ok(ShellReply::Changed(true))
     }
     fn duplicate_slot(
         &self,

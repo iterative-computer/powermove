@@ -512,6 +512,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         Command::Load(_) => String::new(),
                     };
+                    let refused = rename_refused_alert(&failure, &name);
                     let code = match failure {
                         Failure::Service(code) => code,
                         Failure::Kernel { code, detail } => {
@@ -520,7 +521,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         _ => ServiceErrorCode::Unavailable,
                     };
-                    let alert = error_alert(code, &name);
+                    let alert = refused.unwrap_or_else(|| error_alert(code, &name));
                     self.effects
                         .push_back(HostEffect::Announce(alert.message.clone()));
                     self.prompt(alert, PromptAction::Error);
