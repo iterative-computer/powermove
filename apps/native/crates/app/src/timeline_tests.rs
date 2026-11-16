@@ -3768,3 +3768,38 @@ fn agent_coedit_preview_hold_releases_on_commit_and_escape(cx:&mut TestAppContex
         if !cancel {s.undo(cx);}
     }
 }
+
+/// Retained outlines and scene-positioned names agree after mounting a later
+/// range: the first visible name stays beside its own track, not shifted by
+/// the rows that were left above the viewport.
+#[gpui::test]
+fn retained_names_stay_beside_tracks_after_a_large_wheel_jump(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 200);
+    let first = "[\"layer\",\"l0\"]";
+    let before = s.vcx.debug_bounds("timeline:row:[\"layer\",\"l0\"]").unwrap();
+    let origin = f32::from(before.origin.y) - s.surface.read_with(&s.vcx, |t, _| {
+        t.scene().unwrap().scroll_for(first).unwrap() as f32
+    });
+    let at = s.at(2, 0.2);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let (id, top, scroll) = s.surface.read_with(&s.vcx, |t, _| {
+        let scene = t.scene().unwrap();
+        let height = t.frame().unwrap().viewport.height - tokens().metrics.ruler as f64;
+        let scroll = t.scroll_y();
+        let visible = scene.visible_range(scroll, height);
+        assert!(visible.start > 0);
+        assert!(visible.end > visible.start + 1);
+        let (row, top, _) = scene.span(visible.start + 1).unwrap();
+        (row.id.clone(), top, scroll)
+    });
+    let selector: &'static str = Box::leak(format!("timeline:row:{id}").into_boxed_str());
+    let header = s.vcx.debug_bounds(selector).expect("visible retained row name");
+    let expected = origin + (top - scroll) as f32;
+    assert!((f32::from(header.origin.y) - expected).abs() < 0.75,
+        "name {id} at {:?}, its track at {expected}", header.origin.y);
+}
