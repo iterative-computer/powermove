@@ -527,6 +527,61 @@ fn wheel_steps(cx: &mut TestAppContext, panel: &str, layer: bool) {
     assert_eq!(row(&mut vcx, 10), top + px(200. - 200.));
 }
 /// A panel in a 100 pt slot, as a dock gives one.
+/// PM-387: a list built while its slot was short asks for the rows that show
+/// once the slot grows (its page held only the rows of the short slot).
+#[gpui::test]
+fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let ops = node_ops(
+        1,
+        0,
+        "virtual-list",
+        json!({"count": 100, "range": [0, 2], "itemSize": 20, "style": {"width": 100}}),
+        &["rangechange"],
+    );
+    let surface = synthetic(&rig, ops);
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        Tall { child, height: 40. }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let last_range = |vcx: &mut VisualTestContext| {
+        view.update(vcx, |v, _| {
+            v.log
+                .iter()
+                .rev()
+                .find(|(_, e, _)| e == "rangechange")
+                .and_then(|(_, _, d)| d.range)
+        })
+    };
+    assert_eq!(last_range(&mut vcx), Some((0, 2)));
+    root.update(&mut vcx, |r, cx| {
+        r.height = 200.;
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(last_range(&mut vcx), Some((0, 10)));
+}
+/// A slot whose height the test sets.
+struct Tall {
+    child: Entity<SurfaceView>,
+    height: f32,
+}
+impl Render for Tall {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(100.)).h(px(self.height)).flex().flex_col().child(
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().w(px(100.)).h(px(self.height))),
+        )
+    }
+}
 struct Slot {
     child: Entity<SurfaceView>,
 }
