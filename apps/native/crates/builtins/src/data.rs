@@ -40,7 +40,7 @@ pub(crate) fn effect_binding_rows<'a>(
         .iter()
         .flat_map(|r| match r["kind"].as_str() {
             Some("parameter") => vec![&r["parameter"]],
-            Some("summary" | "point") => r["parameters"]
+            Some("summary" | "point" | "ramp") => r["parameters"]
                 .as_array()
                 .map(|list| list.iter().collect())
                 .unwrap_or_default(),
