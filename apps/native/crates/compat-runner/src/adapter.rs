@@ -14,6 +14,11 @@ use std::{
     sync::Arc,
 };
 
+/// How long a realm started before its project's open finished waits for
+/// the project (a 285 MB project opens in about five seconds; a recovery
+/// question waits on the person).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn model(value: &Value) -> pm_model::Value {
     pm_model::json::parse(&value.to_string()).expect("JSON model input")
 }
@@ -307,6 +312,16 @@ impl KernelAdapter {
     /// hundreds of megabytes of JSON, and a parsed copy of it on the way
     /// costs gigabytes the allocator keeps.
     pub fn stage(&mut self) -> Result<()> {
+        // Started while the project still opens (the realm and its bundle
+        // are made meanwhile, PM-384): its first publication is waited for
+        // here, a little at a time; a window whose open fails drops the host.
+        let deadline = std::time::Instant::now() + OPEN_WAIT;
+        while self.frozen.is_none()
+            && self.kernel.published(&self.project).is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let p = self.published()?;
         let document = pm_model::json::to_canonical_string(&realized(&p));
         let selection = selection_wire(&p.selection);

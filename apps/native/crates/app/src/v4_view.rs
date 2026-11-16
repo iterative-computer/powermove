@@ -32,10 +32,13 @@ pub struct Natives {
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
+/// The rows sit in a driven scroll layer (P-SCROLL-LAYER) the surface steps
+/// with its own: a wheel step inside the recorded rows replays them shifted.
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
     pub column: Cell<f32>,
+    handle: ScrollHandle,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
     surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
@@ -73,14 +76,44 @@ impl Outline {
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
     }
-    fn offset(&self, first: &str) -> f32 {
-        let top = self
-            .scene
+    /// The first JS row's top in the rows' content (all rows' height).
+    fn top(&self, first: &str) -> f32 {
+        self.scene
             .borrow()
             .as_ref()
             .and_then(|s| s.scroll_for(first))
-            .unwrap_or(0.) as f32;
-        top - self.scroll_y.get()
+            .unwrap_or(0.) as f32
+    }
+    fn content_height(&self) -> f32 {
+        self.scene
+            .borrow()
+            .as_ref()
+            .map_or(0., |s| s.content_height()) as f32
+    }
+    /// A wheel step that moved only the rows: the outline's layer replays
+    /// them at `scroll_y` without its view rendering again. False when the
+    /// view has to render (the surface notifies it then, through
+    /// [`Self::scrolled`]).
+    pub fn step(
+        &self,
+        scroll_y: f32,
+        rows: Option<(usize, usize)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let stepped =
+            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
+        if stepped {
+            self.scroll_y.set(scroll_y);
+            // Rows past JS's window are asked for as before; they arrive as
+            // a publication and draw the view.
+            if let (Some(rows), Some(view)) =
+                (rows, self.view.borrow().as_ref().and_then(|v| v.upgrade()))
+            {
+                view.update(cx, |v, cx| v.outline_rows(rows, cx));
+            }
+        }
+        stepped
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
         let moved = self.scroll_y.get() != scroll_y || self.column.get() != column;
@@ -2290,7 +2323,7 @@ impl SurfaceView {
                 .absolute()
                 .left(px(0.))
                 .right(px(0.))
-                .top(px(self.natives.outline.offset(first)));
+                .top(px(self.natives.outline.top(first)));
         }
         #[cfg(test)]
         {
@@ -2619,7 +2652,33 @@ impl SurfaceView {
         if node.sheet_body && in_fitted_sheet {
             return self.sheet_body(element.into_any_element(), id);
         }
-        self.place(element.into_any_element(), node, window, cx)
+        let placed = self.place(element.into_any_element(), node, window, cx);
+        if node.outline_first.is_some() {
+            return self.outline_layer(id, placed);
+        }
+        placed
+    }
+    /// The timeline outline's rows in a layer the surface scrolls: all
+    /// rows' height of content at the surface's offset, JS's window of rows
+    /// placed at its first row's top.
+    fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
+        let outline = &self.natives.outline;
+        outline
+            .handle
+            .set_offset(point(px(0.), px(-outline.scroll_y.get())));
+        div()
+            .id(("v4-outline-rows", id))
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .overflow_y_scroll()
+            .track_scroll(&outline.handle)
+            .scroll_layer_driven()
+            .child(div().w_full().h(px(outline.content_height())))
+            .child(rows)
+            .into_any_element()
     }
     /// A sheet shown in its own window (Export) is the whole window.
     fn own_sheet(&self, node: &NodeView, window: &Window) -> bool {

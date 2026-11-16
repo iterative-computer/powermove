@@ -119,8 +119,12 @@ pub(crate) fn shader_cache() -> Option<PathBuf> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
-/// A job whose process cannot draw with the fonts it was asked to
-/// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
+/// The longest an export waits for the app to send one layer an extension
+/// draws (the app itself fails a request its extensions stop progressing on).
+const LAYER_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// The longest the job's own font thread may take to come round (it turns
+/// every 50 ms; a loaded machine delays it, it does not stop it).
+const FONT_TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The export stopped because the app's fonts could not be compared with the
 /// export's: what did not answer, not a change of fonts.
 pub(crate) fn fonts_uncompared_message(why: &str) -> String {
@@ -128,6 +132,8 @@ pub(crate) fn fonts_uncompared_message(why: &str) -> String {
         "Rendering stopped because Powermove could not check the export's fonts: {why}. Try again."
     )
 }
+/// A job whose process cannot draw with the fonts it was asked to
+/// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
 pub const FONTS_CHANGED: &str =
     "Rendering stopped because the fonts on this Mac changed. Try again.";
 /// A job whose fonts resolved some text to another face (another file,
@@ -1859,9 +1865,12 @@ impl JobFonts {
         let asked = std::time::Instant::now();
         while self.turns.load(Ordering::Acquire) < turn {
             let _ = self.wake.try_send(());
-            if asked.elapsed() > std::time::Duration::from_secs(10) {
+            if asked.elapsed() > FONT_TURN_WAIT {
                 self.changed.store(true, Ordering::Release);
-                return Err("the font service's thread did not answer".to_owned());
+                return Err(format!(
+                    "the export's font thread did not come round in {} s",
+                    FONT_TURN_WAIT.as_secs()
+                ));
             }
             std::thread::sleep(std::time::Duration::from_micros(200));
         }
@@ -2017,9 +2026,12 @@ impl JobRasters {
         ))
     }
     /// The parent's reply, waited for until it comes, the export is
-    /// cancelled or the parent ends.
+    /// cancelled or the parent ends. A busy machine makes it slow, never a
+    /// failure: the app answers with an error itself when the export's
+    /// extensions stop making progress, so this only guards against an app
+    /// that is alive but never answers at all.
     fn wait(&self, rx: &std::sync::mpsc::Receiver<Answers>) -> Option<Answers> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LAYER_WAIT;
         while std::time::Instant::now() < deadline {
             if self.stop.load(Ordering::Acquire) {
                 return None;
@@ -2030,10 +2042,10 @@ impl JobRasters {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
-        *self.error.lock().unwrap() = Some(
-            "the app did not send the layer within 120 s (it answers the export's extension layers)"
-                .into(),
-        );
+        *self.error.lock().unwrap() = Some(format!(
+            "the app did not send the layer within {} min (it answers the export's extension layers)",
+            LAYER_WAIT.as_secs() / 60
+        ));
         None
     }
 }

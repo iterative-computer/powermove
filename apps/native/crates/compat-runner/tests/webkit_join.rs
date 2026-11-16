@@ -2,7 +2,7 @@
 //! thread with no window, activation or Dock icon, so it never takes focus.
 #[cfg(target_os = "macos")]
 mod mac {
-    use objc2::MainThreadMarker;
+    use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
     use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSString};
     use pm_compat_host::*;
@@ -432,6 +432,97 @@ mod mac {
                             web.web_view().registeredDraggedTypes().count(),
                             0,
                             "the loaded page became a drag destination"
+                        );
+                        // PM-294: a panel leaving its slot while the page
+                        // holds the keyboard gives it back to the window's
+                        // own view (the input indicator sat at a hidden
+                        // panel's caret).
+                        let frame = objc2_foundation::NSRect::new(
+                            objc2_foundation::NSPoint::ZERO,
+                            objc2_foundation::NSSize::new(640., 480.),
+                        );
+                        let window = unsafe {
+                            objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer(
+                                objc2_app_kit::NSWindow::alloc(mtm),
+                                frame,
+                                objc2_app_kit::NSWindowStyleMask::Borderless,
+                                objc2_app_kit::NSBackingStoreType::Buffered,
+                                false,
+                            )
+                        };
+                        unsafe { window.setReleasedWhenClosed(false) };
+                        let content = objc2_app_kit::NSView::initWithFrame(
+                            objc2_app_kit::NSView::alloc(mtm),
+                            frame,
+                        );
+                        window.setContentView(Some(&content));
+                        content.addSubview(web.web_view());
+                        let holds = |w: &objc2_app_kit::NSWindow, v: &objc2_app_kit::NSView| {
+                            w.firstResponder().is_some_and(|r| {
+                                std::ptr::eq(
+                                    &*r as *const _ as *const (),
+                                    v as *const _ as *const (),
+                                )
+                            })
+                        };
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        assert!(holds(&window, web.web_view()), "the page took the keyboard");
+                        web.detach(1)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the window's own view has the keyboard back"
+                        );
+                        // In the app every panel shares one attached page: a
+                        // panel hidden or closed is only its region gone. A
+                        // press in the panel at the left, then that region
+                        // leaves: the window's view has the keyboard back; a
+                        // region change that keeps it showing leaves it.
+                        let press = unsafe {
+                            objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                                objc2_app_kit::NSEventType::LeftMouseDown,
+                                objc2_foundation::NSPoint::new(100., 380.),
+                                objc2_app_kit::NSEventModifierFlags::empty(),
+                                0.,
+                                window.windowNumber(),
+                                None,
+                                0,
+                                1,
+                                1.,
+                            )
+                        }
+                        .ok_or("no synthetic press")?;
+                        let left = Rect::new(0., 0., 200., 480.);
+                        let right = Rect::new(400., 0., 240., 480.);
+                        web.set_regions_with_transparent_overlays(vec![left, right], vec![])?;
+                        web.present(viewport)?;
+                        web.web_view().mouseDown(&press);
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        web.set_regions_with_transparent_overlays(vec![left], vec![])?;
+                        web.present(viewport)?;
+                        assert!(holds(&window, web.web_view()), "a panel still showing lost the keyboard");
+                        web.set_regions_with_transparent_overlays(vec![right], vec![])?;
+                        web.present(viewport)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the hidden panel's page kept the keyboard"
+                        );
+                        // Two tabs of one group share a body: the page knows
+                        // its panels by name, and a press belongs to the one
+                        // shown there when it lands.
+                        web.set_regions_with_transparent_overlays(vec![left], vec![])?;
+                        web.set_bodies(vec![("notes".into(), left)]);
+                        web.present(viewport)?;
+                        web.web_view().mouseDown(&press);
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        web.present(viewport)?;
+                        web.set_bodies(vec![("notes".into(), left), ("logos".into(), right)]);
+                        web.present(viewport)?;
+                        assert!(holds(&window, web.web_view()), "a panel still showing lost the keyboard");
+                        web.set_bodies(vec![("logos".into(), left)]);
+                        web.present(viewport)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the page kept the keyboard for a tab no longer shown"
                         );
                         web.destroy(1)?;
                         store_view(&app, mtm, &host)?;

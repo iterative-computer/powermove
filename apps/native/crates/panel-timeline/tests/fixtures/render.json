@@ -3389,6 +3389,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -3416,6 +3417,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -3443,6 +3445,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -3470,6 +3473,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -7013,6 +7017,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -7040,6 +7045,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -7067,6 +7073,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -7094,6 +7101,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -10621,6 +10629,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -10648,6 +10657,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -10675,6 +10685,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -10702,6 +10713,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -14229,6 +14241,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -14256,6 +14269,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -14283,6 +14297,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -14310,6 +14325,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -16255,10 +16271,10 @@
               769.0
             ],
             "selected": true,
-            "top": 25212,
-            "bottom": 34204,
+            "top": 31368,
+            "bottom": 42424,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 16777215,
@@ -16459,10 +16475,10 @@
               769.0
             ],
             "selected": false,
-            "top": 4737096,
-            "bottom": 8224125,
+            "top": 6513507,
+            "bottom": 9013641,
             "grid": 14606046,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 14606046,
@@ -16542,7 +16558,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16621,7 +16637,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16668,10 +16684,10 @@
               769.0
             ],
             "selected": false,
-            "top": 22899,
-            "bottom": 34975,
+            "top": 28798,
+            "bottom": 39853,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 10219260,
@@ -16700,7 +16716,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16779,7 +16795,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16826,10 +16842,10 @@
               769.0
             ],
             "selected": false,
-            "top": 22899,
-            "bottom": 34975,
+            "top": 28798,
+            "bottom": 39853,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 14153982,
@@ -16858,7 +16874,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16937,7 +16953,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -16984,10 +17000,10 @@
               769.0
             ],
             "selected": false,
-            "top": 24104,
-            "bottom": 36699,
+            "top": 30284,
+            "bottom": 41834,
             "grid": 11464651,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 11464651,
@@ -17016,7 +17032,7 @@
             445.0,
             26.0
           ],
-          "color": 9558706,
+          "color": 11006665,
           "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
@@ -17853,6 +17869,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -17880,6 +17897,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -17899,7 +17917,7 @@
             438.0,
             26.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -17907,6 +17925,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -17926,7 +17945,7 @@
             438.0,
             26.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -17934,6 +17953,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -19879,10 +19899,10 @@
               769.0
             ],
             "selected": true,
-            "top": 25212,
-            "bottom": 34204,
+            "top": 31368,
+            "bottom": 42424,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 16777215,
@@ -20083,10 +20103,10 @@
               769.0
             ],
             "selected": false,
-            "top": 4737096,
-            "bottom": 8224125,
+            "top": 6513507,
+            "bottom": 9013641,
             "grid": 14606046,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 14606046,
@@ -20166,7 +20186,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20245,7 +20265,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20292,10 +20312,10 @@
               769.0
             ],
             "selected": false,
-            "top": 22899,
-            "bottom": 34975,
+            "top": 28798,
+            "bottom": 39853,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 10219260,
@@ -20324,7 +20344,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20403,7 +20423,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20450,10 +20470,10 @@
               769.0
             ],
             "selected": false,
-            "top": 22899,
-            "bottom": 34975,
+            "top": 28798,
+            "bottom": 39853,
             "grid": 10219260,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 14153982,
@@ -20482,7 +20502,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20561,7 +20581,7 @@
             4.0,
             4.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.8,
           "radius": 0.0,
           "stroke": 0.0,
@@ -20608,10 +20628,10 @@
               769.0
             ],
             "selected": false,
-            "top": 24104,
-            "bottom": 36699,
+            "top": 30284,
+            "bottom": 41834,
             "grid": 11464651,
-            "gridAlpha": 0.30000001192092896,
+            "gridAlpha": 0.4000000059604645,
             "gridFrom": 320.0,
             "gridStep": 100.0,
             "ring": 11464651,
@@ -20640,7 +20660,7 @@
             445.0,
             26.0
           ],
-          "color": 9558706,
+          "color": 11006665,
           "opacity": 0.72,
           "radius": 0.0,
           "stroke": 0.0,
@@ -21477,6 +21497,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -21504,6 +21525,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -21523,7 +21545,7 @@
             438.0,
             26.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 0.7,
           "radius": 0.0,
           "stroke": 0.0,
@@ -21531,6 +21553,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -21550,7 +21573,7 @@
             438.0,
             26.0
           ],
-          "color": 16777215,
+          "color": 13433087,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -21558,6 +21581,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -25085,6 +25109,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -25112,6 +25137,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -25139,6 +25165,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -25166,6 +25193,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
@@ -28693,6 +28721,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -28720,6 +28749,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": "exclamationmark.triangle.fill",
             "lockSymbol": null
           },
@@ -28747,6 +28777,7 @@
           "fontSize": 11.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": null
           },
@@ -28774,6 +28805,7 @@
           "fontSize": 12.0,
           "detail": {
             "truncate": "tail",
+            "weight": 600,
             "offlineSymbol": null,
             "lockSymbol": "lock"
           },
