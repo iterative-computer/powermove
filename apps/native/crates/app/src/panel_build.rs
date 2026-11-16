@@ -80,6 +80,8 @@ mod tests {
 /// Slot-local event clock, retained across GPUI renders.
 #[derive(Clone, Debug)]
 pub struct State {
+    /// Headless proof samples a fixed event time; live builds use the clock.
+    pub sampled_at: Option<std::time::Instant>,
     pub explicit: bool,
     pub planned: std::collections::BTreeSet<usize>,
     pub stage: Stage,
@@ -93,7 +95,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let now = std::time::Instant::now();
-        Self { explicit: false, planned: Default::default(), stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
+        Self { sampled_at: None, explicit: false, planned: Default::default(), stage: Stage::Wake, started: now, changed: now, row: 0, pending: Default::default(), complete: false, committed: Default::default() }
     }
 }
 impl State {
@@ -167,6 +169,7 @@ mod wiring_tests {
 
 
 impl State {
+    pub fn now(&self) -> std::time::Instant { self.sampled_at.unwrap_or_else(std::time::Instant::now) }
     pub fn resolve(&self, now: std::time::Instant) -> f32 {
         if self.stage == Stage::Ready { pm_design::dots::resolve(now.saturating_duration_since(self.changed).as_secs_f32()) } else { 0. }
     }

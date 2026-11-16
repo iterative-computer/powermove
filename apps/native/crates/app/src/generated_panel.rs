@@ -163,7 +163,7 @@ fn inside_ground(point: [f32;2], size: [f32;2], radius: f32) -> bool {
 }
 
 fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
-    let resolve=build.map_or(1.,|b|b.resolve(std::time::Instant::now()));
+    let resolve=build.map_or(1.,|b|b.resolve(b.now()));
     if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().rounded(px(t.radius.lg)).bg(rgb(t.colors.panel));}
     let color=t.colors.panel;
     let radius=t.radius.lg;
@@ -216,12 +216,12 @@ fn control_fraction(control: &Value, current: &Value) -> f32 {
 fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bool) -> f32 {
     let Some(build)=build else {return 1.;};
     if build.stage==panel_build::Stage::Ready {return 1.;}
-    build.committed.get(&index).map_or(0.,|at| if reduced {panel_build::reveal(at.elapsed().as_secs_f32(),true)} else {1.})
+    build.committed.get(&index).map_or(0.,|at| if reduced {panel_build::reveal(build.now().saturating_duration_since(*at).as_secs_f32(),true)} else {1.})
 }
 fn dot_filter(build: Option<&panel_build::State>, index: Option<usize>, t: &pm_design::Tokens) -> Vec<Filter> {
     let Some(build)=build else {return vec![];};
     if t.accessibility.reduce_motion {return vec![];}
-    let now=std::time::Instant::now();
+    let now=build.now();
     let detail=index.or(Some(0)).and_then(|i|build.committed.get(&i)).map_or(0.6,|at|pm_design::dots::detail(now.saturating_duration_since(*at).as_secs_f32()));
     vec![Filter::DotMatrix{detail,resolve:build.resolve(now),accent:t.colors.accent}]
 }
@@ -1445,6 +1445,7 @@ mod panel_build_capture {
                 let count = if matches!(stage,panel_build::Stage::Ready|panel_build::Stage::Erase) { 5 } else if stage == panel_build::Stage::Rest { row+1 } else { row };
                 for index in 0..count { state.committed.insert(index, std::time::Instant::now() - std::time::Duration::from_secs(2)); }
                 if stage == panel_build::Stage::Ink { state.committed.insert(row, std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed)); }
+                state.sampled_at=Some(std::time::Instant::now());
                 let definition = json!({"title":"Colour grade","controls":[
                     {"type":"slider","label":"Exposure","def":0.35,"min":-1,"max":1},
                     {"type":"slider","label":"Contrast","def":12,"min":0,"max":30},
