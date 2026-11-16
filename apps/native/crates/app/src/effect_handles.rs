@@ -784,8 +784,11 @@ impl GizmoSurface {
             }
             Edit::Value(_) => {
                 if let Some((i, j)) = g.effect_picker {
+                    let Some(time) = g.effect_drag.as_ref().map(|d| d.time) else {
+                        return;
+                    };
                     g.effect_controls[i].stops[j].color = entity.read(cx).color.0.map(f64::from);
-                    if let Some(command) = g.effect_controls[i].stop_command(g.host.time(cx)) {
+                    if let Some(command) = g.effect_controls[i].stop_command(time) {
                         g.queue.push_back(Job::Step(vec![command], true));
                         g.pump(cx);
                     }

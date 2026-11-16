@@ -34,6 +34,7 @@ struct Recorder {
     /// The composition size the viewer reports, when not 640 by 360.
     size: Cell<Option<[f64; 2]>>,
     scale: Cell<Option<f64>>,
+    time: Cell<Option<f64>>,
     /// Compositions a double-clicked precomp asked to open.
     opened: RefCell<Vec<String>>,
     /// Model geometry a part pick loads, and the parts it focused.
@@ -120,7 +121,7 @@ impl Host for Recording {
         self.0.canvas_focuses.set(self.0.canvas_focuses.get() + 1);
     }
     fn time(&self, _: &App) -> f64 {
-        0.5
+        self.0.time.get().unwrap_or(0.5)
     }
     fn playing(&self, _: &App) -> bool {
         false
@@ -3282,7 +3283,7 @@ fn gradient_stop_delete_key_removes_selected_stop_and_undo_restores_it(cx: &mut 
 }
 #[gpui::test]
 fn gradient_stop_double_click_opens_anchored_picker_and_edits_rgba(cx: &mut TestAppContext) {
-    let mut s = stage_on(cx, &gradient_stop_project(false));
+    let mut s = stage_on(cx, &gradient_stop_project(true));
     add_middle_stop(&mut s, cx);
     let at = ramp_at(&s, 0.5);
     click(&mut s, cx, at, Modifiers::none(), 2);
@@ -3296,9 +3297,12 @@ fn gradient_stop_double_click_opens_anchored_picker_and_edits_rgba(cx: &mut Test
     picker.update(&mut s.vcx, |p,cx| p.edit_rgba([1.,0.,0.5,1.],cx));
     let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
     assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,1.]);
+    // A playhead publication cannot retarget the ongoing colour gesture.
+    s.recorder.time.set(Some(1.));
     picker.update(&mut s.vcx, |p,cx|p.edit_rgba([1.,0.,0.5,0.25],cx));
     let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
     assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,0.25]);
+    s.recorder.time.set(None);
     picker.update(&mut s.vcx, |p,cx|p.finish(true,cx));
     let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
     s.refresh(cx);
