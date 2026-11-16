@@ -743,7 +743,12 @@ define_class!(
                 });
                 beside && !(stateful && state.disabled.contains(name))
             } else {
-                true
+                // A row built when its menu opens (a panel, a workspace, a
+                // layer kind) names its command; a sheet holds it too.
+                let command = item
+                    .representedObject()
+                    .and_then(|o| o.downcast_ref::<NSString>().map(|s| s.to_string()));
+                command.is_none_or(|c| !sheet_up() || menu::runs_beside_sheet(&c, false))
             }
         }
 
@@ -7182,9 +7187,10 @@ pub fn install_menus() {
                         item.setAction(Some(sel!(submenuAction:)));
                     }
                 }
-            } else if menu::SUBMENUS.contains(&spec.command.as_str()) {
-                unsafe { item.setAction(None) };
             }
+            // Panels, Workspace and Open Recent keep `act:`: an item with no
+            // action is disabled in an auto-enabling menu, and through the
+            // shell's `validateMenuItem` the parent dims only for a sheet.
             submenu.addItem(&item);
             index += 1;
         }
