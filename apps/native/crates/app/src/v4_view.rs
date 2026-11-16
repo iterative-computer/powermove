@@ -1268,7 +1268,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -1807,6 +1807,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -1837,8 +1841,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -3753,7 +3764,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
