@@ -2034,6 +2034,7 @@ impl Controller {
                     v.mcp.awaiting_recovery(None);
                     v.after_open.fail();
                     v.end_ghost(cx);
+                    v.reset_extensions();
                     v.message = "Opening cancelled. Recovery data is kept.".into();
                     cx.notify();
                     return;
