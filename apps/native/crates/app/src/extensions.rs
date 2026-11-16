@@ -1746,11 +1746,13 @@ impl Controller {
             return None;
         }
         let t = self.host.borrow().tokens.clone();
+        // Layout uses the same full-width body as native rows. Splitter
+        // grabs are protected separately by the shell's presentation mask.
         let body = layout::Rect {
-            x: bounds.x + t.metrics.border,
+            x: bounds.x,
             y: bounds.y + t.metrics.header,
-            w: (bounds.w - t.metrics.border * 2.).max(0.),
-            h: (bounds.h - t.metrics.header - t.metrics.border).max(0.),
+            w: bounds.w.max(0.),
+            h: (bounds.h - t.metrics.header).max(0.),
         };
         self.extensions.hidden.remove(id);
         if self.extensions.panels.insert(id.to_owned(), body).is_none()
