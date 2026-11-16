@@ -1392,6 +1392,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexGrow" => {
                 if n.is_some_and(|n| n > 0.) {
                     e = e.flex_1();
+                } else if n == Some(0.) {
+                    // Takes no spare room (over a kit recipe's `flex_1`).
+                    e = e.flex_grow(0.);
                 }
             }
             "flexShrink" => {
@@ -1405,6 +1408,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexBasis" => {
                 if let Some(v) = len {
                     e = e.flex_basis(Length::from(v));
+                } else if value.as_str() == Some("auto") {
+                    // Its content's width (a rail as wide as its names).
+                    e = e.flex_basis(Length::Auto);
                 }
             }
             "borderRadius" => e = with(e, n, |e, n| e.rounded(px(n))),

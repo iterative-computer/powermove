@@ -139,7 +139,9 @@ export function EffectsPanel({
             tabIndex={0}
             style={{
               ...hitStyle,
+              flexGrow: 0,
               flexShrink: 0,
+              flexBasis: "auto",
               minWidth: token("metrics.label_column"),
               paddingLeft: token("metrics.gap"),
               paddingRight: token("metrics.gap"),
