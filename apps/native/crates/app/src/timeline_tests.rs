@@ -21,6 +21,8 @@ pub(crate) struct Recorder {
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
+    /// Ruler scrubs starting (`true`) and ending, as the app hears them.
+    pub scrubs: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -46,6 +48,9 @@ impl Delegate for Recording {
     }
     fn skim(&self, seconds: Option<f64>, _: &mut App) {
         self.0.skims.borrow_mut().push(seconds);
+    }
+    fn scrubbing(&self, on: bool, _: &mut App) {
+        self.0.scrubs.borrow_mut().push(on);
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
@@ -112,6 +117,24 @@ pub(crate) fn stage(cx: &mut TestAppContext, layers: usize) -> Stage {
     stage_project(cx, crate::v4_view_tests::project_json(layers))
 }
 pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
+    stage_with(cx, project, false)
+}
+/// The panel in a cached slot, as a dock holds it: a frame that renders no
+/// view replays the panel's last one.
+struct Docked {
+    child: Entity<SurfaceView>,
+}
+impl gpui::Render for Docked {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div().size_full().child(
+            self.child
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let rig = crate::v4_view_tests::rig_project("timeline", &project);
     let first = publication(&rig);
     let natives = Natives::default();
@@ -135,7 +158,20 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
         .borrow_mut()
         .insert("timeline".into(), surface.clone().into());
     let outline = natives.outline.clone();
-    let (view, vcx) = window(cx, &rig, first, natives);
+    let (view, vcx) = if docked {
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let child =
+                cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
+            Docked { child }
+        });
+        let vcx = vcx.clone();
+        vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
+    } else {
+        window(cx, &rig, first, natives)
+    };
     outline.bind(view.downgrade());
     let mut stage = Stage {
         rig,
@@ -1106,6 +1142,47 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
     assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
     assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
 }
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render and the written view's
+    // publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 2).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
@@ -1355,6 +1432,9 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
         s.rig.kernel.published(PROJECT).unwrap().revision(),
         revision
     );
+    // The app hears the scrub start before its first seek and end on
+    // release (PM-310: only Properties follows each frame meanwhile).
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
@@ -1796,7 +1876,8 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
     hover(&mut s, cx, at);
     assert!(s.recorder.skims.borrow().is_empty());
     s.recorder.skimming.set(true);
-    for seconds in [1.0, 2.0, 1.5] {
+    // (The pointer rests at 1.0 now: a skim starts once it moves.)
+    for seconds in [2.0, 1.0, 1.5] {
         let at = s.at(0, seconds);
         hover(&mut s, cx, at);
         let last = *s.recorder.skims.borrow().last().unwrap();
@@ -1821,6 +1902,104 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
 }
+/// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
+/// or in time (the viewer keeps the playhead's picture), nor does a move
+/// event that did not move the pointer; moving it does. A skim showing
+/// stays under the pointer as the time scrolls beneath it.
+#[gpui::test]
+fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 40);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    let skimmer = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+    wheel(&mut s, cx, point(px(0.), px(-40.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(0.), px(-200.)), Modifiers::control());
+    wheel(&mut s, cx, point(px(-60.), px(0.)), Modifiers::none());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()) > 0.);
+    assert_eq!(skimmer(&s), None);
+    assert!(s.recorder.skims.borrow().is_empty(), "the viewer keeps the playhead's picture");
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(skimmer(&s), None, "a move event that did not move the pointer");
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let shown = skimmer(&s);
+    assert!(shown.is_some(), "the pointer moved over the clips");
+    wheel(&mut s, cx, point(px(60.), px(0.)), Modifiers::none());
+    let now = skimmer(&s);
+    assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
+}
+/// A sheet that covered the tracks closes over a resting pointer (the
+/// Export sheet's buttons lie over the clips): the first sight of the pointer
+/// starts no skim, so the viewer keeps the playhead's picture; moving it does.
+#[gpui::test]
+fn the_pointer_met_again_where_it_rests_starts_no_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    s.vcx
+        .simulate_mouse_move(at + point(px(6.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+}
+/// PM-388, zoomed in: the pointer skimmed the clips, then the playhead moved
+/// (a key, a click, playback: the viewer is back on the playhead's frame).
+/// With the pointer resting, a time scroll slides other frames under it and
+/// a move event that does not move it comes: neither starts skimming again;
+/// moving the pointer does.
+#[gpui::test]
+fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_moved(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 4);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    // Zoomed in around the pointer.
+    wheel(&mut s, cx, point(px(0.), px(-300.)), Modifiers::control());
+    s.vcx
+        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims > 0, "the pointer moved over the clips");
+    // While the skim shows, a time scroll keeps it under the pointer.
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims >= 2, "a showing skim follows the time under the pointer");
+    // The playhead moves: the viewer shows its frame again.
+    *s.recorder.time.borrow_mut() = 0.5;
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(40.), px(0.)), Modifiers::none());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.skims.borrow().len(), skims, "nothing skims without the pointer moving");
+    s.vcx
+        .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
+}
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays
 /// from the playhead, not from a stale skimmer (review).
@@ -1831,6 +2010,9 @@ fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
     s.idle(cx);
     s.recorder.skimming.set(true);
     let at = s.at(0, 1.0);
+    // Coming over the tracks, then moving there: the skimmer shows.
+    s.vcx
+        .simulate_mouse_move(at - point(px(4.), px(0.)), None, Modifiers::none());
     s.vcx.simulate_mouse_move(at, None, Modifiers::none());
     s.idle(cx);
     let over = |s: &mut Stage| {

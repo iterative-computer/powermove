@@ -22,6 +22,24 @@ impl PanelClock {
     }
 }
 
+/// The clock the head and timecode show: paused during a ruler scrub, the
+/// time the scrub last asked for (`asked`, seconds), not yet the viewer's.
+pub fn scrub_shown(
+    mut clock: pm_protocol::clock::ClockSample,
+    playing: bool,
+    asked: Option<f64>,
+) -> pm_protocol::clock::ClockSample {
+    if !playing
+        && let Some(seconds) = asked.filter(|s| s.is_finite() && *s >= 0.)
+        && let Ok(ticks) = pm_protocol::common::Ticks::new(
+            (seconds * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64,
+        )
+    {
+        clock.media_time = ticks;
+    }
+    clock
+}
+
 /// The host instant a playing playhead and timecode stand for: the next
 /// vsync (`vsync`, CADisplayLink host seconds, the same clock as
 /// `HostMicros`), never before the sample's own `host_time`. Paused, the
@@ -281,6 +299,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // tick lands on. A sample's own time only moves when a new one
                     // arrives, so a late sample held the head a frame, then jumped two.
                     // Never before the sample itself (a run's pre-roll is ahead).
+                    // Scrubbing the ruler, the head and timecode stand where the
+                    // pointer asked, each refresh: the viewer's clock lands with
+                    // its picture, which may come later (PM-310).
+                    let clock=scrub_shown(clock,playing,v.builtins.scrubbing.then_some(v.builtins.scrub_time).flatten());
                     let at=shown_at(&clock,vsync,playing);
                     let head_time=clock.media_time_at(at);
                     let fraction=(head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration()).clamp(0.,1.);
@@ -403,7 +425,7 @@ fn failures_line(
 
 #[cfg(test)]
 mod shown_at_tests {
-    use super::shown_at;
+    use super::{scrub_shown, shown_at};
     use pm_protocol::clock::{ClockSample, TransportState};
     use pm_protocol::common::{HostMicros, TICKS_PER_SECOND};
 
@@ -439,5 +461,21 @@ mod shown_at_tests {
         let paused = sample(TransportState::Stopped, 1_000_000, 3);
         assert_eq!(shown_at(&paused, Some(5.0), false), paused.host_time);
         assert_eq!(shown_at(&c, None, true), c.host_time);
+    }
+
+    /// PM-310: scrubbing, the head shows the time the pointer asked for
+    /// while the viewer's clock still has the last picture's; playing, or
+    /// with no scrub, the clock's own.
+    #[test]
+    fn a_scrub_shows_the_asked_time_before_the_viewer_lands() {
+        let paused = sample(TransportState::Stopped, 1_000_000, 3);
+        let shown = scrub_shown(paused, false, Some(4.5));
+        assert_eq!(
+            shown.media_time_at(shown.host_time).get(),
+            9 * TICKS_PER_SECOND / 2
+        );
+        assert_eq!(scrub_shown(paused, false, None), paused);
+        let playing = sample(TransportState::Playing, 1_000_000, 3);
+        assert_eq!(scrub_shown(playing, true, Some(4.5)), playing);
     }
 }

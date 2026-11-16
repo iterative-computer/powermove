@@ -469,7 +469,11 @@ export class ExportModel {
     if (["done", "cancelled"].includes(this.current.run.phase))
       this.accept((await this.command("export.reset")).value, true);
     this.open = true;
+    // Closed, the sheet is not planned on every edit (PM-376): it plans as it
+    // opens, and Export waits for that plan as for any other.
+    this.readyPlanVersion = -1;
     this.changed();
+    await this.refreshPlan();
   }
   set<K extends keyof Options>(key: K, value: Options[K]) {
     if (this.locked || this.disposed) return;

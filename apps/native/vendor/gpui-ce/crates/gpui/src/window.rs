@@ -1341,6 +1341,26 @@ pub struct Window {
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
+    /// Powermove P-SCROLL-LAYER: recorded scroll content (`crate::scroll_layer`).
+    pub(crate) scroll_layers: FxHashMap<crate::scroll_layer::ScrollLayerKey, crate::scroll_layer::ScrollLayer>,
+    /// Inside a scroll layer's recording: cached views draw in full there
+    /// (their ranges would point into the layer's own scene).
+    pub(crate) scroll_layer_depth: usize,
+    /// The frame being drawn, for the layers it draws.
+    pub(crate) scroll_layer_frame: u64,
+    /// A scroll layer moved by steps since the view last drew in full: hover
+    /// waits until the steps stop (as AppKit's tracking areas do), or every
+    /// row passing under a still pointer would draw its view again.
+    pub(crate) scroll_layer_moving: bool,
+    /// The extent the last scrolling div computed (a layer reads it for its own).
+    pub(crate) last_scroll_max: Point<Pixels>,
+    scroll_layer_pending_deferred: Vec<usize>,
+    /// Layers resting, and the frame each records again.
+    scroll_layer_rest: FxHashMap<crate::scroll_layer::ScrollLayerKey, u64>,
+    /// The layers being painted, innermost last.
+    scroll_layer_painting: Vec<crate::scroll_layer::ScrollLayerKey>,
+    /// Truncated labels, by what they were shaped from (`elements::text`).
+    pub(crate) truncations: FxHashMap<u64, Vec<crate::elements::TruncationEntry>>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
@@ -2120,6 +2140,15 @@ impl Window {
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
             dirty_views: FxHashSet::default(),
+            scroll_layers: FxHashMap::default(),
+            scroll_layer_depth: 0,
+            scroll_layer_frame: 0,
+            scroll_layer_moving: false,
+            last_scroll_max: Point::default(),
+            scroll_layer_pending_deferred: Vec::new(),
+            scroll_layer_rest: FxHashMap::default(),
+            scroll_layer_painting: Vec::new(),
+            truncations: FxHashMap::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
@@ -3294,8 +3323,11 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        self.scroll_layer_frame += 1;
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
+            let frame = self.scroll_layer_frame;
+            self.scroll_layers.retain(|_, layer| layer.frame == frame);
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -3390,7 +3422,9 @@ impl Window {
         self.reset_cursor_style(cx);
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
-        self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        if !self.scroll_layer_moving {
+            self.notify_pointer_observers(PointerChangeCause::Layout, cx);
+        }
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -3645,7 +3679,10 @@ impl Window {
                 .map(|(n, t)| format!("{n}:{:.2}/{:.2}/{:.2}", t[0], t[1], t[2]))
                 .collect();
             eprintln!(
-                "PM_DRAW {{\"times\":\"{}\",\"views\":\"{}\",\"dirty\":{dirty},\"layout\":{:.2},\"prepaint\":{:.2},\"paint\":{:.2},\"a11y\":{:.2},\"a11y_on\":{a11y_active_start_of_frame}}}",
+                "PM_DRAW {{\"w\":{},\"times\":\"{}\",\"views\":\"{}\",\"dirty\":{dirty},\"layout\":{:.2},\"prepaint\":{:.2},\"paint\":{:.2},\"a11y\":{:.2},\"a11y_on\":{a11y_active_start_of_frame}}}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
                 times.join(" "),
                 rendered.join(" "),
                 ms(start, layout),
@@ -3872,11 +3909,7 @@ impl Window {
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         self.a11y
             .replay(range.start.a11y_index..range.end.a11y_index, self.focus);
-        self.next_frame.hitboxes.extend(
-            self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
-                .iter()
-                .cloned(),
-        );
+        self.reuse_hitboxes(range.start.hitboxes_index..range.end.hitboxes_index);
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
                 [range.start.tooltips_index..range.end.tooltips_index]
@@ -3920,6 +3953,299 @@ impl Window {
                     paint_range: deferred_draw.paint_range.clone(),
                 }),
         );
+    }
+
+    /// Copies a cached view's hitboxes from the last frame; a scroll layer's
+    /// come from its recording, shifted to its offset now.
+    fn reuse_hitboxes(&mut self, range: Range<usize>) {
+        let previous = self.scroll_layer_frame - 1;
+        let mut inside: Vec<(usize, crate::scroll_layer::ScrollLayerKey)> = self
+            .scroll_layers
+            .iter()
+            .filter(|(_, l)| {
+                l.frame == previous
+                    && range.start <= l.hitbox_range.start
+                    && l.hitbox_range.end <= range.end
+            })
+            .map(|(key, l)| (l.hitbox_range.start, *key))
+            .collect();
+        inside.sort_unstable();
+        let mut at = range.start;
+        for (start, key) in inside {
+            let Some(layer) = self.scroll_layers.get_mut(&key) else {
+                continue;
+            };
+            if start < at {
+                continue;
+            }
+            self.next_frame
+                .hitboxes
+                .extend(self.rendered_frame.hitboxes[at..start].iter().cloned());
+            let begin = self.next_frame.hitboxes.len();
+            if layer.shiftable {
+                self.next_frame.hitboxes.extend(layer.shifted_hitboxes());
+            } else {
+                self.next_frame.hitboxes.extend(
+                    self.rendered_frame.hitboxes[start..layer.hitbox_range.end]
+                        .iter()
+                        .cloned(),
+                );
+            }
+            at = layer.hitbox_range.end;
+            layer.hitbox_range = begin..self.next_frame.hitboxes.len();
+        }
+        self.next_frame
+            .hitboxes
+            .extend(self.rendered_frame.hitboxes[at..range.end].iter().cloned());
+    }
+
+    /// A scroll layer's children prepaint against the recording's mask, not
+    /// the div's clip (a mask replaced, not intersected).
+    pub(crate) fn begin_scroll_layer(
+        &mut self,
+        offset: &Rc<RefCell<Point<Pixels>>>,
+        reach: Point<Pixels>,
+        driven: bool,
+    ) -> Option<crate::scroll_layer::ScrollLayerKey> {
+        let key = crate::scroll_layer::key(offset);
+        let frame_now = self.scroll_layer_frame;
+        if self.scroll_layer_rest.get(&key).is_some_and(|until| *until > frame_now) {
+            return None;
+        }
+        self.scroll_layer_rest.remove(&key);
+        if !driven && let Some(layer) = self.scroll_layers.get_mut(&key) {
+            let idle = layer.frame + 1 == frame_now && layer.generation == layer.recorded_at;
+            layer.idle_records = if idle { layer.idle_records + 1 } else { 0 };
+            if layer.idle_records >= crate::scroll_layer::IDLE_RECORDS {
+                self.scroll_layer_rest
+                    .insert(key, frame_now + crate::scroll_layer::REST);
+                self.scroll_layers.remove(&key);
+                return None;
+            }
+        }
+        let clip = self.content_mask();
+        let mask = crate::scroll_layer::recording_mask(&clip, reach);
+        let max = self.last_scroll_max;
+        let view = self.current_view();
+        let frame = self.scroll_layer_frame;
+        let start = self.next_frame.hitboxes.len();
+        let deferred = self.next_frame.deferred_draws.len();
+        let layer = self
+            .scroll_layers
+            .entry(key)
+            .or_insert_with(|| crate::scroll_layer::ScrollLayer {
+                view,
+                offset: offset.clone(),
+                recorded: Point::default(),
+                reach,
+                max,
+                clip: clip.clone(),
+                ops: Vec::new(),
+                hitboxes: Vec::new(),
+                hitbox_range: 0..0,
+                shiftable: true,
+                why: "",
+                frame,
+                generation: 0,
+                recorded_at: 0,
+                idle_records: 0,
+            });
+        layer.view = view;
+        layer.offset = offset.clone();
+        layer.recorded = *offset.borrow();
+        layer.reach = reach;
+        layer.max = max;
+        layer.clip = clip;
+        layer.hitbox_range = start..start;
+        layer.frame = frame;
+        layer.recorded_at = layer.generation;
+        layer.shiftable = true;
+        layer.why = "";
+        self.scroll_layer_pending_deferred.push(deferred);
+        self.content_mask_stack.push(mask);
+        self.scroll_layer_depth += 1;
+        Some(key)
+    }
+
+    /// Ends a scroll layer's prepaint: its hitboxes are kept as drawn and
+    /// clipped to the div in the frame.
+    pub(crate) fn end_scroll_layer_prepaint(&mut self, key: crate::scroll_layer::ScrollLayerKey) {
+        self.content_mask_stack.pop();
+        self.scroll_layer_depth -= 1;
+        let deferred = self.scroll_layer_pending_deferred.pop().unwrap_or(0);
+        let Some(layer) = self.scroll_layers.get_mut(&key) else {
+            return;
+        };
+        let range = layer.hitbox_range.start..self.next_frame.hitboxes.len();
+        layer.hitboxes = self.next_frame.hitboxes[range.clone()].to_vec();
+        for hitbox in &mut self.next_frame.hitboxes[range.clone()] {
+            hitbox.content_mask = hitbox.content_mask.intersect(&layer.clip);
+        }
+        layer.hitbox_range = range;
+        // A popover or tooltip drawn from inside is placed for this offset.
+        if self.next_frame.deferred_draws.len() != deferred {
+            layer.shiftable = false;
+            layer.why = "deferred draw";
+        }
+    }
+
+    /// Starts a scroll layer's paint: its children paint into a scene of
+    /// their own, against the recording's mask.
+    pub(crate) fn begin_scroll_layer_paint(
+        &mut self,
+        key: crate::scroll_layer::ScrollLayerKey,
+    ) -> Option<(Scene, usize)> {
+        // Recorded in this frame's prepaint (not resting).
+        let layer = self
+            .scroll_layers
+            .get(&key)
+            .filter(|l| l.frame == self.scroll_layer_frame)?;
+        let mask = crate::scroll_layer::recording_mask(&layer.clip, layer.reach);
+        let outer = mem::take(&mut self.next_frame.scene);
+        self.content_mask_stack.push(mask);
+        self.scroll_layer_depth += 1;
+        self.scroll_layer_painting.push(key);
+        Some((outer, self.next_frame.input_handlers.len()))
+    }
+
+    /// Ends a scroll layer's paint: keeps what it drew and inserts it into
+    /// the frame clipped to the div, between its markers.
+    pub(crate) fn end_scroll_layer_paint(
+        &mut self,
+        key: crate::scroll_layer::ScrollLayerKey,
+        (outer, handlers): (Scene, usize),
+    ) {
+        self.content_mask_stack.pop();
+        self.scroll_layer_depth -= 1;
+        self.scroll_layer_painting.pop();
+        let mut inner = mem::replace(&mut self.next_frame.scene, outer);
+        let ops = inner.take_operations();
+        let scale_factor = self.scale_factor();
+        let typing = self.next_frame.input_handlers.len() != handlers;
+        let Some(layer) = self.scroll_layers.get_mut(&key) else {
+            return;
+        };
+        // Text being typed inside places its editor for this offset.
+        if typing {
+            layer.shiftable = false;
+            layer.why = "text input";
+        } else if !ops.iter().all(crate::scroll_layer::shiftable) {
+            layer.shiftable = false;
+            layer.why = "transformed glyph";
+        }
+        layer.ops = ops;
+        let scene = &mut self.next_frame.scene;
+        scene.insert_operation(crate::scene::PaintOperation::ScrollLayerStart(key));
+        for op in layer.shifted_ops(scale_factor) {
+            scene.insert_operation(op);
+        }
+        scene.insert_operation(crate::scene::PaintOperation::ScrollLayerEnd);
+    }
+
+    /// The scroll layer being painted here, if any: content placed outside
+    /// the scene (an AppKit control's slot) keeps it, to follow the layer's
+    /// offset on the frames that replay it ([`Self::scroll_layer_shift`]).
+    pub fn scroll_layer(&self) -> Option<crate::ScrollLayerId> {
+        self.scroll_layer_painting
+            .last()
+            .copied()
+            .map(crate::ScrollLayerId)
+    }
+
+    /// How far a scroll layer's content has moved since it was painted, and
+    /// the area where it shows; `None` once the layer is gone.
+    pub fn scroll_layer_shift(
+        &self,
+        layer: crate::ScrollLayerId,
+    ) -> Option<(Point<Pixels>, Bounds<Pixels>)> {
+        let layer = self.scroll_layers.get(&layer.0)?;
+        Some((layer.current() - layer.recorded, layer.clip.bounds))
+    }
+
+    /// A step its owner makes on a driven scroll layer
+    /// ([`crate::StatefulInteractiveElement::scroll_layer_driven`]) tracked by
+    /// `handle`: the offset moves to `offset`, and when the recording covers
+    /// it the frame replays the layer shifted without notifying its view (the
+    /// view draws in full once the steps stop). False when the view needs to
+    /// draw again for the new offset (the owner notifies it then).
+    pub fn step_scroll_layer(
+        &mut self,
+        handle: &crate::ScrollHandle,
+        offset: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        let cell = handle.offset_cell();
+        *cell.borrow_mut() = offset;
+        if !crate::scroll_layer::enabled() {
+            return false;
+        }
+        let key = crate::scroll_layer::key(&cell);
+        let Some(view) = self.scroll_layers.get(&key).map(|l| l.view) else {
+            if crate::view::draw_trace_enabled() {
+                eprintln!("PM_LAYER {{\"refused\":\"unrecorded\"}}");
+            }
+            return false;
+        };
+        self.scroll_layer_step(key, view, cx)
+    }
+
+    /// A wheel step on a scroll layer that only moves its offset: when the
+    /// recording covers the new offset, the offset moves and a frame is
+    /// asked for without notifying the view (its cached frame is replayed
+    /// shifted); the view draws in full once the steps stop. Returns false
+    /// when the step needs the view to draw again.
+    pub(crate) fn scroll_layer_step(
+        &mut self,
+        key: crate::scroll_layer::ScrollLayerKey,
+        view: EntityId,
+        cx: &mut App,
+    ) -> bool {
+        let refused = |why: &str| {
+            if crate::view::draw_trace_enabled() {
+                eprintln!("PM_LAYER {{\"refused\":\"{why}\"}}");
+            }
+            false
+        };
+        let Some(layer) = self.scroll_layers.get_mut(&key) else {
+            return refused("unrecorded");
+        };
+        if !layer.shiftable {
+            let why = layer.why;
+            return refused(why);
+        }
+        if layer.view != view || self.dirty_views.contains(&view) {
+            return refused("view");
+        }
+        let mut offset = layer.current();
+        offset.x = offset.x.clamp(-layer.max.x, px(0.));
+        offset.y = offset.y.clamp(-layer.max.y, px(0.));
+        if !layer.covers(offset) {
+            return refused("reach");
+        }
+        *layer.offset.borrow_mut() = offset;
+        layer.generation += 1;
+        let generation = layer.generation;
+        self.scroll_layer_moving = true;
+        self.invalidator.set_dirty(true);
+        self.spawn(cx, async move |cx| {
+            cx.background_executor()
+                .timer(crate::scroll_layer::SETTLE)
+                .await;
+            cx.update(|window, cx| {
+                // Gone (drawn again since): the steps stopped too.
+                let settled = window
+                    .scroll_layers
+                    .get(&key)
+                    .is_none_or(|l| l.generation == generation);
+                if settled {
+                    window.scroll_layer_moving = false;
+                    cx.notify(view);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        true
     }
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
@@ -3973,9 +4299,20 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
+        let (frame, scale_factor) = (self.scroll_layer_frame, self.scale_factor());
+        let layers = &mut self.scroll_layers;
+        self.next_frame.scene.replay_layers(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
+            |key| {
+                let layer = layers.get_mut(&key)?;
+                layer.frame = frame;
+                // One that can't shift keeps what the last frame drew (its
+                // offset hasn't moved: its steps draw the view again).
+                layer
+                    .shiftable
+                    .then(|| layer.shifted_ops(scale_factor).collect())
+            },
         );
     }
 

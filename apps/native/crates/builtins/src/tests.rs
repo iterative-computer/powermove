@@ -2068,25 +2068,12 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     let mut panels = Builtins::new(kernel.clone(), "P", || {}).unwrap();
     finish(panels.mount("settings").unwrap());
     finish(panels.show("settings").unwrap());
-    // Settings shows one section per page: open Memory from the sidebar.
-    let first = panels.take_publications().pop().unwrap();
-    let nav = first
-        .surface
-        .nodes()
-        .values()
-        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("settings.nav.memory"))
-        .unwrap()
-        .id;
+    // Settings shows one section per page: open Memory from the window's
+    // sidebar (AppKit's, which acts on the panel).
+    panels.take_publications();
     finish(
         panels
-            .event(
-                "settings",
-                first.generation,
-                first.surface.revision(),
-                nav,
-                "click",
-                EventDetail::default(),
-            )
+            .panel_act("settings", &json!({ "select": "memory" }))
             .unwrap(),
     );
     let publication = panels.take_publications().pop().unwrap();
@@ -5456,5 +5443,73 @@ fn parent_and_track_matte_rows_carry_only_the_current_layer() {
         snapshot.to_string().len() < 20_000,
         "{}",
         snapshot.to_string().len()
+    );
+}
+
+/// PM-376: the Export sheet's subscription, published on every document
+/// change, plans the export and checks the encoders only while the sheet is
+/// open; closed, the project's own facts stay current and the last plan's
+/// figures are kept, so an edit or an undo no longer waits for a plan.
+#[test]
+fn the_export_subscription_plans_only_while_the_sheet_is_open() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-closed".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["capabilities"]["mp4"]["reason"], "Checking…");
+    assert_eq!(closed["project"]["summary"], "");
+    assert!(closed["project"]["id"].is_string());
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    let open = sheet.export_publication().unwrap();
+    assert_eq!(open["project"]["summary"], "300 frames · 10 s · 640×360");
+    assert_ne!(open["capabilities"]["mp4"]["reason"], "Checking…");
+    sheet.native_command("export.dismiss", &json!({})).unwrap();
+    let p = kernel.published("synthetic").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Composition Settings".into()),
+                    expected_revision: Some(p.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                width: Some(1280.0),
+                                height: Some(720.0),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["project"]["width"], 1280);
+    assert_eq!(closed["project"]["summary"], "300 frames · 10 s · 640×360");
+    // Opened again, it plans the project as it is now.
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    assert_eq!(
+        sheet.export_publication().unwrap()["project"]["summary"],
+        "300 frames · 10 s · 1280×720"
     );
 }

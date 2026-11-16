@@ -205,11 +205,17 @@ export function ProjectView(props: ProjectViewProps) {
   };
   const invoke = (command: import("./contract").Command) =>
     input({ Invoke: command });
+  // Escape's clear is the panel's own change to the text: it replaces what
+  // the field holds even while it is typed in (an echo of the typing leaves
+  // the field's committed value behind, so a plain "" might change nothing).
+  const [clears, setClears] = useState(0);
   const searchEscape = (event: SurfaceEvent) => {
     if (event.key !== "Escape" || event.composing) return;
     event.stopPropagation();
-    if (query) filter("");
-    else setSearchOpen(false);
+    if (query) {
+      filter("");
+      setClears(clears + 1);
+    } else setSearchOpen(false);
   };
   const pointer = (
     row: Row,
@@ -755,7 +761,8 @@ export function ProjectView(props: ProjectViewProps) {
             title="Search media"
             value={query}
             metadata={{
-              hostValue: Math.max(hostFilter.current, view.host_filter),
+              hostValue:
+                Math.max(hostFilter.current, view.host_filter) * 65536 + clears,
               placeholder: "Search",
               search: true,
             }}
@@ -972,17 +979,26 @@ export function ProjectView(props: ProjectViewProps) {
                 (to - from) * layout.columns > 4096
               )
                 return;
-              // The rows shown. A range that reaches the last row asks for a
-              // first page's worth more: the host's range stops at the rows
-              // there are now, and media imported later joins the end, which
-              // the next publication then brings without a scroll (the native
-              // model clamps to what exists).
-              const room = to >= count ? FIRST_PAGE : 0;
-              const offset = from * layout.columns;
-              const limit = Math.min(4096, (to - from) * layout.columns + room);
-              // Every wheel event reports the range; a page is asked for only
-              // when it moves (each one republishes and redraws the panel).
-              const key = `${offset}:${limit}:${view.page.stamp.document}`;
+              // The rows shown, with as many again on each side: scrolling
+              // inside the page loaded asks for nothing (each page republishes
+              // and redraws the panel), and the host scrolls the rows it has.
+              // A page that reaches the last row asks for a first page's worth
+              // more: media imported later joins the end, which the next
+              // publication then brings without a scroll (the native model
+              // clamps to what exists).
+              const loadedRoom = askedPage.current.endsWith(":room");
+              if (from >= start && to <= end && (to < count || loadedRoom))
+                return;
+              const span = Math.max(1, to - from);
+              const first = Math.max(0, from - span);
+              const last = Math.min(count, to + span);
+              const room = last >= count ? FIRST_PAGE : 0;
+              const offset = first * layout.columns;
+              const limit = Math.min(
+                4096,
+                (last - first) * layout.columns + room,
+              );
+              const key = `${offset}:${limit}:${view.page.stamp.document}${room ? ":room" : ""}`;
               if (key === askedPage.current) return;
               askedPage.current = key;
               props.page(offset, limit);

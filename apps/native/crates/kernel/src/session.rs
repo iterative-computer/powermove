@@ -119,6 +119,15 @@ pub enum ShellCall {
         id: String,
         name: String,
     },
+    /// Renames a library project no window has open (Home's Rename): its
+    /// saved name and its row. Refused, with [`ShellReply::HasUnsavedWork`],
+    /// while it has work from a session that ended without saving, which its
+    /// next open offers to recover; refused with `AlreadyOpen` when it is
+    /// open (a window renames it as an edit).
+    Rename {
+        project: String,
+        name: String,
+    },
     /// The library's takes (v1's `takes` store), newest first.
     Takes,
     /// Replaces the takes only while they still equal `expected` (what the
@@ -346,6 +355,9 @@ pub enum ShellReply {
     /// (`computer`, `user`, `at` in milliseconds) where the record says.
     Leftovers(Vec<Value>),
     Changed(bool),
+    /// [`ShellCall::Rename`] of a project with work a session left without
+    /// saving: open it to recover that work first.
+    HasUnsavedWork,
 }
 pub(crate) enum Destination {
     Library(String),
@@ -1062,6 +1074,7 @@ impl Kernel {
                     .restore(&id)
                     .map_err(failure)?,
             )),
+            ShellCall::Rename { project, name } => self.rename_closed(&project, &name),
             ShellCall::Duplicate { project, id, name } => {
                 let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
                 if w.store().load(&id).map_err(failure)?.is_some() {
@@ -1358,6 +1371,50 @@ impl Kernel {
             displaced,
         })
     }
+    /// [`ShellCall::Rename`].
+    fn rename_closed(&mut self, project: &str, name: &str) -> Result<ShellReply, KernelFailure> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(failure("A project needs a name"));
+        }
+        if let Some(s) = self.sessions.values().find(|s| {
+            s.handle.project == project
+                || matches!(&s.destination, Destination::Library(slot) if slot == project)
+        }) {
+            return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
+        }
+        let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
+        let Some(p) = w.store().load(project).map_err(failure)? else {
+            // A file's entry: the file holds the name, renamed by opening it.
+            return Ok(ShellReply::Changed(false));
+        };
+        // Work a session left without saving is replayed onto what the slot
+        // holds; a rename would change that base, and the next open could
+        // not offer the work. A copy of another project keeps its journal
+        // under that project's id (PM-360).
+        let journals = [Some(project.to_owned()), p
+            .session
+            .as_ref()
+            .and_then(|m| m.get("copyOf")?.get("entry")?.as_str())
+            .map(str::to_owned)];
+        let unsaved = journals.iter().flatten().any(|id| {
+            self.project_dir(id)
+                .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty())
+        });
+        if unsaved || p.journal_applied > 0 {
+            return Ok(ShellReply::HasUnsavedWork);
+        }
+        let w = self.library.as_ref().unwrap();
+        w.save_project(
+            project,
+            with_identity(p.project, project, Some(name)),
+            p.history.unwrap_or(Value::Null),
+            p.workspace.unwrap_or(Value::Null),
+            p.session.unwrap_or(Value::Null),
+        )
+        .map_err(failure)?;
+        Ok(ShellReply::Changed(true))
+    }
     fn duplicate_slot(
         &self,
         id: &str,
@@ -1367,10 +1424,14 @@ impl Kernel {
     ) -> Result<(), KernelFailure> {
         let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
         let mut meta = p.session.unwrap_or(Value::Null);
-        // A copy that named the original's file would reopen as that file.
+        // A copy that named the original's file would reopen as that file;
+        // one that kept the record of what a copy stands in for would be
+        // taken up in that copy's place (`copy_of`, `copy_of_entry`). A
+        // duplicate is a project of its own.
         if let Value::Object(m) = &mut meta {
             m.remove("file");
             m.remove("embeddedMedia");
+            m.remove("copyOf");
         }
         let ws = p.workspace.unwrap_or(Value::Null);
         let history = p.history.unwrap_or(Value::Null);
@@ -1778,6 +1839,18 @@ impl Kernel {
                         }
                     }
                 }
+                // The copy made the last time this project could not open as
+                // itself holds the person's saved work since: the same
+                // project, unchanged, opens that copy again, never another
+                // one (PM-379). A project changed since gets a copy of its own.
+                if let OpenDecision::AsCopy(reason) = &decision {
+                    if let Some(copy) = self.copy_of_entry(&profile, &project, &hash) {
+                        return self.reopen_copy(id, copy, decision, mode);
+                    }
+                    if let Value::Object(m) = &mut meta {
+                        m.insert("copyOf", entry_copy_record(&profile, &project, reason, &hash));
+                    }
+                }
                 let source = match associated {
                     Some(file) => OpenSource::LibraryWithFile { lib: p, file },
                     None => OpenSource::Library(p),
@@ -1979,8 +2052,14 @@ impl Kernel {
             OpenSource::LibraryWithFile { file, .. } => Some(file.clone()),
             _ => None,
         };
-        let recovery_id = match &destination {
-            Destination::Library(slot) => slot.as_str(),
+        let recovery_id = match (&destination, &source) {
+            // A copy of a library project taken up again for that project
+            // (PM-379) journals under the project's id (`journal_id`).
+            (
+                Destination::Library(slot),
+                OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. },
+            ) if *slot != id && entry_of_copy(lib.session.as_ref()).is_some() => id.as_str(),
+            (Destination::Library(slot), _) => slot.as_str(),
             _ => id.as_str(),
         };
         // Only a journal left behind needs the base as a value.
@@ -2159,6 +2238,16 @@ impl Kernel {
             recovery_file,
             from_other,
         } = prepared;
+        // The library project this open read, decided before a recovery
+        // replaces the source: who keeps the session's journal follows what
+        // was opened (`journal_id`), for the recovered session and every
+        // save after it, not what the recovery made of it.
+        let opened_library = match &source {
+            OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
+                Some((lib.id.clone(), entry_of_copy(lib.session.as_ref()).is_some()))
+            }
+            _ => None,
+        };
         let setting_aside = matches!(
             choice,
             Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
@@ -2326,13 +2415,15 @@ impl Kernel {
         // under a file's id after Recover on a copy) and a copy of a file (the
         // file's next open reopens that copy, `copy_of`) keep it in the slot.
         // A copy made from a library project (its file missing, or the
-        // original app's library) keeps it under the id it opened with: that
-        // project's next open reads that id again, not this copy (PM-360).
-        let journal_id = match (&destination, &source) {
-            (
-                Destination::Library(slot),
-                OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. },
-            ) if *slot != id && lib.id != *slot => id.clone(),
+        // original app's library) keeps it under the id it opened with, and
+        // so does that copy when the project's next open takes it up again
+        // (PM-379): the next open reads that id (PM-360).
+        let journal_id = match (&destination, &opened_library) {
+            (Destination::Library(slot), Some((lib, copy_of_entry)))
+                if *slot != id && (lib != slot || *copy_of_entry) =>
+            {
+                id.clone()
+            }
             (Destination::Library(slot), _) => slot.clone(),
             _ => id.clone(),
         };
@@ -2738,6 +2829,32 @@ fn copy_record(
     }
     Value::Object(m)
 }
+/// What a copy's entry records about the library project it stands in for
+/// (`copyOf`): which library and entry, why it opened as a copy, and the
+/// content it was made from (`source.hash`).
+fn entry_copy_record(
+    library: &std::path::Path,
+    entry: &str,
+    reason: &CopyReason,
+    hash: &str,
+) -> Value {
+    let mut m = Map::new();
+    m.insert(
+        "library",
+        Value::from(library.to_string_lossy().into_owned()),
+    );
+    m.insert("entry", Value::from(entry.to_owned()));
+    m.insert("reason", Value::from(format!("{reason:?}")));
+    let mut source = Map::new();
+    source.insert("hash", Value::from(hash.to_owned()));
+    m.insert("source", Value::Object(source));
+    Value::Object(m)
+}
+/// The library project a copy stands in for (`copyOf.entry`), if it is a
+/// copy of one.
+fn entry_of_copy(meta: Option<&Value>) -> Option<&str> {
+    meta?.get("copyOf")?.get("entry")?.as_str()
+}
 /// Whether the file at `path` now is the one a copy was made from: the same
 /// file untouched (device, inode, size and modification time), or a file
 /// with exactly its content (a sync client rewrites a file under a new
@@ -2785,6 +2902,43 @@ impl Kernel {
                     Some(same(record.get("path")?.as_str()?) && is_copy_source(record, path))
                 })
                 .unwrap_or(false)
+        })
+    }
+    /// The library copy made of library project `entry` (in the library at
+    /// `library`) when it last could not open as itself, if the library
+    /// still has it and the project is still what it was copied from
+    /// (`hash`): the newest, were there several.
+    fn copy_of_entry(
+        &self,
+        library: &std::path::Path,
+        entry: &str,
+        hash: &str,
+    ) -> Option<String> {
+        let store = self.library.as_ref()?.store();
+        let same_library = |recorded: &str| {
+            let recorded = std::path::Path::new(recorded);
+            recorded == library
+                || recorded
+                    .canonicalize()
+                    .is_ok_and(|r| library.canonicalize().is_ok_and(|l| l == r))
+        };
+        let mut rows = store.projects().ok()?;
+        rows.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
+        rows.into_iter().map(|row| row.id).find(|id| {
+            id != entry
+                && store
+                    .read(&format!("projectMeta.{id}"))
+                    .ok()
+                    .flatten()
+                    .and_then(|meta| {
+                        let record = meta.get("copyOf")?;
+                        Some(
+                            record.get("entry")?.as_str()? == entry
+                                && same_library(record.get("library")?.as_str()?)
+                                && record.get("source")?.get("hash")?.as_str()? == hash,
+                        )
+                    })
+                    .unwrap_or(false)
         })
     }
     /// Copies in the library that hold work for the file session `id` has

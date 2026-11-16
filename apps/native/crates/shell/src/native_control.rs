@@ -290,6 +290,14 @@ pub struct NativeControl {
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    /// A search field's last value from its view. The view's value can lag
+    /// what is typed (an echo of the typing commits nothing), so only a new
+    /// value replaces the field's text; an unchanged one is left alone
+    /// (PM-342: a panel laid out again showed the search empty while its
+    /// list stayed filtered).
+    search_value: Option<Value>,
+    /// Where the slot was painted inside a scroll layer, to follow it.
+    layer: Rc<crate::layer_stage::LayerStage>,
 }
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
@@ -434,7 +442,11 @@ impl NativeControl {
                     // never the content's own ink.
                     v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
                 }
-                v.sizeToFit();
+                // A pop-up in a row's well fills the well: its own size is
+                // never used, and measuring it is a layout pass of its own.
+                if !well {
+                    v.sizeToFit();
+                }
                 Control::Popup(v)
             }
             Kind::Segmented => {
@@ -656,6 +668,9 @@ impl NativeControl {
                 sized.setFrameSize(frame);
                 fitting
             }
+            None if well && matches!(kind, Kind::Popup) => {
+                NSSize::new(t.metrics.value_column as f64, t.metrics.field as f64)
+            }
             None => control.view().fittingSize(),
         };
         let width = if matches!(kind, Kind::Popup) && !inline {
@@ -693,6 +708,8 @@ impl NativeControl {
             stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
             host_revision: None,
+            search_value: None,
+            layer: Rc::default(),
         }
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
@@ -753,8 +770,13 @@ impl NativeControl {
         };
         v.currentEditor().is_some()
     }
-    pub fn keep(&self) {
-        self.slot.keep();
+    /// Stages the slot again on a frame whose cached paint did not run: as
+    /// last painted, or shifted with the scroll layer it is in.
+    pub fn keep(&self, window: &Window) {
+        match self.layer.kept(window) {
+            Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
+            None => self.slot.keep(),
+        }
     }
     /// A push button's title follows the panel (Export's action names the
     /// chosen format); its width follows the new title.
@@ -856,7 +878,11 @@ impl NativeControl {
             }
         }
         let shown = self._target.ivars().options.borrow().clone();
-        self.control.value(value, &shown);
+        let unchanged_search = matches!(self.control, Control::Search(_))
+            && self.search_value.replace(value.clone()).as_ref() == Some(value);
+        if !unchanged_search {
+            self.control.value(value, &shown);
+        }
         self.control.enabled(!disabled);
         if self.inline {
             // The title names the current value, so the width follows it.
@@ -869,6 +895,7 @@ impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let focus = self.focus.clone();
+        let layer = self.layer.clone();
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -883,19 +910,9 @@ impl Render for NativeControl {
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    let to_rect = |b: Bounds<Pixels>| {
-                        NSRect::new(
-                            NSPoint::new(
-                                f32::from(b.origin.x) as f64,
-                                f32::from(b.origin.y) as f64,
-                            ),
-                            NSSize::new(
-                                f32::from(b.size.width) as f64,
-                                f32::from(b.size.height) as f64,
-                            ),
-                        )
-                    };
-                    slot.stage(to_rect(bounds), to_rect(window.content_mask().bounds));
+                    let (bounds, clip) =
+                        layer.painted(bounds, window.content_mask().bounds, window);
+                    slot.stage(ns_rect(bounds), ns_rect(clip));
                     if focus.get()
                         && let Some(window) = native.window()
                     {
@@ -1175,4 +1192,14 @@ impl PopupRows {
             let _: () = msg_send![&*self.target, act: &*self.popup];
         }
     }
+}
+/// GPUI top-left points as an AppKit rectangle (the slot flips them).
+pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
+    NSRect::new(
+        NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
+        NSSize::new(
+            f32::from(b.size.width) as f64,
+            f32::from(b.size.height) as f64,
+        ),
+    )
 }

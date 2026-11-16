@@ -11,6 +11,7 @@ mod access;
 mod after_open;
 mod agent_clients;
 mod alert;
+mod appearance;
 mod builtins;
 mod tabs;
 #[cfg(test)]
@@ -93,6 +94,7 @@ mod raster_overrides;
 mod render_frames;
 mod rows;
 mod session;
+mod settings_window;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
