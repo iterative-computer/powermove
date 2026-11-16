@@ -1069,6 +1069,15 @@ impl MacWindowState {
         }
     }
 
+    /// A size/scale/visibility change invalidates the presented surface even
+    /// when GPUI was clean or a resize callback is temporarily taken. Force
+    /// fresh layout and wake the paused source, rather than stretching the
+    /// previous Metal frame under newly positioned AppKit controls.
+    fn request_surface_frame(&mut self) {
+        self.force_render_pending = true;
+        self.start_display_link();
+    }
+
     fn start_display_link(&mut self) {
         self.frame_requested = true;
         self.idle_cleanup.take();
@@ -3822,7 +3831,7 @@ unsafe extern "C" fn window_did_change_occlusion_state(this: &Objc2Object, _: Se
             .contains(NSWindowOcclusionState::Visible)
         {
             lock.move_traffic_light();
-            lock.start_display_link();
+            lock.request_surface_frame();
         } else if !draws_occluded() {
             lock.stop_display_link();
         }
@@ -3839,7 +3848,9 @@ fn draws_occluded() -> bool {
 
 unsafe extern "C" fn window_did_resize(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    window_state.as_ref().lock().move_traffic_light();
+    let mut lock = window_state.as_ref().lock();
+    lock.move_traffic_light();
+    lock.request_surface_frame();
 }
 
 unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
@@ -3921,6 +3932,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -4112,6 +4124,7 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -4209,8 +4222,10 @@ extern "C" fn step(view: *mut c_void) {
 
         // Dirty views and animations mark demand through frame_waker while
         // GPUI serves this frame. Keep a running animation's link uninterrupted.
-        lock.frame_requested = false;
         if let Some(mut callback) = lock.request_frame_callback.take() {
+            // A nested tick with no callback must not erase the outer
+            // frame's demand and let it pause with work still outstanding.
+            lock.frame_requested = false;
             let request = lock.next_frame_request();
             drop(lock);
             gpui_apple::feel::set_frame_start();
