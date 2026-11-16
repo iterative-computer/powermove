@@ -429,6 +429,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
                 .or_else(|| crate::generated_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))?;
+            let content = crate::generated_panel::extension_build(v,id,content,bounds,w,cx);
             let Some(at) = v.revealed.get(id).copied() else {
                 return Some(content);
             };

@@ -1200,6 +1200,7 @@ impl Controller {
         ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
         cx: &mut Context<Self>,
     ) {
+        self.panel_builds.insert(panel.clone(), Default::default());
         cx.spawn(async move |this, cx| {
             let mounted = match ticket.await {
                 Ok(ticket) => ticket.await.map(|e| e.generation.number),
@@ -1207,7 +1208,10 @@ impl Controller {
             };
             let _ = this.update(cx, |v, cx| {
                 match mounted {
-                    Ok(generation) => v.surface_ready(panel, generation),
+                    Ok(generation) => {
+                        if let Some(build)=v.panel_builds.get_mut(&panel) { build.published([0],true); }
+                        v.surface_ready(panel, generation)
+                    },
                     Err(error) => {
                         v.builtins.forget_surface(&panel);
                         v.message = format!("{source} could not start: {error}");

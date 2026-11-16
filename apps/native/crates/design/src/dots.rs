@@ -53,8 +53,9 @@ fn fbm(mut p:[f32;2])->f32 { let(mut v,mut a)=(0.,0.5); for _ in 0..4 {v+=a*nois
 pub fn aurora(size:[f32;2],age:f32,accent:u32,text:u32,muted:u32)->Vec<Dot> {
     let mut dots=Vec::new();
     if size.iter().any(|n|!n.is_finite()||*n<=0.) {return dots;}
-    let gold=super::mix(accent,text,0.5);
-    let rose=super::mix(accent,muted,0.4);
+    let (l,c,h)=super::color::to_oklch(accent);
+    let gold=super::mix(super::color::oklch_fit((l+0.16).min(0.92),c,h+35.),text,0.12);
+    let rose=super::mix(super::color::oklch_fit(l,c,h-35.),muted,0.12);
     for y in (1..size[1].min(4096.) as usize).step_by(3) { for x in (1..size[0].min(4096.) as usize).step_by(3) {
         let xn=x as f32/size[0]*2.2; let up=1.-y as f32/size[1]; let(mut swirl,mut rise)=(0_f32,0_f32);
         for j in 0..4 {let f=j as f32;
