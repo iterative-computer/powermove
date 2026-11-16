@@ -704,7 +704,8 @@ impl Picker {
             }))
             .child(
                 canvas(
-                    move |bounds, window, _| {
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
                         let weak = weak.clone();
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase == DispatchPhase::Bubble
@@ -725,8 +726,6 @@ impl Picker {
                                 });
                             }
                         });
-                    },
-                    move |bounds, _, window, _| {
                         let opaque = |c: Color| {
                             let c = if p3 { Color::from_p3(c) } else { c };
                             Rgba::new(c.0[0], c.0[1], c.0[2], 1.)
@@ -1270,7 +1269,7 @@ mod tests {
     use core::prelude::v1::test;
     #[gpui::test]
     fn colour_drag_alpha_and_keyboard_are_one_gesture(cx: &mut TestAppContext) {
-        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+        let (picker, vcx) = cx.add_window_view(|w, cx| {
             Picker::new(
                 Color::parse("#FF0000").unwrap(),
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
@@ -1329,7 +1328,7 @@ mod tests {
     }
     #[gpui::test]
     fn colour_focus_and_pending_sample_are_scoped_to_picker(cx: &mut TestAppContext) {
-        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+        let (picker, vcx) = cx.add_window_view(|w, cx| {
             Picker::new(
                 Color::parse("#FF6B1A").unwrap(),
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
@@ -1404,7 +1403,7 @@ mod tests {
     }
     #[gpui::test]
     fn colour_close_applies_typed_draft_after_focus_moves(cx: &mut TestAppContext) {
-        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+        let (picker, vcx) = cx.add_window_view(|w, cx| {
             Picker::new(
                 Color::parse("#FF0000").unwrap(),
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
@@ -1422,7 +1421,7 @@ mod tests {
     }
     #[gpui::test]
     fn colour_keyboard_nudges_and_wraps_focus(cx: &mut TestAppContext) {
-        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+        let (picker, vcx) = cx.add_window_view(|w, cx| {
             Picker::new(
                 Color::parse("#FF0000").unwrap(),
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
