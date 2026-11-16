@@ -3779,7 +3779,7 @@ fn build(
         .then(|| {
             let mut mirror = QueryMirror::new(&published);
             let comp = client.model.index.comp_id.clone();
-            graph_render::sample(&client.model, |layer, path, time| {
+            graph_render::sample(&client.model, tokens, |layer, path, time| {
                 mirror
                     .queries()
                     .evaluate(comp.as_deref(), layer, path, time)

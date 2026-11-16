@@ -233,7 +233,7 @@ fn graph_draws_v1s_ground_legend_axis_colours_key_shapes_and_playhead_values() {
         vec![Curve {
             id: "x".into(),
             name: "Position X".into(),
-            color: axis_color("position.x", 0),
+            color: tokens().graph_curve("position.x", 0),
             focused: true,
             segments: vec![Segment {
                 from: a,
@@ -276,12 +276,12 @@ fn graph_draws_v1s_ground_legend_axis_colours_key_shapes_and_playhead_values() {
     assert_eq!(ops[0].bounds, region);
     assert_eq!(
         ops.iter().find(|o| o.id == "curve:x").unwrap().color,
-        0xf36870
+        t.graph_curve("position.x", 0)
     );
     let key = ops.iter().find(|o| o.id == "graph-key:key").unwrap();
     assert_eq!(key.shape, "graph-vertex");
     assert_eq!(key.detail["kind"], "bezier");
-    assert_eq!(key.detail["ring"], SELECTED_RING);
+    assert_eq!(key.detail["ring"], t.graph_key_selected());
     // Keys sit in the plot, never under the legend or on the graph's edge.
     let plot = plot(region);
     assert!(

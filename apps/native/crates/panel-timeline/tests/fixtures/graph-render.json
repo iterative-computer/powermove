@@ -480,7 +480,7 @@
       640.0,
       320.0
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 1.35,
@@ -526,7 +526,7 @@
       640.0,
       320.0
     ],
-    "color": 15190091,
+    "color": 15319898,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 1.0,
@@ -562,14 +562,14 @@
       6.0,
       6.0
     ],
-    "color": 15190091,
+    "color": 15319898,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
     "text": null,
     "fontSize": 0.0,
     "detail": {
-      "keyline": 15190091,
+      "keyline": 15319898,
       "keylineWidth": 1.0
     },
     "clip": [
@@ -588,7 +588,7 @@
       8.0,
       8.0
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
@@ -596,7 +596,7 @@
     "fontSize": 0.0,
     "detail": {
       "kind": "bezier",
-      "ring": 6483592
+      "ring": 6219173
     },
     "clip": [
       320.0,
@@ -614,7 +614,7 @@
       624.0,
       14.299999475479126
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
@@ -640,7 +640,7 @@
       6.0,
       6.0
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
@@ -663,7 +663,7 @@
       120.0,
       14.299999475479126
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
@@ -969,7 +969,7 @@
       10.0,
       2.0
     ],
-    "color": 15951984,
+    "color": 15894660,
     "opacity": 1.0,
     "radius": 0.0,
     "stroke": 0.0,
