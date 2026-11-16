@@ -404,7 +404,11 @@ impl Render for TextField {
                         .max(self.value.lines().count() as f32)
                         .max(1.)
                         .min(self.tokens.metrics.composer_max_lines);
-                    (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
+                    // Each line as the editor spaces it (v1's 1.5), and
+                    // its inset above and below.
+                    let line = self.tokens.typography.body
+                        * gpui_macos::native_text::COMPOSER_LEADING as f32;
+                    (lines * line + 6.).max(self.tokens.metrics.hit)
                 } else if bare {
                     // One line, so the control around it can centre the text.
                     (self.tokens.typography.body * 1.35).ceil()

@@ -1827,17 +1827,11 @@ function Composer({
           gap: t("metrics.gap"),
           background: t("colors.floating"),
           borderRadius: t("metrics.panel_radius"),
-          // Only the field answers focus, with a quiet hairline; a drop
-          // over the composer rings it in the accent. At rest it has no
-          // edge of its own.
+          // A quiet hairline edge (v1's, its composer having the keyboard
+          // whenever the panel opens); a drop over the composer rings it in
+          // the accent.
           borderWidth: t("metrics.border"),
-          borderColor: t(
-            n.dropTarget
-              ? "colors.accent"
-              : n.keyboardFocus === "composer"
-                ? "colors.hairline"
-                : "colors.floating",
-          ),
+          borderColor: t(n.dropTarget ? "colors.accent" : "colors.hairline"),
           paddingTop: t("metrics.gap"),
           paddingBottom: t("metrics.gap"),
           paddingLeft: t("metrics.gap"),

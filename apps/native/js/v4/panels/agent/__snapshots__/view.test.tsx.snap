@@ -17428,7 +17428,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "colors.floating",
           },
           "borderColor": {
-            "token": "colors.floating",
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.panel_radius",
