@@ -1,6 +1,7 @@
 #[wgsl_rs::wgsl]
 pub mod surface {
     use super::super::common::*;
+    use super::super::corner_smoothing::*;
     use wgsl_rs::std::*;
 
     #[repr(C)]
@@ -70,7 +71,7 @@ pub mod surface {
             return transparent();
         }
         let locals = get!(SURFACE_LOCALS);
-        let fade = ContentMask::alpha(locals.content_mask, input.position.xy());
+        let fade = content_mask_alpha(locals.content_mask, input.position.xy());
         if locals.color_format == SurfaceColorFormat::Yuv {
             return sample_yuv_surface(input.texture_position) * locals.opacity * fade;
         }

@@ -19,7 +19,7 @@ use gpui::{prelude::*, *};
 use pm_design::{Elevation, Text, Tokens, motion::Preset};
 use pm_kernel::{KernelHandle, session::ShellReply};
 use pm_shell::{
-    kit::{self, Button, Item, Kit, Recipes, ink},
+    kit::{self, Button, Kit, Recipes, ink},
     native_control::{ControlSpec, Kind, NativeControl},
     symbol::Weight,
 };
@@ -1691,63 +1691,12 @@ impl Render for ProjectLibrary {
             .detach();
             self.view_switch = Some(switch);
         }
-        let list = self.layout == Layout::List;
-        let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .relative()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .w(px(VIEW_CELL.0))
-                .h(px(VIEW_CELL.1))
-                .role(Role::RadioButton)
-                .aria_label(label)
-                .aria_selected(on)
-                .tooltip(kit::tooltip(&t, label))
-                .child(kit.symbol(
-                    symbol,
-                    m.symbol_toolbar,
-                    Weight::Regular,
-                    if on { c.text } else { c.secondary },
-                ))
-        };
-        // The on fill glides between the two cells.
-        let at = kit
-            .animate(kit::key("home-view"), f32::from(list), Some(Preset::Layout))
-            .clamp(-0.1, 1.1);
+        // Until the window can host the system's control (the first frame),
+        // its place stays empty: no drawn stand-in (PM-409).
         let view_switch = div()
-            .id("home-layout")
-            .relative()
-            .flex()
             .flex_none()
-            .items_center()
-            .gap(px(t.space.hair))
-            .p(px(m.border))
-            .rounded(px(t.radius.md))
-            .bg(rgb(c.raised))
-            .elevated(&t, Elevation::Raised)
-            .role(Role::RadioGroup)
-            .aria_label("Project layout")
-            .child(
-                div()
-                    .absolute()
-                    .top(px(m.border))
-                    .left(px(m.border + at * (VIEW_CELL.0 + t.space.hair)))
-                    .w(px(VIEW_CELL.0))
-                    .h(px(VIEW_CELL.1))
-                    .rounded(px(t.radius.nested(t.radius.md, m.border + t.space.hair)))
-                    .bg(ink(c.text, tr.selected)),
-            )
-            .child(
-                cell("home-grid", "square.grid.2x2", "Grid view", !list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::Grid, cx))),
-            )
-            .child(
-                cell("home-list", "list.bullet", "List view", list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::List, cx))),
-            );
+            .w(px(2. * VIEW_CELL.0 + t.space.hair + 2. * m.border))
+            .h(px(VIEW_CELL.1 + 2. * m.border));
         let controls_row = div()
             .flex()
             .flex_none()
@@ -2049,7 +1998,7 @@ impl Render for ProjectLibrary {
                                 quiet: false,
                                 tint,
                                 symbol: None,
-                                glass: false,
+                                glass: true,
                                 well: false,
                             },
                             &tokens,
@@ -2118,7 +2067,6 @@ impl ProjectLibrary {
                 )
         };
         let line = || div().flex().flex_wrap().items_center().gap(px(t.space.md));
-        let none = |_: usize, _: &mut Window, _: &mut App| {};
         let buttons = |disabled: bool| {
             let row = line()
                 .child(kit.button(
@@ -2253,41 +2201,13 @@ impl ProjectLibrary {
                     .child(buttons(true)),
             )
             .child(
-                section("Icon buttons, segmented control, tabs")
+                section("Icon buttons")
                     .child(
                         line()
                             .child(kit.icon_button("g-icon-a", "magnifyingglass", "Search", false))
                             .child(kit.icon_button("g-icon-b", "plus", "Add", false))
-                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true))
-                            .child(kit.segmented(
-                                "g-seg-symbols",
-                                &[
-                                    Item::Symbol("square.grid.2x2", "Grid view"),
-                                    Item::Symbol("list.bullet", "List view"),
-                                ],
-                                0,
-                                false,
-                                none,
-                            ))
-                            .child(kit.segmented(
-                                "g-seg-titles",
-                                &[Item::Title("Layers"), Item::Title("Tracks")],
-                                0,
-                                false,
-                                none,
-                            )),
-                    )
-                    .child(kit.segmented(
-                        "g-tabs",
-                        &[
-                            Item::Title("Project"),
-                            Item::Title("Effect Controls"),
-                            Item::Title("Notes"),
-                        ],
-                        0,
-                        true,
-                        none,
-                    )),
+                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true)),
+                    ),
             )
             .child(
                 section("Search, switch, checkbox, radio, slider, progress")

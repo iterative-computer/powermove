@@ -162,9 +162,10 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     }
     let lightness = |c| pm_design::color::to_oklch(c).0;
     assert!(
-        lightness(m.bottom) > lightness(m.top),
-        "the lower half is the more luminous"
+        lightness(m.top) > lightness(m.bottom),
+        "lit from above: the top is the slab's lightest"
     );
+    assert!(m.opacity < 1., "glass: the grid and the row behind show through");
     let hover = dark.strip(green, StripState::Hover);
     assert_eq!(
         (hover.top, hover.bottom),
@@ -186,9 +187,9 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     // never the dark canvas's slab.
     assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));
     assert!(lightness(pale.foreground) < 0.45);
-    // The dark canvas's slab: a vivid top (the reference's, L 0.5) under a
-    // pale name.
-    assert!(lightness(m.top) < 0.55 && lightness(m.foreground) > 0.8);
+    // The dark canvas's slab: vivid glass, lit at its top, never the light
+    // canvas's pale tint, under a pale name.
+    assert!(lightness(m.top) < 0.7 && lightness(m.foreground) > 0.8);
     assert!(
         lightness(ringed.top) < lightness(pale.top),
         "selected is a step deeper"

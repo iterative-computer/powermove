@@ -184,7 +184,8 @@ fn report_activation() {
 pub static EDITORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub fn install_probe(cx: &mut gpui::App) {
-    if !enabled() {
+    // High frequency latency sampling is opt-in, even when trace logging is on.
+    if !enabled() || std::env::var_os("PM_NATIVE_RESPONSIVENESS_PROBE").is_none() {
         return;
     }
     let timer = cx.background_executor().clone();

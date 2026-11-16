@@ -100,6 +100,15 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         css.push_str("--line:var(--pm-hairline);");
         css.push_str("--tx:var(--pm-text);");
         css.push_str("--tx-2:var(--pm-text-2);");
+        // The rest of v1's names extensions style with: unset, each
+        // declaration using one was dropped (no hover fill, no caption size).
+        css.push_str("--tx-3:var(--pm-text-3);");
+        css.push_str("--bg-hover:var(--pm-hover);");
+        css.push_str("--on-accent:var(--pm-selected-text);");
+        css.push_str("--danger:var(--pm-danger);");
+        css.push_str("--warning:var(--pm-warning);");
+        css.push_str("--fs-xs:var(--pm-fs-caption);");
+        css.push_str("--fs-sm:var(--pm-fs-body);");
         css.push_str("--accent:var(--pm-accent);");
         css.push_str("--f-ui:var(--pm-font);");
         css.push_str("--f-mono:var(--pm-font-mono);");
