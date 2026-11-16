@@ -795,7 +795,7 @@ impl Project {
             outside_revision,
             call,
         } = request;
-        if outside_revision.is_some_and(|r| r != self.revision() || self.entry.is_some()) {
+        if outside_revision.is_some_and(|r| r != self.revision() || (self.entry.is_some() && !matches!(&call, Call::Transact {body,..} if self.independent_composition(body)))) {
             return Handled::reply(self.ack(
                 None,
                 None,
@@ -950,7 +950,9 @@ impl Project {
         }
         if self.entry.is_none() && !self.pending_squashes.is_empty() {
             let pending = std::mem::take(&mut self.pending_squashes);
-            for (_, (mark, label)) in pending {
+            let mut pending: Vec<_> = pending.into_values().collect();
+            pending.sort_by_key(|(mark, _)| std::cmp::Reverse(mark.serial));
+            for (mark, label) in pending {
                 self.squash_turn(&mark, &label);
             }
         }
@@ -2297,6 +2299,51 @@ impl Project {
         }
     }
 
+    /// A targeted non-open composition can commit independently of the UI lease.
+    /// Shared/project-wide writes and overlapping scopes retain normal admission.
+    fn independent_composition(&self, body: &WriteBody) -> bool {
+        let WriteBody::Ops(ops) = body else {
+            return false;
+        };
+        let Some(first) = ops.first() else {
+            return false;
+        };
+        let [PathPart::Key(comps), PathPart::Key(comp), ..] = first.path() else {
+            return false;
+        };
+        let Some(comp) = comp.as_str() else {
+            return false;
+        };
+        if comps.as_str() != Some("comps")
+            || self.store.snapshot().open_comp().as_deref() == Some(comp)
+            || self
+                .store
+                .root()
+                .and_then(|r| crate::model::comp_node(r, Some(comp)))
+                .is_none()
+        {
+            return false;
+        }
+        let prefix = crate::model::comp_path(Some(comp));
+        ops.iter().all(|op| {
+            op.path().starts_with(&prefix)
+                && self.entry.as_ref().is_none_or(|entry| {
+                    entry.ops.iter().all(|old| {
+                        old.scopes.iter().all(|path| {
+                            !path.starts_with(op.path()) && !op.path().starts_with(path)
+                        })
+                    })
+                })
+        })
+    }
+    pub(crate) fn entry_before(&self) -> Option<Snapshot> {
+        self.entry.as_ref().map(|entry| Snapshot {
+            doc_id: self.store.doc_id(),
+            revision: entry.before.revision(),
+            document: entry.before.clone(),
+        })
+    }
+
     fn transact(
         &mut self,
         caller: Caller,
@@ -2324,7 +2371,37 @@ impl Project {
                 WriteBody::Ops(_) => None,
             })
             .unwrap_or_else(|| "Edit".to_owned());
-        match self.write(caller.writer, caller.origin, &label, &body, true) {
+        let independent = self.entry.is_some() && self.independent_composition(&body);
+        // Rebase the drag's saved starting tree as well as the live document.
+        // Cancel and rebased commits must never record the remote write twice.
+        let rebased = if independent {
+            let entry = self.entry.as_ref().unwrap();
+            let mut root = entry.before.root().cloned();
+            let WriteBody::Ops(ops) = &body else {
+                unreachable!()
+            };
+            for op in ops {
+                root = match crate::document::apply_one(root, op, self.revision() + 1) {
+                    Ok((root, _)) => root,
+                    Err(error) => return self.ack(txid, None, None, Reply::Throw(error.into())),
+                };
+            }
+            Some(Arc::new(Document::from_root(root, entry.before.revision())))
+        } else {
+            None
+        };
+        let mut entry = if independent { self.entry.take() } else { None };
+        let outcome = self.write(caller.writer, caller.origin, &label, &body, true);
+        if let Some(open) = &mut entry {
+            if matches!(&outcome, Ok((true, _))) {
+                open.before = rebased.unwrap();
+                open.base_token = self.store.kernel_state_token();
+            }
+        }
+        if independent {
+            self.entry = entry;
+        }
+        match outcome {
             Ok((changed, folded)) => self.ack(
                 txid,
                 folded,

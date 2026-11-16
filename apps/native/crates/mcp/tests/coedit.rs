@@ -20,8 +20,12 @@ fn fixture() -> (
         .as_str()
         .unwrap()
         .to_owned();
+    h.agent_grants = Some(Arc::new(|_| {
+        Some(("synthetic-run".into(), "project".into()))
+    }));
     let h = Arc::new(Mutex::new(h));
     let mut s = McpSession::new(h.clone());
+    s.set_agent_run("synthetic-grant");
     ok(s.call("start_session", json!({"prompt":"Synthetic coedit"})));
     (root, h, s, id)
 }
@@ -183,8 +187,12 @@ fn attached_fixture() -> (
         .as_str()
         .unwrap()
         .to_owned();
+    host.agent_grants = Some(Arc::new(|_| {
+        Some(("synthetic-run".into(), "project".into()))
+    }));
     let host = Arc::new(Mutex::new(host));
     let mut session = McpSession::new(host.clone());
+    session.set_agent_run("synthetic-grant");
     ok(session.call("start_session", json!({"prompt":"Synthetic hold"})));
     ok(session.call(
         "apply_commands",
@@ -194,55 +202,85 @@ fn attached_fixture() -> (
 }
 #[test]
 fn a_live_interface_lease_holds_an_agent_write_then_lands_after_release() {
-    use pm_kernel::{Caller, GestureCall, Reply, Request};
-    let (root, host, actor, mut session, id) = attached_fixture();
-    let kernel = actor.handle();
-    let ack = kernel
-        .call(
-            &id,
-            Request::new(
-                Caller::native(),
-                GestureCall::Begin {
-                    label: "User drag".into(),
-                },
-            ),
-        )
-        .wait()
-        .unwrap()
-        .unwrap();
-    let Reply::Gesture(gesture) = ack.reply else {
-        panic!("expected gesture");
-    };
-    let release = kernel.clone();
-    let project = id.clone();
-    let thread = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        release
+    for cancel in [false, true] {
+        use pm_kernel::{Caller, GestureCall, Reply, Request};
+        let (root, host, actor, mut session, id) = attached_fixture();
+        let kernel = actor.handle();
+        let ack = kernel
             .call(
-                &project,
-                Request::new(Caller::native(), GestureCall::Commit { gesture }),
+                &id,
+                Request::new(
+                    Caller::native(),
+                    GestureCall::Begin {
+                        label: "User drag".into(),
+                    },
+                ),
             )
             .wait()
             .unwrap()
             .unwrap();
-    });
-    let result = session
+        let Reply::Gesture(gesture) = ack.reply else {
+            panic!("expected gesture");
+        };
+        if cancel {
+            kernel
+                .call(
+                    &id,
+                    Request::new(
+                        Caller::native(),
+                        GestureCall::Step {
+                            gesture,
+                            replace: false,
+                            body: vec![pm_kernel::Command::SetStaticOpacity {
+                                layer_id: "L".into(),
+                                value: 17.,
+                            }]
+                            .into(),
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+        }
+        let release = kernel.clone();
+        let project = id.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            release
+                .call(
+                    &project,
+                    Request::new(
+                        Caller::native(),
+                        if cancel {
+                            GestureCall::Cancel { gesture }
+                        } else {
+                            GestureCall::Commit { gesture }
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+        });
+        let result = session
         .dispatch(
             "apply_commands",
             &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
         )
         .unwrap();
-    thread.join().unwrap();
-    assert_eq!(result["status"], "applied", "{result}");
-    session.finish(true).unwrap();
-    assert_eq!(
-        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
-        40
-    );
-    drop(session);
-    drop(host);
-    drop(actor);
-    std::fs::remove_dir_all(root).unwrap();
+        thread.join().unwrap();
+        assert_eq!(result["status"], "applied", "{result}");
+        session.finish(true).unwrap();
+        assert_eq!(
+            host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+            40
+        );
+        drop(session);
+        drop(host);
+        drop(actor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 #[test]
 fn typing_holds_after_four_seconds_and_user_wins_at_release() {
@@ -256,6 +294,12 @@ fn typing_holds_after_four_seconds_and_user_wins_at_release() {
         )
         .unwrap();
     assert_eq!(result["status"], "held", "{result}");
+    let started = std::time::Instant::now();
+    let pending = session
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    assert_eq!(pending["status"], "held", "{pending}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
     actor
         .handle()
         .call(
@@ -389,4 +433,170 @@ fn coedit_paused_worker_observes_panel_stop_without_a_resume() {
     drop(app);
     drop(actor);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stopping_a_bound_run_drops_its_held_write_without_waiting_for_blur() {
+    let (root, host, actor, mut session, id) = attached_fixture();
+    pm_mcp::coedit::touch_field(&id, "synthetic-stop", true);
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    assert_eq!(result["status"], "held");
+    let started = std::time::Instant::now();
+    session.close().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_ne!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+        40
+    );
+    pm_mcp::coedit::touch_field(&id, "synthetic-stop", false);
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn non_open_composition_commits_independently_of_user_commit_or_cancel() {
+    use pm_kernel::{Call, Caller, Command, CompCommand, GestureCall, HistoryCall, Reply, Request};
+    for cancel in [false, true] {
+        let (root, host, actor, mut session, id) = attached_fixture();
+        session.finish(true).unwrap();
+        let kernel = actor.handle();
+        kernel
+            .call(
+                &id,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some("User precomp".into()),
+                        expected_revision: None,
+                        body: vec![
+                            CompCommand::Create {
+                                comp_id: "pre".into(),
+                                settings: Default::default(),
+                            }
+                            .into(),
+                        ]
+                        .into(),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        ok(session.call("start_session", json!({"prompt":"Edit other composition"})));
+        let before = kernel.published(&id).unwrap();
+        let Reply::Gesture(gesture) = kernel
+            .call(
+                &id,
+                Request::new(
+                    Caller::native(),
+                    GestureCall::Begin {
+                        label: "User drag".into(),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap()
+            .reply
+        else {
+            panic!()
+        };
+        kernel
+            .call(
+                &id,
+                Request::new(
+                    Caller::native(),
+                    GestureCall::Step {
+                        gesture,
+                        replace: false,
+                        body: vec![Command::SetStaticOpacity {
+                            layer_id: "L".into(),
+                            value: 17.,
+                        }]
+                        .into(),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result=session.dispatch("apply_commands",&json!({"compositionId":"pre","commands":[{"type":"add_layer","id":"remote","layerType":"shape"}]})).unwrap();
+        assert_ne!(result["status"], "held", "{result}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let during = kernel.published(&id).unwrap();
+        assert!(during.entry.is_some());
+        assert_eq!(during.snapshot.open_comp(), before.snapshot.open_comp());
+        assert_eq!(during.selection, before.selection);
+        assert_eq!(
+            host.lock().unwrap().read_document(&id).unwrap()["comps"]["pre"]["layers"][0]["id"],
+            "remote"
+        );
+        // Finishing may defer history grouping, but never waits for this drag.
+        session.finish(true).unwrap();
+        let app = host.lock().unwrap().coedit_host().unwrap();
+        let (writer, _) = app.latest_turn(&id).unwrap();
+        kernel
+            .call(
+                &id,
+                Request::new(
+                    Caller::native(),
+                    if cancel {
+                        GestureCall::Cancel { gesture }
+                    } else {
+                        GestureCall::Commit { gesture }
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let project = host.lock().unwrap().read_document(&id).unwrap();
+        assert_eq!(
+            project["layers"][0]["p"]["opacity"]["v"],
+            if cancel { 100 } else { 17 }
+        );
+        assert_eq!(project["comps"]["pre"]["layers"][0]["id"], "remote");
+        let reply = kernel
+            .call(
+                &id,
+                Request::new(
+                    Caller::native(),
+                    HistoryCall::UndoWriter {
+                        writer,
+                        keep_mine: false,
+                        label: "Undo Agent".into(),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap()
+            .reply;
+        assert!(
+            matches!(reply, Reply::Applied { changed: true, .. }),
+            "{reply:?}"
+        );
+        let project = host.lock().unwrap().read_document(&id).unwrap();
+        assert_eq!(
+            project["layers"][0]["p"]["opacity"]["v"],
+            if cancel { 100 } else { 17 }
+        );
+        assert_eq!(
+            project["comps"]["pre"]["layers"].as_array().unwrap().len(),
+            0
+        );
+        drop(session);
+        drop(host);
+        drop(app);
+        drop(actor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

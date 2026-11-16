@@ -62,8 +62,11 @@ impl McpSession {
         let result = if wait {
             pending
                 .receive
-                .recv()
-                .map_err(|_| mpsc::TryRecvError::Disconnected)
+                .recv_timeout(Duration::from_millis(crate::coedit::TOOL_WAIT_MS))
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
+                    mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
+                })
         } else {
             pending.receive.try_recv()
         };
@@ -92,7 +95,10 @@ impl McpSession {
         let _ = self.take_hold(true);
     }
     pub(super) fn defer_if_touched(&mut self, name: &str, args: &Value) -> Result<Option<Value>> {
-        if self.bypass_hold
+        // Legacy external MCP connections retain their synchronous folding
+        // contract. Co-edit admission belongs to an explicitly bound run.
+        if self.agent_token.is_none()
+            || self.bypass_hold
             || ![
                 "apply_commands",
                 "edit_layer_strips",
@@ -110,11 +116,22 @@ impl McpSession {
             return Ok(None);
         };
         let (host, baseline, scopes) = {
-            let automation = self
+            let mut automation = self
                 .host
                 .lock()
                 .map_err(|_| Error::unavailable("MCP host stopped"))?;
             let view = automation.view(&project)?;
+            let target = args["compositionId"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| active.default_comp.clone());
+            if target
+                .as_ref()
+                .is_some_and(|id| view.snapshot.open_comp().as_ref() != Some(id))
+            {
+                refresh(active, &mut automation, &project, self.writer)?;
+                return Ok(None);
+            }
             observe_foreign(active, &automation, &project);
             let touching = automation.coedit_host().is_some_and(|h| {
                 h.kernel
@@ -206,7 +223,12 @@ impl McpSession {
             if !touching {
                 return Ok(None);
             }
-            (host, view.snapshot, scopes)
+            let baseline = host
+                .kernel
+                .published(&project)
+                .and_then(|p| p.entry_before.clone())
+                .unwrap_or(view.snapshot);
+            (host, baseline, scopes)
         };
         let mut worker = McpSession {
             host: self.host.clone(),
@@ -236,8 +258,15 @@ impl McpSession {
             let ticket = ticket;
             let events = host.kernel.subscribe();
             let result = (|| {
+                let waiting_since = Instant::now();
                 let mut released: Option<Instant> = None;
                 loop {
+                    if waiting_since.elapsed() >= Duration::from_millis(crate::coedit::MAX_HOLD_MS)
+                    {
+                        return Ok(
+                            json!({"status":"dropped","reason":"The user kept editing beyond the hold limit. This write expired; do not retry it."}),
+                        );
+                    }
                     if stop.load(Ordering::Acquire) || worker.run_revoked() {
                         return Ok(
                             json!({"status":"dropped","reason":"The run stopped before this write landed."}),

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const RELEASE_DELAY_MS: u64 = 250;
 pub const TOOL_WAIT_MS: u64 = 4_000;
+pub const MAX_HOLD_MS: u64 = 120_000;
 // Approved shortcuts. Keep independent of the existing shell cancel/grid keys.
 pub const STOP: &str = "cmd+alt+.";
 pub const PAUSE: &str = "cmd+shift+.";
