@@ -323,8 +323,15 @@ impl Controller {
                 // Ghost loading from Home: a window with no project shows the
                 // editor's ghost at once (one with a project keeps it until
                 // the replacing open, `replace_project`).
-                Outbound::Opening { name, aspect } => {
+                Outbound::Opening {
+                    name,
+                    project,
+                    aspect,
+                } => {
                     if v.session.is_none() && !v.opening {
+                        if let Some(project) = &project {
+                            v.stage_poster(project);
+                        }
                         v.begin_ghost(&name, aspect, cx);
                     }
                 }
@@ -421,12 +428,14 @@ impl Controller {
         })
         .detach();
     }
-    /// The viewer's picture as it stands, the playhead's frame of the open
-    /// project, stored as its last frame (`crate::poster::write_last_frame`)
-    /// unless it already is. Rendered off the main thread, only once the
-    /// project's effects are loaded. The channel hears once it is stored,
-    /// or at `deadline`: a close waits on it (`lifecycle::complete_close`).
-    pub(crate) fn store_last_frame(
+    /// The picture the viewer presented last, kept as the open project's
+    /// last frame (`crate::poster::write_last_frame`) unless it already is:
+    /// the engine's held picture of that frame, read and written on a
+    /// background thread, no render. Never while the project's effects
+    /// load (the picture would leave them out). The channel hears once it
+    /// is written, or at `deadline`: a quit waits on it
+    /// (`lifecycle::complete_close`).
+    pub(crate) fn keep_last_frame(
         &mut self,
         deadline: Option<std::time::Duration>,
         cx: &mut Context<Self>,
@@ -435,30 +444,25 @@ impl Controller {
             crate::diag::line(serde_json::json!({"last_frame": "loading"}));
             return None;
         }
-        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
-            crate::diag::line(serde_json::json!({"last_frame": "no project"}));
-            return None;
-        };
-        let published = self.kernel.published(&project)?;
-        let time = self.time();
-        let mark = crate::poster::last_frame_mark(published.revision(), time);
-        if crate::poster::last_frame_current(&self.profile, &project, &mark) {
+        let project = self.session.as_ref()?.project.clone();
+        let doc = self.published.as_ref()?.snapshot.doc_id;
+        let frame = self.viewer.as_ref()?.status().frame?;
+        // Only this project's own picture (a viewer replaced for another
+        // project may still hold the last one's).
+        if frame.stamp.doc_id != doc {
             return None;
         }
-        let renderer = match crate::mcp_services::frame_renderer(
-            self.kernel.clone(),
-            project.clone(),
-            self.profile.clone(),
-            self.job_overrides.clone(),
-            crate::mcp_services::Capture::Poster,
-        ) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                crate::diag::line(serde_json::json!({"last_frame": "no renderer", "error": error.to_string()}));
-                return None;
-            }
-        };
-        let (size, _) = crate::poster::frame_of(&published);
+        let picture = frame.picture?;
+        let time = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        let mark = crate::poster::last_frame_mark(frame.stamp.revision, time, frame.settled);
+        // Kept already, or settled already where this is its preview.
+        let settled = crate::poster::last_frame_mark(frame.stamp.revision, time, true);
+        if [&mark, &settled]
+            .into_iter()
+            .any(|mark| crate::poster::last_frame_current(&self.profile, &project, mark))
+        {
+            return None;
+        }
         let profile = self.profile.clone();
         let (done, heard) = async_channel::bounded(1);
         if let Some(deadline) = deadline {
@@ -474,15 +478,71 @@ impl Controller {
         cx.background_executor()
             .spawn(async move {
                 let started = std::time::Instant::now();
-                let stored = crate::poster::write_last_frame(
-                    &renderer, published, &profile, &project, time, size, &mark,
-                );
+                let stored = crate::poster::write_last_frame(&picture, &profile, &project, &mark);
                 crate::diag::line(serde_json::json!({"last_frame": if stored { "stored" } else { "failed" },
                     "time": time, "ms": started.elapsed().as_secs_f64() * 1000.}));
                 let _ = done.try_send(());
             })
             .detach();
         Some(heard)
+    }
+    /// The viewer showed `frame`: once its picture has held still
+    /// (`poster::still`) it is kept as the project's last frame, so a launch
+    /// after a kill or a signal quit, which keep nothing, still opens on a
+    /// recent picture of the project (PM-384).
+    pub(crate) fn watch_still(
+        &mut self,
+        frame: Option<&pm_engine_service::FrameReport>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frame) = frame else {
+            return;
+        };
+        let shown = (frame.stamp.revision, frame.time.get(), frame.settled);
+        let watch = &mut self.last_frame_watch;
+        if watch.shown.is_some_and(|(was, _)| was == shown) {
+            return;
+        }
+        watch.shown = Some((shown, std::time::Instant::now()));
+        if std::mem::replace(&mut watch.watching, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let mut wait = crate::poster::LAST_FRAME_STILL;
+            loop {
+                cx.background_executor().timer(wait).await;
+                match this.update(cx, |v, cx| v.look_still(cx)) {
+                    Ok(Some(next)) => wait = next,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+    /// The still picture's watch looks again: how long until the next look,
+    /// or none when it rendered (or there is nothing to keep).
+    fn look_still(&mut self, cx: &mut Context<Self>) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let watch = &self.last_frame_watch;
+        let held = watch.shown.map_or(Default::default(), |(_, at)| now - at);
+        let since = watch.stored.map(|at| now - at);
+        let busy = self.playing() || self.settling.is_some() || self.awaiting_extension_effects();
+        match crate::poster::still(held, since, watch.writing, busy) {
+            crate::poster::Still::Wait(next) => Some(next),
+            crate::poster::Still::Store => {
+                self.last_frame_watch.watching = false;
+                if let Some(done) = self.keep_last_frame(None, cx) {
+                    self.last_frame_watch.writing = true;
+                    self.last_frame_watch.stored = Some(now);
+                    cx.spawn(async move |this, cx| {
+                        let _ = done.recv().await;
+                        let _ = this.update(cx, |v, _| v.last_frame_watch.writing = false);
+                    })
+                    .detach();
+                }
+                None
+            }
+        }
     }
     pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
         self.home = true;

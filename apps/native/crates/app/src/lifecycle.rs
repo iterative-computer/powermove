@@ -65,13 +65,19 @@ fn quit_waits_for(
         CloseState::Dirty | CloseState::Clean => None,
     }
 }
-/// How long a close waits to store the viewer's last picture
-/// (`Controller::store_last_frame`). A quit by signal (logout, shutdown, a
-/// script) has no time to give: it never renders one and never waits, so it
-/// keeps only a picture already stored. A chosen quit and a close wait up to
-/// `LAST_FRAME_WAIT` for one to render.
-fn last_frame_wait(intent: Intent, signal: bool) -> Option<std::time::Duration> {
-    (!(signal && intent == Intent::Quit)).then_some(LAST_FRAME_WAIT)
+/// Whether a close keeps the viewer's last picture
+/// (`Controller::keep_last_frame`, a copy of what it presented), and how
+/// long it waits for it to be written. A quit by signal (logout, shutdown,
+/// a script) has no time to give: it keeps only a picture already kept
+/// (the one that held still). A chosen quit waits up to `LAST_FRAME_WAIT`
+/// for the file, the process ending after it; a close of a window or a
+/// project waits for nothing, the write finishing on its own.
+fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Duration>> {
+    match (intent, signal) {
+        (Intent::Quit, true) => None,
+        (Intent::Quit, false) => Some(Some(LAST_FRAME_WAIT)),
+        _ => Some(None),
+    }
 }
 /// The longest a quit signal keeps the process running.
 const SIGNAL_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -148,11 +154,10 @@ fn running_exports(
 /// An export's worker removes its unfinished file before it reports that;
 /// quitting sooner killed the worker with that file still on disk.
 const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-/// The longest a close waits to store the viewer's last picture
-/// (`Controller::store_last_frame`): a first render of a heavy project took
-/// 4.7 s (Paper, Deep Glow). Only a close whose picture differs from the one
-/// stored (another time or revision since the last save) renders at all.
-const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest a chosen quit waits for the viewer's last picture to be
+/// written (`Controller::keep_last_frame`): a read and a PNG, tens of
+/// milliseconds.
+const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Whether every export in `stopping` has ended (cancelled, failed or done).
 fn exports_ended(
     tasks: &[pm_promedia::tasks::Task],
@@ -1112,14 +1117,18 @@ impl Controller {
         let had_project = session.is_some() || self.published.is_some();
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         // The picture the viewer shows now is what the next launch shows
-        // until its first frame: stored before the project and its effects
-        // go, waited for at most `LAST_FRAME_WAIT`; never by a quit signal.
+        // until its first frame: copied before the project goes; a chosen
+        // quit waits for the file (`last_frame_keep`), a quit signal keeps
+        // only the one already kept.
         let signal = cx.global::<QuitCoordinator>().terminating;
         let last_frame = session
             .is_some()
-            .then(|| last_frame_wait(intent, signal))
+            .then(|| last_frame_keep(intent, signal))
             .flatten()
-            .and_then(|wait| self.store_last_frame(Some(wait), cx));
+            .and_then(|wait| {
+                let written = self.keep_last_frame(wait, cx);
+                written.filter(|_| wait.is_some())
+            });
         cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(stored) = last_frame {
@@ -1246,16 +1255,16 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    /// A quit by signal never renders or waits for the last picture; a
-    /// chosen quit and a close wait for it (PM-384).
+    /// A quit by signal never keeps or waits for the last picture; a chosen
+    /// quit waits for its file; a close keeps it without waiting (PM-384).
     #[test]
     fn a_signal_quit_never_waits_on_the_last_frame() {
-        assert_eq!(super::last_frame_wait(Intent::Quit, true), None);
-        assert_eq!(super::last_frame_wait(Intent::Quit, false), Some(LAST_FRAME_WAIT));
+        assert_eq!(super::last_frame_keep(Intent::Quit, true), None);
+        assert_eq!(super::last_frame_keep(Intent::Quit, false), Some(Some(LAST_FRAME_WAIT)));
         for intent in [Intent::Window, Intent::Project] {
-            assert_eq!(super::last_frame_wait(intent, false), Some(LAST_FRAME_WAIT));
+            assert_eq!(super::last_frame_keep(intent, false), Some(None));
             // Only the quit goes without it.
-            assert_eq!(super::last_frame_wait(intent, true), Some(LAST_FRAME_WAIT));
+            assert_eq!(super::last_frame_keep(intent, true), Some(None));
         }
     }
     use super::*;

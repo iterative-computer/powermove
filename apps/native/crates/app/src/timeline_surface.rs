@@ -13,7 +13,7 @@ use pm_panel_timeline::{
     footer::Part,
     frame,
     graph_render::{self, Graph},
-    render::{Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
+    render::{BarState, Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
 };
 use std::{
     cell::RefCell,
@@ -516,6 +516,8 @@ pub struct TimelineSurface {
     effect_over: Option<Point<Pixels>>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
+/// How often a growing render bar is read again (PM-431).
+const RENDER_BAR_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tracks and the ruler draw this many of their widths in from their
 /// layers' left edge, in content `2 × SIDEWAYS + 1` widths wide: a sideways
 /// step inside the width the layer records past each side replays it.
@@ -626,24 +628,19 @@ impl TimelineSurface {
         })
         .detach();
         this.restore_view();
-        // The render bar follows the disk render cache (Render Selection).
+        // The render bar follows the disk render cache (Render Selection,
+        // the background render). A background render reports every frame
+        // it stores: the bar is read at most once a `RENDER_BAR_EVERY` while
+        // it grows (the channel keeps one report), and the panel draws again
+        // only when the bar would draw other points at this zoom (PM-431: an
+        // untouched app drew the timeline nine times a second).
         let changes = crate::render_frames::watch();
         cx.spawn(async move |this, cx| {
             while changes.recv().await.is_ok() {
-                let alive = this.update(cx, |s, cx| {
-                    let Some(scene) = &s.scene else { return };
-                    let bars = crate::render_frames::bars(s.model.index.comp_id.as_deref());
-                    let mut next = Scene::clone(scene);
-                    next.bars = bars;
-                    let next = Arc::new(next);
-                    s.scene = Some(next.clone());
-                    s.outline.set_scene(Some(next));
-                    s.frame = None;
-                    s.changed(false, cx);
-                });
-                if alive.is_err() {
+                if this.update(cx, |s, cx| s.render_bars_changed(cx)).is_err() {
                     break;
                 }
+                cx.background_executor().timer(RENDER_BAR_EVERY).await;
             }
         })
         .detach();
@@ -1207,6 +1204,27 @@ impl TimelineSurface {
         self.queue.retain(|j| !matches!(j, Job::Persist(_)));
         self.queue.push_back(Job::Persist(self.view));
         self.pump(cx);
+    }
+    /// The disk render cache changed: the scene takes its bars, and the
+    /// panel draws again only when they would draw other points.
+    pub(crate) fn render_bars_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(scene) = &self.scene else { return };
+        let bars = crate::render_frames::bars(self.model.index.comp_id.as_deref());
+        let seen = self.drawn_bars(&bars) != self.drawn_bars(&scene.bars);
+        let mut next = Scene::clone(scene);
+        next.bars = bars;
+        let next = Arc::new(next);
+        self.scene = Some(next.clone());
+        self.outline.set_scene(Some(next));
+        if seen {
+            self.frame = None;
+            self.changed(false, cx);
+        }
+    }
+    /// The render bars as the ruler draws them now: state and whole points.
+    fn drawn_bars(&self, bars: &[pm_panel_timeline::render::Bar]) -> Vec<(BarState, i64, i64)> {
+        let x = |t: f64| (self.view.layer_column + (t - self.view.scroll_time) * self.view.pps).round() as i64;
+        bars.iter().map(|b| (b.state, x(b.from), x(b.to))).collect()
     }
     fn changed(&mut self, persist: bool, cx: &mut Context<Self>) {
         self.frame = None;
@@ -5393,11 +5411,12 @@ fn strip_rim(
         };
         window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
     }
-    // Light falls from the top left: a line inside the top and left edges.
+    // Light falls from above: a line inside the top edge, brightest there
+    // and round the top corners (the reference's rim).
     if light.1 > 0. {
         let shadow = BoxShadow {
             color: ink(light),
-            offset: point(px(1.), px(1.)),
+            offset: point(px(0.), px(1.)),
             blur_radius: px(0.5),
             spread_radius: px(0.),
             inset: true,

@@ -1381,6 +1381,7 @@ impl Controller {
             .iter()
             .map(|(id, (title, _))| (id.clone(), title.clone()));
         let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
+        remember_titles(&self.profile, &contributed);
         self.extensions.contributed = contributed;
         let undo = Choice {
             label: "Undo Extension Change".into(),
@@ -2851,3 +2852,45 @@ mod recovered_runtime_tests {
         assert!(extensions.surfaces.is_empty());
     }
 }
+/// The titles of extension panels as they last registered, kept in the
+/// profile: while a project opens, a panel whose extension is still starting
+/// shows its name in its tab (PM-427), not its id. Read once per process.
+fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
+    profile.join("caches").join("panel-titles.json")
+}
+thread_local! {
+    static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
+}
+fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String, String>) -> R) -> R {
+    TITLES.with(|t| {
+        let mut t = t.borrow_mut();
+        let titles = t.get_or_insert_with(|| {
+            std::fs::read(titles_file(profile))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        });
+        f(titles)
+    })
+}
+pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
+    with_titles(profile, |t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
+    let changed = with_titles(profile, |t| {
+        let mut changed = false;
+        for (id, title) in panels {
+            if t.get(id) != Some(title) {
+                t.insert(id.clone(), title.clone());
+                changed = true;
+            }
+        }
+        changed.then(|| serde_json::to_vec(t).ok()).flatten()
+    });
+    if let Some(bytes) = changed {
+        let file = titles_file(profile);
+        let _ = std::fs::create_dir_all(file.parent().unwrap());
+        let _ = std::fs::write(file, bytes);
+    }
+}
+
