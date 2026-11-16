@@ -1976,3 +1976,73 @@ fn stop_deadline_starts_after_kernel_sealing_completes() {
         Some(Action::Disabled { .. })
     ));
 }
+
+/// A release the Store does not sign is admitted as the shipped app admits
+/// one: by the registry's archive hash and git tree hash (the expected tree
+/// is `git write-tree` of the same files), with an unsigned proof.
+#[test]
+fn a_registry_release_is_admitted_by_its_hashes_alone() {
+    let manifest =
+        br#"{"id":"synthetic-store","name":"Synthetic","version":"1.0.0","apiVersion":3,"permissions":[]}"#;
+    let files = |extra: &[(&str, &[u8])]| {
+        let mut entries: Vec<(String, Vec<u8>, u8)> = [
+            ("manifest.json", &manifest[..]),
+            ("index.ts", &b"export default function(){}"[..]),
+            ("lib.ts", &b"export const a = 1;"[..]),
+            ("lib/util.ts", &b"export const b = 2;"[..]),
+        ]
+        .iter()
+        .chain(extra)
+        .map(|(p, d)| (p.to_string(), d.to_vec(), b'0'))
+        .collect();
+        entries.reverse();
+        pack(&entries)
+    };
+    let archive = files(&[]);
+    let record = RegistryRelease {
+        release_id: "synthetic-release".into(),
+        extension: id("synthetic-store"),
+        publisher: "synthetic-publisher".into(),
+        tar_sha256: hash(&archive),
+        tree_sha: "6281bb49d29ef4a2e6ddc428259b32bb824c665e".into(),
+    };
+    let admitted = admit_registry(&record, &archive, Limits::default()).unwrap();
+    assert_eq!(admitted.statement().format, 0);
+    assert_eq!(admitted.statement().publisher, "synthetic-publisher");
+    assert_eq!(
+        admitted.file("lib/util.ts"),
+        Some(&b"export const b = 2;"[..])
+    );
+    assert_eq!(admitted.statement().files.len(), 4);
+    // Another archive than the registry names.
+    let other = files(&[("extra.ts", b"1")]);
+    assert!(matches!(
+        admit_registry(&record, &other, Limits::default()),
+        Err(Error::Integrity("archive hash"))
+    ));
+    // The right archive hash, files the tree does not name.
+    let forged = RegistryRelease {
+        tar_sha256: hash(&other),
+        ..record.clone()
+    };
+    assert!(matches!(
+        admit_registry(&forged, &other, Limits::default()),
+        Err(Error::Integrity("tree hash"))
+    ));
+    // A dot-entry is outside every tree: refused, never written unverified.
+    let dotted = files(&[(".hidden", b"1")]);
+    let dotted_record = RegistryRelease {
+        tar_sha256: hash(&dotted),
+        ..record.clone()
+    };
+    assert!(admit_registry(&dotted_record, &dotted, Limits::default()).is_err());
+    // A manifest naming another extension than the registry recorded.
+    let renamed = RegistryRelease {
+        extension: id("another-store"),
+        ..record
+    };
+    assert!(matches!(
+        admit_registry(&renamed, &archive, Limits::default()),
+        Err(Error::Integrity("manifest id"))
+    ));
+}
