@@ -172,6 +172,11 @@ impl Placeholder {
         }
     }
 }
+/// Whether a viewer bound again keeps the placeholder it has: one for the
+/// same document, when no new poster was staged for it.
+fn placeholder_kept(shown: Option<u64>, staged: bool, doc: Option<u64>) -> bool {
+    !staged && shown.is_some() && shown == doc
+}
 impl Drop for Placeholder {
     fn drop(&mut self) {
         unsafe {
@@ -299,9 +304,17 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         publish_output.clone(),
                     ));
                     binding.as_ref().unwrap().sync();
-                    // The opening project's last picture stands in until its first frame.
-                    placeholder = v.viewer_poster.take().zip(v.published.as_ref().map(|p| p.snapshot.doc_id))
-                        .and_then(|(poster, doc)| Placeholder::over(&host.borrow().viewer_layer(), &poster, doc));
+                    // The opening project's last picture stands in until its
+                    // first frame, also across a viewer bound again for the
+                    // same document before that frame (PM-384).
+                    let doc = v.published.as_ref().map(|p| p.snapshot.doc_id);
+                    let poster = v.viewer_poster.take();
+                    // The layer it sits on is the window's, kept across viewers.
+                    if !placeholder_kept(placeholder.as_ref().map(|p| p.doc_id), poster.is_some(), doc) {
+                        placeholder = poster.zip(doc)
+                            .and_then(|(poster, doc)| Placeholder::over(&host.borrow().viewer_layer(), &poster, doc));
+                    }
+                    crate::diag::line(serde_json::json!({"placeholder": placeholder.is_some()}));
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
@@ -317,8 +330,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     v.update_builtins(cx);
                 }
                 v.tell_presented(status.frame.as_ref());
+                v.watch_still(status.frame.as_ref(), cx);
                 if placeholder.as_ref().is_some_and(|p| status.frame.as_ref().is_some_and(|f| f.stamp.doc_id == p.doc_id)) {
                     placeholder = None;
+                    crate::diag::line(serde_json::json!({"placeholder": "first frame"}));
                 }
                 if !status.layer_failures.is_empty() {
                     let contributions = v.extensions.host.as_ref().and_then(|host| host.contributions());
@@ -624,6 +639,20 @@ mod extension_compile_log_tests {
         assert_eq!(log.entries.len(), 1);
         assert_eq!(log.entries[0].message, failures[0].message);
         assert_eq!(log.entries[0].source, source);
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    /// A viewer bound again before the project's first frame (its document
+    /// published again while it settles) keeps the stand-in picture; another
+    /// document, or a poster staged for a new open, replaces it (PM-384).
+    #[test]
+    fn a_viewer_bound_again_keeps_its_placeholder() {
+        assert!(super::placeholder_kept(Some(7), false, Some(7)));
+        assert!(!super::placeholder_kept(Some(7), true, Some(7)), "a new open's poster");
+        assert!(!super::placeholder_kept(Some(7), false, Some(8)), "another document");
+        assert!(!super::placeholder_kept(None, false, Some(7)), "none shown");
     }
 }
 

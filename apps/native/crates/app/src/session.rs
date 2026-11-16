@@ -81,6 +81,9 @@ pub struct Controller {
     /// first real frame (`playback::Placeholder`); taken when its viewer is
     /// bound.
     pub(crate) viewer_poster: Option<std::path::PathBuf>,
+    /// The picture the viewer shows, kept as the last frame once it holds
+    /// still (`poster::still`).
+    pub(crate) last_frame_watch: crate::poster::StillWatch,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -885,6 +888,7 @@ impl Controller {
             ghost_aspect: None,
             ghost_poster: None,
             viewer_poster: None,
+            last_frame_watch: Default::default(),
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -1161,6 +1165,15 @@ impl Controller {
             let found = found.await;
             let _ = this.update(cx, |v, cx| {
                 v.reopening = false;
+                // The tab shows its project opening, with its picture, from
+                // now: not Home while the tabs before it open (PM-384).
+                if let Some((id, name)) = &found
+                    && v.session.is_none()
+                    && !v.opening
+                {
+                    v.stage_poster(id);
+                    v.begin_ghost(name, None, cx);
+                }
                 cx.notify();
             });
             if let Some((id, name)) = found {
@@ -1184,9 +1197,13 @@ impl Controller {
                                 profile: v.profile.clone(),
                                 project: id,
                             },
-                            Some(name),
+                            Some(name.clone()),
                             cx,
                         );
+                        // It could not start: the ghost gives way to Home.
+                        if !v.opening && v.session.is_none() && v.opening_name.as_deref() == Some(&name) {
+                            v.end_ghost(cx);
+                        }
                     }
                 });
             }
@@ -1858,16 +1875,7 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        // The picture the viewer last showed stands in the opening viewer
-        // until the project's first real frame; Home's poster where none
-        // was kept.
-        self.ghost_poster = [
-            crate::poster::last_frame_files(&self.profile, &open_id).0,
-            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
-        ]
-        .into_iter()
-        .find(|poster| poster.is_file());
-        self.viewer_poster = self.ghost_poster.clone();
+        self.stage_poster(&open_id);
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -1908,6 +1916,14 @@ impl Controller {
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
+    /// The picture the viewer last showed for `project` stands in the
+    /// opening viewer until its first real frame; Home's poster where none
+    /// was kept (PM-384).
+    pub(crate) fn stage_poster(&mut self, project: &str) {
+        self.ghost_poster = crate::poster::opening_poster(&self.profile, project);
+        self.viewer_poster = self.ghost_poster.clone();
+        self.last_frame_watch.shown = None;
+    }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(
         &mut self,
@@ -1934,6 +1950,9 @@ impl Controller {
             }
             return;
         };
+        if let ShellReply::Opened { session, .. } = &reply {
+            self.stage_poster(&session.project);
+        }
         // A library project's saved version is in the library, wherever its file went.
         self.settle_open(
             operation,

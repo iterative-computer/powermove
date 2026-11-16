@@ -323,8 +323,15 @@ impl Controller {
                 // Ghost loading from Home: a window with no project shows the
                 // editor's ghost at once (one with a project keeps it until
                 // the replacing open, `replace_project`).
-                Outbound::Opening { name, aspect } => {
+                Outbound::Opening {
+                    name,
+                    project,
+                    aspect,
+                } => {
                     if v.session.is_none() && !v.opening {
+                        if let Some(project) = &project {
+                            v.stage_poster(project);
+                        }
                         v.begin_ghost(&name, aspect, cx);
                     }
                 }
@@ -483,6 +490,64 @@ impl Controller {
             })
             .detach();
         Some(heard)
+    }
+    /// The viewer showed `frame`: once its picture has held still
+    /// (`poster::still`) it is kept as the project's last frame, so a launch
+    /// after a kill or a signal quit, which keep nothing, still opens on a
+    /// recent picture of the project (PM-384).
+    pub(crate) fn watch_still(
+        &mut self,
+        frame: Option<&pm_engine_service::FrameReport>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frame) = frame else {
+            return;
+        };
+        let shown = (frame.stamp.revision, frame.time.get());
+        let watch = &mut self.last_frame_watch;
+        if watch.shown.is_some_and(|(was, _)| was == shown) {
+            return;
+        }
+        watch.shown = Some((shown, std::time::Instant::now()));
+        if std::mem::replace(&mut watch.watching, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let mut wait = crate::poster::LAST_FRAME_STILL;
+            loop {
+                cx.background_executor().timer(wait).await;
+                match this.update(cx, |v, cx| v.look_still(cx)) {
+                    Ok(Some(next)) => wait = next,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+    /// The still picture's watch looks again: how long until the next look,
+    /// or none when it rendered (or there is nothing to keep).
+    fn look_still(&mut self, cx: &mut Context<Self>) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let watch = &self.last_frame_watch;
+        let held = watch.shown.map_or(Default::default(), |(_, at)| now - at);
+        let since = watch.stored.map(|at| now - at);
+        let busy = self.playing() || self.settling.is_some() || self.awaiting_extension_effects();
+        match crate::poster::still(held, since, watch.rendering, busy) {
+            crate::poster::Still::Wait(next) => Some(next),
+            crate::poster::Still::Store => {
+                self.last_frame_watch.watching = false;
+                if let Some(done) = self.store_last_frame(None, cx) {
+                    self.last_frame_watch.rendering = true;
+                    self.last_frame_watch.stored = Some(now);
+                    cx.spawn(async move |this, cx| {
+                        let _ = done.recv().await;
+                        let _ = this.update(cx, |v, _| v.last_frame_watch.rendering = false);
+                    })
+                    .detach();
+                }
+                None
+            }
+        }
     }
     pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
         self.home = true;

@@ -184,6 +184,63 @@ pub(crate) fn last_frame_files(profile: &Path, id: &str) -> (PathBuf, PathBuf) {
 pub(crate) fn last_frame_mark(revision: u64, time: f64) -> String {
     format!("{revision}\n{time:.4}\n{}", identity())
 }
+/// The picture that stands in for `id` while it opens: the frame its viewer
+/// last showed, else its Home card's poster; none when neither was ever
+/// stored (PM-384).
+pub(crate) fn opening_poster(profile: &Path, id: &str) -> Option<PathBuf> {
+    [
+        last_frame_files(profile, id).0,
+        files(&profile.join("caches").join("thumbnails"), id).0,
+    ]
+    .into_iter()
+    .find(|poster| poster.is_file())
+}
+/// How long the viewer's picture must hold still before it is kept as the
+/// last frame: a kill or a signal quit stores nothing, so the picture a
+/// launch opens on is the last one that held this long.
+pub(crate) const LAST_FRAME_STILL: std::time::Duration = std::time::Duration::from_secs(4);
+/// The least time between two renders kept that way: each is an engine job.
+pub(crate) const LAST_FRAME_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+/// What the still picture's watch does next.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Still {
+    /// Look again after this long.
+    Wait(std::time::Duration),
+    /// Render and keep it now.
+    Store,
+}
+/// The still picture's watch, given how long the picture has held, how long
+/// since the last render was asked for (if one was), whether one is still
+/// rendering, and whether the picture is moving or still loading.
+pub(crate) fn still(
+    held: std::time::Duration,
+    since_stored: Option<std::time::Duration>,
+    rendering: bool,
+    busy: bool,
+) -> Still {
+    if held < LAST_FRAME_STILL {
+        return Still::Wait(LAST_FRAME_STILL - held);
+    }
+    if rendering || busy {
+        return Still::Wait(LAST_FRAME_STILL);
+    }
+    match since_stored {
+        Some(since) if since < LAST_FRAME_GAP => Still::Wait(LAST_FRAME_GAP - since),
+        _ => Still::Store,
+    }
+}
+/// The watch over the picture the viewer shows, for the last frame.
+#[derive(Default)]
+pub(crate) struct StillWatch {
+    /// The picture shown (its revision and time) and since when.
+    pub shown: Option<((u64, i64), std::time::Instant)>,
+    /// A watch is waiting for the picture to hold.
+    pub watching: bool,
+    /// A render is in flight.
+    pub rendering: bool,
+    /// When the last render was asked for.
+    pub stored: Option<std::time::Instant>,
+}
 /// Whether the stored last frame already shows `mark`.
 pub(crate) fn last_frame_current(profile: &Path, id: &str, mark: &str) -> bool {
     let (image, stamp) = last_frame_files(profile, id);
@@ -265,6 +322,40 @@ mod tests {
         assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04)));
         assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3.)));
         std::fs::remove_dir_all(&profile).unwrap();
+    }
+
+    /// An opening project stands in with the frame its viewer last showed,
+    /// else its Home card's picture, never nothing when either exists.
+    #[test]
+    fn an_opening_project_shows_its_last_frame_else_its_home_poster() {
+        let profile = tempfile::tempdir().unwrap();
+        let profile = profile.path();
+        assert_eq!(opening_poster(profile, "file-1"), None, "none ever stored");
+        let (card, _) = files(&profile.join("caches/thumbnails"), "file-1");
+        std::fs::create_dir_all(card.parent().unwrap()).unwrap();
+        std::fs::write(&card, b"png").unwrap();
+        assert_eq!(opening_poster(profile, "file-1"), Some(card.clone()));
+        let (last, _) = last_frame_files(profile, "file-1");
+        std::fs::create_dir_all(last.parent().unwrap()).unwrap();
+        std::fs::write(&last, b"png").unwrap();
+        assert_eq!(opening_poster(profile, "file-1"), Some(last));
+        assert_eq!(opening_poster(profile, "file-2"), None, "another project's is not its");
+    }
+
+    /// A picture that held still is kept, so a launch after a kill or a
+    /// signal quit (which store nothing) opens on it; a moving or loading
+    /// picture waits, and renders stay one at a time and spaced.
+    #[test]
+    fn a_still_picture_is_kept_once_it_holds() {
+        use std::time::Duration;
+        let s = Duration::from_secs;
+        assert_eq!(still(s(1), None, false, false), Still::Wait(s(3)));
+        assert_eq!(still(s(4), None, false, false), Still::Store);
+        assert_eq!(still(s(9), Some(s(60)), false, false), Still::Store);
+        // Playing, settling or waiting on its effects: looked at again.
+        assert_eq!(still(s(9), None, false, true), Still::Wait(LAST_FRAME_STILL));
+        assert_eq!(still(s(9), None, true, false), Still::Wait(LAST_FRAME_STILL));
+        assert_eq!(still(s(9), Some(s(10)), false, false), Still::Wait(s(20)));
     }
 
     #[test]
