@@ -680,6 +680,9 @@ fn row_drag_index_and_empty_space_reorder_with_one_undo(cx: &mut TestAppContext)
     for source in ["index", "space", "name", "badge"] {
         let mut s = stage(cx, 3);
         let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l2"]"#);
+        // Jude's quiet switches are painted after the pointer enters the row.
+        s.vcx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        s.idle(cx);
         let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l2"]"#);
         let shy = bounds(&mut s.vcx, r#"timeline:shy:["layer","l2"]"#);
         let before_history = s.rig.kernel.published(PROJECT).unwrap().history.entries;

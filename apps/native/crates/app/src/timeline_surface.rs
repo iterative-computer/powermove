@@ -1176,7 +1176,7 @@ impl TimelineSurface {
         } else {
             step(&self.tracks_handle, point(px(x), px(-y)), window, cx)
                 && step(&self.rows_handle, point(px(0.), px(-y)), window, cx)
-                && self.outline.step(y, self.visible_rows(), window, cx)
+                && self.outline.step(y, self.visible_rows(), (f32::from(self.bounds.size.height) - self.tokens.metrics.ruler) as f64, window, cx)
         };
         if !stepped {
             return false;

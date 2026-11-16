@@ -114,12 +114,19 @@ impl Outline {
         &self,
         scroll_y: f32,
         rows: Option<(usize, usize)>,
+        height: f64,
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        // A different mounted range needs fresh child geometry before replay.
+        // Keep the mounted overscan while it still covers every visible row.
+        // A new suggested range alone must not redraw on each small wheel step.
         if rows.is_some_and(|rows| rows != self.rows.get()) {
-            return false;
+            let (start, end) = self.rows.get();
+            let covered = self.scene.borrow().as_ref().is_some_and(|scene| {
+                let visible = scene.visible_range(scroll_y as f64, height.max(0.));
+                start <= visible.start && end >= visible.end
+            });
+            if !covered { return false; }
         }
         let stepped =
             window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
@@ -136,8 +143,9 @@ impl Outline {
         stepped
     }
     pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
-        self.rows.set(rows.unwrap_or((0, 0)));
-        let moved = self.scroll_y.get() != scroll_y || self.column.get() != column;
+        let mounted = rows.unwrap_or((0, 0));
+        let changed = self.rows.replace(mounted) != mounted;
+        let moved = changed || self.scroll_y.get() != scroll_y || self.column.get() != column;
         self.scroll_y.set(scroll_y);
         self.column.set(column);
         if let Some(view) = self.view.borrow().as_ref().and_then(|v| v.upgrade()) {
