@@ -11,9 +11,11 @@
 //! A quit signal (SIGTERM: a logout, a shutdown, a script) has nobody to ask
 //! and the system ends the process soon anyway: the thread that heard it
 //! bounds it from that moment ([`signalled`]), a quit already under way and
-//! stuck on the main thread included. That path never blocks (no stderr),
-//! tries the journal flush with a bound, stops the engine jobs this app
-//! started, and exits.
+//! stuck on the main thread included. Its end is best effort, not a promise
+//! of durability: it tries every journal's sync at once within a bound,
+//! names each one not confirmed, stops the engine jobs this app started,
+//! and exits, non-zero when any journal was not confirmed. That path never
+//! blocks (no stderr).
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,8 +31,10 @@ pub const SIGNAL: Duration = Duration::from_secs(3);
 /// How long making the journals durable may take before Quit Now says it
 /// could not.
 pub const SECURE: Duration = Duration::from_secs(5);
-/// The journal flush a signal's end attempts, within its limit.
+/// The journal syncs a signal's end attempts, within its limit.
 const SIGNAL_FLUSH: Duration = Duration::from_secs(1);
+/// The exit status of a signal's end that could not confirm every journal.
+const UNCONFIRMED: i32 = 1;
 
 /// The chosen quit's current stage; a new stage or a cancel supersedes it.
 static STAGE: AtomicU64 = AtomicU64::new(0);
@@ -101,23 +105,59 @@ fn report(stall: Stall) {
 pub fn signalled() {
     if !SIGNALLED.swap(true, Ordering::AcqRel) {
         let kernel = kernel();
-        arm_signal(SIGNAL, move || kernel.map_or(Ok(()), |k| k.sync_journals()));
+        arm_signal(SIGNAL, move || {
+            kernel.map_or_else(Vec::new, |k| k.sync_each_journal(SIGNAL_FLUSH))
+        });
     }
 }
 /// After `limit`, the signal's end: nobody to ask, and nothing on this path
-/// may block (a stalled stderr pipe included). The journals get a bounded
-/// flush, the engine jobs this app started are stopped, and the process
-/// exits.
-fn arm_signal(limit: Duration, flush: impl FnOnce() -> std::io::Result<()> + Send + 'static) {
+/// may block (a stalled stderr pipe included). Best effort: every journal's
+/// sync is attempted (`sync`, bounded per journal), each one not confirmed
+/// is named, the engine jobs this app started are stopped, and the process
+/// exits non-zero if any journal was not confirmed. A `sync` that does not
+/// return at all counts as none confirmed.
+fn arm_signal(
+    limit: Duration,
+    sync: impl FnOnce() -> Vec<(String, Result<(), String>)> + Send + 'static,
+) {
     watch(
         limit,
         || true,
         move || {
             crate::diag::line(serde_json::json!({"quit":"limit","stage":"signal"}));
-            let _ = flush_within(flush, SIGNAL_FLUSH);
-            stop_jobs_and_exit()
+            stop_jobs_and_exit(signal_exit_status(sync_within(sync, SIGNAL_FLUSH * 2)))
         },
     );
+}
+/// `sync`'s reports, or `None` when it did not return within `bound`.
+fn sync_within(
+    sync: impl FnOnce() -> Vec<(String, Result<(), String>)> + Send + 'static,
+    bound: Duration,
+) -> Option<Vec<(String, Result<(), String>)>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("pm-quit-journals".into())
+        .spawn(move || {
+            let _ = tx.send(sync());
+        })
+        .ok()?;
+    rx.recv_timeout(bound).ok()
+}
+/// Names every journal a signal's end could not confirm and gives the exit
+/// status: 0 only when each one synced.
+fn signal_exit_status(reports: Option<Vec<(String, Result<(), String>)>>) -> i32 {
+    let Some(reports) = reports else {
+        crate::diag::line(serde_json::json!({"quit":"journals_unconfirmed","why":"the sync did not return"}));
+        return UNCONFIRMED;
+    };
+    let mut status = 0;
+    for (project, result) in reports {
+        if let Err(why) = result {
+            crate::diag::line(serde_json::json!({"quit":"journal_unconfirmed","project":project,"why":why}));
+            status = UNCONFIRMED;
+        }
+    }
+    status
 }
 
 fn kernel() -> Option<pm_kernel::KernelHandle> {
@@ -171,9 +211,10 @@ fn flush_within(
     }
 }
 
-/// `exit` runs no drops: stops the engine jobs this app started (its
-/// process group, when it leads one, as a launched app does), then exits.
-pub fn stop_jobs_and_exit() -> ! {
+/// Ends the process with `status`, running no drops and no exit handlers:
+/// stops the engine jobs this app started (its process group, when it leads
+/// one, as a launched app does), then exits.
+pub fn stop_jobs_and_exit(status: i32) -> ! {
     // SAFETY: plain process calls; this process ignores the SIGTERM it sends
     // itself (blocked in every thread, waited for by one).
     unsafe {
@@ -182,9 +223,10 @@ pub fn stop_jobs_and_exit() -> ! {
         }
         // Not `exit`: its handlers (libraries', C++ statics) run on this
         // thread and can wait forever on a lock the main thread holds in a
-        // long open, so a SIGTERM never ended the app (run 23). What must be
-        // durable is already flushed by the caller.
-        libc::_exit(0)
+        // long open, so a SIGTERM never ended the app (run 23). Durability
+        // is the caller's: Quit Now ends only after its journals synced; a
+        // signal's end tried them, best effort, and says which it could not.
+        libc::_exit(status)
     }
 }
 
@@ -264,7 +306,7 @@ mod tests {
                 );
                 println!("failed={failed:?} hung={hung:?}");
                 if failed.is_ok() || hung.is_ok() {
-                    stop_jobs_and_exit();
+                    stop_jobs_and_exit(0);
                 }
                 std::thread::sleep(Duration::from_secs(30));
             }
@@ -277,7 +319,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
                 arm_signal(Duration::from_millis(100), || {
                     std::thread::sleep(Duration::from_secs(60));
-                    Ok(())
+                    vec![]
                 });
                 std::thread::sleep(Duration::from_secs(30));
             }
@@ -290,15 +332,42 @@ mod tests {
                 }
                 // SAFETY: registers a plain C function to run at exit().
                 unsafe { libc::atexit(never_returns) };
-                arm_signal(Duration::from_millis(100), || Ok(()));
+                arm_signal(Duration::from_millis(100), Vec::new);
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // A signal's end where one journal synced and one did not.
+            "signal-unconfirmed" => {
+                arm_signal(Duration::from_millis(100), || {
+                    vec![
+                        ("Synced".into(), Ok(())),
+                        ("Stalled".into(), Err("not confirmed within 1000 ms".into())),
+                    ]
+                });
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // A signal's end where every journal synced.
+            "signal-confirmed" => {
+                arm_signal(Duration::from_millis(100), || vec![("Synced".into(), Ok(()))]);
                 std::thread::sleep(Duration::from_secs(30));
             }
             other => panic!("unknown case {other}"),
         }
     }
 
+    /// A signal's end says, by its exit status, whether every journal was
+    /// confirmed: non-zero when one was not, zero when all were.
+    #[test]
+    fn a_signal_end_exits_non_zero_when_a_journal_is_not_confirmed() {
+        let status = |case| {
+            let mut c = child(case, false);
+            assert!(ended_within(&mut c, Duration::from_secs(4)), "{case} did not end");
+            c.wait().unwrap().code()
+        };
+        assert_eq!(status("signal-unconfirmed"), Some(UNCONFIRMED));
+        assert_eq!(status("signal-confirmed"), Some(0));
+    }
     /// A quit signal ends the process even when an exit handler would never
-    /// return: its end does not run them (the journals are flushed first).
+    /// return: its end runs none.
     #[test]
     fn a_signal_ends_the_process_past_an_exit_handler_that_never_returns() {
         let mut c = child("signal-exit-handler", false);

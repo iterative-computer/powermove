@@ -41,7 +41,7 @@ pub fn route_sigterm() {
                 if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
                     // No window yet, so nothing is open to close; ends
                     // without exit handlers, as the signal's limit does.
-                    crate::quit_limit::stop_jobs_and_exit();
+                    crate::quit_limit::stop_jobs_and_exit(0);
                 }
                 // Bounded here, not on the main thread: a quit already under
                 // way and stuck there would otherwise never hear it.
@@ -623,8 +623,6 @@ define_class!(
             // otherwise Objective-C capability checks hide the quit route.
             selector == objc2::sel!(applicationShouldTerminate:)
                 || selector == objc2::sel!(handleQuitEvent:withReplyEvent:)
-                || selector == objc2::sel!(pmQuit:)
-                || selector == objc2::sel!(validateMenuItem:)
                 || unsafe { msg_send![&*self.ivars().previous, respondsToSelector: selector] }
         }
     }
@@ -655,35 +653,6 @@ define_class!(
                 self.ivars().suspended.borrow_mut().push(id as usize);
             }
             let _ = self.ivars().sender.try_send(());
-        }
-        /// Quit Powermove (Cmd-Q). `terminate:` never reaches the delegate
-        /// while a window shows a sheet; this action does, from the end of
-        /// the responder chain, with or without a sheet, and goes to the
-        /// quit coordinator like the Quit Apple Event (PM-464).
-        #[unsafe(method(pmQuit:))]
-        fn quit_chosen(&self, _sender: *mut AnyObject) {
-            if self.ivars().allowed.get() {
-                let mtm = MainThreadMarker::new().unwrap();
-                NSApplication::sharedApplication(mtm).terminate(None);
-                return;
-            }
-            let _ = self.ivars().sender.try_send(());
-        }
-        /// Quit stays available beside any sheet; every other item is as the
-        /// previous delegate (GPUI's) says.
-        #[unsafe(method(validateMenuItem:))]
-        fn validate_menu_item(&self, item: &NSMenuItem) -> objc2::runtime::Bool {
-            let previous = &*self.ivars().previous;
-            let valid = item.action() == Some(objc2::sel!(pmQuit:)) || {
-                let responds: bool = unsafe {
-                    msg_send![previous, respondsToSelector: objc2::sel!(validateMenuItem:)]
-                };
-                !responds || {
-                    let valid: bool = unsafe { msg_send![previous, validateMenuItem: item] };
-                    valid
-                }
-            };
-            objc2::runtime::Bool::new(valid)
         }
         #[unsafe(method(forwardingTargetForSelector:))]
         fn forward(&self, _: Sel) -> *const AnyObject {
@@ -720,6 +689,17 @@ pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
     (guard, rx)
 }
 impl QuitDelegate {
+    /// Quit Powermove or Cmd-Q (`pm_shell::native::set_quit_hook`): to the
+    /// quit coordinator like the Quit Apple Event, with or without a sheet;
+    /// once the quit is allowed, the app terminates.
+    pub fn chosen(&self) {
+        if self.ivars().allowed.get() {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).terminate(None);
+            return;
+        }
+        let _ = self.ivars().sender.try_send(());
+    }
     pub fn allow(&self) {
         self.ivars().allowed.set(true);
     }

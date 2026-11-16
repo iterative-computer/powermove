@@ -54,19 +54,27 @@ fn held_note(intent: Intent, asking: bool) -> &'static str {
         _ => "Finish the active edit, open or recovery decision before closing.",
     }
 }
-/// What holds a quit in a window: the Recover question, the Export sheet, or
-/// another question or sheet on screen; `None`: nothing does.
-fn quit_blocker(recovering: bool, sheet_up: bool, export_open: bool) -> Option<&'static str> {
-    match (recovering, sheet_up, export_open) {
-        (true, ..) => Some("the Recover question"),
-        (_, true, true) => Some("the Export sheet"),
-        (_, true, false) => Some("a question"),
-        _ => None,
+/// What a quit's blocker is called: a file chooser (an open or save panel,
+/// wherever it is), the Recover question or the Export sheet on an editor, or
+/// any other question.
+fn blocker_name(file_chooser: bool, recovering: bool, export_open: bool) -> &'static str {
+    if file_chooser {
+        "a file chooser"
+    } else if recovering {
+        "the Recover question"
+    } else if export_open {
+        "the Export sheet"
+    } else {
+        "a question"
     }
 }
-/// The status line of a window whose sheet or question held a quit.
+/// The status line of an editor whose sheet or question stopped a quit.
 fn held_by(what: &str) -> String {
-    format!("Powermove didn’t quit: {what} is open in this window. Answer or close it, then quit again.")
+    format!("Powermove didn’t quit: {what} is open. Answer or close it, then quit again.")
+}
+/// The status line while a quit already under way waits on its question.
+fn quit_waits_on(what: &str) -> String {
+    format!("Powermove quits once {what} is answered.")
 }
 /// What a Quit waits for at a window that cannot close this moment, when
 /// that is work which ends on its own: a save in flight, a project still
@@ -232,40 +240,121 @@ fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
         ],
     )
 }
-pub fn begin_quit(cx: &mut App) {
-    crate::diag::line(serde_json::json!({"quit":"begin"}));
-    let q = cx.global_mut::<QuitCoordinator>();
-    if q.terminating {
-        if !q.quitting {
-            start_quit(cx);
+/// Where a Quit goes.
+#[derive(Debug, PartialEq)]
+enum QuitEntry {
+    /// A quit signal: never held, never asks.
+    Signal,
+    /// A sheet or question is on screen: its window comes forward and says
+    /// so. `cancel`: no quit was under way yet, so this one ends here; a quit
+    /// already asking (its Save or Review Changes question, the running
+    /// export question) goes on once that is answered.
+    Hold { cancel: bool },
+    /// A quit is under way: offer to quit now (the Quit Now sheet's own
+    /// question is the answer while it is up).
+    QuitNow,
+    /// Nothing holds it: the quit starts.
+    Start,
+}
+fn quit_entry(terminating: bool, quitting: bool, asking_now: bool, blocked: bool) -> QuitEntry {
+    if terminating {
+        QuitEntry::Signal
+    } else if asking_now {
+        QuitEntry::QuitNow
+    } else if blocked {
+        QuitEntry::Hold { cancel: !quitting }
+    } else if quitting {
+        QuitEntry::QuitNow
+    } else {
+        QuitEntry::Start
+    }
+}
+/// What holds a quit: the window a sheet covers anywhere in the app (an
+/// editor, a popover, Settings, the Store, a pop-out viewer), the editor it
+/// belongs to when there is one, and what to call it.
+struct Blocker {
+    window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    owner: Option<Entity<Controller>>,
+    what: &'static str,
+}
+fn find_blocker(cx: &mut App) -> Option<Blocker> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    // Notices that ask nothing go first; a quit never stops at one.
+    for window in objc2_app_kit::NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isSheet() {
+            crate::alert::dismiss_notice(&window);
         }
-        return;
     }
-    if q.quitting {
-        return ask_quit_now(cx);
+    let (window, sheet) = pm_shell::quit_blocker_window()?;
+    let mut top = objc2::Message::retain(&*window);
+    while let Some(parent) = top.parentWindow() {
+        top = parent;
     }
-    if q.asking_exports {
-        return;
-    }
-    // A question or sheet on screen (a Recover question, the Export sheet, a
-    // close's Save question) holds the quit before anything closes: that
-    // window comes forward and says what holds it. Closing other windows
-    // first left them closed when the quit then stopped (PM-464).
-    let controllers = q.controllers.clone();
-    let blocker = controllers.iter().filter_map(|weak| weak.upgrade()).find_map(|c| {
-        let what = c.read(cx).quit_blocker()?;
-        Some((c, what))
-    });
-    if let Some((controller, what)) = blocker {
-        controller.update(cx, |v, cx| {
-            v.message = held_by(what);
-            crate::diag::line(serde_json::json!({"quit":"held", "by":what}));
-            v.bring_forward();
+    let owner = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .clone()
+        .into_iter()
+        .filter_map(|weak| weak.upgrade())
+        .find(|c| *c.read(cx).host.borrow().window == *top);
+    let on_editor = owner
+        .as_ref()
+        .is_some_and(|c| *c.read(cx).host.borrow().window == *window);
+    let what = blocker_name(
+        objc2_foundation::NSObjectProtocol::isKindOfClass(&*sheet, <objc2_app_kit::NSSavePanel as objc2::ClassType>::class()),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).recovery_pending),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).builtins.windows.contains_key("export")),
+    );
+    Some(Blocker { window, owner, what })
+}
+/// Brings the blocking window forward and says so in its editor.
+fn hold_quit(blocker: Blocker, quitting: bool, cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"held", "by":blocker.what, "quitting":quitting}));
+    if let Some(owner) = &blocker.owner {
+        owner.update(cx, |v, cx| {
+            v.message = if quitting { quit_waits_on(blocker.what) } else { held_by(blocker.what) };
             cx.notify();
         });
-        return cancel_quit(cx);
     }
-    // An export that is running is asked about before anything closes.
+    bring_forward(&blocker.window);
+}
+/// `pm_shell::bring_forward`, except a development lane launched in the
+/// background, which takes no focus.
+fn bring_forward(window: &objc2_app_kit::NSWindow) {
+    if !gpui_macos::child_window::would_hold() {
+        pm_shell::bring_forward(window);
+    }
+}
+pub fn begin_quit(cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"begin"}));
+    let q = cx.global::<QuitCoordinator>();
+    let (terminating, asking_now) = (q.terminating, q.asking_now.is_some());
+    // The running-export question belongs to a quit already asking.
+    let quitting = q.quitting || q.asking_exports;
+    // A sheet or question on screen holds the quit before anything closes:
+    // closing other windows first left them closed when it then stopped
+    // (PM-464), and a second Quit during the quit's own question went
+    // unanswered (Sol, w55).
+    let blocker = (!terminating && !asking_now).then(|| find_blocker(cx)).flatten();
+    match quit_entry(terminating, quitting, asking_now, blocker.is_some()) {
+        QuitEntry::Signal => {
+            if !cx.global::<QuitCoordinator>().quitting {
+                start_quit(cx);
+            }
+        }
+        QuitEntry::Hold { cancel } => {
+            hold_quit(blocker.expect("held by a blocker"), !cancel, cx);
+            if cancel {
+                cancel_quit(cx);
+            }
+        }
+        QuitEntry::QuitNow => ask_quit_now(cx),
+        QuitEntry::Start => ask_exports_then_start(cx),
+    }
+}
+/// An export that is running is asked about before anything closes; then
+/// the quit starts.
+fn ask_exports_then_start(cx: &mut App) {
     let q = cx.global::<QuitCoordinator>();
     let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
     let window = q
@@ -534,7 +623,7 @@ async fn quit_as_is(note: String, cx: &mut gpui::AsyncApp) {
             Ok(()) => {
                 q._delegate.resolve_quit_events(false);
                 crate::diag::line(serde_json::json!({"quit":"quit_now","note":note}));
-                crate::quit_limit::stop_jobs_and_exit();
+                crate::quit_limit::stop_jobs_and_exit(0);
             }
             // Not durable: ending now could lose it, so the app stays.
             Err(reason) => cannot_quit_now(&reason, cx),
@@ -737,6 +826,9 @@ fn finish_quit(cx: &mut App) {
 pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
     if cx.try_global::<QuitCoordinator>().is_none() {
         let (delegate, rx) = crate::platform::quit_guard();
+        // The Quit item and Cmd-Q come here from now on.
+        let chosen = delegate.clone();
+        pm_shell::set_quit_hook(move || chosen.chosen());
         let host = entity.read(cx).mcp.clone();
         crate::quit_limit::set_kernel(host.kernel.clone());
         let stalls = crate::quit_limit::stalls();
@@ -965,22 +1057,7 @@ impl Controller {
     /// A quit stopped at a question in this window: the app comes forward
     /// (unhidden, active) with this window key and its tab chosen, and beeps.
     fn bring_forward(&self) {
-        let window = self.host.borrow().window.clone();
-        let Some(mtm) = objc2::MainThreadMarker::new() else {
-            return;
-        };
-        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        if gpui_macos::child_window::would_hold() {
-            // A development lane launch in the background takes no focus.
-            return;
-        }
-        app.unhide(None);
-        app.activate();
-        if let Some(group) = window.tabGroup() {
-            group.setSelectedWindow(Some(&window));
-        }
-        window.makeKeyAndOrderFront(None);
-        objc2_app_kit::NSBeep();
+        bring_forward(&self.host.borrow().window.clone());
     }
     /// A close or quit met an edit the kernel still holds open (`label`):
     /// the person finishes it (sealed as one step they can undo, then the
@@ -1307,18 +1384,6 @@ impl Controller {
             shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
         }
     }
-    /// What on screen in this window holds a quit (a question or a sheet
-    /// only the person can end), named for the status line; notices that
-    /// ask nothing are dismissed instead.
-    fn quit_blocker(&self) -> Option<&'static str> {
-        let window = self.host.borrow().window.clone();
-        let sheet_up = !crate::alert::dismiss_notice(&window);
-        quit_blocker(
-            self.recovery_pending,
-            sheet_up,
-            self.builtins.windows.contains_key("export"),
-        )
-    }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if let Some(g) = self.builtins.gizmos.clone() {
             g.update(cx, |g, cx| g.studio_fly_end(false, cx));
@@ -1559,16 +1624,28 @@ mod tests {
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
     }
-    /// What holds a quit is named: the Recover question, the Export sheet,
-    /// any other question or sheet; a window with none holds nothing.
+    /// What holds a quit is named: a file chooser anywhere, the Recover
+    /// question and the Export sheet on an editor, any other question.
     #[test]
     fn a_quit_names_the_sheet_that_holds_it() {
-        assert_eq!(quit_blocker(true, true, false), Some("the Recover question"));
-        assert_eq!(quit_blocker(false, true, true), Some("the Export sheet"));
-        assert_eq!(quit_blocker(false, true, false), Some("a question"));
-        assert_eq!(quit_blocker(false, false, true), None);
-        assert_eq!(quit_blocker(false, false, false), None);
+        assert_eq!(blocker_name(true, true, true), "a file chooser");
+        assert_eq!(blocker_name(false, true, true), "the Recover question");
+        assert_eq!(blocker_name(false, false, true), "the Export sheet");
+        assert_eq!(blocker_name(false, false, false), "a question");
         assert!(held_by("the Export sheet").starts_with("Powermove didn’t quit: the Export sheet"));
+    }
+    /// A sheet on screen holds every chosen Quit before anything closes,
+    /// the second Quit of a quit asking its own question included (it goes on
+    /// after the answer, not cancelled); the Quit Now sheet answers a second
+    /// Quit itself; a signal is never held.
+    #[test]
+    fn a_sheet_holds_a_quit_before_anything_closes() {
+        assert_eq!(quit_entry(false, false, false, true), QuitEntry::Hold { cancel: true });
+        assert_eq!(quit_entry(false, true, false, true), QuitEntry::Hold { cancel: false });
+        assert_eq!(quit_entry(false, true, true, true), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(true, false, false, true), QuitEntry::Signal);
+        assert_eq!(quit_entry(false, true, false, false), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(false, false, false, false), QuitEntry::Start);
     }
     /// A quit a question stops says so in that window, by name: never the
     /// generic close note, never nothing.
