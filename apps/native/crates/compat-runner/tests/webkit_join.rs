@@ -441,6 +441,58 @@ mod mac {
                             holds(&window, &content),
                             "the window's own view has the keyboard back"
                         );
+                        // In the app every panel shares one attached page: a
+                        // panel hidden or closed is only its region gone. A
+                        // press in the panel at the left, then that region
+                        // leaves: the window's view has the keyboard back; a
+                        // region change that keeps it showing leaves it.
+                        let press = unsafe {
+                            objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                                objc2_app_kit::NSEventType::LeftMouseDown,
+                                objc2_foundation::NSPoint::new(100., 380.),
+                                objc2_app_kit::NSEventModifierFlags::empty(),
+                                0.,
+                                window.windowNumber(),
+                                None,
+                                0,
+                                1,
+                                1.,
+                            )
+                        }
+                        .ok_or("no synthetic press")?;
+                        let left = Rect::new(0., 0., 200., 480.);
+                        let right = Rect::new(400., 0., 240., 480.);
+                        web.set_regions(vec![left, right])?;
+                        web.present(viewport)?;
+                        web.web_view().mouseDown(&press);
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        web.set_regions(vec![left])?;
+                        web.present(viewport)?;
+                        assert!(holds(&window, web.web_view()), "a panel still showing lost the keyboard");
+                        web.set_regions(vec![right])?;
+                        web.present(viewport)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the hidden panel's page kept the keyboard"
+                        );
+                        // Two tabs of one group share a body: the page knows
+                        // its panels by name, and a press belongs to the one
+                        // shown there when it lands.
+                        web.set_regions(vec![left])?;
+                        web.set_bodies(vec![("notes".into(), left)]);
+                        web.present(viewport)?;
+                        web.web_view().mouseDown(&press);
+                        assert!(window.makeFirstResponder(Some(web.web_view())));
+                        web.present(viewport)?;
+                        web.set_bodies(vec![("notes".into(), left), ("logos".into(), right)]);
+                        web.present(viewport)?;
+                        assert!(holds(&window, web.web_view()), "a panel still showing lost the keyboard");
+                        web.set_bodies(vec![("logos".into(), left)]);
+                        web.present(viewport)?;
+                        assert!(
+                            holds(&window, &content),
+                            "the page kept the keyboard for a tab no longer shown"
+                        );
                         web.destroy(1)?;
                         store_view(&app, mtm, &host)?;
                         drop(host);
