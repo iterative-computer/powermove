@@ -27,6 +27,7 @@ const EXPORT: &str = "export:";
 
 pub(crate) fn watch(host: &Arc<ExtensionHost>) {
     if ACTIVE.load(Ordering::Acquire) {
+        host.pages_shown_without_a_window();
         HOSTS.lock().unwrap().push(Arc::downgrade(host));
     }
 }

@@ -26,6 +26,7 @@ pub use object_map::ObjectMap;
 pub use parse::{
     ParseError, Prebuilt, TreeBuilder, Unit, UnitScanner, member_order, parse, parse_bytes,
     parse_bytes_parallel, parse_bytes_parallel_prebuilt, parse_bytes_with, parse_file_text,
+    parse_parallel,
     parse_unit_with, parse_with,
 };
 pub use string::JsString;
