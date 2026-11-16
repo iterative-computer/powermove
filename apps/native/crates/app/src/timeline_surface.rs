@@ -4558,6 +4558,7 @@ impl Render for TimelineSurface {
         self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
         let rows_weak = this.clone();
         let tracks_weak = this.clone();
+        let tracks_metrics = this.clone();
         let ruler_weak = this.clone();
         let rows_tokens = self.tokens.clone();
         let tracks_tokens = self.tokens.clone();
@@ -4842,7 +4843,7 @@ impl Render for TimelineSurface {
                                 paint_agent_tracks(&frame, &groups, origin, column, above, &cull, &tracks_tokens, window, cx);
                                 if !groups.is_empty() {
                                     let elapsed = plan_ms + dot_started.elapsed().as_secs_f64() * 1000.;
-                                    let _ = this.update(cx, |s, _| {
+                                    let _ = tracks_metrics.update(cx, |s, _| {
                                         s.agent_ink_samples[s.agent_ink_sample_count % 64] = elapsed;
                                         s.agent_ink_sample_count += 1;
                                     });
