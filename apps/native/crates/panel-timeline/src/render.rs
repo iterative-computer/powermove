@@ -2167,6 +2167,27 @@ impl Frame {
     pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
         key_identity(self.hit_op("key:", x, y, slop)?)
     }
+    /// The key a press at `(x, y)` takes, as v1 picks it (timeline.ts
+    /// keyDown): the nearest whose centre is less than `reach` points across
+    /// from `x`, in the row under `y` (`row` high). Further off, a press on
+    /// the row starts a marquee and moves no key.
+    pub fn hit_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        let centre = |o: &Op| (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+        let op = self
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .filter(|o| {
+                let (cx, cy) = centre(o);
+                (cx - x).abs() < reach && (cy - y).abs() <= row / 2.
+            })
+            .min_by(|a, b| (centre(a).0 - x).abs().total_cmp(&(centre(b).0 - x).abs()))?;
+        key_identity(op)
+    }
+    /// [`Self::hit_key_across`] as `(layer, key)`.
+    pub fn hit_layer_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        self.hit_key_across(x, y, reach, row).and_then(on_layer)
+    }
     /// The key under a point as `(layer, key)`: key ids may repeat across
     /// layers, so the row it sits on names its layer.
     pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {

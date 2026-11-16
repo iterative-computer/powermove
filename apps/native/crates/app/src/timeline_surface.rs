@@ -1723,7 +1723,8 @@ impl TimelineSurface {
         // (selection, a drag) goes on from there, without a skimmer. A key, a
         // direction handle or a transform grip under the pointer takes the
         // press as it stands: the playhead stays where it is.
-        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key(x, y, 3.).is_some())
+        let row = self.tokens.metrics.row as f64;
+        let grabs = self.frame.as_ref().is_some_and(|f| f.hit_key_across(x, y, KEY_REACH, row).is_some())
             || self.graph_point_at(x, y);
         // A press on the ruler scrubs from the time under it, so the
         // playhead goes there with the scrub (whose time is written once
@@ -1811,8 +1812,7 @@ impl TimelineSurface {
                 .command(&format!("captions.cue:{verb}:{layer}\u{1f}{cue}"), cx);
             return;
         }
-        let slop = ((m.hit - m.keyframe) as f64 / 2.).max(0.);
-        if let Some((on, key)) = frame.hit_layer_key(x, y, slop)
+        if let Some((on, key)) = frame.hit_layer_key_across(x, y, KEY_REACH, m.row as f64)
             && let Some((layer, channel, hit)) = self.model.index.key_on(&on, &key)
         {
             // v1: a double-click on a key opens its value editor, for the
@@ -2918,7 +2918,7 @@ impl TimelineSurface {
                     series: self.graph.as_ref().map_or(0, |_| 1),
                 },
             }
-        } else if let Some((_, key)) = frame.hit_key(x, y, 3.) {
+        } else if let Some((_, key)) = frame.hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64) {
             MenuContext::Keys { ids: vec![key] }
         } else if let Some((layer, _)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
@@ -2941,7 +2941,7 @@ impl TimelineSurface {
         // Main's contexts: a row's kind, `layerId` only on a layer row (with
         // `layer:context` too), `empty` on the ruler and between rows.
         let key_row = frame
-            .hit_key(x, y, 3.)
+            .hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64)
             .and_then(|(row, _)| pm_panel_timeline::v4::parse_row(&row).ok());
         let locations = match (&context, key_row) {
             (MenuContext::Keys { .. }, Some(RowId::Layer(id))) => {
@@ -3187,16 +3187,25 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor = if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
+        let cursor = if let Some(cursor) = self.graph_cursor(x, y) {
+            cursor
+        } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
             && y >= m.ruler as f64
         {
             CursorStyle::ResizeColumn
         } else if self.work_handle_at(x, y).is_some() {
             CursorStyle::ResizeLeftRight
+        } else if x >= self.view.layer_column
+            && y <= WORK_BAR_STRIP
+            && self.frame.as_ref().is_some_and(|f| f.hit_op("work-area", x, y, 0.).is_some())
+        {
+            // v1: the work area's bar moves it; a hand to grab it by.
+            CursorStyle::OpenHand
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
-        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key(x,y,((m.hit-m.keyframe) as f64/2.).max(0.)).is_some()) {
-            CursorStyle::PointingHand
+        } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
+            // The owner's rule: no pointing hand; a key keeps the arrow.
+            CursorStyle::Arrow
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -3215,7 +3224,9 @@ impl TimelineSurface {
             self.cursor = cursor;
             cx.notify();
         }
-        let text = self.frame.as_ref().and_then(|f| f.tooltip_at(x, y));
+        let text = self
+            .marker_tip(x, y)
+            .or_else(|| self.frame.as_ref().and_then(|f| f.tooltip_at(x, y)));
         let shown = self.tip.as_ref().map(|(t, _)| t.to_string());
         if text != shown {
             if self.tip.take().is_some() {
@@ -3232,6 +3243,72 @@ impl TimelineSurface {
                 })
             });
         }
+    }
+    /// v1's graph cursors (timeline.ts onMove), in the order a press takes
+    /// them (`press_graph`): a transform grip's resize, a crosshair on a
+    /// handle, an open hand inside the selection's box (it moves the keys),
+    /// the arrow on a point (no pointing hand), a crosshair elsewhere (a
+    /// marquee). `None` outside the graph.
+    fn graph_cursor(&self, x: f64, y: f64) -> Option<CursorStyle> {
+        let region = self.graph_region()?;
+        if y < region.y || x < self.view.layer_column {
+            return None;
+        }
+        if y < region.y + graph_render::LEGEND {
+            return Some(CursorStyle::Arrow);
+        }
+        let graph = self.graph.as_ref()?;
+        let boxed = self.viewport().and_then(|v| graph.selection_box(v, region));
+        if let Some(b) = boxed
+            && graph.transformable()
+            && let Some(grip) = graph_render::grip_at(b, x, y)
+        {
+            return Some(match graph_render::GRIPS[grip] {
+                "n" | "s" => CursorStyle::ResizeUpDown,
+                "e" | "w" => CursorStyle::ResizeLeftRight,
+                "nw" | "se" => CursorStyle::ResizeUpLeftDownRight,
+                _ => CursorStyle::ResizeUpRightDownLeft,
+            });
+        }
+        let ops = self.graph_ops(None).unwrap_or_default();
+        let nearest = |prefix: &str| {
+            ops.iter()
+                .filter(|o| o.id.starts_with(prefix))
+                .map(|o| (o.bounds.x + o.bounds.width / 2. - x).hypot(o.bounds.y + o.bounds.height / 2. - y))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (pd, hd) = (nearest("graph-key:"), nearest("graph-handle:"));
+        let prefer_point = pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || hd + 4. >= pd);
+        Some(if hd < graph_render::HANDLE_HIT && !prefer_point {
+            CursorStyle::Crosshair
+        } else if pd < graph_render::POINT_HIT {
+            CursorStyle::Arrow
+        } else if boxed.is_some_and(|b| x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) {
+            CursorStyle::OpenHand
+        } else {
+            CursorStyle::Crosshair
+        })
+    }
+    /// v1's marker tooltip (timeline.ts onMove): its name, its time and how
+    /// to remove it, over a marker in the ruler.
+    fn marker_tip(&self, x: f64, y: f64) -> Option<String> {
+        if y >= self.tokens.metrics.ruler as f64 {
+            return None;
+        }
+        let op = self.frame.as_ref()?.hit_op("marker:", x, y, 2.)?;
+        let id = &op.id["marker:".len()..];
+        let marker = self.model.index.markers.iter().find(|m| m.id.as_deref() == Some(id))?;
+        let name = marker.name.to_string();
+        let name = if name.trim().is_empty() { "Marker".to_owned() } else { name };
+        Some(format!(
+            "{name} · {} · Right-click to remove",
+            crate::captions_panel::timecode(marker.time, self.model.index.fps)
+        ))
+    }
+    #[cfg(test)]
+    pub fn marker_tip_for_test(&self, at: Point<Pixels>) -> Option<String> {
+        let (x, y) = self.local(at);
+        self.marker_tip(x, y)
     }
     #[cfg(test)]
     pub fn graph_ops_for_test(&self) -> Vec<Op> {
@@ -3953,11 +4030,13 @@ impl ModelPresenter for Presenter {
         })
         .unwrap_or_default()
     }
+    /// v1's marks (timeline.ts drawPropKeys): a hold key is a square, every
+    /// other key a diamond, read from what the file stores.
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
-        match key.stored_string("e") {
-            Some("hold") => Interpolation::Hold,
-            Some("linear") | None => Interpolation::Linear,
-            _ => Interpolation::Ease,
+        if key.held() {
+            Interpolation::Hold
+        } else {
+            Interpolation::Linear
         }
     }
     fn track_accessibility_label(
@@ -5661,6 +5740,9 @@ mod edge_scroll_regression {
     }
 }
 
+/// How far across from a key's centre a press still takes it (v1's
+/// keyDown: 6 points); beyond it a press on the row starts a marquee.
+pub(crate) const KEY_REACH: f64 = 6.;
 pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
 pub(crate) fn empty_new_menu() -> serde_json::Value {
     serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
