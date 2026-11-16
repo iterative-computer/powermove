@@ -184,6 +184,20 @@ fn current_design_tokens_resolve_without_a_host_table() {
     assert!(!p.diagnostics.iter().any(|d| d.code == "missingDesignToken"));
 }
 #[test]
+fn a_zero_least_size_is_structural_and_other_literals_are_not() {
+    let codes = |style: Value| {
+        let mut s = surface(Component::FormGroup, json!({}));
+        patch(&mut s, json!({ "style": style }));
+        validate_panel(&s, &tokens(), &Layout::new())
+            .into_iter()
+            .filter(|d| d.code == "nonTokenValue")
+            .count()
+    };
+    assert_eq!(codes(json!({"minWidth": 0, "minHeight": 0})), 0);
+    assert_eq!(codes(json!({"minWidth": 12})), 1);
+    assert_eq!(codes(json!({"maxWidth": 0})), 1);
+}
+#[test]
 fn missing_tokens_are_explicit_and_never_replaced_with_literals() {
     let t = tokens();
     let p = Panel::prepare_with_token_table(
@@ -1071,5 +1085,29 @@ fn review_banner_symbols_use_severity_and_dark_palette_only_over_media() {
                 }
             );
         }
+    }
+}
+
+#[test]
+fn compact_composition_tab_hit_targets_are_scoped_to_the_tab_recipe() {
+    let t = tokens();
+    for (metadata, role, hit, valid) in [
+        (json!({}), "button", 16., false),
+        (json!({"compositionTabClose":{}}), "button", 16., true),
+        (json!({"compositionTabClose":{}}), "button", 15., false),
+        (json!({"compositionTab":true}), "tab", 22., true),
+        (json!({"compositionTab":true}), "tab", 21., false),
+    ] {
+        let s = surface(
+            Component::ToolbarItem,
+            json!({"metadata":metadata,"role":role}),
+        );
+        let layout = Layout::from([(1, accesskit::Rect::new(0., 0., hit, hit))]);
+        let diagnostics = validate_panel(&s, &t, &layout);
+        assert_eq!(
+            diagnostics.iter().any(|d| d.code == "smallHitTarget"),
+            !valid,
+            "{diagnostics:?}"
+        );
     }
 }

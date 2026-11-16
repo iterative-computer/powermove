@@ -10,13 +10,13 @@ pub mod layer_shell;
 /// Types for configuring parent-anchored popup windows such as menus, dropdowns and tooltips.
 pub mod popup;
 
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
 mod threaded_dispatcher;
 
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
 mod test;
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(target_os = "macos", any(test, feature = "headless-support")))]
 mod visual_test;
 
 #[cfg(all(feature = "screen-capture", target_os = "windows"))]
@@ -88,19 +88,19 @@ pub use app_menu::*;
 pub use keyboard::*;
 pub use keystroke::*;
 
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
 pub(crate) use test::*;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub use tests::TestTextSystem;
 
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+#[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
 pub use threaded_dispatcher::ThreadedDispatcher;
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(target_os = "macos", any(test, feature = "headless-support")))]
 pub use visual_test::VisualTestPlatform;
 
 // TODO(jk): return an enum instead of a string
@@ -1113,7 +1113,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Inform the adapter of updated window bounds.
     fn a11y_update_window_bounds(&self) {}
 
-    #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+    #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         None
     }
@@ -1121,7 +1121,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Renders the given scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
+    #[cfg(any(test, feature = "headless-support", feature = "frame-capture"))]
     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image not implemented for this platform")
     }
@@ -1193,14 +1193,14 @@ pub trait PlatformDispatcher: Send + Sync {
         gpui_util::defer(Box::new(|| {}))
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+    #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
     fn as_test(&self) -> Option<&TestDispatcher> {
         None
     }
 
     // This cfg must match the `threaded_dispatcher` module's, which implements
     // this method whenever it compiles.
-    #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+    #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
     fn as_threaded(&self) -> Option<&ThreadedDispatcher> {
         None
     }
@@ -1247,7 +1247,7 @@ pub trait PlatformTextSystem: Send + Sync {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 mod tests {
     use crate::{
         Bounds, CaretAffinity, CaretMovement, CaretPosition, Font, FontId, FontMetrics, GlyphId,
@@ -1971,7 +1971,7 @@ pub trait PlatformAtlas {
     ) -> Result<GlyphAtlasEntry>;
     fn remove(&self, key: &AtlasKey);
 
-    #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+    #[cfg(any(test, feature = "headless-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
     }
@@ -3757,7 +3757,7 @@ impl Image {
 
     /// Check whether this image is present in GPUI's asset cache (loading or
     /// loaded), without fetching it.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn is_asset_cached(self: &Arc<Self>, cx: &App) -> bool {
         ImageSource::Image(self.clone()).is_asset_cached(cx)
     }

@@ -48,7 +48,11 @@ fn body_bands_and_middle_group_follow_main() {
             )
             .unwrap();
         assert_eq!(p.target, expected);
-        assert!(p.rect.x >= r.x && p.rect.y >= r.y && p.rect.y + p.rect.h <= r.y + r.h);
+        // Side-panel floors can grow the scrollable column on a split.
+        // The preview must describe the actual landing, including that growth.
+        let mut landed = l.clone();
+        landed.move_panel_to("assets", p.target).unwrap();
+        assert_eq!(p.rect, panel(&landed, "assets"));
     }
 }
 #[test]
@@ -214,6 +218,7 @@ fn maximize_tracks_group_across_tab_selection_without_persisting_geometry() {
 #[test]
 fn overflow_keeps_active_and_never_loses_a_tab() {
     let group = Group {
+        flex_basis: None,
         tabs: (0..12).map(|i| format!("tab-{i}")).collect(),
         active: 10,
         size: None,
@@ -223,28 +228,24 @@ fn overflow_keeps_active_and_never_loses_a_tab() {
     let widths: Vec<f32> = (0..12).map(|i| 40. + 6. * i as f32).collect();
     for width in [24., 144., 300., 1200.] {
         let track = group.tab_track(width, &widths, &t);
-        assert!(track.visible.contains(&10));
-        assert!(!track.overflow.contains(&10));
-        let mut all = track.visible.clone();
-        all.extend(&track.overflow);
-        all.sort_unstable();
-        assert_eq!(all, (0..12).collect::<Vec<_>>());
-        // Shown tabs plus the reserved More Panels square fit the header; only
-        // an active tab wider than that room truncates, to exactly that room.
+        assert_eq!(track.visible, (0..12).collect::<Vec<_>>());
         let room = (width - t.metrics.hit).max(0.);
-        let shown: f32 = track.visible.iter().map(|&i| widths[i]).sum();
-        match track.active_limit {
-            None => assert!(shown <= room),
-            Some(limit) => {
-                assert_eq!(track.visible, [10]);
-                assert!(widths[10] > room);
-                assert_eq!(limit, room);
-            }
-        }
+        let shown: f32 = track
+            .visible
+            .iter()
+            .map(|&i| widths[i].min(track.title_limit.unwrap_or(widths[i])))
+            .sum();
+        assert!(shown <= room + 0.01);
+        assert_eq!(
+            track.overflow,
+            (0..12)
+                .filter(|&i| track.title_limit.is_some_and(|limit| widths[i] > limit))
+                .collect::<Vec<_>>()
+        );
     }
     // Everything fits: no limit and nothing folded.
     let wide = group.tab_track(10_000., &widths, &t);
-    assert!(wide.overflow.is_empty() && wide.active_limit.is_none());
+    assert!(wide.overflow.is_empty() && wide.title_limit.is_none());
 }
 #[test]
 fn main_menu_has_system_show_all_delete_and_one_new_window() {
@@ -276,8 +277,12 @@ fn bottom_dock_floor_uses_opus_metrics_and_stays_bounded() {
     assert_eq!(l.docks[divider.dock].size, Some(floor));
     assert_eq!(panel(&l, "timeline").h, floor);
     let small = Rect { h: 80., ..BOUNDS };
-    for p in l.geometry(small, &t).panels {
-        assert!(p.rect.y + p.rect.h <= small.y + small.h);
+    let geometry = l.geometry(small, &t);
+    for p in &geometry.panels {
+        let visible = geometry.side_docks.get(&p.dock).map_or(p.rect, |viewport| p.rect.intersection(*viewport));
+        if visible.h > 0. {
+            assert!(visible.y + visible.h <= small.y + small.h);
+        }
     }
 }
 #[test]

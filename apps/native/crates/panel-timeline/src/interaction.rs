@@ -48,6 +48,7 @@ impl std::error::Error for ModelError {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEffect {
     Seek(f64),
+    Status(String),
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.
     FitCurves(f64, f64),
@@ -408,10 +409,66 @@ impl TimelineModel {
                 }
                 .into(),
             ),
-            "delete" if self.key_selection_active => {
+            "delete" if self.key_selection_active || !keys.is_empty() => {
+                self.key_selection_active = true;
+                if keys.is_empty() {
+                    return Ok(Plan::default());
+                }
                 edit(KeyframeCommand::Delete { key_ids: keys }.into())
             }
-            "delete" => edit(LayerCommand::Delete { layer_ids: layers }.into()),
+            "delete" => {
+                let roots: Vec<_> = self
+                    .index
+                    .layers
+                    .iter()
+                    .filter(|l| {
+                        if !layers.contains(&l.id) {
+                            return false;
+                        }
+                        let mut next = l.group.as_deref();
+                        let mut seen = std::collections::HashSet::new();
+                        while let Some(id) = next {
+                            if !seen.insert(id) {
+                                break;
+                            }
+                            if layers.iter().any(|selected| selected == id) {
+                                return false;
+                            }
+                            next = self.index.layer(id).and_then(|g| g.group.as_deref());
+                        }
+                        true
+                    })
+                    .collect();
+                let skipped: Vec<_> = roots
+                    .into_iter()
+                    .filter(|l| {
+                        self.index
+                            .expanded_ids(&[l.id.clone()])
+                            .iter()
+                            .filter_map(|id| self.index.layer(id))
+                            .any(|child| child.effectively_locked)
+                    })
+                    .collect();
+                let locked = skipped.len();
+                let groups = skipped.iter().all(|l| l.kind == "group");
+                let mut plan = if layers.iter().any(|id| self.index.layer(id).is_some()) {
+                    edit(LayerCommand::Delete { layer_ids: layers }.into())
+                } else {
+                    Plan::default()
+                };
+                if locked > 0 {
+                    plan.effects.push(HostEffect::Status(format!(
+                        "Skipped {locked} locked {}",
+                        match (groups, locked) {
+                            (true, 1) => "group",
+                            (true, _) => "groups",
+                            (false, 1) => "layer",
+                            (false, _) => "layers",
+                        }
+                    )));
+                }
+                plan
+            }
             "deselect" => {
                 self.key_selection_active = false;
                 Plan {
@@ -1044,8 +1101,7 @@ pub struct Drag {
     pub key_snap: Option<crate::snap::GroupLock>,
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
-    selected_property_keys: std::collections::HashSet<String>,
-    property_keys: std::collections::HashMap<(String, String), Vec<(String, f64)>>,
+
     /// A key drag in the Speed Graph: each key side's speed and influence at
     /// the press. A vertical drag there changes speeds (as v1 does), never
     /// the keys' values.
@@ -1251,40 +1307,6 @@ impl Drag {
             }
             _ => {}
         }
-        let mut property_keys = std::collections::HashMap::new();
-        if let DragKind::Property { targets, time } = &kind {
-            for (l, c) in targets {
-                let layer = index.layer(l).unwrap();
-                let channel = index.channel(l, c).unwrap();
-                let paired = match c.as_str() {
-                    "scale.x" => index.channel(l, "scale.y"),
-                    "scale.y" => index.channel(l, "scale.x"),
-                    _ => None,
-                };
-                let at_key = |channel: &crate::Channel| {
-                    channel
-                        .keys
-                        .iter()
-                        .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
-                };
-                if !at_key(channel) && !paired.is_some_and(at_key) {
-                    let keys: Vec<_> = channel
-                        .keys
-                        .iter()
-                        .filter(|k| model.selection.keys().contains(&k.id))
-                        .filter_map(|k| k.value.as_f64().map(|v| (k.id.clone(), v)))
-                        .collect();
-                    let paired_selected = paired.is_some_and(|p| {
-                        p.keys.iter().any(|k| {
-                            model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
-                        })
-                    });
-                    if !keys.is_empty() || paired_selected {
-                        property_keys.insert((l.clone(), c.clone()), keys);
-                    }
-                }
-            }
-        }
         let track_snap = if model.mode == TimelineMode::Tracks
             && matches!(
                 kind,
@@ -1331,8 +1353,6 @@ impl Drag {
             key_snap: None,
             track_snap,
             property_values: Default::default(),
-            selected_property_keys: model.selection.keys().iter().cloned().collect(),
-            property_keys,
         })
     }
     pub fn label(&self) -> &'static str {
@@ -1376,31 +1396,73 @@ impl Drag {
             _ => "Work area",
         }
     }
+    pub fn is_work_area(&self) -> bool {
+        matches!(
+            self.kind,
+            DragKind::WorkIn | DragKind::WorkOut | DragKind::WorkMove
+        )
+    }
+    /// Electron draws a guide for strip latches only. Key proximity locks have
+    /// no guide, and work-area edits remain frame-only.
+    pub fn snap_target(&self) -> Option<f64> {
+        self.snap.lock.map(|lock| lock.target)
+    }
+    /// Trimming can clamp at a legal source/minimum-duration boundary. Only
+    /// show the latch if an actual resulting edge still rests on its target.
+    pub fn snap_target_in(&self, index: &TimelineIndex) -> Option<f64> {
+        let target = self.snap_target()?;
+        match &self.kind {
+            DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
+                let is_in = matches!(self.kind, DragKind::TrimIn { .. });
+                ids.iter()
+                    .filter_map(|id| index.layer(id))
+                    .any(|l| {
+                        let edge = if is_in { l.from } else { l.from + l.duration };
+                        (edge - target).abs() < 1e-9
+                    })
+                    .then_some(target)
+            }
+            _ => Some(target),
+        }
+    }
     pub fn commands(&mut self, sample: DragSample) -> Result<Vec<Command>, ModelError> {
         finite(sample.time_delta)?;
         finite(sample.value_delta)?;
         finite(sample.playhead)?;
-        let snapping = self
-            .track_snap
-            .map_or(sample.modifiers.shift, |on| on != sample.modifiers.shift);
+        let is_key = matches!(
+            self.kind,
+            DragKind::Keys { .. } | DragKind::GraphKeys { .. }
+        );
+        let snapping = !self.is_work_area()
+            && !(matches!(self.kind, DragKind::GraphKeys { .. }) && sample.time_delta == 0.)
+            && self
+                .track_snap
+                .map_or(sample.modifiers.shift, |on| on != sample.modifiers.shift);
         if snapping && self.fixed.is_none() {
             self.fixed = Some(snap_targets(
                 &self.start,
                 self.moving_layers(),
                 self.moving_keys(),
+                is_key,
             ));
         }
         let mut targets = self.fixed.clone().unwrap_or_default();
-        targets.push(Target {
-            time: sample.playhead,
-            edge: None,
-            weight: 1.5,
-        });
-        targets.push(Target {
-            time: sample.playhead + 1. / self.start.fps,
-            edge: Some(Edge::Out),
-            weight: 1.5,
-        });
+        if is_key {
+            // Electron keys prefer the playhead on equal distances. They do not
+            // offer the strip-only exclusive out-edge at playhead + one frame.
+            targets.insert(0, Target::at(sample.playhead));
+        } else {
+            targets.push(Target {
+                time: sample.playhead,
+                edge: None,
+                weight: 1.5,
+            });
+            targets.push(Target {
+                time: sample.playhead + 1. / self.start.fps,
+                edge: Some(Edge::Out),
+                weight: 1.5,
+            });
+        }
         let resolved = if matches!(
             self.kind,
             DragKind::Keys { .. } | DragKind::GraphKeys { .. }
@@ -1728,46 +1790,6 @@ impl Drag {
             }
             DragKind::Property { targets, time } => {
                 for (l, c) in targets {
-                    if let Some(keys) = self.property_keys.get(&(l.clone(), c.clone())) {
-                        for (id, start) in keys {
-                            out.push(
-                                KeyframeCommand::Edit {
-                                    key_id: id.clone(),
-                                    time: None,
-                                    value: Some(Value::Number(start + sample.value_delta)),
-                                }
-                                .into(),
-                            );
-                        }
-                        if self.start.layer(l).is_some_and(|layer| layer.scale_linked) {
-                            let paired = match c.as_str() {
-                                "scale.x" => Some("scale.y"),
-                                "scale.y" => Some("scale.x"),
-                                _ => None,
-                            };
-                            if let Some(paired) = paired {
-                                if let Some(channel) = self.start.channel(l, paired) {
-                                    for key in &channel.keys {
-                                        if self.selected_property_keys.contains(&key.id) {
-                                            if let Some(start) = key.value.as_f64() {
-                                                out.push(
-                                                    KeyframeCommand::Edit {
-                                                        key_id: key.id.clone(),
-                                                        time: None,
-                                                        value: Some(Value::Number(
-                                                            start + sample.value_delta,
-                                                        )),
-                                                    }
-                                                    .into(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        continue;
-                    }
                     let channel = self.start.channel(l, c).unwrap();
                     let baseline = self
                         .property_values
@@ -1825,9 +1847,14 @@ impl Drag {
                 let frame = 1. / self.start.fps;
                 let duration = self.start.duration;
                 let (a, b) = match self.kind {
-                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b),
+                    DragKind::WorkIn => (
+                        (self::frame(a + sample.time_delta, self.start.fps))
+                            .max(0.)
+                            .min(b - frame),
+                        b,
+                    ),
                     DragKind::WorkOut => {
-                        let end = (b + delta).max(a + frame);
+                        let end = self::frame(b + sample.time_delta, self.start.fps).max(a + frame);
                         self.work_duration = self.work_duration.max(end);
                         (a, end)
                     }
@@ -1924,6 +1951,9 @@ impl Scrub {
         );
         Ok(HostEffect::Seek(delta))
     }
+    pub fn snap_target(&self) -> Option<f64> {
+        self.snap.lock.map(|lock| lock.target)
+    }
     pub fn targets_loaded(&self) -> bool {
         self.targets.is_some()
     }
@@ -1936,6 +1966,7 @@ fn snap_targets(
     index: &TimelineIndex,
     moving_layers: &[String],
     moving_keys: &[String],
+    keys: bool,
 ) -> Vec<Target> {
     let mut out: Vec<_> = [0., index.duration, index.work[0], index.work[1]]
         .into_iter()
@@ -1946,17 +1977,15 @@ fn snap_targets(
         if moving_layers.contains(&l.id) {
             continue;
         }
-        if l.duration > 0. {
+        if keys || l.duration > 0. {
             out.extend([Target::at(l.from), Target::at(l.from + l.duration)]);
         }
-        if moving_layers.is_empty() {
+        if keys {
             for c in &l.channels {
                 for k in &c.keys {
                     if !moving_keys.contains(&k.id) {
                         let time = l.from + k.time;
-                        if time >= 0. && time <= index.duration {
-                            out.push(Target::at(time));
-                        }
+                        out.push(Target::at(time));
                     }
                 }
             }

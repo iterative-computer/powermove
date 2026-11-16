@@ -96,3 +96,18 @@ impl Render for SettingsFrame {
             .child(self.view.clone())
     }
 }
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_delete_toast() {
+    capture("delete-toast", |_, cx| {
+        let toast = cx.new(|cx| crate::action_toast::ToastView::new("Deleted Launch Film".into(), |_| {}, cx));
+        cx.new(|_| ToastFrame { toast })
+    });
+}
+struct ToastFrame { toast: Entity<crate::action_toast::ToastView> }
+impl Render for ToastFrame {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().relative().bg(rgb(pm_shell::tokens().colors.panel)).child(self.toast.clone())
+    }
+}

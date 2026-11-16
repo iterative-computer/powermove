@@ -13,6 +13,23 @@ use pm_protocol::{
 use pm_shell::{Command as ShellCommand, Host};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
+/// Cancellation wins even if the sheet's abort callback also sent an answer.
+/// Poll both channels so Quit wakes a wait whose sheet was never visible.
+pub(crate) async fn recovery_answer<A>(
+    answer: &async_channel::Receiver<Option<A>>,
+    cancellation: &async_channel::Receiver<()>,
+) -> Result<Option<A>, ()> {
+    use std::future::Future;
+    let mut answer = std::pin::pin!(answer.recv());
+    let mut cancellation = std::pin::pin!(cancellation.recv());
+    std::future::poll_fn(|cx| {
+        if cancellation.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(()));
+        }
+        answer.as_mut().poll(cx).map(|answer| Ok(answer.ok().flatten()))
+    }).await
+}
+
 #[derive(Clone)]
 struct CompositionView {
     time: f64,
@@ -61,6 +78,8 @@ pub struct Controller {
     /// Window ▸ Background Tasks, while open.
     pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
+    /// Cancels only the unanswered recovery choice, never an in-flight save.
+    pub(crate) recovery_cancel: Option<async_channel::Sender<()>>,
     /// Held while a project opens and its panels settle: no App Nap or
     /// background throttling.
     pub(crate) busy: Option<crate::platform::Busy>,
@@ -71,6 +90,10 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
+    /// The project's Home poster, shown in the opening viewer's frame until
+    /// the viewer draws: the first picture waits for the open and for the
+    /// extensions the project draws with (PM-384).
+    pub(crate) ghost_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -101,8 +124,8 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
-    pub(crate) panel_builds:
-        std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    pub(crate) agent_panel_builds: std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
+    pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
@@ -144,6 +167,7 @@ pub struct Controller {
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
     pub message: String,
+    pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
@@ -382,6 +406,12 @@ impl pm_shell::integration::Integration for Bridge {
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).unavailable_commands()
     }
+    fn natural_panel_height(&self, id: &str, cx: &App) -> Option<f32> {
+        let controller = self.0.read(cx);
+        let view = controller.builtins.views.get(id)?;
+        let height = view.read(cx).natural_body_height();
+        (height > 0.).then(|| height + controller.host.borrow().tokens.metrics.header)
+    }
     fn panel(
         &self,
         id: &str,
@@ -390,6 +420,9 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
+            if let Some(slot) = crate::generated_panel::agent_slot(v, id, bounds, w, cx) {
+                return Some(slot);
+            }
             if let Some(ghost) = panels::opening(v, id, bounds) {
                 if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
                     // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
@@ -440,11 +473,17 @@ impl pm_shell::integration::Integration for Bridge {
             v.page_element(w, cx).or_else(|| v.home_element(w, cx))
         })
     }
+    fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
+        self.0.read(cx).delete_toast.clone().map(|v| v.into_any_element())
+    }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
     }
+    fn native_panel_id(&self, id: &str, cx: &App) -> String {
+        self.0.read(cx).agent_panel_builds.get(id).and_then(|b| b.target.clone()).unwrap_or_else(|| id.to_owned())
+    }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
-        self.0.read(cx).extensions.owns_panel(id)
+        self.0.read(cx).extensions.owns_panel(&self.native_panel_id(id, cx))
     }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
@@ -457,14 +496,20 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
-        self.0.read(cx).extensions.contributed.clone()
+        let v = self.0.read(cx);
+        let mut panels = v.extensions.contributed.clone();
+        panels.extend(v.agent_panel_builds.iter().map(|(id, b)| (id.clone(), b.title.clone())));
+        panels
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
-            v.sync_extension_panels(open);
+            let mut effective: Vec<&str> = open.to_vec();
+            for id in open { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.as_deref()) { effective.push(target); } }
+            let effective: Vec<String> = effective.into_iter().map(str::to_owned).collect();
+            v.sync_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             v.sync_parking(open, cx);
             let was_docked = v.builtins.agent_docked;
             v.builtins.agent_docked = open.contains(&"agent");
@@ -485,7 +530,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
-            v.hide_extension_panels(shown);
+            let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
+            for id in shown { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) { effective.push(target); } }
+            v.hide_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.
             let timeline = shown.contains(&"timeline");
@@ -736,6 +783,8 @@ impl Controller {
             }
         })
         .detach();
+        // The profile's Appearance, from launch on.
+        crate::appearance::follow(&kernel.state());
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -779,6 +828,11 @@ impl Controller {
                                     if v.session.as_ref().is_some_and(|s| s.project == project) =>
                                 {
                                     v.notice(notice, cx);
+                                }
+                                // Settings › General › Appearance chosen (here or in
+                                // another window): the whole app takes it.
+                                KernelEvent::StateChanged { .. } => {
+                                    crate::appearance::follow(&v.kernel.state())
                                 }
                                 _ => {}
                             }
@@ -831,9 +885,11 @@ impl Controller {
             pro_media,
             tasks_window: None,
             opening: false,
+            recovery_cancel: None,
             busy: None,
             opening_name: None,
             ghost_aspect: None,
+            ghost_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -852,6 +908,7 @@ impl Controller {
             workspace_store: Default::default(),
             workspaces_status: String::new(),
             generated_menu_layer: None,
+            agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
             shell: None,
             cloud: Default::default(),
@@ -880,6 +937,7 @@ impl Controller {
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
+            delete_toast: None,
             path: None,
             recent: vec![],
             library: None,
@@ -1014,6 +1072,7 @@ impl Controller {
         self.ghosted.clear();
         self.revealed.clear();
         self.ghost_aspect = None;
+        self.ghost_poster = None;
         self.host
             .borrow()
             .set_document_metadata("Untitled", "", false, None);
@@ -1037,6 +1096,13 @@ impl Controller {
                 self.dispose_pending(next, cx);
                 self.message = "Finish closing this project first.".into();
                 cx.notify();
+                return;
+            }
+            // Tabs mode: the project shown stays as it is and the other
+            // opens as a new tab of this window.
+            crate::lifecycle::OpenPlan::AfterClose if pm_shell::tabs_mode() => {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(next, leader, cx);
                 return;
             }
             crate::lifecycle::OpenPlan::AfterClose => {}
@@ -1092,6 +1158,18 @@ impl Controller {
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // Every restored window reopens its project, one open at a
+                // time (an open holds the project-operation fence): a tab
+                // waits for the one before it instead of giving up.
+                for _ in 0..300 {
+                    let busy = this.update(cx, |v, _| v.mcp.operation_in_progress());
+                    if !matches!(busy, Ok(true)) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
                         v.open_named(
@@ -1278,15 +1356,9 @@ impl Controller {
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
-            let json = |v: &pm_model::Value| {
-                serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v))
-                    .unwrap_or_default()
-            };
-            crate::generated_panel::publication(
-                &mut self.panel_builds,
-                &json(&previous.workspace),
-                &json(&p.workspace),
-            );
+            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
+                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
+            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
         }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
@@ -1768,6 +1840,17 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        // Its Home poster stands in the opening viewer, where one was kept.
+        self.ghost_poster = Some(
+            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
+        )
+        .filter(|poster| poster.is_file());
+        // The extensions start now, while the project opens: their realm and
+        // bundle take seconds that need no project, and the first picture
+        // waits for the extensions the project draws with (PM-384).
+        if !matches!(source, SessionSource::New(_)) {
+            self.start_extensions_for(open_id.clone(), cx);
+        }
         let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
@@ -1863,6 +1946,7 @@ impl Controller {
         self.begin_ghost(&name, None, cx);
         cx.spawn(async move |this, cx| {
             let _operation = operation;
+            let mut cancelled = false;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
@@ -1880,6 +1964,11 @@ impl Controller {
                     r
                 });
                 if let Some(recovery) = recovery {
+                    let ticket = match reply {
+                        ShellReply::RecoveryRequired { ticket, .. } => ticket.clone(),
+                        _ => unreachable!(),
+                    };
+                    let (cancel, cancellation) = async_channel::bounded(1);
                     let answer = this.update(cx, |v, _| {
                         if let ShellReply::RecoveryRequired {
                             recovery: RecoveryResult::Unrecoverable { reason, .. },
@@ -1896,22 +1985,60 @@ impl Controller {
                             );
                         }
                         v.recovery_pending = true;
+                        v.recovery_cancel = Some(cancel);
+                        let kind = match reply {
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Recovered { .. }, .. } => "recover",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::OfferCopy { .. }, .. } => "offer_copy",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::Unrecoverable { .. }, .. } => "unrecoverable",
+                            ShellReply::RecoveryRequired { recovery: RecoveryResult::FromOtherFile { .. }, .. } => "other_file",
+                            _ => "none",
+                        };
+                        v.open_timer.mark("recovery_question", serde_json::json!({"kind":kind}));
                         v.mcp.awaiting_recovery(Some(name.clone()));
                         recovery.alert.sheet(&v.host.borrow().window)
                     });
                     let response = match answer {
-                        Ok(rx) => rx.recv().await.ok().flatten(),
-                        Err(_) => None,
+                        Ok(rx) => match recovery_answer(&rx, &cancellation).await {
+                            Ok(answer) => answer,
+                            Err(()) => {
+                                cancelled = true;
+                                // Await acknowledgement before releasing the fence:
+                                // no prepared file lock can outlive this open.
+                                let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                                None
+                            }
+                        },
+                        Err(_) => {
+                            let _ = kernel.shell(ShellCall::CancelRecovery { ticket: ticket.clone() }).await;
+                            None
+                        },
                     };
                     let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                     if let Some(call) = response.and_then(|action| recovery.decision(action)) {
                         result = kernel.shell(call).await;
+                    } else if !cancelled {
+                        let _ = kernel.shell(ShellCall::CancelRecovery { ticket }).await;
                     }
                 }
             }
+            // Keep the operation fence through this final state update. The
+            // quit retries after the task has finished and released it.
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
+                v.recovery_cancel = None;
+                if cancelled {
+                    v.busy = None;
+                    v.settling = None;
+                    v.open_timer.mark("cancelled", serde_json::json!({}));
+                    v.mcp.awaiting_recovery(None);
+                    v.after_open.fail();
+                    v.end_ghost(cx);
+                    v.reset_extensions();
+                    v.message = "Opening cancelled. Recovery data is kept.".into();
+                    cx.notify();
+                    return;
+                }
                 // Panels say it's opening until they've mounted for the project.
                 v.settling = match &result {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
@@ -1927,6 +2054,8 @@ impl Controller {
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
                         v.end_ghost(cx);
+                        // The extensions started for it with the open go too.
+                        v.reset_extensions();
                     }
                 }
                 match result {
@@ -2553,14 +2682,6 @@ impl Controller {
     /// placed one joins its tabs, as opening from the window does. Other
     /// windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = &self.session {
-            let events = self.mcp.take_presence(&session.project);
-            if !events.is_empty() {
-                if let Some(timeline) = &self.builtins.timeline {
-                    timeline.update(cx, |t, cx| t.agent_presence(events, cx));
-                }
-            }
-        }
         if self.opening || self.close_pending {
             return;
         }
@@ -2581,7 +2702,12 @@ impl Controller {
             // opens in a window of its own (one project per window), never
             // in place of the one the person is working on.
             self.mcp.bind_window(self.window_key, self.session.clone());
-            crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            if pm_shell::tabs_mode() {
+                let leader = self.shell_window_id(cx);
+                crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            } else {
+                crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
+            }
             return;
         }
         self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
@@ -2614,6 +2740,12 @@ impl Controller {
         if self.recovery_pending || self.save_pending {
             self.message = "Finish the recovery decision or current save first".into();
             return;
+        }
+        // An edit left open (its owner never ended it: no button is held,
+        // nothing is typed) would refuse the save: it is finished first, as
+        // Undo does, and the save takes it.
+        if self.edit_left_open(cx) {
+            self.call(Call::History(HistoryCall::Seal), cx);
         }
         let path = as_path.clone();
         if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
@@ -2719,7 +2851,7 @@ impl Controller {
         })
         .detach();
     }
-    fn project_name(&self) -> String {
+    pub(crate) fn project_name(&self) -> String {
         self.published
             .as_ref()
             .and_then(|p| p.snapshot.document.root())
@@ -2925,6 +3057,21 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name == crate::v4_quote::CITE_COMMAND {
+            return self
+                .builtins
+                .views
+                .get("agent")
+                .cloned()
+                .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
+        }
+        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") {
+            if self.builtins.views.get("agent").cloned().is_some_and(|view| {
+                view.update(cx, |v, cx| v.copy_selection(window, cx))
+            }) {
+                return true;
+            }
+        }
         // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
         // flight where it began, the rest wait (no play, scrub or edits).
         if let Some(g) = self.builtins.gizmos.clone()
@@ -3290,63 +3437,16 @@ impl Controller {
             // The gear and ⌘, toggle: Settings showing closes, back to the
             // tab it came forward over; open behind another tab, it comes
             // forward. Its rows have saved as they changed (as its × closes).
-            "settings" if self.pages.toggle_closes("settings") => {
-                self.close_tab_page("settings", cx)
-            }
+            // ⌘, with Settings in front closes it.
+            "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
-            "agent.stop" => {
-                let Some(session) = &self.session else {
-                    return false;
-                };
-                self.mcp.resume_project(&session.project);
-                let Some(runtime) = self.builtins.runtime.clone() else {
-                    return false;
-                };
-                let Some(thread) = runtime.agent_current_thread() else {
-                    return false;
-                };
-                if !runtime.agent_status().0 {
-                    return false;
+            "agent.launcher.task" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    if let Some(runtime) = &self.builtins.runtime {
+                        let _ = runtime.agent_launcher_switch(id);
+                    }
+                    self.show_builtin("agent", window, cx);
                 }
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            runtime.agent_thread_control(
-                                "thread_cancel",
-                                &serde_json::json!({"threadId":thread,"callerAccess":"project"}),
-                            )
-                        })
-                        .await;
-                    let _ = this.update(cx, |s, cx| {
-                        s.message = match result {
-                            Ok(_) => "Agent stopped".into(),
-                            Err(error) => error,
-                        };
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            "agent.undoTurn" => self.undo_agent_turn(cx),
-            "agent.steer" => self.open_agent_steer(window, cx),
-            "agent.pause" => {
-                let Some(session) = &self.session else {
-                    return false;
-                };
-                let Some(runtime) = self.builtins.runtime.as_ref() else {
-                    return false;
-                };
-                if !runtime.agent_status().0 {
-                    return false;
-                }
-                let paused = self.mcp.toggle_pause(&session.project);
-                self.message = if paused {
-                    "Agent paused · ⇧⌘. to resume"
-                } else {
-                    "Agent resumed"
-                }
-                .into();
             }
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
@@ -3359,7 +3459,9 @@ impl Controller {
                     self.close_tab_page(&id, cx);
                 }
             }
-            "closeTab" | "closeProject" if self.session.is_some() => {
+            // Tabs mode: the tab closes (its window; the last one stays on
+            // Home). Separate windows: the project closes, the window stays.
+            "closeTab" | "closeProject" if self.session.is_some() && !pm_shell::tabs_mode() => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Project, cx)
             }
@@ -3413,6 +3515,16 @@ impl Controller {
                     .borrow()
                     .send_command("panel:show:timeline", vec![]);
                 timeline.update(cx, |t, cx| t.show_graph(layer, channel, keys, cx));
+            }
+            // A Properties diamond keyed a property: the graph plots it.
+            "timeline.focusGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.focus_graph(layer, channel, cx));
             }
             "properties.expression" => {
                 let Some(input) = cmd.args.first() else {
@@ -3483,6 +3595,7 @@ impl Controller {
                 }
             }
             "saveAs" => self.save_dialog(cx),
+            "renderPending" => self.render_pending(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {
                 for call in undo_calls(self.edit_left_open(cx)) {
@@ -3602,6 +3715,16 @@ impl Controller {
             // v1: Return (and the row menu's Rename…) opens the selected
             // layer's name field in the timeline; a text layer's Return edits
             // its text first (text.editSelected steps aside otherwise).
+            "saveAnimationPreset" => {
+                if let Some(runtime) = self.builtins.runtime.clone() {
+                    let _ = runtime
+                        .preset_sheet(cmd.args.first().cloned().unwrap_or(serde_json::json!({})));
+                    self.host
+                        .borrow()
+                        .send_command("panel:show:fxbrowser", vec![]);
+                    self.drain_builtins(cx);
+                }
+            }
             "renameLayer" => {
                 let Some(runtime) = self.builtins.runtime.clone() else {
                     return false;
@@ -3777,12 +3900,8 @@ impl Controller {
                 if self.published.is_none() {
                     return false;
                 }
+                self.builtins.settings_page = Some("project".into());
                 self.show_builtin("settings", window, cx);
-                if let Some(view) = self.builtins.views.get("settings") {
-                    view.update(cx, |v, cx| {
-                        v.scroll_semantic("settings.section.project", cx)
-                    });
-                }
             }
             "actualSize" => self.step_zoom(1., Some(1.), window, cx),
             "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),
@@ -3836,6 +3955,16 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // The button came up somewhere in the window (after the views
+            // heard it): a pointer gesture whose own view never did ends now.
+            "pointerReleased" => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                }
+                for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
+                    view.update(cx, |v, cx| v.release_unheard(window, cx));
+                }
+            }
             // Space came up after arming the hand over the viewer: it plays
             // only if the hand did not pan (After Effects' rule).
             "viewer.spaceUp" => {
@@ -3847,6 +3976,19 @@ impl Controller {
                 if !panned {
                     self.host.borrow().send_command("play", vec![]);
                 }
+            }
+            // Space on a Project item a click left with the keyboard is the
+            // item's (Quick Look, as in Finder): Play declines and the key
+            // reaches it. Everywhere else Space plays.
+            "play"
+                if cmd.token.is_some()
+                    && self
+                        .builtins
+                        .views
+                        .get("assets")
+                        .is_some_and(|v| v.read(cx).focused_takes_keys(window)) =>
+            {
+                return false;
             }
             // Space held over the viewer is the hand: Play waits for the key
             // to come up (no drag) instead of starting on the way down.

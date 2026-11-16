@@ -8,5 +8,5 @@ pub(crate) use display::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub use platform::{TestScreenCaptureSource, TestScreenCaptureStream};

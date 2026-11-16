@@ -328,7 +328,8 @@ pub struct LayerRowAt {
 }
 #[derive(Clone, Debug)]
 pub struct Scene {
-    rows: Vec<PaintRow>,
+    rows: Vec<std::sync::Arc<PaintRow>>,
+    time_preview: HashMap<String, f64>,
     tops: Vec<f64>,
     positions: HashMap<String, usize>,
     control_times: HashMap<String, std::sync::Arc<[f64]>>,
@@ -384,6 +385,68 @@ pub trait ModelPresenter {
     }
 }
 impl Scene {
+    /// Update only moved rows; all other row payloads remain shared. No model
+    /// rebuild or JS publication is needed for a transient scalar offset.
+    pub fn preview_times(&mut self, model: &crate::TimelineModel, starts: &[(String, f64)]) {
+        let offsets: HashMap<_, _> = starts
+            .iter()
+            .filter_map(|(id, from)| model.index.layer(id).map(|l| (id.clone(), from - l.from)))
+            .collect();
+        for row in &mut self.rows {
+            let Ok(id) = crate::v4::parse_row(&row.id) else {
+                continue;
+            };
+            let layer = match &id {
+                crate::RowId::Layer(id) => id,
+                crate::RowId::Property { layer_id, .. }
+                | crate::RowId::Effect { layer_id, .. } => layer_id,
+            };
+            let Some(offset) = offsets.get(layer) else {
+                continue;
+            };
+            let delta = offset - self.time_preview.get(layer).copied().unwrap_or(0.);
+            if delta == 0. {
+                continue;
+            }
+            let row = std::sync::Arc::make_mut(row);
+            match &mut row.content {
+                RowContent::Layer { clip, summary } => {
+                    if let Some(bands) = self.stagger.get_mut(layer) {
+                        for band in bands {band.start += delta;band.end += delta;}
+                    }
+                    if let Some(clip) = clip {
+                        clip.from += delta;
+                    }
+                    *summary = summary
+                        .iter()
+                        .cloned()
+                        .map(|mut k| {
+                            k.seconds += delta;
+                            k
+                        })
+                        .collect();
+                }
+                RowContent::Property { keys, state } => {
+                    for k in keys.iter_mut() {
+                        k.seconds += delta;
+                    }
+                    *state = if keys.is_empty() {
+                        KeyState::Static
+                    } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
+                        KeyState::AtPlayhead
+                    } else {
+                        KeyState::Animated
+                    };
+                    self.control_times.insert(
+                        row.id.clone(),
+                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                    );
+                }
+                RowContent::Track { .. } => {}
+            }
+        }
+        self.time_preview = offsets;
+    }
     pub fn from_model(
         model: &crate::TimelineModel,
         p: &dyn ModelPresenter,
@@ -479,6 +542,13 @@ impl Scene {
                             selected.contains(id.as_str()),
                         )
                     }
+                    RowId::Effect { .. } => (
+                        RowContent::Property {
+                            state: KeyState::Static,
+                            keys: vec![],
+                        },
+                        false,
+                    ),
                     RowId::Property { layer_id, channel } => {
                         let layer = model.index.layer(layer_id).ok_or(Error::DuplicateId)?;
                         let keys = keys(layer, model.track_channels(layer_id, channel));
@@ -658,7 +728,8 @@ impl Scene {
             })
             .collect();
         Ok(Self {
-            rows,
+            rows: rows.into_iter().map(std::sync::Arc::new).collect(),
+            time_preview: HashMap::new(),
             tops,
             positions,
             control_times,
@@ -720,19 +791,19 @@ impl Scene {
         self.rows.len()
     }
     pub fn row(&self, id: &str) -> Option<&PaintRow> {
-        self.positions.get(id).map(|i| &self.rows[*i])
+        self.positions.get(id).map(|i| self.rows[*i].as_ref())
     }
     /// AX virtual navigation resolves any ID/ordinal without mounting 60k nodes.
     pub fn navigate(&self, id: &str, delta: isize) -> Option<&PaintRow> {
         let i = self.positions.get(id)?.checked_add_signed(delta)?;
-        self.rows.get(i)
+        self.rows.get(i).map(std::sync::Arc::as_ref)
     }
     pub fn navigate_first(&self, ordinal: usize) -> Option<String> {
         self.rows.get(ordinal).map(|r| r.id.clone())
     }
     /// Row `i` and its top and bottom in content space.
     pub fn span(&self, i: usize) -> Option<(&PaintRow, f64, f64)> {
-        let row = self.rows.get(i)?;
+        let row = self.rows.get(i)?.as_ref();
         let top = self.tops[i];
         Some((row, top, self.tops.get(i + 1).copied().unwrap_or(top)))
     }
@@ -757,6 +828,7 @@ impl Scene {
         }
         self.rows
             .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
+            .map(std::sync::Arc::as_ref)
     }
     /// Where media dropped at a content-space y joins the stack (v1.2.0's
     /// `mediaDropAt`): a new layer is always its own strip, so the pointer
@@ -1460,8 +1532,12 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-/// How far either side of a layer's in or out point a press trims it.
+/// How far past a layer's in or out point a press trims it.
 const TRIM_REACH: f64 = 5.;
+/// How far in from a strip's drawn end a press trims it: v1's five points,
+/// with room for an end drawn on a half point, so five points in trims at
+/// both ends (the out end was drawn on a half point and lost its fifth).
+const TRIM_INSIDE: f64 = 6.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1492,10 +1568,7 @@ fn paint_clip(
     // strip that goes on out of view is cut straight by the tracks, never
     // rounded at the edge as if it ended there (where it has no trim).
     let reach = radius + gap + 2. * m.border as f64;
-    let (x0, x1) = (
-        start.max(v.layer_column - reach),
-        end.min(v.width + reach),
-    );
+    let (x0, x1) = (start.max(v.layer_column - reach), end.min(v.width + reach));
     let body = Rect::new(x0, r.y, x1 - x0, r.height);
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
@@ -1859,6 +1932,9 @@ fn paint_keys(
 fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
     match crate::v4::parse_row(&row).ok()? {
         crate::RowId::Layer(layer)
+        | crate::RowId::Effect {
+            layer_id: layer, ..
+        }
         | crate::RowId::Property {
             layer_id: layer, ..
         } => Some((layer, key)),
@@ -2123,11 +2199,11 @@ impl Frame {
             let drawn = o.detail["stripEdges"].as_array()?;
             let (a, b) = (edges[0].as_f64()?, edges[1].as_f64()?);
             let (da, db) = (drawn[0].as_f64()?, drawn[1].as_f64()?);
-            // v1's reach at both ends: `TRIM_REACH` inside the strip as drawn
-            // and as far past the layer's edge; a strip too short for both
-            // trims the end nearer the point.
-            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_REACH;
-            let near_out = x >= db - TRIM_REACH && x <= b + TRIM_REACH;
+            // v1's reach at both ends: `TRIM_INSIDE` inside the strip as
+            // drawn and `TRIM_REACH` past the layer's edge; a strip too short
+            // for both trims the end nearer the point.
+            let near_in = x >= a - TRIM_REACH && x <= da + TRIM_INSIDE;
+            let near_out = x >= db - TRIM_INSIDE && x <= b + TRIM_REACH;
             let edge = match (near_in, near_out) {
                 (true, true) if (x - da).abs() <= (x - db).abs() => Some(Edge::In),
                 (true, true) => Some(Edge::Out),
@@ -2447,7 +2523,7 @@ mod drop_tests {
                 clip: None,
                 summary: std::sync::Arc::from([]),
             },
-            RowId::Property { .. } => RowContent::Property {
+            RowId::Property { .. } | RowId::Effect { .. } => RowContent::Property {
                 state: KeyState::Static,
                 keys: vec![],
             },
@@ -2574,4 +2650,39 @@ pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
         ("extension", Some("powermove.3d.camera")) => "camera3d",
         _ => kind,
     }
+}
+
+/// Electron's fixed yellow dashed latch guide (not a theme or viewer token).
+/// This overlay never enters the cached clip artwork or hit-testing plan.
+pub fn snap_guide(v: Viewport, ruler: f64, target: Option<f64>) -> Vec<Op> {
+    let Some(time) = target.filter(|t| t.is_finite()) else {
+        return vec![];
+    };
+    let x = v.x(time);
+    if x < v.layer_column || x > v.width || v.height <= ruler {
+        return vec![];
+    }
+    let clip = Rect::new(
+        v.layer_column,
+        ruler,
+        v.width - v.layer_column,
+        v.height - ruler,
+    );
+    let mut line = Op::new(
+        "snap-guide",
+        "line",
+        Rect::new(x, ruler + 6., 1.5, v.height - ruler - 6.),
+        0xe7c84b,
+    );
+    line.stroke = 1.5;
+    line.detail = json!({"from":[x,ruler+6.],"to":[x,v.height],"dash":[3.,3.]});
+    line.clip = Some(clip);
+    let mut pin = Op::new(
+        "snap-guide-pin",
+        "marker",
+        Rect::new(x - 4., ruler, 8., 7.),
+        0xe7c84b,
+    );
+    pin.clip = Some(clip);
+    vec![line, pin]
 }

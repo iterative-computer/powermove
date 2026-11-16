@@ -2,6 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useLayoutEffect, useReducer } from "preact/hooks";
 import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
+import { RenderQueue } from "./queue";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
   audioCodings,
@@ -52,10 +53,7 @@ const stack = { display: "flex", flexDirection: "column" } as const;
  * section headings, the row titles, the notes and the summary all start a
  * row inset inside the cards' leading edge.
  */
-const column = {
-  paddingLeft: token("metrics.inset"),
-  paddingRight: token("metrics.inset"),
-} as const;
+const column = {} as const;
 /** Between the title and the actions; the sheet's height follows it. */
 const body = { ...stack, gap: token("metrics.inset") } as const;
 /** Summary on the text column, actions at the trailing edge (a Mac sheet). */
@@ -107,18 +105,29 @@ export interface ExportSheetProps {
   model: ExportModel;
   anchor: number;
 }
+/** "Work area" names what it exports: the whole composition when the work
+ * area was never narrowed (it starts as the whole length), else its span. */
+export function workAreaLabel(p: {
+  hasWorkArea: boolean;
+  workArea?: [number, number] | null;
+  duration?: number;
+}) {
+  if (!p.hasWorkArea) return "Work area · not set";
+  const [a, b] = p.workArea ?? [];
+  if (a === undefined || b === undefined || p.duration === undefined)
+    return "Work area";
+  if (a <= 1e-6 && b >= p.duration - 1e-6)
+    return "Work area · whole composition";
+  const s = (t: number) => `${Number(t.toFixed(2))}`;
+  return `Work area · ${s(a)}–${s(b)} s`;
+}
+
 export function ExportSheet({ model, anchor }: ExportSheetProps) {
   const [, update] = useReducer((n) => n + 1, 0);
   useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
   const s = model.state;
   const p = s.project;
-  if (
-    !p ||
-    !model.open ||
-    s.run.phase === "done" ||
-    s.run.phase === "cancelled"
-  )
-    return null;
+  if (!p || !model.open || s.run.phase === "cancelled") return null;
   const o = model.options;
   const busy = model.locked;
   const watch = (job: Promise<unknown>) => {
@@ -245,6 +254,14 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     ? `Can’t export with these settings: ${model.planningError}`
     : (blocked ?? p.summary);
   const timed = timedSummary(summary);
+  const queue = (
+    <scroll
+      id="export.queue.rows"
+      style={{ ...stack, maxHeight: token("metrics.sheet_body_max") }}
+    >
+      <RenderQueue model={model} watch={watch} />
+    </scroll>
+  );
   return (
     <UI.SheetAnchor
       id="export.sheet"
@@ -252,16 +269,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       anchor={anchor}
       open
       style={{
-        padding: token("metrics.sheet_inset"),
+        padding: token("space.xl"),
         width: token("metrics.sheet_width_wide"),
-        gap: token("metrics.inset"),
+        gap: token("space.lg"),
       }}
-      // No substitute for missing wide-sheet/inset tokens. Metadata is a request,
-      // not a claim the current kit interprets these properties.
+      // Shared tokens keep the sheet and its compact rows on the same grid.
       metadata={{
         export: {
           width: "metrics.sheet_width_wide",
-          inset: "metrics.sheet_inset",
+          inset: "space.xl",
           dismissOutside: false,
           dismissEscape: !progressSheet,
           initialFocus: progressSheet ? null : "export.kind",
@@ -276,13 +292,34 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         style={{
           ...column,
           color: token("colors.text"),
-          fontSize: token("typography.heading"),
+          fontSize: token(
+            progressSheet ? "typography.body" : "typography.heading",
+          ),
           fontWeight: token("typography.display_weight"),
         }}
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
       </text>
-      {progressSheet ? (
+      {!progressSheet && (s.run.phase === "done" || model.kind === "project")
+        ? queue
+        : null}
+      {s.run.phase === "done" ? (
+        <div role="status" id="export.completed" style={body}>
+          <text style={text}>Export complete</text>
+          <text style={detail}>{s.run.path}</text>
+          <Action
+            id="export.showInFinder"
+            label="Show in Finder"
+            onClick={() => watch(model.showInFinder())}
+          />
+          <Action
+            id="export.done"
+            label="Done"
+            primary
+            onClick={() => watch(model.dismissCompleted())}
+          />
+        </div>
+      ) : progressSheet ? (
         <>
           <div data-pm-slot="body" style={{ ...body, ...column }}>
             {s.run.phase === "rendering" && s.run.preview ? (
@@ -340,11 +377,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               </>
             )}
           </div>
+          <div style={column}>{queue}</div>
           <div
             role="group"
             label="Export"
             metadata={{ export: { recipe: "sheet-footer" } }}
-            style={{ ...footer, justifyContent: "end" }}
+            style={{ ...footer, ...column, justifyContent: "end" }}
           >
             {s.run.phase === "failed" ? (
               <>
@@ -452,6 +490,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   maxHeight: token("metrics.sheet_body_max"),
                 }}
               >
+                <div style={column}>{queue}</div>
                 <Group label="Output">
                   {select(
                     "format",
@@ -517,9 +556,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     ? select("range", [
                         {
                           v: "work",
-                          label: p.hasWorkArea
-                            ? "Work area"
-                            : "Work area · not set",
+                          label: workAreaLabel(p),
                         },
                         { v: "all", label: "Full composition" },
                       ])
@@ -572,7 +609,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                         label={`Render time ${p.studio.estimate}`}
                         style={{
                           ...text,
-                          fontWeight: "600",
+                          fontWeight: token("typography.display_weight"),
                           fontVariantNumeric: "tabular-nums",
                           color: token(
                             p.studio.state === "measuring"
@@ -700,7 +737,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                           : "colors.text",
                       ),
                       fontSize: token("typography.body"),
-                      fontWeight: "600",
+                      fontWeight: token("typography.display_weight"),
                       fontVariantNumeric: "tabular-nums",
                     }}
                   >
@@ -765,6 +802,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 label="Cancel"
                 disabled={busy}
                 onClick={() => watch(model.cancel())}
+              />
+              <Action
+                id="export.queue.add"
+                label="Add to Queue"
+                disabled={!model.canExport}
+                onClick={() => watch(model.addToQueue())}
               />
               <Action
                 id="export.start"

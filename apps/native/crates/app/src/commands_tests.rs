@@ -863,3 +863,53 @@ fn camera_command_creates_one_selects_and_undoes(cx: &mut TestAppContext) {
     undo(&mut s, cx);
     assert_eq!(layers(&s).len(), 1);
 }
+
+#[gpui::test]
+fn delete_groups_menu_backspace_and_delete_share_one_undo(cx: &mut TestAppContext) {
+    for entry in ["menu", "backspace", "delete"] {
+        let mut s = stage(cx, 3);
+        select(&mut s, cx, &["l0", "l1"]);
+        press(&mut s, cx, "cmd+g");
+        let group = selected(&s).pop().unwrap();
+        let before: Vec<_> = layers(&s).iter().map(|l| l.id.clone()).collect();
+        select(&mut s, cx, &[&group, "l0", "l1", "l2"]);
+        if entry == "menu" {
+            run(&mut s, cx, "delete", &[]);
+        } else {
+            press(&mut s, cx, entry);
+        }
+        assert!(layers(&s).is_empty(), "{entry}");
+        undo(&mut s, cx);
+        assert_eq!(
+            layers(&s).iter().map(|l| l.id.clone()).collect::<Vec<_>>(),
+            before,
+            "{entry}"
+        );
+        assert!(s.recorder.reports.borrow().is_empty());
+    }
+}
+
+#[test]
+fn delete_groups_resolver_routes_globally_but_never_while_typing() {
+    for chord in ["delete", "backspace"] {
+        assert_eq!(dispatch(chord).0, "delete");
+        let mut resolver = Resolver::with(pm_shell::keymap::current());
+        let mut effects = resolver.submit(Key {
+            token: 91,
+            chord: chord.into(),
+            field: true,
+            repeat: false,
+            up: false,
+            compat: false,
+        });
+        loop {
+            match effects.into_iter().next() {
+                Some(Effect::Dispatch { command, .. }) => {
+                    assert_ne!(command, "delete", "{chord} must belong to the text field");
+                    effects = resolver.resolve(91, false);
+                }
+                _ => break,
+            }
+        }
+    }
+}

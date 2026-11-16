@@ -93,7 +93,12 @@ impl Inspector {
             }
             return Ok(out);
         }
-        let id = self.primary().expect("selected");
+        self.fields_for_layer(self.primary().expect("selected"))
+    }
+    /// Timeline rows may show an unselected layer. Metadata must describe that
+    /// row, without changing the user's selection to inspect it.
+    pub fn fields_for_layer(&self, id: &str) -> Result<Vec<FieldDescriptor>, InspectorError> {
+        let mut out = Vec::new();
         let layer = self.layer(id)?;
         let kind = text(&layer, "type");
         let d = layer.get("d");

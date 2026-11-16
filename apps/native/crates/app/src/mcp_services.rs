@@ -345,11 +345,23 @@ impl EngineJobs {
         }))
     }
     fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
-        self.kernel
+        let published = self
+            .kernel
             .published(&frozen.project_id)
             .filter(|p| p.snapshot.doc_id == frozen.document_id && p.revision() == frozen.revision)
-            .ok_or_else(|| Error::conflict("The composition changed during engine work"))
+            .ok_or_else(|| Error::conflict("The composition changed during engine work"))?;
+        if let Some(comp) = frozen.project["compId"].as_str()
+            && published.snapshot.open_comp().as_deref() != Some(comp)
+        {
+            // Render a private projection, without publishing editor navigation.
+            let mut targeted = (*published).clone();
+            targeted.snapshot =
+                pm_mcp::automation::composition_snapshot(&published.snapshot, comp)?;
+            return Ok(Arc::new(targeted));
+        }
+        Ok(published)
     }
+
     fn start(
         &self,
         published: &Arc<Published>,
@@ -955,7 +967,10 @@ impl MediaImporter for EngineJobs {
         if crate::colour::lut_file(path).is_some() {
             return self.import_lut(request, size);
         }
-        let (kind, mime) =
+        if let Some(error) = pm_scene3d::import::path::unsupported(path) {
+            return Err(Error::invalid(error));
+        }
+        let (kind, mut mime) =
             media_type(path).ok_or_else(|| Error::invalid("Unsupported media file."))?;
         let fingerprint = fingerprint(path, size).map_err(failed)?;
         if request
@@ -1018,8 +1033,28 @@ impl MediaImporter for EngineJobs {
             .as_ref()
             .is_some_and(|probe| probe.streams.iter().any(|stream| stream.audio.is_some()));
         let archive = Archive::open(&self.profile).map_err(failed)?;
+        let prepared = (kind == "model")
+            .then(|| pm_scene3d::import::path::prepare(path))
+            .transpose()
+            .map_err(failed)?;
+        let staged = prepared
+            .as_ref()
+            .map(|model| {
+                let dir = tempfile::tempdir()?;
+                let file = dir.path().join(&model.name);
+                std::fs::write(&file, &model.bytes)?;
+                Ok::<_, std::io::Error>((dir, file))
+            })
+            .transpose()
+            .map_err(failed)?;
+        let retained_path = staged.as_ref().map_or(path.as_path(), |(_, p)| p.as_path());
+        if kind == "model" {
+            mime = media_type(retained_path)
+                .ok_or_else(|| Error::invalid("Unsupported model"))?
+                .1;
+        }
         let original = archive
-            .retain_path(path, &mime, &AtomicBool::new(false))
+            .retain_path(retained_path, &mime, &AtomicBool::new(false))
             .map_err(failed)?;
         let name = path
             .file_name()
@@ -1073,6 +1108,14 @@ impl MediaImporter for EngineJobs {
         let mut metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        if kind == "model" {
+            metadata["format"] = json!(
+                retained_path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+        }
         if kind == "video" {
             metadata["audioDur"] = json!(
                 probe

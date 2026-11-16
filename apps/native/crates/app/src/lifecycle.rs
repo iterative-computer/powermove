@@ -830,8 +830,23 @@ impl Controller {
                 .asking_now
                 .as_ref()
                 .is_some_and(|(window, _)| **window == *self.host.borrow().window);
-        let asking = self.recovery_pending
-            || (!quit_now_here && !crate::alert::dismiss_notice(&self.host.borrow().window));
+        // An unanswered open has not adopted a session or any recovered edits.
+        // Cancel its ticket, not the quit; the open task releases its fence
+        // after the kernel acknowledges cancellation. Never cancel a save.
+        let cancelling_open = intent == Intent::Quit
+            && self.opening
+            && self.recovery_cancel.as_ref().is_some_and(|cancel| {
+                let _ = cancel.try_send(());
+                true
+            });
+        if cancelling_open {
+            let window = &self.host.borrow().window;
+            if let Some(sheet) = window.attachedSheet() {
+                window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+            }
+        }
+        let asking = !cancelling_open && (self.recovery_pending
+            || (!quit_now_here && !crate::alert::dismiss_notice(&self.host.borrow().window)));
         let state = close_state(p.as_deref(), self.opening || asking, self.save_pending);
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
@@ -1377,6 +1392,60 @@ mod tests {
         actor.shutdown();
     }
 
+    #[test]
+    fn quit_cancels_unanswered_recovery_without_losing_saved_or_unsaved_work() {
+        let (dir, actor, session) = fixture();
+        let k = actor.handle();
+        let file = dir.path().join("unanswered.pmv");
+        answer(&k, ShellCall::SaveAs {
+            session: session.clone(), path: file.clone(), replace: false,
+        });
+        let saved = std::fs::read(&file).unwrap();
+        edit(&k);
+        answer(&k, ShellCall::DeferClose(session));
+        let prepare = || ShellCall::PrepareOpen {
+            id: "test".into(), source: SessionSource::File(file.clone()), electron_profile: None,
+        };
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(&k, prepare()) else {
+            panic!("fixture must stop at an unanswered recovery choice");
+        };
+        let (sheet, rx) = async_channel::bounded::<Option<crate::surfaces::recovery::Action>>(1);
+        let (cancel, cancellation) = async_channel::bounded(1);
+        let mut waiting = std::pin::pin!(crate::session::recovery_answer(&rx, &cancellation));
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(quit_waits_for(CloseState::Busy, true, false, true), Some("finishing opening the project"));
+        // Quit arrives before any answer, including an off-screen sheet.
+        cancel.try_send(()).unwrap();
+        assert!(wait(waiting).is_err());
+        assert!(matches!(answer(&k, ShellCall::CancelRecovery { ticket: ticket.clone() }), ShellReply::RecoveryCancelled));
+        assert_eq!(std::fs::read(&file).unwrap(), saved);
+        assert!(k.shell(ShellCall::DecideRecovery {
+            ticket, decision: RecoveryDecision::Recover,
+        }).wait().unwrap().is_err());
+        // The operation fence is no longer held by the UI wait; the kernel
+        // can finish a durable quit while leaving the journal recoverable.
+        assert!(matches!(answer(&k, ShellCall::PrepareQuit), ShellReply::Compacted { .. }));
+        // Preparing again still offers the unsaved edits: cancellation did
+        // not silently select Discard, Open Saved Version or Open as Copy.
+        let ShellReply::RecoveryRequired { ticket, .. } = answer(&k, prepare()) else {
+            panic!("the cancelled open must preserve its recoverable edits");
+        };
+        answer(&k, ShellCall::CancelRecovery { ticket });
+        answer(&k, ShellCall::ReleaseLibrary);
+        drop(sheet);
+        actor.shutdown();
+    }
+
+    #[test]
+    fn quit_cancellation_wins_over_a_simultaneous_sheet_answer() {
+        let (sheet, rx) = async_channel::bounded(1);
+        let (cancel, cancellation) = async_channel::bounded(1);
+        sheet.try_send(Some(crate::surfaces::recovery::Action::OpenAsCopy)).unwrap();
+        cancel.try_send(()).unwrap();
+        assert!(wait(crate::session::recovery_answer(&rx, &cancellation)).is_err());
+    }
+
     fn edit(k: &KernelHandle) {
         k.call_blocking(
             "test",
@@ -1636,6 +1705,40 @@ mod tests {
             p.unwrap().history.can_undo,
             "the finished edit is one undo step"
         );
+        actor.shutdown();
+    }
+    /// Save with an edit left open (a drag whose release never ended it):
+    /// the kernel refuses it as it is; finished first, as Cmd-S now does,
+    /// the save goes through and keeps the edit.
+    #[test]
+    fn a_save_finishes_an_edit_left_open_and_keeps_it() {
+        let (_dir, actor, session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Scale".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let refused = k.shell(ShellCall::Save(session.clone())).wait().unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| crate::surfaces::documents::WriteFailure::of(&format!("{e:?}"))
+                    == crate::surfaces::documents::WriteFailure::EditOpen),
+            "{refused:?}"
+        );
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        answer(&k, ShellCall::Save(session));
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none() && !p.dirty, "saved");
+        assert!(p.history.can_undo, "the edit is kept, one undo step");
         actor.shutdown();
     }
     /// Undo with an edit left open (a move whose drag never sent its end):

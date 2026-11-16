@@ -62,11 +62,11 @@ export function status(
 }
 /** A rendition's state in the row's quiet meta text. */
 function rendition(state: unknown, label: string): string | null {
-  if (state === "Queued") return `${label} Waiting`;
+  if (state === "Queued") return label === "Proxy" ? "Preparing preview" : `${label} Waiting`;
   if (typeof state !== "object" || state === null) return null;
   if ("Generating" in state) {
     const { percent } = (state as { Generating: { percent: number } }).Generating;
-    return `Creating ${label} ${percent}%`;
+    return label === "Proxy" ? `Preparing preview ${percent}%` : `Creating ${label} ${percent}%`;
   }
   if ("Ready" in state) return label;
   if ("Failed" in state) return `${label} Failed`;

@@ -520,6 +520,8 @@ impl MouseMoveEvent {
 /// A mouse wheel event from the platform.
 #[derive(Clone, Debug, Default)]
 pub struct ScrollWheelEvent {
+    /// Inertial scrolling after the fingers leave the trackpad.
+    pub is_momentum: bool,
     /// The position of the mouse on the window.
     pub position: Point<Pixels>,
 

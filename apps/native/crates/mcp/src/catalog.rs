@@ -43,6 +43,14 @@ pub fn catalog() -> &'static Value {
                 .expect("existing media tool");
             *tool = replacement.clone();
         }
+        for tool in value["tools"].as_array_mut().unwrap() {
+            if COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap_or("")) {
+                tool["inputSchema"]["properties"]["compositionId"] = serde_json::json!({
+                    "type":"string", "minLength":1,
+                    "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
+                });
+            }
+        }
         value
     })
 }
@@ -75,6 +83,7 @@ pub fn native_tools() -> &'static Vec<Value> {
     })
 }
 pub fn permits(subset: &str, name: &str) -> bool {
+    if subset == "app" && ["panel_begin", "panel_build"].contains(&name) { return true; }
     catalog()[subset]
         .as_array()
         .unwrap()
@@ -257,6 +266,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "interact_panel",
     "capture_panel",
     "computer_use_panel",
+    "panel_begin",
+    "panel_build",
     "set_panel_layout",
     "get_workspace_state",
     "thread_launch",
@@ -289,6 +300,8 @@ pub const HOST_BACKED: &[&str] = &[
     "interact_panel",
     "capture_panel",
     "computer_use_panel",
+    "panel_begin",
+    "panel_build",
     "set_panel_layout",
     "get_workspace_state",
     "thread_launch",
@@ -363,3 +376,35 @@ pub fn backing(name: &str) -> &'static str {
         _ => "agent runtime, user MCP servers and scripting sandbox",
     }
 }
+
+#[cfg(test)]
+mod panel_build_tools_tests {
+    use super::*;
+    use serde_json::json;
+    #[test] fn panel_build_is_discoverable_and_validates_progress() {
+        assert!(names().iter().any(|n| n == "panel_begin"));
+        assert!(permits("app", "panel_begin"));
+        assert!(!permits("inspection", "panel_begin"));
+        assert!(validate("panel_begin", &json!({"title":"Grade", "placement":{"beside":"inspector"}, "planned":[{"kind":"slider","label":"Exposure"}]})).is_ok());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":1})).is_ok());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"pretend"})).is_err());
+        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":-1})).is_err());
+    }
+}
+/// Tools whose model and timeline are relative to a composition.
+pub const COMPOSITION_TOOLS: &[&str] = &[
+    "get_project_state",
+    "apply_commands",
+    "render_frames",
+    "check_project",
+    "select_layers",
+    "edit_layer_strips",
+    "edit_video",
+    "edit_3d",
+    "get_timeline",
+    "get_3d_scene",
+    "export_captions",
+    "export_video",
+    "generate_captions",
+    "import_media_to_timeline",
+];

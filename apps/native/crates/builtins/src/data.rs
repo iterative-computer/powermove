@@ -61,10 +61,8 @@ pub(crate) fn effect_binding_rows<'a>(
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         == channels.len();
-    (distinct
-        && handles.join("+") == handle
-        && found.iter().all(|p| p["effect"] == *effect))
-    .then_some(found)
+    (distinct && handles.join("+") == handle && found.iter().all(|p| p["effect"] == *effect))
+        .then_some(found)
 }
 pub(crate) fn model(value: &Value) -> Result<pm_model::Value, String> {
     pm_model::json::parse(&value.to_string()).map_err(|e| format!("{e:?}"))
@@ -75,6 +73,7 @@ struct Inflight {
     reply: SyncSender<HostAck>,
     pending: Pending<Result<Ack, KernelFailure>>,
     plan: Option<pm_panel_inspector::v4_effects::Plan>,
+    delete_message: Option<String>,
 }
 struct StateInflight {
     request: HostRequest,
@@ -101,6 +100,7 @@ pub(crate) struct Backend {
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
     last_effects: BTreeMap<String, Value>,
+    pub(crate) presets: Vec<Value>,
     last_registries: Option<Arc<BTreeMap<String, Vec<state::Registration>>>>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
@@ -156,12 +156,18 @@ impl Backend {
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
             // Effect Controls folds a grade's wheels and curve points into
             // summary rows; the Color panel draws them itself.
-            panel: EffectsPanel::new(presentation, 0..96).folding_grades(panel == "layer-effects"),
+            panel: EffectsPanel::new(
+                presentation,
+                0..if panel == "inspector" { usize::MAX } else { 96 },
+            )
+            .folding_grades(panel == "layer-effects")
+            .adding_to_selection(panel == "inspector"),
             extension: format!("ext.builtin.{panel}"),
             native,
             panel_id: panel.into(),
             service_revision: 0,
             last_effects: BTreeMap::new(),
+            presets: Vec::new(),
             last_registries: None,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
@@ -552,6 +558,17 @@ impl Backend {
                 {
                     return Err(format!("Notes remain applied but could not be saved: {message}. Read the latest notes before retrying."));
                 }
+                if matches!(&item.request.operation, HostOperation::Command { command, .. } if command == "panel.project")
+                    && matches!(ack.reply, Reply::Applied { .. })
+                    && let Some(message) = item.delete_message
+                    && let Some(p) = self.published()
+                    && p.revision() == ack.revision
+                {
+                    self.native.platform.push(("project.effect".into(), serde_json::to_value(pm_panel_media::HostRequest {
+                        owner: pm_panel_media::Stamp { project: p.project.clone(), document: p.snapshot.doc_id, revision: ack.revision },
+                        effect: pm_panel_media::Effect::Deleted { message },
+                    }).map_err(|e| e.to_string())?));
+                }
                 if let Some(plan) = item.plan {
                     self.panel
                         .acknowledge(self.model.as_mut().ok_or("No open project")?, plan, &ack)
@@ -764,6 +781,30 @@ impl KernelData for Data {
                 HostOperation::Edit { label, commands } => {
                     let mut all = vec![];
                     for command in commands {
+                        if command.command == "preset.apply" {
+                            let saved = b
+                                .presets
+                                .iter()
+                                .find(|p| p["id"] == command.args["preset"])
+                                .cloned()
+                                .ok_or("Preset not found")?;
+                            let saved = model(&saved)?;
+                            let caller = b.caller;
+                            let time = b.native.facts["time"].as_f64().unwrap_or(0.);
+                            let m = b.model.as_mut().ok_or("No open project")?;
+                            let targets = m.selected_layers().to_vec();
+                            let next = m
+                                .apply_preset(caller, &saved, &targets, time)
+                                .map_err(|e| e.to_string())?;
+                            if let pm_kernel::Call::Transact {
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                ..
+                            } = next.call
+                            {
+                                all.extend(commands);
+                            }
+                            continue;
+                        }
                         if command.command != "effect.add" {
                             return Err("Unregistered built-in edit".into());
                         }
@@ -849,7 +890,11 @@ impl KernelData for Data {
                 *expected_revision = Some(request.expected_revision);
             }
             let pending = b.kernel.call(&b.identity.project, next);
+            let delete_message = if matches!(&request.operation, HostOperation::Command { command, .. } if command == "panel.project") {
+                b.native.project_reply.as_mut().and_then(|v| v.as_object_mut()).and_then(|v| v.remove("delete_message")).and_then(|v| v.as_str().map(str::to_owned))
+            } else { None };
             b.pending.push(Inflight {
+                delete_message,
                 request,
                 reply,
                 pending,
@@ -960,5 +1005,7 @@ fn media_stamp(facts: &Value) -> u64 {
     facts["skimming"].as_bool().hash(&mut hash);
     // Settings › Shortcuts: its page is rebuilt with a new stamp.
     facts["shortcuts"]["stamp"].as_u64().hash(&mut hash);
+    // Settings › Project's header: the poster, the path, the open projects.
+    facts["settingsHeader"].to_string().hash(&mut hash);
     hash.finish()
 }

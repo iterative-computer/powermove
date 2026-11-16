@@ -1603,6 +1603,7 @@ impl MediaCache {
             return Ok(t.clone());
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        let _span = pm_perf::Span::new(pm_perf::Counter::ImageMicros);
         #[cfg(test)]
         if FAIL_DECODE.with(|f| f.get()) {
             return Err(MediaFailure::Failed(format!(
@@ -2201,10 +2202,16 @@ impl MediaCache {
                 }
                 None => Want::Exact,
             };
-            let fetched = self
+            let Some(fetched) = self
                 .viewer
-                .fetch(&src, instance, n, want)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                .fetch_ready(&src, instance, n, want)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+            else {
+                // The cold layer has not landed yet. Count it explicitly
+                // as unavailable rather than calling the frame exact.
+                self.stand_ins.push(usize::MAX);
+                return Ok(None);
+            };
             if !fetched.exact {
                 self.stand_ins.push(fetched.shown);
             }

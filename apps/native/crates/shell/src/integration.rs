@@ -9,6 +9,10 @@ use std::{cell::RefCell, rc::Rc};
 pub trait Integration {
     fn observe(&self, cx: &mut gpui::Context<crate::view::Editor>);
     fn command(&self, command: &Command, window: &mut Window, cx: &mut App) -> bool;
+    /// Last measured natural body plus header height, before column clipping.
+    fn natural_panel_height(&self, _id: &str, _cx: &App) -> Option<f32> {
+        None
+    }
     fn panel(
         &self,
         id: &str,
@@ -35,6 +39,7 @@ pub trait Integration {
     fn home(&self, _window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
         None
     }
+    fn action_toast(&self, _cx: &mut App) -> Option<AnyElement> { None }
     /// Commands that cannot run now, so menus never offer a silent no-op.
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
@@ -56,6 +61,7 @@ pub trait Integration {
     }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel_id(&self, id: &str, _cx: &App) -> String { id.to_owned() }
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }

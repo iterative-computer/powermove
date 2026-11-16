@@ -14,6 +14,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 #[derive(Default)]
 pub(crate) struct Recorder {
     pub time: RefCell<f64>,
+    pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
     pub seeks: RefCell<Vec<f64>>,
     pub effects: RefCell<Vec<HostEffect>>,
     pub reports: RefCell<Vec<String>>,
@@ -31,6 +32,9 @@ pub(crate) struct Recorder {
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, _: &mut App) {
+        self.0.timing_previews.borrow_mut().push(snapshot);
+    }
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
     }
@@ -150,6 +154,8 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
 impl Stage {
     /// Worker jobs and repaints quiesce, and JS publications reach the host.
     pub fn idle(&mut self, cx: &mut TestAppContext) {
+        // The mock platform has no display link; deliver its pending frame.
+        self.vcx.update(|window, cx| window.simulate_next_frame(cx));
         let surface = self.surface.clone();
         settle(cx, |cx| surface.read_with(cx, |s, _| s.idle()));
         self.vcx.run_until_parked();
@@ -2317,7 +2323,8 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
     hover(&mut s, cx, at);
     assert!(s.recorder.skims.borrow().is_empty());
     s.recorder.skimming.set(true);
-    for seconds in [1.0, 2.0, 1.5] {
+    // (The pointer rests at 1.0 now: a skim starts once it moves.)
+    for seconds in [2.0, 1.0, 1.5] {
         let at = s.at(0, seconds);
         hover(&mut s, cx, at);
         let last = *s.recorder.skims.borrow().last().unwrap();
@@ -2341,6 +2348,88 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         near(seeks.first().copied(), 2.5),
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
+}
+/// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
+/// or in time (the viewer keeps the playhead's picture), nor does a move
+/// event that did not move the pointer; moving it does. A skim showing
+/// stays under the pointer as the time scrolls beneath it.
+#[gpui::test]
+fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 40);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    let skimmer = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+    wheel(&mut s, cx, point(px(0.), px(-40.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(0.), px(-200.)), Modifiers::control());
+    wheel(&mut s, cx, point(px(-60.), px(0.)), Modifiers::none());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()) > 0.);
+    assert_eq!(skimmer(&s), None);
+    assert!(s.recorder.skims.borrow().is_empty(), "the viewer keeps the playhead's picture");
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(skimmer(&s), None, "a move event that did not move the pointer");
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let shown = skimmer(&s);
+    assert!(shown.is_some(), "the pointer moved over the clips");
+    wheel(&mut s, cx, point(px(60.), px(0.)), Modifiers::none());
+    let now = skimmer(&s);
+    assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
+}
+/// PM-388, zoomed in: the pointer skimmed the clips, then the playhead moved
+/// (a key, a click, playback: the viewer is back on the playhead's frame).
+/// With the pointer resting, a time scroll slides other frames under it and
+/// a move event that does not move it comes: neither starts skimming again;
+/// moving the pointer does.
+#[gpui::test]
+fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_moved(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 4);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    // Zoomed in around the pointer.
+    wheel(&mut s, cx, point(px(0.), px(-300.)), Modifiers::control());
+    s.vcx
+        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims > 0, "the pointer moved over the clips");
+    // While the skim shows, a time scroll keeps it under the pointer.
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims >= 2, "a showing skim follows the time under the pointer");
+    // The playhead moves: the viewer shows its frame again.
+    *s.recorder.time.borrow_mut() = 0.5;
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(40.), px(0.)), Modifiers::none());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.skims.borrow().len(), skims, "nothing skims without the pointer moving");
+    s.vcx
+        .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
 }
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays
@@ -2649,4 +2738,203 @@ fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppCon
         assert_eq!(t.time_mapping(), mapping);
         assert!(t.model().index.work[1] < end);
     });
+}
+
+#[gpui::test]
+fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let from = s.at(0, 1.);
+    let to = from + point(px(60.), px(0.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.revision(), before.revision());
+    assert_eq!(during.history.entries, before.history.entries);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .iter()
+            .any(Option::is_some)
+    );
+    let frame = s.surface.read_with(&s.vcx, |s, _| s.frame().unwrap());
+    let clip = frame.ops.iter().find(|op| op.id == "clip:l0").unwrap();
+    assert!(clip.detail["from"].as_f64().unwrap() > 0.);
+    // This is the surface's Escape handler; it also clears the viewer input.
+    s.surface.update(&mut s.vcx, |s, cx| assert!(s.cancel(cx)));
+    s.idle(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let from = s.at(0, 1.);
+    s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
+    assert!(s.start_of("l0") > 0.);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries + 1);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    s.undo(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+}
+
+/// Uses GPUI's mock platform: no application window or user profile.
+#[gpui::test]
+fn work_area_stream_keeps_ruler_mapping_and_tracks_pointer_through_extension(
+    cx: &mut TestAppContext,
+) {
+    for zoom_in in [false, true] {
+        for end in [false, true] {
+            let mut project: serde_json::Value =
+                serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+            project["work"] = serde_json::json!([1., 3.]);
+            let mut s = stage_project(cx, project.to_string());
+            s.surface.update(&mut s.vcx, |t, cx| {
+                t.fit_time(cx);
+                if zoom_in {
+                    t.command("timeline.zoomIn", 0., None, false, cx);
+                }
+            });
+            s.idle(cx);
+            let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+                (
+                    t.frame().unwrap().viewport,
+                    t.model().index.work,
+                    t.model().index.duration,
+                    t.time_mapping(),
+                )
+            });
+            let origin = s.origin();
+            let y = origin.y + px(tokens().metrics.ruler / 2.);
+            let x_of =
+                |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+            let edge = before[usize::from(end)];
+            // Start within the generous hit zone rather than on its center.
+            let from = point(x_of(edge) + px(if end { -4. } else { 4. }), y);
+            s.vcx
+                .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            let mut previous = edge;
+            let mut peak = duration;
+            let times: Vec<f64> = if end {
+                // Slow, fast, beyond comp end, then back to its interior.
+                vec![
+                    3.2, 3.21, 3.3, 3.4, 4., 6., 9., 11., 14., 14., 14., 12., 10., 8., 6., 4.,
+                ]
+            } else {
+                vec![
+                    1.2, 1.21, 1.3, 1.4, 1.8, 2., 2.2, 2.5, 2.7, 2.9, 2.9, 2.7, 2.4, 2., 1.8, 1.5,
+                ]
+            };
+            let mut previous_time = edge;
+            for &time in &times {
+                let at = point(x_of(time), y);
+                s.vcx
+                    .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+                s.idle(cx);
+                s.surface.read_with(&s.vcx, |t, _| {
+                    assert_eq!(t.time_mapping(), mapping, "ruler changed at {time}");
+                    let actual = t.model().index.work[usize::from(end)];
+                    let expected = pm_panel_timeline::frame(time, t.model().index.fps);
+                    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+                    if time >= previous_time {
+                        assert!(actual >= previous);
+                    } else {
+                        assert!(actual <= previous);
+                    }
+                    previous = actual;
+                    previous_time = time;
+                    peak = peak.max(actual);
+                    assert_eq!(t.model().index.duration, if end { peak } else { duration });
+                });
+            }
+            let to = point(x_of(*times.last().unwrap()), y);
+            // Queue the last pointer and release together: the pending writer
+            // sample must retain the mapping after the UI gesture becomes idle.
+            s.vcx
+                .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+            s.vcx
+                .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            s.surface
+                .read_with(&s.vcx, |t, _| assert_eq!(t.time_mapping(), mapping));
+            assert!(s.recorder.seeks.borrow().is_empty());
+            assert!(
+                s.recorder
+                    .timing_previews
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none)
+            );
+            assert!(s.recorder.reports.borrow().is_empty());
+            assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
+            s.undo(cx);
+            s.surface.read_with(&s.vcx, |t, _| {
+                assert_eq!(t.model().index.work, before);
+                assert_eq!(t.model().index.duration, duration);
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn work_area_cancel_restores_duration_without_refitting_ruler(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.work,
+            t.model().index.duration,
+            t.time_mapping(),
+        )
+    });
+    let origin = s.origin();
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    let x_of = |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+    s.vcx.simulate_mouse_down(
+        point(x_of(before[1]) - px(2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(
+        point(x_of(duration + 2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.surface
+        .read_with(&s.vcx, |t, _| assert!(t.model().index.duration > duration));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.time_mapping(), mapping);
+        assert_eq!(t.model().index.work, before);
+        assert_eq!(t.model().index.duration, duration);
+    });
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
 }

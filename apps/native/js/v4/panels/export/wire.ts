@@ -6,6 +6,8 @@ import type { Commit } from "../../src";
 let executable: string | undefined;
 function buildNative() {
   if (!executable) {
+    if (process.env.PM_EXPORT_PANEL_WIRE)
+      return (executable = process.env.PM_EXPORT_PANEL_WIRE);
     const native = fileURLToPath(new URL("../../../../", import.meta.url));
     const target = resolve(
       process.env.CARGO_TARGET_DIR ??

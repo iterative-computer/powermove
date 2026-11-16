@@ -5084,12 +5084,15 @@ dependencies = [
  "pm-fx-defs",
  "pm-model",
  "pm-protocol",
+ "pm-render",
  "pm-scene3d",
  "pm-text",
+ "pm-time",
  "pm-wasm",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "zstd",
 ]
 
@@ -5192,6 +5195,7 @@ dependencies = [
  "pm-model",
  "pm-native-migrate",
  "pm-panel-agentpanel",
+ "pm-panel-inspector",
  "pm-panel-media",
  "pm-panel-studio3d",
  "pm-panel-timeline",
@@ -5540,6 +5544,7 @@ dependencies = [
 name = "pm-scene3d"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "image",
  "pm-geom3d",
  "pm-import-fbx",
@@ -5593,6 +5598,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pm-design",
  "raw-window-handle",
+ "resvg",
  "serde",
  "serde_json",
 ]
@@ -7233,8 +7239,6 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f"
 dependencies = [
  "arrayvec",
  "serde",

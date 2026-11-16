@@ -438,6 +438,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "a", 1.)),
         [
             "Rename…",
+            "Save Animation Preset…",
             "Duplicate",
             "Group",
             "Simplify Keyframes",
@@ -484,11 +485,11 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
 
     // Two layers: the lower can be the upper's matte.
     desk.select(&["a", "b"]);
-    assert_eq!(labels(&menu(&desk, "a", 1.))[4], "Use Bottom Layer as Mask");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[5], "Use Bottom Layer as Mask");
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
     // One layer: Rename… leads (v1).
-    assert_eq!(labels(&menu(&desk, "t", 1.))[5], "Split Text into Layers");
+    assert_eq!(labels(&menu(&desk, "t", 1.))[6], "Split Text into Layers");
     assert_eq!(
         child_labels(&menu(&desk, "t", 1.), "Split Text into Layers"),
         ["By Word", "By Character", "By Line"]
@@ -512,6 +513,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "locked", 1.)),
         [
             "(Rename…)",
+            "(Save Animation Preset…)",
             "(Duplicate)",
             "(Group)",
             "(Simplify Keyframes)",
@@ -590,7 +592,7 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     step("a", &["Hide"], "Hide Layers", &|| {
         assert_eq!(flag("a", "on"), Some(false))
     });
-    assert_eq!(labels(&menu(&desk, "a", 1.))[9], "Show");
+    assert_eq!(labels(&menu(&desk, "a", 1.))[10], "Show");
     step("a", &["Show"], "Show Layers", &|| {
         assert_eq!(flag("a", "on"), Some(true))
     });
@@ -1072,7 +1074,7 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     );
     assert_eq!(
         desk.published().history.undo_label.as_deref(),
-        Some("Distribute Layers")
+        Some("Distribute Horizontally")
     );
     desk.undo();
     assert_eq!(desk.document(), before);
@@ -1083,19 +1085,10 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     let off =
         crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default());
     assert!(off.contains("distributeLayers") && !off.contains("alignLayers"));
-    // Align: the selection's box meets the composition's edge, each layer
-    // moving by the same amount.
+    // Each selected anchor meets the leftmost selected anchor.
     desk.run("alignLayers", &[json!("left")], 0.);
-    let (a, b) = (x(&desk, "a"), x(&desk, "b"));
-    assert!(a < 100., "moved left: {a}");
-    assert_eq!(b - a, 50., "the pair keeps its spacing");
-    assert_eq!(
-        desk.published().history.undo_label.as_deref(),
-        Some("Align Layers")
-    );
-    desk.run("alignLayers", &[json!("right")], 0.);
-    assert!(x(&desk, "b") > 150.);
-    desk.undo();
+    assert_eq!((x(&desk, "a"), x(&desk, "b")), (100., 100.));
+    assert_eq!(desk.published().history.undo_label.as_deref(), Some("Align Left"));
     desk.undo();
     assert_eq!(desk.document(), before);
 }

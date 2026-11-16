@@ -1,4 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
+import { createContext } from "preact";
+import { useContext, useEffect, useState } from "preact/hooks";
 import { memo } from "../../src/memo";
 import type { ComponentChildren } from "preact";
 import * as UI from "../../src/components";
@@ -13,6 +14,8 @@ import type {
 } from "./model";
 import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
+
+const TimelineFocused = createContext(false);
 
 type Send = (intent: Intent) => void;
 const t = UI.token;
@@ -117,6 +120,120 @@ function refusal(value: Announcement): boolean {
 /** The graph view the switch returns to: the last one shown (v1 keeps "Show
  * Layer Bars with Graph" apart from the switch itself). */
 let lastGraphView: "Graph" | "Combined" = "Graph";
+/** One stable pill; the reserved close slot never changes the label width. */
+function CompositionTab({
+  tab,
+  closable,
+  send,
+}: {
+  key?: string;
+  tab: TimelineFrame["tabs"][number];
+  closable: boolean;
+  send: Send;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const context = (event: SurfaceEvent) => {
+    event.stopPropagation();
+    send({ type: "tabContext", id: tab.id });
+  };
+  return (
+    <div
+      id={`timeline:tab:${tab.id}`}
+      label={tab.name}
+      title={tab.name}
+      metadata={{ compositionTab: true }}
+      role="tab"
+      tabIndex={tab.active ? 0 : -1}
+      aria-selected={tab.active}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      onPointerDown={(event) => {
+        if (event.button === 2 || (event.button === 0 && event.ctrlKey))
+          context(event);
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (
+          !event.ctrlKey &&
+          (event.button === undefined || event.button === 0)
+        )
+          send({ type: "tab", id: tab.id, close: false });
+      }}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.stopPropagation();
+          send({ type: "tab", id: tab.id, close: false });
+        }
+      }}
+      style={{
+        ...line,
+        flexShrink: 0,
+        height: t("metrics.comp_tab_height"),
+        minHeight: t("metrics.comp_tab_height"),
+        minWidth: t("metrics.comp_tab_height"),
+        paddingLeft: t("metrics.comp_tab_leading"),
+        paddingRight: t("metrics.comp_tab_trailing"),
+        gap: t("metrics.comp_tab_content_gap"),
+        borderRadius: t("metrics.control_radius"),
+        color: t(tab.active ? "colors.text" : "colors.secondary"),
+        ...(tab.active ? { background: t("colors.selected_fill") } : {}),
+        fontSize: t("typography.reading"),
+      }}
+    >
+      <text
+        style={{
+          maxWidth: t("metrics.toolbar_title_width"),
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {tab.name}
+      </text>
+      {closable && (
+        <UI.ToolbarItem
+          id={`timeline:tab-close:${tab.id}`}
+          label={`Close ${tab.name}`}
+          title={`Close ${tab.name}`}
+          tabIndex={-1}
+          aria-hidden={!tab.active && !hovered}
+          metadata={{
+            requiredSymbol: "xmark",
+            compositionTabClose: {
+              tab: `timeline:tab:${tab.id}`,
+              active: tab.active,
+              visible: tab.active || hovered,
+            },
+          }}
+          style={{
+            width: t("metrics.comp_tab_close"),
+            height: t("metrics.comp_tab_close"),
+            minWidth: t("metrics.comp_tab_close"),
+            minHeight: t("metrics.comp_tab_close"),
+            paddingLeft: t("metrics.border"),
+            paddingRight: t("metrics.border"),
+            symbolSize: t("metrics.symbol_inline"),
+            color: t("colors.muted"),
+            borderRadius: t("metrics.inner_radius"),
+          }}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            if (event.button === 2 || event.ctrlKey) context(event);
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (
+              !event.ctrlKey &&
+              (event.button === undefined || event.button === 0)
+            )
+              send({ type: "tab", id: tab.id, close: true });
+          }}
+        />
+      )}
+    </div>
+  );
+}
 /** v1's tab row: one tab per open composition (the active one in the text
  * ink on the kit's selected ground, a raised neutral cell: the accent marks
  * the playhead alone), and the Layers / Tracks switch at its end. */
@@ -139,65 +256,22 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
         role="tablist"
         // Tabs sit centred in the bar at a control's height, clear of the
         // panel's top edge and of the row below.
-        style={{ ...line, alignItems: "center", gap: t("metrics.gap") }}
+        style={{
+          ...line,
+          minWidth: t("metrics.comp_tab_gap"),
+          flexShrink: 1,
+          overflow: "scroll",
+          gap: t("metrics.comp_tab_gap"),
+        }}
       >
         {f.hasComposition &&
           f.tabs.map((tab) => (
-            <div key={tab.id} style={line}>
-              <UI.ToolbarItem
-                id={`timeline:tab:${tab.id}`}
-                label={tab.name}
-                title={tab.name}
-                onPointerDown={(event) => {
-                  if (event.button === 2) {
-                    event.stopPropagation();
-                    send({ type: "tabContext", id: tab.id });
-                  }
-                }}
-                role="tab"
-                tabIndex={tab.active ? 0 : -1}
-                aria-selected={tab.active}
-                onClick={action(send, {
-                  type: "tab",
-                  id: tab.id,
-                  close: false,
-                })}
-                style={{
-                  // A name is text in a cell: the cell keeps the toolbar's
-                  // side margins round it, at a control's height.
-                  height: t("metrics.control"),
-                  paddingLeft: t("metrics.gap"),
-                  paddingRight: t("metrics.gap"),
-                  color: t(tab.active ? "colors.text" : "colors.muted"),
-                  fontSize: t("typography.reading"),
-                  ...(tab.active
-                    ? { fontWeight: t("typography.medium_weight") }
-                    : {}),
-                }}
-              >
-                {tab.name}
-              </UI.ToolbarItem>
-              <Icon
-                id={`timeline:tab-menu:${tab.id}`}
-                label={`${tab.name} menu`}
-                symbol="ellipsis"
-                quiet
-                send={send}
-                intent={{ type: "tabContext", id: tab.id }}
-              />
-              {f.tabs.length > 1 && tab.showClose && (
-                <Icon
-                  id={`timeline:tab-close:${tab.id}`}
-                  label={`Close ${tab.name}`}
-                  title={`Close ${tab.name} (⌘W)`}
-                  symbol="xmark"
-                  quiet
-                  tabIndex={-1}
-                  send={send}
-                  intent={{ type: "tab", id: tab.id, close: true }}
-                />
-              )}
-            </div>
+            <CompositionTab
+              key={tab.id}
+              tab={tab}
+              closable={f.tabs.length > 1}
+              send={send}
+            />
           ))}
       </div>
       {f.hasComposition && (
@@ -373,11 +447,13 @@ function Layer({
   // names truncate at the same place on every row and nothing moves under
   // the pointer. Visibility and the parent link always show; Lock shows
   // when set, or under the pointer, keyboard focus or a single selected
-  // layer. Shy and Solo are the Layer menu's and the row menu's (the owner
-  // took their row buttons out).
+  // layer. Shy and Solo stay reachable on each layer row.
+  const focusedSelection = useContext(TimelineFocused) && row.selected;
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
+    { name: "shy" as const, on: !!row.shy, label: "Toggle Shy", symbol: "face.dashed", active: row.shy, always: true },
+    { name: "solo" as const, on: row.solo, label: "Toggle Solo", symbol: "s.circle", active: row.solo, always: true },
     ...(row.transformable
       ? [
           {
@@ -426,7 +502,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t(row.selected ? "colors.accent_text" : "colors.muted"),
+              color: t(focusedSelection ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -457,7 +533,7 @@ function Layer({
               label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
               symbol={row.expanded ? "chevron.down" : "chevron.right"}
               quiet
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               tabIndex={-1}
               send={send}
               intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -496,7 +572,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t(row.selected ? "colors.accent_text" : "colors.text"),
+            color: t(focusedSelection ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -528,7 +604,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
-              ...(row.selected ? { color: t("colors.accent_text") } : {}),
+              ...(focusedSelection ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -549,7 +625,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -656,13 +732,31 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             id={`timeline:value:${row.id}`}
             label={row.label}
             {...row.numeric}
+            binding={
+              typeof row.numeric.binding === "string"
+                ? row.numeric.binding
+                : row.numeric.binding.handle
+            }
             disabled={row.locked}
             tabIndex={-1}
           />
         ) : (
           (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
             (axis) =>
-              axis.editor ? (
+              axis.numeric ? (
+                <UI.NumberField
+                  id={`timeline:value:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                  {...axis.numeric}
+                  binding={
+                    typeof axis.numeric.binding === "string"
+                      ? axis.numeric.binding
+                      : axis.numeric.binding.handle
+                  }
+                  disabled={row.locked}
+                  tabIndex={-1}
+                />
+              ) : axis.editor ? (
                 <UI.TextField
                   id={`timeline:value-edit:${row.id}:${axis.path}`}
                   label={`${row.label} ${axis.path.split(".").at(-1)}`}
@@ -736,9 +830,29 @@ const TimelineRow = memo(
     single: boolean;
     key?: string;
   }) {
+    const [hover, setHover] = useState(false);
+    const timelineFocused = useContext(TimelineFocused);
+    if (published.kind === "heading")
+      return (
+        <div
+          id={`timeline:heading:${published.id}`}
+          role="row"
+          label={published.label}
+          style={{
+            ...line,
+            height: t("metrics.property_row"),
+            paddingLeft: `${published.depth * 16 + 12}px`,
+          }}
+        >
+          <text
+            style={{ color: t("colors.muted"), fontSize: t("typography.body") }}
+          >
+            {published.label}
+          </text>
+        </div>
+      );
     let clickModifiers: Modifiers = {};
     // Hover is the pointer's, local to the row: switches show without a host trip.
-    const [hover, setHover] = useState(false);
     const row =
       hover && !published.hovered ? { ...published, hovered: true } : published;
     return (
@@ -777,7 +891,7 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.selected
+          ...(row.selected && timelineFocused
             ? {
                 background: t(
                   row.hovered
@@ -786,7 +900,9 @@ const TimelineRow = memo(
                 ),
                 color: t("colors.accent_text"),
               }
-            : row.hovered
+            : row.selected
+              ? { background: t("colors.fill_strong") }
+              : row.hovered
               ? { background: t("colors.hover") }
               : {}),
         }}
@@ -890,9 +1006,14 @@ export function TimelinePanel({
   frame: TimelineFrame;
   send: Send;
 }) {
+  const [focused, setFocused] = useState(false);
   return (
+    <TimelineFocused.Provider value={focused}>
     <div
       id="timeline"
+      onPointerDownCapture={() => setFocused(true)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => setFocused(typeof event.value === "string" && event.value.startsWith("timeline"))}
       label="Timeline"
       role="group"
       metadata={{
@@ -1081,6 +1202,7 @@ export function TimelinePanel({
         </>
       )}
     </div>
+    </TimelineFocused.Provider>
   );
 }
 

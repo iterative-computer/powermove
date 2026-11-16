@@ -290,6 +290,14 @@ pub struct NativeControl {
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    /// A search field's last value from its view. The view's value can lag
+    /// what is typed (an echo of the typing commits nothing), so only a new
+    /// value replaces the field's text; an unchanged one is left alone
+    /// (PM-342: a panel laid out again showed the search empty while its
+    /// list stayed filtered).
+    search_value: Option<Value>,
+    /// Where the slot was painted inside a scroll layer, to follow it.
+    layer: Rc<crate::layer_stage::LayerStage>,
 }
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
@@ -336,6 +344,33 @@ pub struct ControlSpec<'a> {
     pub well: bool,
 }
 
+/// What a button's or a switch's size follows: one made with the same
+/// look is the same size, so it is measured once (`measured`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Look {
+    kind: u8,
+    title: String,
+    symbol: Option<String>,
+    glass: bool,
+    font: u32,
+}
+thread_local! {
+    static MEASURED: std::cell::RefCell<std::collections::HashMap<Look, (NSSize, NSSize)>> =
+        std::cell::RefCell::default();
+}
+/// A button's frame as `sizeToFit` sets it and its fitting size, measured
+/// the first time its look is made: each measure is a layout pass on
+/// macOS 27 (about two milliseconds), and Settings › Shortcuts alone makes
+/// a few hundred buttons of two looks.
+fn measured(look: Look, control: &NSControl) -> (NSSize, NSSize) {
+    if let Some(sizes) = MEASURED.with_borrow(|m| m.get(&look).copied()) {
+        return sizes;
+    }
+    control.sizeToFit();
+    let sizes = (control.frame().size, control.fittingSize());
+    MEASURED.with_borrow_mut(|m| m.insert(look, sizes));
+    sizes
+}
 impl NativeControl {
     pub fn new(
         spec: ControlSpec<'_>,
@@ -407,7 +442,11 @@ impl NativeControl {
                     // never the content's own ink.
                     v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
                 }
-                v.sizeToFit();
+                // A pop-up in a row's well fills the well: its own size is
+                // never used, and measuring it is a layout pass of its own.
+                if !well {
+                    v.sizeToFit();
+                }
                 Control::Popup(v)
             }
             Kind::Segmented => {
@@ -493,23 +532,28 @@ impl NativeControl {
                 Control::Slider(v)
             }
             Kind::Checkbox | Kind::Radio | Kind::Push => {
-                let v = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(if matches!(kind, Kind::Checkbox | Kind::Radio) {
-                            ""
-                        } else {
-                            label
-                        }),
-                        Some(&target),
-                        Some(sel!(act:)),
-                        mtm,
-                    )
-                };
+                // Not `buttonWithTitle:target:action:`, which sizes the
+                // button as it makes it: a measure is a layout pass of its
+                // own on macOS 27, and a list of rows makes the same button
+                // hundreds of times (`measured`).
+                let v = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                }
+                v.setTitle(&NSString::from_str(
+                    if matches!(kind, Kind::Checkbox | Kind::Radio) {
+                        ""
+                    } else {
+                        label
+                    },
+                ));
                 if matches!(kind, Kind::Checkbox) {
                     v.setButtonType(NSButtonType::Switch);
                 } else if matches!(kind, Kind::Radio) {
                     v.setButtonType(NSButtonType::Radio);
                 } else {
+                    v.setButtonType(NSButtonType::MomentaryPushIn);
                     v.setBezelStyle(if glass {
                         NSBezelStyle::Glass
                     } else {
@@ -542,7 +586,6 @@ impl NativeControl {
                     }
                 }
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                v.sizeToFit();
                 Control::Button(v)
             }
             Kind::Search => {
@@ -592,7 +635,6 @@ impl NativeControl {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
                 }
-                v.sizeToFit();
                 Control::Switch(v)
             }
         };
@@ -604,7 +646,33 @@ impl NativeControl {
             .setAccessibilityIdentifier(Some(&NSString::from_str(identifier)));
         control.enabled(!disabled);
         control.value(value, &options);
-        let intrinsic = control.view().fittingSize();
+        let sized: Option<&NSControl> = match &control {
+            Control::Button(v) => Some(v.as_ref()),
+            Control::Switch(v) => Some(v.as_ref()),
+            _ => None,
+        };
+        let intrinsic = match sized {
+            Some(sized) => {
+                let look = Look {
+                    kind: kind as u8,
+                    title: if matches!(kind, Kind::Push) {
+                        label.to_owned()
+                    } else {
+                        String::new()
+                    },
+                    symbol: symbol.map(str::to_owned),
+                    glass,
+                    font: t.typography.body.to_bits(),
+                };
+                let (frame, fitting) = measured(look, sized);
+                sized.setFrameSize(frame);
+                fitting
+            }
+            None if well && matches!(kind, Kind::Popup) => {
+                NSSize::new(t.metrics.value_column as f64, t.metrics.field as f64)
+            }
+            None => control.view().fittingSize(),
+        };
         let width = if matches!(kind, Kind::Popup) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else if matches!(kind, Kind::Slider | Kind::Search) {
@@ -640,6 +708,8 @@ impl NativeControl {
             stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
             host_revision: None,
+            search_value: None,
+            layer: Rc::default(),
         }
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
@@ -700,8 +770,13 @@ impl NativeControl {
         };
         v.currentEditor().is_some()
     }
-    pub fn keep(&self) {
-        self.slot.keep();
+    /// Stages the slot again on a frame whose cached paint did not run: as
+    /// last painted, or shifted with the scroll layer it is in.
+    pub fn keep(&self, window: &Window) {
+        match self.layer.kept(window) {
+            Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
+            None => self.slot.keep(),
+        }
     }
     /// A push button's title follows the panel (Export's action names the
     /// chosen format); its width follows the new title.
@@ -803,7 +878,11 @@ impl NativeControl {
             }
         }
         let shown = self._target.ivars().options.borrow().clone();
-        self.control.value(value, &shown);
+        let unchanged_search = matches!(self.control, Control::Search(_))
+            && self.search_value.replace(value.clone()).as_ref() == Some(value);
+        if !unchanged_search {
+            self.control.value(value, &shown);
+        }
         self.control.enabled(!disabled);
         if self.inline {
             // The title names the current value, so the width follows it.
@@ -816,6 +895,7 @@ impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let focus = self.focus.clone();
+        let layer = self.layer.clone();
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -830,19 +910,9 @@ impl Render for NativeControl {
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    let to_rect = |b: Bounds<Pixels>| {
-                        NSRect::new(
-                            NSPoint::new(
-                                f32::from(b.origin.x) as f64,
-                                f32::from(b.origin.y) as f64,
-                            ),
-                            NSSize::new(
-                                f32::from(b.size.width) as f64,
-                                f32::from(b.size.height) as f64,
-                            ),
-                        )
-                    };
-                    slot.stage(to_rect(bounds), to_rect(window.content_mask().bounds));
+                    let (bounds, clip) =
+                        layer.painted(bounds, window.content_mask().bounds, window);
+                    slot.stage(ns_rect(bounds), ns_rect(clip));
                     if focus.get()
                         && let Some(window) = native.window()
                     {
@@ -1122,4 +1192,14 @@ impl PopupRows {
             let _: () = msg_send![&*self.target, act: &*self.popup];
         }
     }
+}
+/// GPUI top-left points as an AppKit rectangle (the slot flips them).
+pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
+    NSRect::new(
+        NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
+        NSSize::new(
+            f32::from(b.size.width) as f64,
+            f32::from(b.size.height) as f64,
+        ),
+    )
 }

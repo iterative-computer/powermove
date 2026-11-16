@@ -1,0 +1,23 @@
+{
+  "tools": [
+    "get_project_state",
+    "apply_commands",
+    "render_frames",
+    "check_project",
+    "select_layers",
+    "edit_layer_strips",
+    "edit_video",
+    "edit_3d",
+    "get_timeline",
+    "get_3d_scene",
+    "export_captions",
+    "export_video",
+    "generate_captions",
+    "import_media_to_timeline"
+  ],
+  "compositionId": {
+    "type": "string",
+    "minLength": 1,
+    "description": "Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
+  }
+}

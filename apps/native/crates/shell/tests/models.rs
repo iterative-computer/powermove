@@ -50,7 +50,11 @@ fn every_preset_and_small_window_is_bounded() {
             for p in g.panels {
                 assert!(p.rect.w >= 0. && p.rect.h >= 0., "{id}");
                 assert!(p.rect.x + p.rect.w <= w + 0.01);
-                assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                if !g.side_docks.contains_key(&p.dock) {
+                    assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                } else {
+                    assert!(p.rect.h >= tokens().metrics.header);
+                }
             }
         }
     }
@@ -92,11 +96,8 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 296);
-    let camera = bindings
-        .iter()
-        .find(|b| b.id == "native.newCamera")
-        .unwrap();
+    assert_eq!(bindings.len(), 292);
+    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
     assert_eq!(camera.command, "newCamera");
     assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
@@ -120,7 +121,7 @@ fn menu_matches_every_w1_equivalent_and_installs_every_command() {
     let doc = include_str!("../../../../../docs/native/w1-keymap.md");
     let rows: Vec<_> = doc.lines().filter(|s| s.starts_with("| M0")).collect();
     let equivalents = menu::equivalents();
-    assert_eq!(rows.len(), 33);
+    assert_eq!(rows.len(), 35);
     let installed: Vec<_> = menu::menus().into_iter().flat_map(|(_, i)| i).collect();
     for (row, e) in rows.iter().zip(equivalents) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
@@ -542,48 +543,123 @@ fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
     }
 }
 
-// Contextual commands (priority 300) get first refusal before the agent's
-// global Pause fallback (400). The Cite lane owns whether its source has a
-// focused, nonempty prose selection; the shell must honour its handled result.
 #[test]
-fn agent_prose_selection_cites_without_pausing() {
-    let mut resolver = Resolver::new();
-    resolver.bindings.push(Binding {
-        id: "context.agent.cite".into(),
-        chord: "cmd+shift+.".into(),
-        command: "agent.citeSelection".into(),
-        args: vec![],
-        priority: 300,
-        in_fields: true,
-        repeat: false,
-        loose: false,
-    });
-    let out = resolver.submit(key(500, "cmd+shift+."));
-    assert!(
-        matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.citeSelection")
-    );
-    // The focused prose source accepts Cite and stops propagation.
-    assert_eq!(resolver.resolve(500, true), [Effect::Consumed(500)]);
+fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
+    let t = tokens();
+    let bounds = Rect { x: 0., y: 0., w: 1000., h: 400. };
+    for first in [None, Some(300.)] {
+        let mut layout = Layout::preset("design");
+        let di = layout.docks.iter().position(|dock| dock.id == "right").unwrap();
+        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"].into_iter().enumerate().map(|(i, id)| Group {
+            flex_basis: None,
+            tabs: vec![id.into()], active: 0, size: if i == 0 { first } else { Some(300.) }, collapsed: false,
+        }).collect();
+        let before = layout.geometry(bounds, &t);
+        let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
+        let heights = |g: &Geometry| g.panels.iter().filter(|p| p.dock == di).map(|p| p.rect).collect::<Vec<_>>();
+        let original = heights(&before);
+        layout.resize(divider, 40., bounds, &t);
+        let resized = heights(&layout.geometry(bounds, &t));
+        assert_eq!(layout.docks[di].groups[0].size.is_none(), first.is_none(), "resizing preserves fluid sizing");
+        let saved = pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+        let restored = pm_shell::workspace::layout(&saved);
+        for (before, after) in layout.docks[di].groups.iter().zip(&restored.docks[di].groups) {
+            let mut exact = before.clone();
+            exact.flex_basis = after.flex_basis;
+            assert_eq!(&exact, after, "workspace keeps fixed heights, tabs and sizing kind");
+            assert!(match (before.flex_basis, after.flex_basis) {
+                (Some(a), Some(b)) => (a - b).abs() <= 0.05,
+                (None, None) => true,
+                _ => false,
+            }, "workspace keeps fluid basis to its authored tenth-point precision");
+        }
+        if first.is_none() {
+            let larger = layout.geometry(Rect { h: 1400., ..bounds }, &t);
+            assert!(heights(&larger)[0].h > resized[0].h, "fluid panel still fills a taller window");
+        }
+        assert_eq!(resized[0].h, original[0].h + 40.);
+        assert_eq!(resized[1].h, original[1].h - 40.);
+        assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
+    }
 }
 #[test]
-fn no_prose_selection_declines_to_global_agent_pause() {
-    let mut resolver = Resolver::new();
-    resolver.bindings.push(Binding {
-        id: "context.agent.cite".into(),
-        chord: "cmd+shift+.".into(),
-        command: "agent.citeSelection".into(),
-        args: vec![],
-        priority: 300,
-        in_fields: true,
-        repeat: false,
-        loose: false,
-    });
-    resolver.submit(key(501, "cmd+shift+."));
-    let out = resolver.resolve(501, false);
+fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
+    let t = tokens();
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1248.,
+        h: 705. - t.metrics.toolbar - t.metrics.status - t.metrics.dock_gap,
+    };
+    let mut layout = Layout::preset("design");
+    let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+    layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+        .into_iter()
+        .map(|id| Group {
+            tabs: vec![id.into()],
+            active: 0,
+            size: None,
+            flex_basis: None,
+            collapsed: false,
+        })
+        .collect();
+    let geometry = layout.geometry(bounds, &t);
+    let viewport = geometry.side_docks[&di];
+    let panels: Vec<_> = geometry.panels.iter().filter(|p| p.dock == di).collect();
     assert!(
-        matches!(out.as_slice(),[Effect::Dispatch{command,class:Class::MayDecline,..}] if command=="agent.pause")
+        panels.last().unwrap().rect.y + panels.last().unwrap().rect.h > viewport.y + viewport.h
     );
-    assert_eq!(resolver.resolve(501, true), [Effect::Consumed(501)]);
-    let out = Resolver::new().submit(key(502, "cmd+shift+."));
-    assert!(matches!(out.as_slice(),[Effect::Dispatch{command,..}] if command=="agent.pause"));
+    for (p, usable_floor) in panels.iter().zip([360., 320., 400.]) {
+        assert!(p.rect.h >= usable_floor);
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR);
+    }
+    let natural = std::collections::BTreeMap::from([
+        ("inspector".into(), 2000.),
+        ("easing".into(), 360.),
+        ("fxbrowser".into(), 5000.),
+    ]);
+    let measured = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    for p in measured.panels.iter().filter(|p| p.dock == di) {
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR && p.rect.h <= 705. * 0.6 + 0.01);
+    }
+    // The splitter starts from the same measured geometry; a saved size wins
+    // over automatic natural-content sizing and remains a fluid basis.
+    let divider = measured
+        .dividers
+        .iter()
+        .find(|d| d.dock == di && d.group == Some(0))
+        .unwrap();
+    let before = measured
+        .panels
+        .iter()
+        .find(|p| p.dock == di && p.group == 0)
+        .unwrap()
+        .rect
+        .h;
+    layout.resize_with_panel_heights(divider, -40., bounds, &t, &natural);
+    let resized = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    assert_eq!(
+        resized
+            .panels
+            .iter()
+            .find(|p| p.dock == di && p.group == 0)
+            .unwrap()
+            .rect
+            .h,
+        before - 40.
+    );
+    assert!(layout.docks[di].groups[0].size.is_none());
+    layout.docks[di].groups[1].size = Some(240.);
+    layout.docks[di].groups[1].flex_basis = None;
+    assert_eq!(
+        side_group_floor(&layout.docks[di].groups[1], bounds.h, &t, Some(5000.)),
+        240.
+    );
+    let record =
+        pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+    let restored = pm_shell::workspace::layout(&record);
+    assert!(restored.docks[di].groups[0].size.is_none());
+    assert!((restored.docks[di].groups[0].flex_basis.unwrap() - layout.docks[di].groups[0].flex_basis.unwrap()).abs() <= 0.05);
+    assert_eq!(restored.docks[di].groups[1].size, Some(240.));
+    assert_eq!(pm_shell::workspace::write(&restored, &record), record);
 }

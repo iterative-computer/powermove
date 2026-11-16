@@ -79,6 +79,10 @@ pub enum HostEffect {
     },
     /// Standard medium announcement; errors are high priority.
     Announce(String),
+    Deleted {
+        id: String,
+        message: String,
+    },
     /// Technical gap only, never displayed as product copy.
     IntegrationGap(&'static str),
     /// The Error Log keeps why a kernel operation failed, never alert copy.
@@ -377,6 +381,9 @@ impl<P: LibraryPort> LibraryController<P> {
             _ => None,
         }
     }
+    pub fn restore_deleted(&mut self, id: String) -> Result<(), Failure> {
+        self.send(Command::PutBack(id))
+    }
     fn send(&mut self, command: Command) -> Result<(), Failure> {
         if self.mutation.is_some() {
             return Err(Failure::Busy);
@@ -458,6 +465,13 @@ impl<P: LibraryPort> LibraryController<P> {
             let request = self.mutation.take().expect("matching request");
             match completion.result {
                 Ok(outcome) => {
+                    if let Command::Trash(id) = &request.command {
+                        let name = self.row(id).map_or_else(|_| "project".to_owned(), |r| r.name.clone());
+                        self.effects.push_back(HostEffect::Deleted {
+                            id: id.clone(),
+                            message: format!("Deleted {name}"),
+                        });
+                    }
                     if let Command::Create(_) = &request.command {
                         self.form = None;
                         self.effects.push_back(HostEffect::CloseNewProject);
@@ -469,8 +483,16 @@ impl<P: LibraryPort> LibraryController<P> {
                                 Command::Open(id) => self.rows.iter().find(|r| &r.id == id),
                                 _ => None,
                             };
+                            // A new project opens under the name typed in
+                            // its sheet (PM-380).
+                            let typed = match &request.command {
+                                Command::Create(values) if !values.name.trim().is_empty() => {
+                                    Some(values.name.trim().to_owned())
+                                }
+                                _ => None,
+                            };
                             let (name, file) = row.map_or_else(
-                                || ("Untitled".into(), None),
+                                || (typed.unwrap_or_else(|| "Untitled".into()), None),
                                 |r| (r.name.clone(), r.file.clone()),
                             );
                             self.effects.push_back(HostEffect::OpenEditor {
@@ -504,6 +526,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         Command::Load(_) => String::new(),
                     };
+                    let refused = rename_refused_alert(&failure, &name);
                     let code = match failure {
                         Failure::Service(code) => code,
                         Failure::Kernel { code, detail } => {
@@ -512,7 +535,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         _ => ServiceErrorCode::Unavailable,
                     };
-                    let alert = error_alert(code, &name);
+                    let alert = refused.unwrap_or_else(|| error_alert(code, &name));
                     self.effects
                         .push_back(HostEffect::Announce(alert.message.clone()));
                     self.prompt(alert, PromptAction::Error);

@@ -91,6 +91,10 @@ fn mime_extension(media_type: &str) -> &'static str {
         "audio/aac" => "aac",
         "audio/mp4" => "m4a",
         "model/gltf-binary" => "glb",
+        "model/gltf+json" => "gltf",
+        "model/obj" => "obj",
+        "model/ply" => "ply",
+        "model/splat" => "splat",
         _ => "bin",
     }
 }
@@ -305,7 +309,28 @@ fn for_session_within(
                         provider,
                     }),
                     None => {
-                        catalog.originals.insert(id, p);
+                        if value.get("kind").and_then(crate::node_string) == Some("model") {
+                            match pm_scene3d::import::path::prepare(&p) {
+                                Ok(model) => {
+                                    use sha2::{Digest, Sha256};
+                                    let hash = format!("{:x}", Sha256::digest(&model.bytes));
+                                    let ext = Path::new(&model.name)
+                                        .extension()
+                                        .unwrap_or_default()
+                                        .to_string_lossy();
+                                    let cached = objects.join(format!("{hash}.{ext}"));
+                                    if !cached.exists() {
+                                        fs::write(&cached, &model.bytes)?;
+                                    }
+                                    catalog.originals.insert(id, cached);
+                                }
+                                Err(_) => {
+                                    continue;
+                                }
+                            }
+                        } else {
+                            catalog.originals.insert(id, p);
+                        }
                     }
                 }
             }

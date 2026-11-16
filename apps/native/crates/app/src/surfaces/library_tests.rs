@@ -694,8 +694,11 @@ fn real_kernel_trash_restore_keeps_document_bytes_and_archive_refuses_safely() {
     actor.shutdown();
 }
 
+/// PM-385. Home renames a project no window has open where it is kept,
+/// without opening it: a closed project, and a duplicate just made (the
+/// Rename sheet that follows Duplicate), which no window has ever opened.
 #[test]
-fn real_kernel_closed_slot_rename_is_explicitly_unavailable_and_does_not_open_it() {
+fn real_kernel_renames_a_closed_project_and_a_fresh_duplicate_without_opening_them() {
     let (_dir, actor, mut service) = service();
     let session = create_real(&mut service);
     service
@@ -709,10 +712,36 @@ fn real_kernel_closed_slot_rename_is_explicitly_unavailable_and_does_not_open_it
             id: session.project.clone(),
             name: "Other".into()
         }),
-        Err(Failure::Unsupported(_))
+        Ok(Outcome::Changed)
     ));
     assert!(service.kernel.published(&session.project).is_none());
-    assert_eq!(service.snapshot().unwrap().rows[0].name, "Launch Film");
+    assert_eq!(service.snapshot().unwrap().rows[0].name, "Other");
+    let Outcome::Duplicated(copy) = service
+        .execute(Command::Duplicate {
+            id: session.project.clone(),
+            name: "Other copy".into(),
+        })
+        .unwrap()
+    else {
+        panic!("not duplicated");
+    };
+    assert!(matches!(
+        service.execute(Command::Rename {
+            id: copy.clone(),
+            name: "Run6 Dup".into()
+        }),
+        Ok(Outcome::Changed)
+    ));
+    assert!(service.kernel.published(&copy).is_none());
+    let names: Vec<String> = service
+        .snapshot()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.name.clone())
+        .collect();
+    assert!(names.contains(&"Run6 Dup".to_owned()), "{names:?}");
+    assert!(names.contains(&"Other".to_owned()), "{names:?}");
     actor.shutdown();
 }
 
@@ -1106,4 +1135,51 @@ fn open_in_new_window_asks_for_a_window_of_its_own() {
         });
         assert_eq!(opened, Some(("Trailer".into(), new_window)));
     }
+}
+
+#[test]
+fn delete_toast_follows_successful_home_trash_and_undo_uses_put_back() {
+    let mut c = ready();
+    c.menu("a", MenuAction::Trash).unwrap();
+    let (serial, _) = alert(&mut c);
+    c.answer(serial, Some(true)).unwrap();
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Ok(Outcome::Changed));
+    let toast = effects(&mut c).into_iter().find_map(|e| match e { HostEffect::Deleted { id, message } => Some((id, message)), _ => None }).unwrap();
+    assert_eq!(toast, ("a".into(), "Deleted Launch Film".into()));
+    c.restore_deleted(toast.0).unwrap();
+    assert_eq!(c.port.sent.last().unwrap().command, Command::PutBack("a".into()));
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Ok(Outcome::Changed));
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+}
+
+#[test]
+fn failed_home_trash_never_shows_delete_toast() {
+    let mut c = ready();
+    c.menu("a", MenuAction::Trash).unwrap();
+    let (serial, _) = alert(&mut c);
+    c.answer(serial, Some(true)).unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Err(Failure::Service(ServiceErrorCode::Unavailable)));
+    assert!(!effects(&mut c).iter().any(|e| matches!(e, HostEffect::Deleted { .. })));
+}
+
+#[test]
+fn a_new_project_opens_under_the_name_typed_in_its_sheet() {
+    use pm_kernel::{locks::OpenDecision, session::ShellReply};
+    let mut c = ready();
+    c.begin_new("owner".into(), None, &format()).unwrap();
+    c.form.as_mut().unwrap().name = "Launch Film".into();
+    c.create().unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    c.take_effects();
+    let reply = ShellReply::Library(OpenDecision::Writable);
+    complete(&mut c, serial, Ok(Outcome::Opened(reply)));
+    let opened = c.take_effects().into_iter().find_map(|e| match e {
+        HostEffect::OpenEditor { name, .. } => Some(name),
+        _ => None,
+    });
+    assert_eq!(opened.as_deref(), Some("Launch Film"));
 }

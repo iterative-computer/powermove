@@ -4,8 +4,9 @@
  * groups, questions, errors with Try Again, composer with its run options)
  * and draws it with the native kit and pm-design tokens.
  */
-import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { Component, createContext, type ComponentChildren } from "preact";
+import { useContext, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { citationLabel, quoteSelection, type Citation } from "./citations";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
 import type {
@@ -39,6 +40,27 @@ import {
   type ToolDetail,
   type ToolsRow,
 } from "./present";
+
+/** Pure view memoization using native Preact. Importing preact/compat installs
+ * DOM event normalization globally, which changes native field event plans. */
+function memo<P extends object>(
+  view: (props: P) => ComponentChildren,
+  equal: (a: P, b: P) => boolean = (a, b) => {
+    const keys = Object.keys(a) as (keyof P)[];
+    return (
+      keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k])
+    );
+  },
+) {
+  return class extends Component<P> {
+    shouldComponentUpdate(next: P) {
+      return !equal(this.props, next);
+    }
+    render() {
+      return view(this.props);
+    }
+  };
+}
 
 const t = UI.token;
 /** The composer and answer fields hold the model's draft (sent as actions),
@@ -123,33 +145,255 @@ export function elapsed(ms: number) {
 
 // ── Prose ────────────────────────────────────────────────────────────────
 
+const CitationContext = createContext<{
+  threadId: string;
+  cite: (q: Citation) => void;
+  jump?: Citation & { nonce: number };
+  reveal: (q: Citation) => void;
+} | null>(null);
+function QuoteSource({
+  id,
+  text,
+  style = reading,
+  code = false,
+}: {
+  id: string;
+  text: string;
+  style?: Style;
+  code?: boolean;
+}) {
+  const context = useContext(CitationContext);
+  const [selection, setSelection] = useState<Citation | null>(null);
+  const [anchor, setAnchor] = useState({ x: 0, y: 0 });
+  useLayoutEffect(() => setSelection(null), [id, context?.threadId]);
+  if (!context) return <Prose text={text} style={style} code={code} />;
+  const cite = () => {
+    if (selection) {
+      context.cite(selection);
+      setSelection(null);
+    }
+  };
+  return (
+    <Prose
+      code={code}
+      text={text}
+      style={style}
+      source={{
+        id: `quote-source-${id}`,
+        label: "Transcript text",
+        tabIndex: 0,
+        metadata: {
+          quoteSource: `${context.threadId}:${id}`,
+          ...(context.jump?.messageId === id
+            ? {
+                revealQuote: [
+                  context.jump.start,
+                  context.jump.end,
+                  context.jump.nonce,
+                ],
+              }
+            : {}),
+        },
+        onSelect: (e) => {
+          setSelection(
+            e.selection
+              ? quoteSelection(id, String(e.value ?? text), ...e.selection)
+              : null,
+          );
+          setAnchor({ x: e.x ?? 0, y: e.y ?? 0 });
+        },
+        onKeyDown: (e) => {
+          if (
+            selection &&
+            e.metaKey &&
+            e.shiftKey &&
+            (e.key === "." || e.key === ">")
+          ) {
+            e.stopPropagation();
+            cite();
+          }
+        },
+      }}
+    >
+      {selection && (
+        <UI.ToolbarItem
+          label="Cite selection"
+          onPointerDown={(e) => e.stopPropagation()}
+          title="Cite selection · ⌘⇧."
+          metadata={{ symbol: "quote.opening" }}
+          onClick={cite}
+          style={{
+            ...chip,
+            color: t("colors.accent_text"),
+            position: "absolute",
+            left: anchor.x,
+            top: anchor.y,
+          }}
+        >
+          Cite
+        </UI.ToolbarItem>
+      )}
+    </Prose>
+  );
+}
+function CitationChips({ s, send }: { key?: string; s: Snapshot; send: Send }) {
+  const [editing, setEditing] = useState<number | null>(null);
+  const [comment, setComment] = useState("");
+  const [hovered, setHovered] = useState<number | null>(null);
+  const context = useContext(CitationContext);
+  const quotes = s.draft.citations ?? [];
+  const save = () => {
+    send({
+      type: "citations",
+      citations: quotes.map((q, i) => (i === editing ? { ...q, comment } : q)),
+    });
+    setEditing(null);
+  };
+  if (!quotes.length) return null;
+  return (
+    <div
+      label="Quoted context"
+      style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}
+    >
+      {quotes.map((q, i) => (
+        <div
+          key={i}
+          role="group"
+          onPointerEnter={() => setHovered(i)}
+          onPointerLeave={() => setHovered(null)}
+          label={`Quoted: ${q.text}`}
+          title={q.comment || q.text}
+          style={{ ...column, ...chip, color: t("colors.accent_text") }}
+        >
+          <div style={row}>
+            <UI.ToolbarItem
+              label={`Quoted: ${q.text}`}
+              title={q.comment || q.text}
+              metadata={{ symbol: "quote.opening" }}
+              onClick={() => {
+                // The source prose owns native selection and scroll-to-visible.
+                context?.reveal(q);
+              }}
+            >
+              {citationLabel(q.text)}
+              {q.comment ? " •" : ""}
+            </UI.ToolbarItem>
+            <UI.ToolbarItem
+              label="Edit comment"
+              metadata={{ symbol: "pencil" }}
+              onClick={() => {
+                setComment(q.comment);
+                setEditing(i);
+              }}
+            />
+            <UI.ToolbarItem
+              label="Remove quote"
+              onFocus={() => setHovered(i)}
+              onBlur={() => setHovered(null)}
+              style={{ opacity: hovered === i ? 1 : 0 }}
+              metadata={{ symbol: "xmark" }}
+              onClick={() =>
+                send({
+                  type: "citations",
+                  citations: quotes.filter((_, index) => index !== i),
+                })
+              }
+            />
+          </div>
+          {editing === i && (
+            <Field
+              label="Add a comment about this quote"
+              multiline
+              value={comment}
+              metadata={{
+                placeholder: "Add a comment about this quote",
+                submitOnReturn: true,
+                focusOnMount: true,
+              }}
+              onInput={(e) => setComment(String(e.value ?? ""))}
+              onChange={save}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save();
+                if (e.key === "Escape") setEditing(null);
+                e.stopPropagation();
+              }}
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** A paragraph of styled runs, wrapped natively as one text. */
 function Para({ runs, style }: { runs: Run[]; style?: Style }) {
   const text = runs.map((r) => r.t).join("");
   const styled = runs.some((r) => r.b || r.i || r.c || r.a);
   // Long unbroken tokens (paths, links, JSON) get places to wrap.
-  const shown = runs.map((r) => ({ ...r, t: breakable(r.t) }));
+  const shown = runs.map((r) => ({
+    ...r,
+    t: breakable(r.t),
+  }));
   return styled ? (
     <div
       label={text}
-      metadata={{ runs: shown as unknown as Json }}
+      metadata={{ runs: shown as unknown as Json, quoteText: text }}
       style={{ ...shrink, ...style }}
     />
   ) : (
-    <text style={{ ...shrink, ...style }}>{breakable(text)}</text>
+    <text metadata={{ quoteText: text }} style={{ ...shrink, ...style }}>
+      {breakable(text)}
+    </text>
   );
 }
 /** Markdown as native text: paragraphs, headings, lists, quotes and code. */
-function Prose({ text, style = reading }: { text: string; style?: Style }) {
+const Prose = memo(function Prose({
+  text,
+  style = reading,
+  source,
+  children,
+  code = false,
+}: {
+  code?: boolean;
+  text: string;
+  style?: Style;
+  children?: ComponentChildren;
+  source?: {
+    id: string;
+    label: string;
+    tabIndex: number;
+    metadata: Record<string, Json>;
+    onSelect: (e: SurfaceEvent) => void;
+    onKeyDown: (e: SurfaceEvent) => void;
+  };
+}) {
   const blocks = markdown(text);
   return (
-    <div style={{ ...column, ...shrink, gap: t("metrics.text_padding") }}>
-      {blocks.map((b, i) => (
-        <ProseBlock key={i} block={b} style={style} />
-      ))}
+    <div
+      {...source}
+      style={{
+        ...column,
+        ...shrink,
+        gap: t("metrics.text_padding"),
+        ...(source ? { ...target, position: "relative" } : {}),
+      }}
+    >
+      {code ? (
+        <text
+          metadata={{ quoteText: text }}
+          data-pm-variant="code"
+          style={style}
+        >
+          {breakable(text)}
+        </text>
+      ) : (
+        blocks.map((b, i) => <ProseBlock key={i} block={b} style={style} />)
+      )}
+      {children}
     </div>
   );
-}
+});
+
 function ProseBlock({
   block: b,
   style,
@@ -211,6 +455,7 @@ function ProseBlock({
           }}
         >
           <text
+            metadata={{ quoteText: b.text }}
             data-pm-variant="code"
             style={{
               fontSize: t("typography.minimum"),
@@ -748,7 +993,7 @@ interface Local {
   type: (key: string, text: string) => void;
 }
 
-function UserMessage({
+function UserMessageView({
   m,
   answering,
 }: {
@@ -795,6 +1040,23 @@ function UserMessage({
             : {}),
         }}
       >
+        {Array.isArray(m.value.citations) &&
+          m.value.citations.map((value, i) => {
+            const q = obj(value);
+            return (
+              <div
+                key={i}
+                role="group"
+                label={`Quoted: ${str(q.text)}`}
+                style={{ ...column, ...chip }}
+              >
+                <text style={quiet}>{"❝ " + str(q.text)}</text>
+                {str(q.comment) && (
+                  <text style={reading}>{str(q.comment)}</text>
+                )}
+              </div>
+            );
+          })}
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
@@ -804,18 +1066,23 @@ function UserMessage({
             ))}
           </div>
         )}
-        {text && <Prose text={text} />}
+        {text && <QuoteSource id={m.rowId} text={text} />}
       </div>
     </div>
   );
 }
+const UserMessage = memo(
+  UserMessageView,
+  (a, b) =>
+    a.answering === b.answering && JSON.stringify(a.m) === JSON.stringify(b.m),
+);
 const STOPPED = /\b(cancell?ed|stopped)\b/i;
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
   video: "Video",
   audio: "Sound",
 };
-function AssistantMessage({
+function AssistantMessageView({
   m,
   s,
   send,
@@ -876,7 +1143,7 @@ function AssistantMessage({
       metadata={{ rowId: m.rowId }}
       style={{ ...column, gap: t("metrics.text_padding") }}
     >
-      {text && <Prose text={text} />}
+      {text && <QuoteSource id={m.rowId} text={text} />}
       {v.requiresProject === true && (
         <div style={row}>
           <UI.PushButton
@@ -897,6 +1164,20 @@ function AssistantMessage({
     </div>
   );
 }
+const AssistantMessage = memo(AssistantMessageView, (a, b) => {
+  // Only inert prose can ignore changing command callbacks and run facts.
+  // Interactive replies always render, keeping retry/media actions current.
+  const inert = ({ value: v }: Message) =>
+    !v.error &&
+    !v.nativeResult &&
+    v.kind !== "result" &&
+    !v.requiresProject &&
+    !Array.isArray(v.visualReplies) &&
+    !Array.isArray(v.media);
+  return (
+    inert(a.m) && inert(b.m) && JSON.stringify(a.m) === JSON.stringify(b.m)
+  );
+});
 /** What a reply names besides its words: interactive visual replies (each
  * opens in its own viewer) and the images, videos and sounds it mentions
  * (each opens in its own app; a web address only when asked). */
@@ -1090,7 +1371,7 @@ function Step({
           metadata={{ rowId: r.key }}
         >
           <div style={{ ...column, gap: t("metrics.text_padding") }}>
-            <Prose text={r.text} />
+            <QuoteSource id={r.row.id} text={r.text} />
             <ReplyCards
               value={r.row.value as Obj}
               rowId={r.row.id}
@@ -1107,7 +1388,7 @@ function Step({
           label={`Thought: ${plain(r.text)}`}
           metadata={{ rowId: r.key }}
         >
-          <Prose text={r.text} style={faint} />
+          <QuoteSource id={r.key} text={r.text} style={faint} />
         </div>
       );
     case "question":
@@ -1372,24 +1653,24 @@ function ToolLine({
               d.kind === "thought" || d.task ? null : t("metrics.text_padding"),
           }}
         >
-          {d.kind === "thought" || d.task ? (
-            <Prose text={d.output} style={faint} />
-          ) : (
-            <text
-              data-pm-variant="code"
-              style={{
-                fontSize: t("typography.minimum"),
-                color: t("colors.secondary"),
-                lineHeight: t("typography.dense_leading"),
-              }}
-            >
-              {breakable(
-                d.output.length > 6000
-                  ? `${d.output.slice(0, 6000)}\n…`
-                  : d.output,
-              )}
-            </text>
-          )}
+          <QuoteSource
+            id={d.sourceId}
+            text={
+              d.output.length > 6000
+                ? `${d.output.slice(0, 6000)}\n…`
+                : d.output
+            }
+            code={d.kind !== "thought" && !d.task}
+            style={
+              d.kind === "thought" || d.task
+                ? faint
+                : {
+                    fontSize: t("typography.minimum"),
+                    color: t("colors.secondary"),
+                    lineHeight: t("typography.dense_leading"),
+                  }
+            }
+          />
         </div>
       )}
     </div>
@@ -1979,6 +2260,7 @@ function Composer({
             ))}
           </div>
         )}
+        <CitationChips key={s.threadId} s={s} send={send} />
         {n.dropTarget ? (
           <text
             style={{
@@ -2213,6 +2495,19 @@ export function AgentView({
   /** The window's field menu (threads, run choices, access, shortcuts). */
   menu?: Menu;
 }) {
+  const [jump, setJump] = useState<
+    (Citation & { nonce: number }) | undefined
+  >();
+  const jumpSerial = useRef(0);
+  const jumpTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useLayoutEffect(() => {
+    setJump(undefined);
+    return () => {
+      if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
+    };
+  }, [s.threadId]);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [away, setAway] = useState(false);
@@ -2225,6 +2520,52 @@ export function AgentView({
       at: n.presentation,
       count: presentation.current.count + 1,
     };
+  // Stream updates must not republish historical prose through context.
+  // Stable callbacks read current draft/rows at the moment of the action.
+  const latestCitationState = useRef({ s, send, open });
+  latestCitationState.current = { s, send, open };
+  const citationContext = useMemo(() => ({
+    threadId: s.threadId,
+    cite: (q: Citation) => {
+      const { s, send } = latestCitationState.current;
+      send({ type: "citations", citations: [...(s.draft.citations ?? []), q] });
+    },
+    jump,
+    reveal: (q: Citation) => {
+      const { s, open } = latestCitationState.current;
+      const expanded = { ...open };
+      for (const entry of entries(s)) {
+        const items =
+          entry.kind === "work"
+            ? entry.items
+            : entry.kind === "message"
+              ? [entry.message]
+              : [];
+        for (const message of items) {
+          if (
+            entry.kind === "work" &&
+            (message.rowId === q.messageId ||
+              message.steps.some((row) => row.id === q.messageId))
+          )
+            expanded[entry.key] = true;
+          for (const part of activity(message.steps))
+            if (part.kind === "tools") {
+              part.details.forEach((detail, i) => {
+                if (detail.sourceId === q.messageId) {
+                  expanded[part.key] = true;
+                  expanded[`${part.key}:${detail.id}-${i}`] = true;
+                  if (entry.kind === "work") expanded[entry.key] = true;
+                }
+              });
+            }
+        }
+      }
+      setOpen(expanded);
+      setJump({ ...q, nonce: ++jumpSerial.current });
+      if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
+      jumpTimer.current = setTimeout(() => setJump(undefined), 1200);
+    },
+  }), [s.threadId, jump]);
   if (!n.visible) return null;
   const local: Local = {
     open,
@@ -2241,7 +2582,7 @@ export function AgentView({
   // Nothing to keep yet: the connection is the whole panel.
   const setup = gate && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";
-  return (
+  const content = (
     <div
       id="agent-panel"
       role="group"
@@ -2378,6 +2719,11 @@ export function AgentView({
         />
       )}
     </div>
+  );
+  return (
+    <CitationContext.Provider value={citationContext}>
+      {content}
+    </CitationContext.Provider>
   );
 }
 /** Mounted extension; onError is required so rejected work is never silently lost. */

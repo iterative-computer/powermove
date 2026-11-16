@@ -566,6 +566,24 @@ pub(crate) fn convert_mouse_position(
     )
 }
 
+/// Moves a pointer event's position by `offset` (see `view_offset`).
+fn offset_position(event: &mut PlatformInput, offset: Point<Pixels>) {
+    if offset == Point::default() {
+        return;
+    }
+    let position = match event {
+        PlatformInput::MouseDown(e) => &mut e.position,
+        PlatformInput::MouseUp(e) => &mut e.position,
+        PlatformInput::MouseMove(e) => &mut e.position,
+        PlatformInput::MousePressure(e) => &mut e.position,
+        PlatformInput::MouseExited(e) => &mut e.position,
+        PlatformInput::ScrollWheel(e) => &mut e.position,
+        PlatformInput::Pinch(e) => &mut e.position,
+        _ => return,
+    };
+    *position = *position + offset;
+}
+
 /// Stores the cursor style on the active GPUI window and invalidates its cursor rects.
 ///
 /// # Safety
@@ -869,6 +887,8 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    frame_requested: bool,
+    idle_cleanup: Option<gpui::Task<()>>,
     /// GPUI painted since hosted views were last placed.
     painted: bool,
     /// Drawables from the layer, taken off the main thread, for frames
@@ -1049,7 +1069,18 @@ impl MacWindowState {
         }
     }
 
+    /// A size/scale/visibility change invalidates the presented surface even
+    /// when GPUI was clean or a resize callback is temporarily taken. Force
+    /// fresh layout and wake the paused source, rather than stretching the
+    /// previous Metal frame under newly positioned AppKit controls.
+    fn request_surface_frame(&mut self) {
+        self.force_render_pending = true;
+        self.start_display_link();
+    }
+
     fn start_display_link(&mut self) {
+        self.frame_requested = true;
+        self.idle_cleanup.take();
         // Core Animation follows the layer/view's display and refresh timing.
         // Metal updates also provide a drawable and a CPU submission deadline.
         unsafe {
@@ -1075,8 +1106,14 @@ impl MacWindowState {
             if available.as_bool() && std::env::var_os("PM_GPUI_CV_DISPLAY_LINK").is_none() {
                 if self.ca_display_link.is_none() {
                     let link: Retained<Objc2Object>;
+                    // PM-310: the view's own display link paces frames. A
+                    // CAMetalDisplayLink schedules every drawable 41.6 ms ahead
+                    // on a 120 Hz display (five refreshes, whatever its frame
+                    // latency, drawable count or rate range), where a drawable
+                    // the view's link asks the layer for reaches the glass in
+                    // two or three. PM_GPUI_METAL_DISPLAY_LINK=1 measures the old way.
                     #[cfg(not(feature = "wgpu"))]
-                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none()
+                    if std::env::var_os("PM_GPUI_METAL_DISPLAY_LINK").is_some()
                         && self.direct_moved.is_none()
                     {
                         let allocated: *mut Objc2Object =
@@ -1267,10 +1304,27 @@ impl MacWindowState {
         )
     }
 
+    /// The size of GPUI's own view: the window's content when GPUI's view
+    /// fills it, the detail area when a split view hosts it.
     fn content_size(&self) -> Size<Pixels> {
-        let content_view: ObjcId = unsafe { msg_send![self.native_window, contentView] };
-        let frame: Objc2NSRect = unsafe { msg_send![content_view, frame] };
+        let frame: Objc2NSRect = unsafe { msg_send![self.native_view.as_ptr(), frame] };
         size(px(frame.size.width as f32), px(frame.size.height as f32))
+    }
+
+    /// What turns a position measured from the window's top-left (as the
+    /// events convert it, against `content_size`'s height) into one measured
+    /// from GPUI's view: zero while the view sits at the window's origin.
+    fn view_offset(&self) -> Point<Pixels> {
+        let view = self.native_view.as_ptr();
+        let bounds: Objc2NSRect = unsafe { msg_send![view, bounds] };
+        let r: Objc2NSRect =
+            unsafe { msg_send![view, convertRect: bounds, toView: std::ptr::null_mut::<Objc2Object>()] };
+        point(px(-r.origin.x as f32), px(r.origin.y as f32))
+    }
+
+    /// A point in the window's coordinates as a position in GPUI's view.
+    fn view_position(&self, location: Objc2NSPoint) -> Point<Pixels> {
+        convert_mouse_position(location, self.content_size().height) + self.view_offset()
     }
 
     fn scale_factor(&self) -> f32 {
@@ -1442,6 +1496,8 @@ impl MacWindow {
                 frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
+                frame_requested: false,
+                idle_cleanup: None,
                 painted: false,
                 #[cfg(not(feature = "wgpu"))]
                 direct_source: None,
@@ -1945,7 +2001,7 @@ impl PlatformWindow for MacWindow {
                 .native_window
                 .mouseLocationOutsideOfEventStream()
         };
-        convert_mouse_position(position, self.content_size().height)
+        self.0.lock().view_position(position)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -2320,6 +2376,15 @@ impl PlatformWindow for MacWindow {
         let window = this.native_window;
 
         unsafe { window.styleMask().contains(NSWindowStyleMask::FullScreen) }
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(state) = state.upgrade() {
+                state.lock().start_display_link();
+            }
+        }))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
@@ -2731,6 +2796,12 @@ impl PlatformWindow for MacWindow {
             // AppKit keeps this frame's distance from the event's location as the drag image's
             // offset from the cursor, so it has to stay anchored on `event`.
             let location: Objc2NSPoint = msg_send![event, locationInWindow];
+            // The items' frames are in the dragging view's own coordinates.
+            let location: Objc2NSPoint = msg_send![
+                native_view,
+                convertPoint: location,
+                fromView: std::ptr::null_mut::<Objc2Object>()
+            ];
             let frame = Objc2NSRect::new(
                 Objc2NSPoint::new(location.x - 16., location.y - 16.),
                 NSSize::new(32., 32.),
@@ -3591,7 +3662,10 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
         }
         _ => {}
     }
-    let event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    let mut event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    if let Some(event) = event.as_mut() {
+        offset_position(event, lock.view_offset());
+    }
 
     if let Some(mut event) = event {
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
@@ -3757,7 +3831,7 @@ unsafe extern "C" fn window_did_change_occlusion_state(this: &Objc2Object, _: Se
             .contains(NSWindowOcclusionState::Visible)
         {
             lock.move_traffic_light();
-            lock.start_display_link();
+            lock.request_surface_frame();
         } else if !draws_occluded() {
             lock.stop_display_link();
         }
@@ -3774,7 +3848,9 @@ fn draws_occluded() -> bool {
 
 unsafe extern "C" fn window_did_resize(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    window_state.as_ref().lock().move_traffic_light();
+    let mut lock = window_state.as_ref().lock();
+    lock.move_traffic_light();
+    lock.request_surface_frame();
 }
 
 unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
@@ -3856,6 +3932,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -4047,6 +4124,7 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.request_surface_frame();
     #[cfg(not(feature = "wgpu"))]
     if lock.direct_moved.is_some()
         && let Some(source) = lock.direct_source.as_mut()
@@ -4142,16 +4220,44 @@ extern "C" fn step(view: *mut c_void) {
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
 
+        // Dirty views and animations mark demand through frame_waker while
+        // GPUI serves this frame. Keep a running animation's link uninterrupted.
         if let Some(mut callback) = lock.request_frame_callback.take() {
+            // A nested tick with no callback must not erase the outer
+            // frame's demand and let it pause with work still outstanding.
+            lock.frame_requested = false;
             let request = lock.next_frame_request();
             drop(lock);
             gpui_apple::feel::set_frame_start();
             callback(request);
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
-            // The link keeps stepping a visible window that has nothing new
-            // to draw: an unchanged window gives back its full-window
-            // intermediates until it draws again.
+            // Device recovery can demand a forced retry during presentation.
+            if lock.force_render_pending {
+                lock.start_display_link();
+            }
+            // Only pause once GPUI has finished and no next frame was asked
+            // for. The legacy CV source has different callback threading.
+            if !lock.frame_requested {
+                if let Some(link) = &lock.ca_display_link {
+                    let _: () = msg_send![&**link, setPaused: true];
+                    // Preserve the existing delayed GPU-target release without
+                    // keeping a display link alive to check its deadline.
+                    #[cfg(not(feature = "wgpu"))]
+                    {
+                        let weak = Arc::downgrade(&window_state);
+                        let timer = lock.background_executor.timer(IDLE_TARGETS);
+                        lock.idle_cleanup = Some(lock.foreground_executor.spawn(async move {
+                            timer.await;
+                            if let Some(state) = weak.upgrade() {
+                                state.lock().renderer.release_idle_targets(IDLE_TARGETS);
+                            }
+                        }));
+                    }
+                }
+            }
+            // Release intermediates when a continuing animation has left
+            // them unused. A fully idle window no longer ticks this callback.
             #[cfg(not(feature = "wgpu"))]
             lock.renderer.release_idle_targets(IDLE_TARGETS);
             #[cfg(not(feature = "wgpu"))]
@@ -4595,7 +4701,7 @@ fn drag_event_position(
     dragging_info: ObjcId,
 ) -> Point<Pixels> {
     let drag_location: Objc2NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
-    convert_mouse_position(drag_location, window_state.lock().content_size().height)
+    window_state.lock().view_position(drag_location)
 }
 
 fn with_input_handler<F, R>(window: &Objc2Object, f: F) -> Option<R>
@@ -4841,8 +4947,9 @@ unsafe extern "C" fn composition_make_first_responder(
         };
         let accepted: Bool = msg_send![super(this, base), makeFirstResponder: responder];
         if accepted.as_bool() {
-            let content: ObjcId = msg_send![this, contentView];
-            crate::composition_accessibility::responder_changed(content as usize);
+            crate::composition_accessibility::responder_changed(
+                crate::composition_accessibility::adapter_host(this),
+            );
         }
         accepted
     }
@@ -4856,9 +4963,10 @@ unsafe extern "C" fn composition_accessibility_hit_test(
     point: Objc2NSPoint,
 ) -> ObjcId {
     unsafe {
-        let window: ObjcId = msg_send![this, window];
-        let content: ObjcId = msg_send![window, contentView];
-        if crate::composition_accessibility::has_adapter(content as usize) {
+        // The adapter is on GPUI's view's parent (the window's content view,
+        // or the detail view of a split view that hosts it).
+        let content: ObjcId = msg_send![this, superview];
+        if !content.is_null() && crate::composition_accessibility::has_adapter(content as usize) {
             msg_send![content, accessibilityHitTest: point]
         } else {
             msg_send![super(this, class!(NSView)), accessibilityHitTest: point]

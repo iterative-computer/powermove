@@ -229,6 +229,55 @@ pub(crate) enum Tap {
 
 /// Most changes kept for [`DocumentStore::changes_since`].
 const CHANGE_LOG: usize = 256;
+// Incremental readers can resync from the current snapshot. A count alone
+// retains arbitrarily large decoded layer stacks after structural edits.
+const CHANGE_LOG_BYTES: usize = 16 * 1024 * 1024;
+
+fn change_bytes(ops: &[Op]) -> usize {
+    use std::mem::size_of;
+    fn value(v: &Value) -> usize {
+        match v {
+            Value::String(s) => s.heap_bytes(),
+            Value::Array(a) => {
+                a.capacity() * size_of::<Value>() + a.iter().map(value).sum::<usize>()
+            }
+            // Charge schema storage conservatively even when shared.
+            Value::Object(m) => {
+                m.len() * (size_of::<Value>() + size_of::<pm_model::JsString>() + 32)
+                    + m.iter()
+                        .map(|(k, v)| k.heap_bytes() + value(v))
+                        .sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+    ops.len() * size_of::<Op>()
+        + ops
+            .iter()
+            .map(|op| {
+                let path = op.path().len() * size_of::<pm_model::patch::PathPart>()
+                    + op.path()
+                        .iter()
+                        .map(|p| match p {
+                            pm_model::patch::PathPart::Key(s) => s.heap_bytes(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                path + match op {
+                    Op::Leaf(p) => p.value.as_ref().map_or(0, value),
+                    Op::Insert { value: v, .. } => value(v),
+                    Op::Order { ids, .. } => {
+                        ids.capacity() * size_of::<pm_model::JsString>()
+                            + ids
+                                .iter()
+                                .map(pm_model::JsString::heap_bytes)
+                                .sum::<usize>()
+                    }
+                    Op::Delete { id, .. } => id.heap_bytes(),
+                }
+            })
+            .sum::<usize>()
+}
 
 type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 
@@ -276,6 +325,7 @@ pub struct DocumentStore {
     /// pending one is `file.envelope.workspace`.
     saved_workspace: Option<Value>,
     log: VecDeque<Arc<Change>>,
+    log_bytes: usize,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
     save_ticket: Weak<()>,
@@ -406,6 +456,7 @@ impl DocumentStore {
             saved_steps,
             saved_workspace,
             log: VecDeque::new(),
+            log_bytes: 0,
             listeners: Vec::new(),
             next_listener: 1,
             save_ticket: Weak::new(),
@@ -877,38 +928,6 @@ impl DocumentStore {
         Some(id)
     }
 
-    /// Preserve user entries while grouping this turn's contiguous segments.
-    pub fn squash_segments(
-        &mut self,
-        mark: &HistoryMark,
-        owned: &std::collections::HashSet<u64>,
-        label: &str,
-    ) -> Option<Vec<u64>> {
-        if self.gesture.is_some() {
-            return None;
-        }
-        let previous = self.state_token;
-        let ids = self.history.squash_segments(mark, owned, label)?;
-        self.history_owned = true;
-        // Reuse the journal's existing history-only operations; no document
-        // mutation or replay of the user's edits is involved.
-        self.tap(|_| Tap::Clear);
-        let records = self.history.records().to_vec();
-        for record in records {
-            if record.external.is_some() {
-                self.tap(|_| Tap::PushExternal(record));
-            } else {
-                self.tap(|_| Tap::Push(record));
-            }
-        }
-        self.state_token = self.history.records().last().map_or(previous, |r| r.id);
-        if self.saved_token == previous {
-            self.saved_token = self.state_token;
-        }
-        self.emit(StoreEvent::HistoryChanged);
-        Some(ids)
-    }
-
     // ── gestures ───────────────────────────────────────────────────────────
 
     /// Starts a gesture (a scrub-drag, a slider drag). Steps publish live
@@ -1087,6 +1106,11 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
+        if let Some(tree) = start {
+            if let Some(ops) = crate::commands::layers::plan_starts(tree, commands) {
+                return self.stage_ops_from(start.cloned(), &ops?, true);
+            }
+        }
         let revision = self.revision() + 1;
         let mut root = start.cloned();
         let mut forward = Vec::new();
@@ -1124,9 +1148,13 @@ impl DocumentStore {
             }
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
             let ops = match (command, property) {
-                (_, Some(c)) => {
-                    crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
-                }
+                (_, Some(c)) => crate::commands::properties::plan_set(
+                    tree,
+                    origin,
+                    c,
+                    &mut presets,
+                    &self.selection,
+                )?,
                 (Some(c), None) => c.plan_with_state(
                     tree,
                     origin,
@@ -1381,9 +1409,12 @@ impl DocumentStore {
                 ops: change.ops.clone(),
             });
         }
+        self.log_bytes += change_bytes(&change.ops);
         self.log.push_back(change.clone());
-        while self.log.len() > CHANGE_LOG {
-            self.log.pop_front();
+        while self.log.len() > CHANGE_LOG || self.log_bytes > CHANGE_LOG_BYTES {
+            if let Some(old) = self.log.pop_front() {
+                self.log_bytes -= change_bytes(&old.ops);
+            }
         }
         let pruned = self.prune_selection();
         self.emit(StoreEvent::Changed(change));

@@ -79,8 +79,7 @@ agent placement or export choices, and introduces no `Effects & Presets` title.
   persistence and scroll-anchor publication/restore. The current section action
   is a neutral kit action in disclosure content, pending the real heading slot.
   Implement native context-menu placement, parent whip/cancel, rested-wheel
-  arbitration, tooltip detail lines and timeline-focus restoration. The spec's
-  exact multi-layer alignment target also needs D1 resolved.
+  arbitration, tooltip detail lines and timeline-focus restoration.
 - **G4 / I1 — multiline and input errors:** TextField is the existing single-line
   native recipe. The kit needs 2–6 line text and 1–6 line monospaced expression
   recipes, validity glyph/status, numeric error observations that keep the draft
@@ -104,11 +103,10 @@ source entry until the owning lane switches the public UI export.
 
 ## DESIGN-TODO(opus)
 
-- **D1:** inspector §2 says multiple-layer alignment is `To selection`, while
-  the frozen `AlignmentStrip.svelte` and current kernel align the union box to
-  the composition, retaining relative offsets. The shared README gives the tag
-  precedence on behavior. Resolve this conflict before wiring the native align
-  service/tooltip. The panel emits only the semantic alignment intent.
+- **D1 resolved:** native alignment uses projected layer anchors. One editable
+  layer targets the composition; several target their selected anchors' extent.
+  Distribution spaces anchors evenly between the outermost anchors. The frozen
+  Electron strip retains its original visual-bounds behavior.
 - **D2:** no copy is specified for actor, subscription, binding or native-menu
   failures. Supply inline product copy/presentation for these failures. The lane
   uses the existing host diagnostic callback and adds no user-facing message.

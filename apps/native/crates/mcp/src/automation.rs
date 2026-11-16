@@ -150,6 +150,7 @@ impl std::ops::DerefMut for Fenced<'_> {
 impl Drop for Fenced<'_> {
     fn drop(&mut self) {
         self.0.document_fence = None;
+        self.0.composition = None;
     }
 }
 /// Single owner host. Call on a dedicated worker; do not put this behind a mutex
@@ -158,13 +159,14 @@ pub struct Automation {
     backend: Backend,
     /// See [`Fenced`].
     document_fence: Option<u64>,
+    pub(crate) composition: Option<String>,
+    composition_selections: HashMap<(u64, String), Vec<String>>,
     pub profile: PathBuf,
     pub exports: PathBuf,
     pub active: Option<String>,
     sessions: HashMap<String, SessionHandle>,
     pending_opens: crate::recovery::PendingOpens,
     subscribers: Vec<mpsc::Sender<AutomationEvent>>,
-    presence: Vec<mpsc::SyncSender<crate::presence::Presence>>,
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     /// Resolves a provider run's grant token (`--agent-run`) to its run id and
@@ -224,13 +226,14 @@ impl Automation {
         Self {
             backend,
             document_fence: None,
+            composition: None,
+            composition_selections: HashMap::new(),
             profile,
             exports,
             active: None,
             sessions: HashMap::new(),
             pending_opens: Default::default(),
             subscribers: Vec::new(),
-            presence: Vec::new(),
             engine: None,
             surfaces: None,
             agent_grants: None,
@@ -266,12 +269,6 @@ impl Automation {
             Backend::App(host) => Some(host),
         }
     }
-    pub fn coedit_host(&self) -> Option<Arc<crate::app_host::Host>> {
-        match &self.backend {
-            Backend::App(host) => Some(host.clone()),
-            _ => None,
-        }
-    }
     pub fn active_project(&self) -> Option<String> {
         match &self.backend {
             Backend::Owned(_) => self.active.clone(),
@@ -285,6 +282,26 @@ impl Automation {
         }
     }
     pub fn view(&self, id: &str) -> Result<ProjectView> {
+        let mut view = self.original_view(id)?;
+        if let Some(comp) = &self.composition {
+            let non_open = view.snapshot.open_comp().as_ref() != Some(comp);
+            view.snapshot = composition_snapshot(&view.snapshot, comp)?;
+            if non_open {
+                let layers = view.snapshot.layers(Some(comp));
+                let selection = self
+                    .composition_selections
+                    .get(&(view.document, comp.clone()))
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| layers.iter().any(|layer| layer.id == **id))
+                    .cloned()
+                    .collect();
+                view.selection = Selection::from_parts(selection, vec![], None);
+            }
+        }
+        Ok(view)
+    }
+    pub(crate) fn original_view(&self, id: &str) -> Result<ProjectView> {
         match &self.backend {
             Backend::Owned(kernel) => {
                 let project = kernel
@@ -334,51 +351,6 @@ impl Automation {
             Backend::App(host) => host.shell(call),
         }
     }
-    /// Bounded and nonblocking: a hidden/slow surface never stalls editing.
-    pub fn subscribe_presence(&mut self) -> mpsc::Receiver<crate::presence::Presence> {
-        let (tx, rx) = mpsc::sync_channel(6);
-        self.presence.push(tx);
-        rx
-    }
-    pub(crate) fn presence(
-        &mut self,
-        project: &str,
-        run: &str,
-        kind: crate::presence::Kind,
-        layer: Option<String>,
-    ) {
-        self.presence_detail(project, run, kind, layer, None, Vec::new());
-    }
-    pub(crate) fn presence_detail(
-        &mut self,
-        project: &str,
-        run: &str,
-        kind: crate::presence::Kind,
-        layer: Option<String>,
-        property: Option<String>,
-        times: Vec<f64>,
-    ) {
-        if self.presence.is_empty() && matches!(&self.backend, Backend::Owned(_)) {
-            return;
-        }
-        let event = crate::presence::Presence {
-            project: project.into(),
-            run: run.into(),
-            kind,
-            layer,
-            property,
-            times,
-        };
-        if let Backend::App(host) = &self.backend {
-            host.publish_presence(event.clone());
-        }
-        self.presence.retain(|tx| {
-            !matches!(
-                tx.try_send(event.clone()),
-                Err(mpsc::TrySendError::Disconnected(_))
-            )
-        });
-    }
     pub fn subscribe(&mut self) -> mpsc::Receiver<AutomationEvent> {
         let (tx, rx) = mpsc::channel();
         self.subscribers.push(tx);
@@ -409,10 +381,7 @@ impl Automation {
     pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
         let view = self.view(id)?;
         let mut project = pm_model::canonical::realize_project(
-            view.snapshot
-                .document
-                .to_value()
-                .ok_or_else(|| Error::invalid("Missing document"))?,
+            working_document(&view.snapshot)?,
         );
         if let Some(object) = project.as_object_mut() {
             object.insert("revision", pm_model::Value::Number(view.revision as f64));
@@ -529,48 +498,25 @@ impl Automation {
         expected_revision: u64,
         writer: u32,
     ) -> Result<Ack> {
-        self.apply_commands_guarded(
-            id,
-            commands,
-            label,
-            origin,
-            expected_revision,
-            writer,
-            false,
-        )
-    }
-    pub(crate) fn apply_commands_guarded(
-        &mut self,
-        id: &str,
-        commands: Vec<Command>,
-        label: &str,
-        origin: Origin,
-        expected_revision: u64,
-        writer: u32,
-        outside: bool,
-    ) -> Result<Ack> {
         if !matches!(origin, Origin::Mcp | Origin::Agent) {
             return Err(Error::invalid(
                 "Automation edits require Mcp or Agent origin",
             ));
         }
-        let request = Request::new(
-            Caller::realm(writer, 1, origin),
-            Call::Transact {
-                label: Some(label.into()),
-                body: WriteBody::Commands(commands),
-                expected_revision: Some(expected_revision),
-            },
-        );
+        let body = self.scoped_body(id, WriteBody::Commands(commands), label, origin)?;
         self.call(
             id,
-            if outside {
-                request.outside_revision(expected_revision)
-            } else {
-                request
-            },
+            Request::new(
+                Caller::realm(writer, 1, origin),
+                Call::Transact {
+                    label: Some(label.into()),
+                    body,
+                    expected_revision: Some(expected_revision),
+                },
+            ),
         )
     }
+
     pub(crate) fn apply_body(
         &mut self,
         id: &str,
@@ -578,24 +524,45 @@ impl Automation {
         label: &str,
         expected: u64,
         writer: u32,
-        outside: bool,
     ) -> Result<Ack> {
-        let request = Request::new(
-            Caller::realm(writer, 1, Origin::Mcp),
-            Call::Transact {
-                label: Some(label.into()),
-                body,
-                expected_revision: Some(expected),
-            },
-        );
+        let body = self.scoped_body(id, body, label, Origin::Mcp)?;
         self.call(
             id,
-            if outside {
-                request.outside_revision(expected)
-            } else {
-                request
-            },
+            Request::new(
+                Caller::realm(writer, 1, Origin::Mcp),
+                Call::Transact {
+                    label: Some(label.into()),
+                    body,
+                    expected_revision: Some(expected),
+                },
+            ),
         )
+    }
+    fn scoped_body(
+        &self,
+        id: &str,
+        body: WriteBody,
+        label: &str,
+        origin: Origin,
+    ) -> Result<WriteBody> {
+        // Plan on a private targeted tree. Only authored differences reach the
+        // real actor, guarded by the same document and revision as any agent edit.
+        let body = match (self.composition.as_ref(), body) {
+            (Some(_), WriteBody::Commands(commands)) => {
+                let snapshot = self.view(id)?.snapshot;
+                let mut scratch = pm_kernel::DocumentStore::scratch(&snapshot);
+                scratch.set_runtime_state((*self.state()).clone(), None);
+                scratch
+                    .transact(label, origin, &commands)
+                    .map_err(Error::kernel)?;
+                WriteBody::Ops(pm_model::ops::diff_node_ops(
+                    snapshot.root(),
+                    scratch.snapshot().root(),
+                ))
+            }
+            (_, body) => body,
+        };
+        Ok(body)
     }
     fn call(&mut self, id: &str, mut request: Request) -> Result<Ack> {
         let ack = match &mut self.backend {
@@ -638,6 +605,24 @@ impl Automation {
         add: bool,
         writer: u32,
     ) -> Result<Value> {
+        if let Some(comp) = &self.composition {
+            let view = self.original_view(id)?;
+            if view.snapshot.open_comp().as_ref() != Some(comp) {
+                let selected = self
+                    .composition_selections
+                    .entry((view.document, comp.clone()))
+                    .or_default();
+                if !add {
+                    selected.clear();
+                }
+                for id in ids {
+                    if !selected.contains(id) {
+                        selected.push(id.clone());
+                    }
+                }
+                return self.selection(id);
+            }
+        }
         self.call(
             id,
             Request::new(
@@ -649,16 +634,6 @@ impl Automation {
             ),
         )?;
         self.selection(id)
-    }
-    pub fn agent_turn(&mut self, id: &str, writer: u32, active: bool) -> Result<()> {
-        self.call(
-            id,
-            Request::new(
-                Caller::realm(writer, 1, Origin::Mcp),
-                pm_kernel::HistoryCall::AgentTurn { active },
-            ),
-        )?;
-        Ok(())
     }
     pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
         match self
@@ -689,32 +664,6 @@ impl Automation {
                 Request::new(
                     Caller::realm(writer.realm, writer.generation, Origin::Mcp),
                     pm_kernel::HistoryCall::Squash {
-                        mark: mark.clone(),
-                        label: label.into(),
-                        expected_revision: revision,
-                    },
-                ),
-            )?
-            .reply
-        {
-            Reply::Entry(entry) => Ok(entry),
-            other => Err(Error::kernel(other)),
-        }
-    }
-    pub fn squash_segments(
-        &mut self,
-        id: &str,
-        mark: &ActorHistoryMark,
-        label: &str,
-    ) -> Result<Option<u64>> {
-        let revision = self.revision(id)?;
-        let writer = mark.writer();
-        match self
-            .call(
-                id,
-                Request::new(
-                    Caller::realm(writer.realm, writer.generation, Origin::Mcp),
-                    pm_kernel::HistoryCall::SquashSegments {
                         mark: mark.clone(),
                         label: label.into(),
                         expected_revision: revision,
@@ -1346,11 +1295,68 @@ mod layout_tests;
 /// revision.
 pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
     let mut project = json_value(&pm_model::canonical::realize_project(
-        snapshot
-            .document
-            .to_value()
-            .ok_or_else(|| Error::invalid("Missing document"))?,
+        working_document(snapshot)?,
     ));
     project["revision"] = json!(snapshot.revision);
     Ok(project)
+}
+
+// Also exclude the retired field from snapshots supplied in memory, before
+// converting any nodes to owned values (file ingress already skips it).
+fn working_document(snapshot: &pm_kernel::Snapshot) -> Result<pm_model::Value> {
+    let root = snapshot.root().ok_or_else(|| Error::invalid("Missing document"))?;
+    let pm_model::NodeKind::Object(members) = root.kind() else {
+        return Err(Error::invalid("Invalid project"));
+    };
+    let mut project = pm_model::Map::new();
+    for (key, node) in members.iter() {
+        if key.as_str() != Some("native3dHistoryArchive") {
+            project.insert(key.clone(), node.to_value());
+        }
+    }
+    Ok(pm_model::Value::Object(project))
+}
+
+#[cfg(test)]
+mod retired_archive_projection_tests {
+    #[test]
+    fn an_in_memory_snapshot_does_not_expose_the_recovery_archive() {
+        let value = pm_model::json::parse(r#"{"id":"P","w":640,"h":360,"layers":[],"native3dHistoryArchive":{"obsolete":true},"scene":{"keep":42}}"#).unwrap();
+        let snapshot = pm_kernel::Snapshot {
+            doc_id: 0, revision: 0,
+            document: std::sync::Arc::new(pm_model::Document::new(Some(value), 0)),
+        };
+        let p = super::document_json(&snapshot).unwrap();
+        assert!(p.get("native3dHistoryArchive").is_none());
+        assert_eq!(p["scene"]["keep"], 42);
+    }
+}
+
+/// Change only a private snapshot's projection; never publish navigation.
+pub fn composition_snapshot(snapshot: &Snapshot, comp: &str) -> Result<Snapshot> {
+    let root = snapshot
+        .root()
+        .ok_or_else(|| Error::invalid("Missing document"))?;
+    if snapshot.open_comp().is_none() && snapshot.render_comp() == comp {
+        return Ok(snapshot.clone());
+    }
+    if pm_kernel::model::comp_node(root, Some(comp)).is_none() {
+        return Err(Error::invalid(format!("Unknown compositionId: {comp}")));
+    }
+    let mut document = (*snapshot.document).clone();
+    document
+        .apply_ops(&[pm_model::Op::Leaf(pm_model::patch::Patch::set(
+            vec!["compId".into()],
+            pm_model::Value::from(comp),
+        ))])
+        .map_err(Error::kernel)?;
+    Ok(Snapshot {
+        // A projection retains the publication's revision; navigation is not
+        // an authored edit and must not look like a newer engine document.
+        document: Arc::new(pm_model::Document::from_root(
+            document.root().cloned(),
+            snapshot.revision,
+        )),
+        ..snapshot.clone()
+    })
 }

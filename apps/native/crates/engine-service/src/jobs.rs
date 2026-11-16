@@ -121,6 +121,13 @@ pub(crate) fn shader_cache() -> Option<PathBuf> {
 }
 /// A job whose process cannot draw with the fonts it was asked to
 /// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
+/// The export stopped because the app's fonts could not be compared with the
+/// export's: what did not answer, not a change of fonts.
+pub(crate) fn fonts_uncompared_message(why: &str) -> String {
+    format!(
+        "Rendering stopped because Powermove could not check the export's fonts: {why}. Try again."
+    )
+}
 pub const FONTS_CHANGED: &str =
     "Rendering stopped because the fonts on this Mac changed. Try again.";
 /// A job whose fonts resolved some text to another face (another file,
@@ -352,6 +359,7 @@ enum ParentMessage {
         #[serde(default)]
         deferred_us: u64,
     },
+    QueueQos { foreground: bool },
     Cancel,
     /// Whether the app's registry answers the questions of
     /// [`ChildMessage::Faces`] `id` with the same faces, or why not.
@@ -644,6 +652,21 @@ impl std::fmt::Display for OfflineRefusal {
     }
 }
 impl std::error::Error for OfflineRefusal {}
+/// The note an export made without its offline clips carries: which it left out.
+fn left_out_note(clips: &[pm_export::render::OfflineClip]) -> String {
+    let names: Vec<_> = clips.iter().take(3).map(|c| c.name.as_str()).collect();
+    let more = match clips.len().saturating_sub(3) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    match clips.len() {
+        1 => format!("Exported without 1 offline clip: {}.", names.join(", ")),
+        n => format!(
+            "Exported without {n} offline clips: {}{more}.",
+            names.join(", ")
+        ),
+    }
+}
 impl OfflineRefusal {
     fn error(&self, job: &JobId) -> EngineError {
         let assets = self.0.iter().map(|c| AssetId::new(&c.asset)).collect();
@@ -696,6 +719,12 @@ pub struct ExportHandle {
     frames: Arc<Mutex<Vec<crate::render_cache::FrameReport>>>,
 }
 impl ExportHandle {
+    /// Only queue callers opt into live app foreground QoS; ordinary exports
+    /// retain their scheduling and quality settings.
+    pub fn queue_foreground(&self, foreground: bool) {
+        let _ = send(&mut *self.control.input.lock().unwrap(), &ParentMessage::QueueQos { foreground });
+    }
+
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
     pub fn start(executable: &Path, session: impl Into<JobSession>) -> Result<Self> {
@@ -960,6 +989,8 @@ pub fn run_child() -> Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
+    let queue_qos = Arc::new(AtomicU64::new(0));
+    let received_qos = queue_qos.clone();
     let stopped = cancel.clone();
     let rasters = Arc::new(JobRasters {
         stop: cancel.clone(),
@@ -998,6 +1029,10 @@ pub fn run_child() -> Result<()> {
                     }
                     _ => format!("an answer to a face check never asked ({id})"),
                 },
+                Ok(ParentMessage::QueueQos { foreground }) => {
+                    received_qos.store(if foreground { 1 } else { 2 }, Ordering::Release);
+                    continue;
+                }
                 Ok(ParentMessage::Cancel) => break,
                 Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
                 Err(e) => e.to_string(),
@@ -1043,6 +1078,7 @@ pub fn run_child() -> Result<()> {
                 replies: face_replies.clone(),
                 next: AtomicU64::new(1),
                 differ: AtomicBool::new(false),
+                uncompared: Mutex::default(),
                 disputed: Mutex::default(),
             }),
         }))
@@ -1109,7 +1145,8 @@ pub fn run_child() -> Result<()> {
     let worker = std::thread::spawn(move || -> Result<(PathBuf, Vec<String>)> {
         let _done = done;
         let cancel = worker_cancel;
-        let gate = ChildGate::new(permits);
+        let mut gate = ChildGate::new(permits);
+        gate.queue_qos = queue_qos;
         let fill = request.cache;
         let JobSpec::Export {
             composition,
@@ -1173,6 +1210,8 @@ pub fn run_child() -> Result<()> {
         if !offline.is_empty() && !request.without_offline && !request.preview {
             return Err(OfflineRefusal(offline).into());
         }
+        // Going without them is said with the file.
+        let left_out = (!offline.is_empty() && !request.preview).then(|| left_out_note(&offline));
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
@@ -1330,10 +1369,9 @@ pub fn run_child() -> Result<()> {
         // What the person is told with the file: sound over full scale,
         // then what the file check noted.
         let report = delivered.report;
-        let notes = report
-            .mix
-            .and_then(|mix| mix.warning())
+        let notes = left_out
             .into_iter()
+            .chain(report.mix.and_then(|mix| mix.warning()))
             .chain(report.notes)
             .collect();
         Ok((delivered.path, notes))
@@ -1397,13 +1435,17 @@ pub fn run_child() -> Result<()> {
                 .is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) =>
         {
             let differ = fenced.as_ref().and_then(|fonts| fonts.faces.as_ref());
+            let uncompared = differ.and_then(|faces| faces.uncompared.lock().unwrap().clone());
             let why = match differ.filter(|faces| faces.differ.load(Ordering::Acquire)) {
                 Some(faces) => faces_differ_message(
                     faces.disputed.lock().unwrap().as_ref(),
                     &faces.resolved.lock().unwrap(),
                     &document,
                 ),
-                None => FONTS_CHANGED.into(),
+                None => match uncompared {
+                    Some(why) => fonts_uncompared_message(&why),
+                    None => FONTS_CHANGED.into(),
+                },
             };
             emit(status(&job_id, JobState::Failed, 0., None, Some(why)))?
         }
@@ -1468,6 +1510,9 @@ struct Faces {
     differ: AtomicBool,
     /// The job's question it answered otherwise.
     disputed: Mutex<Option<pm_text::answers::Query>>,
+    /// Why the app could not compare at all (its font service did not
+    /// answer): what the failure says, never that the fonts changed.
+    uncompared: Mutex<Option<String>>,
 }
 impl Faces {
     /// Whether the app's registry answers everything this job's answered
@@ -1500,7 +1545,9 @@ impl Faces {
         };
         let asked = std::time::Instant::now();
         send(&mut std::io::stdout().lock(), &message).map_err(|e| e.to_string())?;
-        let answer = answered.recv_timeout(std::time::Duration::from_secs(30));
+        // Longer than the app waits for its own font service to take the
+        // question up (`pm_text::host::ASK_TIMEOUT`): its answer, or why not.
+        let answer = answered.recv_timeout(pm_text::host::ASK_TIMEOUT * 2);
         job_diagnostic(serde_json::json!({
             "faces_compared": ask.answers.len(),
             "faces": ask.faces.len(),
@@ -1517,8 +1564,15 @@ impl Faces {
                 *self.disputed.lock().unwrap() = query;
                 Err(why)
             }
-            Ok(Err(Dispute::Moved(why))) => Err(why),
-            Err(_) => Err("the app did not compare the job's faces".to_owned()),
+            Ok(Err(Dispute::Moved(why))) => {
+                *self.uncompared.lock().unwrap() = Some(why.clone());
+                Err(why)
+            }
+            Err(_) => {
+                let why = "the app did not answer the export's font check".to_owned();
+                *self.uncompared.lock().unwrap() = Some(why.clone());
+                Err(why)
+            }
         }
     }
 }
@@ -1990,7 +2044,10 @@ impl JobRasters {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
-        *self.error.lock().unwrap() = Some("The extension did not draw the layer in time".into());
+        *self.error.lock().unwrap() = Some(
+            "the app did not send the layer within 120 s (it answers the export's extension layers)"
+                .into(),
+        );
         None
     }
 }
@@ -2491,6 +2548,7 @@ impl Sample {
 /// (the viewer has been quiet for [`QUIET`]), any other a submission bounded
 /// by [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
 struct ChildGate {
+    queue_qos: Arc<AtomicU64>,
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
     /// Microseconds measured since [`ChildGate::take_measured`] last ran,
@@ -2503,6 +2561,7 @@ struct ChildGate {
 impl ChildGate {
     fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
         Self {
+            queue_qos: Arc::new(AtomicU64::new(0)),
             permits: Mutex::new(permits),
             costs: Mutex::default(),
             measured: Mutex::default(),
@@ -2522,6 +2581,11 @@ impl ChildGate {
 }
 impl pm_export::render::GpuGate for ChildGate {
     fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        match self.queue_qos.load(Ordering::Acquire) {
+            1 => { let _ = crate::qos::set_job_qos(crate::qos::JobQos::Default); }
+            2 => { let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility); }
+            _ => {}
+        }
         {
             let mut costs = self.costs.lock().unwrap();
             costs.frame_units = costs.frame_units.max(units);
@@ -2846,6 +2910,29 @@ mod tests {
             clips(2).to_string(),
             "2 clips are offline: take 0.mov, take 1.mov. Relink the originals, or export without them."
         );
+        // Exported without them, the file's notes say which were left out.
+        assert_eq!(
+            left_out_note(&clips(5).0),
+            "Exported without 5 offline clips: take 0.mov, take 1.mov, take 2.mov and 2 more."
+        );
+        assert_eq!(
+            left_out_note(&clips(1).0),
+            "Exported without 1 offline clip: take 0.mov."
+        );
+    }
+    /// A font check the app could not answer says what did not answer, not
+    /// that the fonts on this Mac changed.
+    #[test]
+    fn an_unanswered_font_check_names_what_did_not_answer() {
+        let message = fonts_uncompared_message(
+            "the app's registry did not answer: \
+             the engine's font service did not take the question within 60 s",
+        );
+        assert!(
+            message.contains("font service did not take the question"),
+            "{message}"
+        );
+        assert_ne!(message, FONTS_CHANGED);
     }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.

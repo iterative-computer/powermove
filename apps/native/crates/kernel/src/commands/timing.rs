@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use pm_model::{Map, Value};
 
-use super::{Cx, channels, layers, new_id, track, values};
+use super::{Cx, channels, comps, layers, new_id, track, values};
 use crate::error::CommandError;
 
 /// Timing commands. Explicitly targeted locked layers refuse, except where
@@ -33,8 +33,8 @@ pub enum TimingCommand {
     /// starts at `time` and keeps its end, at least one frame remains; video
     /// and audio cannot start before their source (`earliestStart`) and keep
     /// showing the same source frames (`d.trim` follows the edge); caption
-    /// cues stay in place. Keys are layer-local and move with the In point,
-    /// as before. Group and locked layers are skipped. Send absolute times
+    /// cues stay in place. Keys are re-based to keep their composition times
+    /// unchanged. Group and locked layers are skipped. Send absolute times
     /// in a drag. Label "Trim Layer".
     TrimIn { layer_ids: Vec<String>, time: f64 },
     /// Drag the Out edge / Option+`]`: the layer ends at `time`, at least
@@ -283,9 +283,13 @@ fn shift(
     Ok(())
 }
 
-/// `PM.MediaTiming.isTimed`.
+/// Source-backed layers use the same local-time + source-trim model.
+/// Precomps must retain their nested composition time when the In edge moves.
 fn is_timed(layer: &Value) -> bool {
-    matches!(values::text(layer, "type"), Some("audio" | "video"))
+    matches!(
+        values::text(layer, "type"),
+        Some("audio" | "video" | "precomp")
+    )
 }
 
 /// A content field's static value (`resolveContent` without animation).
@@ -301,7 +305,7 @@ fn content_number(layer: &Value, key: &str) -> Option<f64> {
 
 /// `PM.MediaTiming.rate`.
 fn rate(layer: &Value) -> f64 {
-    if values::text(layer, "type") == Some("video") {
+    if matches!(values::text(layer, "type"), Some("video" | "precomp")) {
         let s = content_number(layer, "speed")
             .filter(|s| *s != 0.0 && !s.is_nan())
             .unwrap_or(1.0);
@@ -389,6 +393,52 @@ pub(super) fn start_patch(layer: &mut Value, source: &Value, next_from: f64) {
     }
 }
 
+/// Preserve the source position at the cut, including animated playback speed.
+fn preserve_source_time(
+    cx: &mut Cx<'_>,
+    comp: Option<&str>,
+    source: &Value,
+    next: &mut Value,
+    at: f64,
+) -> Result<(), CommandError> {
+    if is_timed(source) {
+        let (_, _, time) = source_times(cx, comp, source, [at; 3])?;
+        // A remapped sourceTime channel already keeps its comp times via cut_head.
+        if !source
+            .get("d")
+            .and_then(|d| d.get("timeRemap"))
+            .is_some_and(|v| {
+                if values::is_property(v) {
+                    v.get("v").is_some_and(Value::is_truthy)
+                } else {
+                    v.is_truthy()
+                }
+            })
+        {
+            set_content(next, "trim", Value::Number(time));
+        }
+    }
+    Ok(())
+}
+
+/// A split precomp is independently editable. Reuse Duplicate Composition's
+/// naming, layer/key ID renewal and internal link remapping in this transaction.
+/// Media and precomps nested inside the source keep their existing references.
+fn duplicate_precomp_source(
+    cx: &mut Cx<'_>,
+    source: &Value,
+    tail: &mut Value,
+) -> Result<(), CommandError> {
+    if values::text(source, "type") == Some("precomp") {
+        if let Some(id) = source.get("d").and_then(|d| values::text(d, "comp")) {
+            let copy_id = new_id("C");
+            comps::duplicate(cx, id, &copy_id)?;
+            set_content(tail, "comp", values::s(&copy_id));
+        }
+    }
+    Ok(())
+}
+
 /// Trim In / Trim Out (the timeline's `trim`): groups and locked layers are
 /// skipped.
 fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result<(), CommandError> {
@@ -407,10 +457,8 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             if is_timed(&layer) {
                 nf = nf.max(earliest_start(&layer));
             }
-            let m = values::obj(&mut next);
-            m.insert("from", Value::Number(nf));
-            m.insert("dur", Value::Number(dur + (from - nf)));
-            start_patch(&mut next, &layer, nf);
+            next = cut_head(&layer, next, nf);
+            preserve_source_time(cx, loc.comp_id.as_deref(), &layer, &mut next, nf)?;
         } else {
             values::obj(&mut next).insert("dur", Value::Number((1.0 / fps).max(time - from)));
         }
@@ -659,7 +707,10 @@ fn split(
                 new_id("L")
             };
             let siblings = layers.clone();
-            let tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
+            let source = layers[index].clone();
+            let mut tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
+            preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
+            duplicate_precomp_source(cx, &source, &mut tail)?;
             layers.insert(index, tail);
             tail_by.push((id.clone(), tail_id.clone()));
             pairs.push((id, tail_id));
@@ -742,7 +793,10 @@ fn split(
         };
         let tail_id = tail_id_for(id).unwrap_or_else(|| new_id("L"));
         let siblings = layers.clone();
-        let tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
+        let source = layers[index].clone();
+        let mut tail = split_pair(&mut layers[index], &tail_id, &siblings, t);
+        preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
+        duplicate_precomp_source(cx, &source, &mut tail)?;
         layers.insert(index, tail);
         changed = true;
     }

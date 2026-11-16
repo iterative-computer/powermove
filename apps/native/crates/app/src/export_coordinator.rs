@@ -21,6 +21,7 @@ use std::{
 #[derive(Clone)]
 pub struct Frozen {
     publication: Arc<pm_kernel::Published>,
+    queue: Option<u64>,
     options: Options,
     media: pm_engine_service::MediaCatalog,
     resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
@@ -143,6 +144,9 @@ impl Controller {
         without: bool,
         cx: &mut Context<Self>,
     ) {
+        self.begin_export_mode(options, retry, without, false, cx);
+    }
+    pub fn begin_export_mode(&mut self, options: Value, retry: bool, without: bool, enqueue: bool, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -158,6 +162,8 @@ impl Controller {
         } else {
             None
         };
+        let queue_id = saved.as_ref().and_then(|f| f.queue);
+        let queue_store = crate::render_queue::store(&self.profile);
         let without_offline = saved.as_ref().is_some_and(|f| f.without_offline);
         let (p, typed, media, playhead) = if let Some(frozen) = &saved {
             (
@@ -179,6 +185,14 @@ impl Controller {
             };
             (p, typed, self.media.clone(), self.time())
         };
+        // Export Without Them is asked once per project in a session.
+        if without {
+            self.builtins
+                .export_without_offline
+                .insert(p.project.clone());
+        }
+        let without_offline = saved.as_ref().is_some_and(|f| f.without_offline)
+            || self.builtins.export_without_offline.contains(&p.project);
         let filename = format!(
             "{}.{}",
             p.snapshot
@@ -264,6 +278,10 @@ impl Controller {
                 observe(&runtime, json!({"phase":"preparing"})).await;
             }
             while resources.pending && !job.cancel.load(Ordering::Acquire) {
+                if queue_id.is_some_and(|id| queue_store.lock().unwrap().cancelled(id)) {
+                    job.cancel.store(true, Ordering::Release);
+                    break;
+                }
                 let text = crate::extensions::starts_once_loaded("Export", &resources);
                 let _ = this.update(cx, |v, cx| {
                     if (shown.is_empty() || v.message == shown) && v.message != text {
@@ -289,6 +307,7 @@ impl Controller {
                 });
             }
             let frozen = Frozen {
+                queue: queue_id,
                 publication: p,
                 options: typed,
                 media,
@@ -298,6 +317,17 @@ impl Controller {
                 replace,
                 without_offline,
             };
+            if enqueue {
+                let added = queue_store.lock().unwrap().add(frozen.record());
+                let _ = this.update(cx, |v, cx| {
+                    v.builtins.export_job = None;
+                    if let Err(error) = added { v.message = error; }
+                    v.publish_render_queue();
+                    cx.notify();
+                });
+                observe(&runtime, json!({"phase":"idle"})).await;
+                return;
+            }
             // The window's extensions as the job starts answer its overrides.
             let (current, overrides) = this
                 .update(cx, |v, _| {
@@ -315,7 +345,15 @@ impl Controller {
             if !current {
                 job.cancel.store(true, Ordering::Release);
             }
+            let history_id = if let Some(id) = queue_id { Some(id) } else {
+                let mut queue = queue_store.lock().unwrap();
+                match queue.add(frozen.record()).and_then(|id| queue.finish(id, "Rendering", String::new()).map(|_|id)) {
+                    Ok(id) => Some(id),
+                    Err(error) => { let _ = this.update(cx, |v,_|v.message = error); None }
+                }
+            };
             let worker_job = job.clone();
+            let worker_queue = queue_store.clone();
             let executor = cx.background_executor().clone();
             let began = std::time::Instant::now();
             let result = cx.background_executor().spawn(async move {
@@ -329,6 +367,7 @@ impl Controller {
                     runtime.clone(),
                     executor,
                     tasks,
+                    history_id.map(|id| (worker_queue, id)),
                 )
                 .await
             });
@@ -345,11 +384,12 @@ impl Controller {
                         Err(error)
                             if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
                         {
+                            crate::notifications::export_finished(false, error, cx);
                             v.message = error.clone();
                         }
                         Ok(finished) => {
-                            v.close_export_sheet(cx);
                             let line = finished.line();
+                            crate::notifications::export_finished(true, &line, cx);
                             // A long export ends while the user is
                             // elsewhere, and a file with something to say
                             // (its sound clipped) is worth reading: the line
@@ -364,8 +404,17 @@ impl Controller {
                                 v.note(line, cx);
                             }
                         }
-                        Err(_) => v.close_export_sheet(cx),
+                        Err(_) if queue_id.is_none() => v.close_export_sheet(cx),
+                        Err(_) => {},
                     }
+                }
+                if let Some(id) = history_id {
+                    let outcome = if job.cancel.load(Ordering::Acquire) { "Cancelled" }
+                        else if result.is_ok() { "Done" } else { "Failed" };
+                    let error = result.as_ref().err().cloned().unwrap_or_default();
+                    if let Err(e) = queue_store.lock().unwrap().finish(id, outcome, error) { v.message = e; }
+                    v.publish_render_queue();
+                    if queue_id.is_some() { v.render_pending(cx); }
                 }
                 cx.notify();
             });
@@ -385,6 +434,7 @@ async fn execute(
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
+    queue: Option<(crate::render_queue::Store, u64)>,
 ) -> Result<Finished, String> {
     let planned = pm_builtins::delivery::plan(
         &frozen.publication.snapshot,
@@ -442,6 +492,7 @@ async fn execute(
                             ticket: started,
                         },
                         &planned,
+                        queue.as_ref(),
                     )
                     .await
                 }
@@ -481,7 +532,7 @@ async fn execute(
     }
     match &result {
         Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
-            observe(&runtime, json!({"phase":"cancelled"})).await
+            observe(&runtime, json!({"phase":if frozen.queue.is_some() { "idle" } else { "cancelled" }})).await
         }
         Err(error) => {
             let offline = !error.offline.is_empty();
@@ -689,8 +740,10 @@ async fn execute_inner(
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
+    queue: Option<&(crate::render_queue::Store, u64)>,
 ) -> Result<Finished, Failure> {
     let TaskAdmission { tasks, ticket } = task;
+    if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -729,6 +782,18 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    // Going without offline clips is said only while there are some (a
+    // remembered answer outlives a relink).
+    let without_offline = frozen.without_offline
+        && planned.settings.as_ref().is_some_and(|settings| {
+            !pm_export::render::offline_media_with_audio(
+                &frozen.publication.snapshot.document,
+                frozen.publication.snapshot.render_comp().as_str(),
+                &frozen.media.export_paths(settings.draft_from_proxies),
+                settings.audio,
+            )
+            .is_empty()
+        });
     request.replace = frozen.replace;
     // The sheet's per-export 3D quality; the composition's saved one otherwise.
     request.studio_quality = frozen
@@ -760,7 +825,16 @@ async fn execute_inner(
     let started = std::time::Instant::now();
     let mut pace = Pace::default();
     let mut cancellation_sent = false;
+    let mut queue_foreground = None;
     loop {
+        if frozen.queue.is_some() {
+            let foreground = objc2_app_kit::NSRunningApplication::currentApplication().isActive();
+            if queue_foreground != Some(foreground) {
+                if let Some(handle) = job.handle.lock().unwrap().as_ref() { handle.queue_foreground(foreground); }
+                queue_foreground = Some(foreground);
+            }
+        }
+        if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
             cancellation_sent = true;
             job.handle
@@ -832,13 +906,18 @@ async fn execute_inner(
             let elapsed = started.elapsed().as_secs_f64();
             let mut run =
                 json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
-            if let Some(note) = waiting.as_ref().and_then(|w| w.lock().unwrap().clone()) {
-                let mut note = note.chars();
-                run["extra"] = json!(
-                    note.next()
-                        .map(|c| c.to_uppercase().chain(note).collect::<String>())
-                        .unwrap_or_default()
-                );
+            // What the person chose is said for the whole export: it goes
+            // without the offline clips (the file's notes name them).
+            let without = without_offline.then_some("without the offline clips");
+            let waiting = waiting.as_ref().and_then(|w| w.lock().unwrap().clone());
+            let extra = [waiting.as_deref(), without]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let mut extra = extra.chars();
+            if let Some(first) = extra.next() {
+                run["extra"] = json!(first.to_uppercase().chain(extra).collect::<String>());
             }
             // The sheet says "About N min left" from the measured pace.
             if let Some(eta) = pace.left(frame, planned.frames, std::time::Instant::now()) {
@@ -848,6 +927,14 @@ async fn execute_inner(
         } else {
             json!({"phase":"preparing"})
         };
+        if let Some((store, id)) = queue {
+            let projection = {
+                let mut queue = store.lock().unwrap();
+                queue.progress(*id, status.progress);
+                queue.projection()
+            };
+            let _ = runtime.observe_render_queue(projection);
+        }
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
     }
@@ -1084,4 +1171,86 @@ fn plain_failure(message: &str) -> String {
             .into();
     }
     message.into()
+}
+
+impl Frozen {
+    fn record(&self) -> Value {
+        let root = self.publication.snapshot.root();
+        let comp = root.and_then(|r| pm_kernel::model::comp_node(r, self.publication.snapshot.open_comp().as_deref()));
+        let name = comp.and_then(|c| c.get("name")).or_else(||root.and_then(|r| r.get("name"))).and_then(crate::node_string).unwrap_or("Untitled");
+        json!({"name":name,
+            "project": self.publication.project, "document": pm_model::json::to_canonical_string(&self.publication.snapshot.document.to_value().unwrap()),
+            "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
+            "resources":self.resources, "playhead":self.playhead, "destination":self.destination,
+            "replace": self.replace, "withoutOffline":self.without_offline})
+    }
+    fn restore(record: &Value, template: &pm_kernel::Published, id: u64) -> Result<Self, String> {
+        let mut publication = template.clone();
+        let document = pm_model::json::parse(record["document"].as_str().ok_or("Missing queued composition")?).map_err(|e|e.to_string())?;
+        publication.snapshot.document = Arc::new(pm_model::Document::from_root(Some(pm_model::Node::from_value(document, 0)), 0));
+        publication.snapshot.revision = 0;
+        publication.project = record["project"].as_str().unwrap_or_default().into();
+        Ok(Self { publication: Arc::new(publication), queue:Some(id),
+            options:serde_json::from_value(record["options"].clone()).map_err(|e|e.to_string())?,
+            media:pm_engine_service::MediaCatalog { originals:serde_json::from_value(record["originals"].clone()).map_err(|e|e.to_string())?,
+                proxies:serde_json::from_value(record["proxies"].clone()).map_err(|e|e.to_string())?, ..Default::default() },
+            resources: Arc::new(serde_json::from_value(record["resources"].clone()).map_err(|e|e.to_string())?),
+            playhead: record["playhead"].as_f64().unwrap_or(0.), destination:serde_json::from_value(record["destination"].clone()).map_err(|e|e.to_string())?,
+            replace:record["replace"] == true, without_offline:record["withoutOffline"] == true })
+    }
+}
+impl Controller {
+    pub fn publish_render_queue(&self) {
+        if let Some(runtime) = &self.builtins.runtime {
+            let _ = runtime.observe_render_queue(crate::render_queue::store(&self.profile).lock().unwrap().projection());
+        }
+    }
+    pub fn render_pending(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.export_job.is_some() { return; }
+        let Some(template) = self.published.clone() else { return; };
+        let store = crate::render_queue::store(&self.profile);
+        let taken = store.lock().unwrap().take_pending();
+        match taken {
+            Ok(Some((id, record))) => match Frozen::restore(&record, &template, id) {
+                Ok(frozen) => {
+                    self.builtins.export_retry = Some(frozen);
+                    self.begin_builtin_export(Value::Null, true, false, cx);
+                }
+                Err(error) => {
+                    let _ = store.lock().unwrap().finish(id, "Failed", error.clone());
+                    self.message = error;
+                }
+            },
+            Err(error) => self.message = error,
+            _ => {}
+        }
+        self.publish_render_queue();
+    }
+}
+
+#[cfg(test)]
+mod frozen_queue_tests {
+    use super::*;
+    #[test]
+    fn queued_input_restores_its_own_composition_options_media_and_destination() {
+        let rig = crate::v4_view_tests::rig("export", 2);
+        let publication = rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
+        let mut options = Options::new(640, 360, 30.);
+        options.format = Format::Json;
+        let mut media = pm_engine_service::MediaCatalog::default();
+        media.originals.insert("clip".into(), PathBuf::from("/media/clip.mov"));
+        let frozen = Frozen { publication:publication.clone(), queue:None, options,
+            media, resources:Arc::default(), playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
+            replace:false, without_offline:false };
+        let record = frozen.record();
+        let mut changed = (*publication).clone();
+        changed.snapshot.document = Arc::new(pm_model::Document::new(Some(pm_model::json::parse(r#"{"name":"Other project","layers":[]}"#).unwrap()), 99));
+        let restored = Frozen::restore(&record, &changed, 42).unwrap();
+        assert_eq!(restored.publication.snapshot.document.to_value(), publication.snapshot.document.to_value());
+        assert_eq!(restored.options.format, Format::Json);
+        assert_eq!(restored.media.originals, frozen.media.originals);
+        assert_eq!(restored.destination, frozen.destination);
+        assert_eq!(restored.playhead, 1.25);
+        assert_eq!(restored.queue, Some(42));
+    }
 }

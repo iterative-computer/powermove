@@ -401,6 +401,14 @@ fn content_types<'a>(extensions: &[&'a str], folders: bool) -> Vec<ContentType<'
 #[cfg(test)]
 mod open_panel_tests {
     use super::{ContentType, content_types};
+    #[test]
+    fn model_extensions_reach_the_native_open_panel() {
+        let extensions = pm_builtins::media_import::extensions();
+        let types = content_types(&extensions, false);
+        for extension in ["glb", "gltf", "obj", "fbx", "ply", "usdz", "stl"] {
+            assert!(types.contains(&ContentType::Extension(extension)));
+        }
+    }
     /// Import Media's panel takes media files and folders: a folder stays
     /// choosable among the media types (else Import opens it), and a panel
     /// for files alone lists file types only.

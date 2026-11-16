@@ -79,11 +79,23 @@ impl Agent {
         );
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
-        Self {
+        let mut panel = Self {
             panels,
             latest: None,
             typed: String::new(),
+        };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
+            panel.choose("agent-access", "editor");
         }
+        panel
     }
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
         Self::mount_recording(actor, environment, Default::default())
@@ -99,10 +111,30 @@ impl Agent {
         let mut panels = panels;
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
-        Self {
+        let mut panel = Self {
             panels,
             latest: None,
             typed: String::new(),
+        };
+        // Status checks can replace the composer with sign-in UI. Let them
+        // finish before deciding whether its access control is available.
+        panel.account_checks_finished();
+        // These protocol fixtures exercise the Editor/app-server transport.
+        // Fresh-chat Auto defaults are covered by the panel model tests.
+        panel.text();
+        if panel.surface().surface.nodes().values().any(|node|
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
+            && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
+            panel.choose("agent-access", "editor");
+        }
+        panel
+    }
+    fn account_checks_finished(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while [Provider::Chatgpt, Provider::Claude].into_iter().any(|provider|
+            self.panels.broker.agent.connection(provider).0 == "checking") {
+            assert!(Instant::now() < deadline, "account status check timed out");
+            thread::sleep(Duration::from_millis(5));
         }
     }
     /// Sign-in status arrives from a worker; a run needs it.
@@ -1443,7 +1475,10 @@ const RESUMED: &str = "Saw: Review these results, verify changes where needed";
 fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
-    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    let release = root.path().join("child-release");
+    let mut environment = slow_environment(root.path(), "1.0");
+    environment.vars.insert("PM_FAKE_CHILD_RELEASE".into(), release.to_string_lossy().into_owned());
+    let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Chatgpt);
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -1500,6 +1535,7 @@ fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
         state.runs.held(&run)
             && state.panel.session(&thread).unwrap().activity == "Waiting for 1 subagent to finish…"
     });
+    std::fs::write(&release, b"continue").unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let agent2 = agent.clone();
     while !{
@@ -2229,5 +2265,90 @@ fn choosing_another_listed_model_sends_it() {
     panel.wait(idle);
     assert!(panel.text().contains("Saw: Hello there"));
     assert_eq!(model.requests()[0]["body"]["model"], "other-model");
+    panel.panels.close();
+}
+
+#[test]
+fn send_latency_status_never_waits_for_provider_or_storage_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Go");
+    let agent = panel.agent();
+    let cached = panel.panels.agent_status();
+    // Reproduce the old UI stack: drain_builtins -> agent_status ->
+    // agent_state/backend lock -> AgentState lock. Worker I/O owns this lock.
+    let hold = |probe: &dyn Fn()| {
+        let (ready, received) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = agent.lock().unwrap();
+                ready.send(()).unwrap();
+                thread::sleep(Duration::from_millis(24));
+            });
+            received.recv().unwrap();
+            let start = Instant::now();
+            probe();
+            start.elapsed()
+        })
+    };
+    let before = hold(&|| {
+        drop(agent.lock().unwrap());
+    });
+    let after = hold(&|| {
+        assert_eq!(panel.panels.agent_status(), cached);
+    });
+    eprintln!(
+        "send_latency blocking_status_before_ms={:.3} cached_status_after_ms={:.3} stack=drain_builtins/agent_status/AgentState::lock",
+        before.as_secs_f64() * 1000.,
+        after.as_secs_f64() * 1000.
+    );
+    assert!(before >= Duration::from_millis(8));
+    assert!(after < Duration::from_millis(8));
+    // Backend is also held during prompt assembly/admission, before AgentState.
+    let backend = panel
+        .panels
+        .broker
+        .entry("agent")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    {
+        let _held = backend.lock().unwrap();
+        let start = Instant::now();
+        assert_eq!(panel.panels.agent_status(), cached);
+        assert!(start.elapsed() < Duration::from_millis(8));
+    }
+    let mut worst = Duration::ZERO;
+    for _ in 0..12 {
+        let start = Instant::now();
+        panel.panels.agent_status();
+        worst = worst.max(start.elapsed());
+        thread::sleep(Duration::from_millis(16));
+    }
+    // Composer input still reaches the controller during the token stream.
+    panel.type_text("Next idea");
+    let thread = thread_id(&agent);
+    assert_eq!(
+        agent
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .draft
+            .text(),
+        "Next idea"
+    );
+    eprintln!(
+        "send_latency streaming_frames=12 worst_status_ms={:.3}",
+        worst.as_secs_f64() * 1000.
+    );
+    assert!(worst < Duration::from_millis(8));
+    panel.click("agent-stop");
+    panel.wait(idle);
     panel.panels.close();
 }

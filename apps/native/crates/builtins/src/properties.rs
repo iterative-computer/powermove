@@ -80,7 +80,12 @@ impl Properties {
             json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
         ))
     }
-    fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
+    pub(crate) fn lease(
+        &mut self,
+        model: &Inspector,
+        id: &str,
+        binding: Binding,
+    ) -> Result<Value, String> {
         let handle = if let Some(handle) = self.handles.get(id) {
             handle.clone()
         } else {
@@ -690,6 +695,9 @@ impl Properties {
             let kind = target["first"]["type"].as_str().unwrap_or("").to_owned();
             if !matches!(kind.as_str(), "audio" | "camera") && studio.is_none() {
                 let masks = self.masks(model, &layer, time)?;
+                if target["first"]["acceptsEffects"].as_bool() == Some(true) {
+                    sections.push(json!({"id":"effects","title":"Effects","collapsed":self.collapsed.get("effects").copied().unwrap_or(false),"rows":[]}));
+                }
                 sections.push(json!({"id":"masks","title":"Masks","collapsed":self.collapsed.get("masks").copied().unwrap_or(false),"rows":[],"action":"mask","masks":masks}));
             }
             if !layer_rows.is_empty() {
@@ -2557,7 +2565,7 @@ impl Properties {
             return Ok(Some(Request::new(
                 caller,
                 pm_kernel::Call::Transact {
-                    label: Some("Align Layers".into()),
+                    label: Some(mode.label().into()),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Transform(
                         TransformCommand::Align {
@@ -2582,7 +2590,7 @@ impl Properties {
             return Ok(Some(Request::new(
                 caller,
                 pm_kernel::Call::Transact {
-                    label: Some("Distribute Layers".into()),
+                    label: Some(spread.label().into()),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Transform(
                         TransformCommand::Distribute {
@@ -2691,7 +2699,18 @@ impl Properties {
                 _ => return Err("Unknown property action".into()),
             }
         };
+        // v1's ChannelRow focused the Timeline's graph on a property pressed
+        // in Properties: keyed from its diamond, the graph plots it (it fell
+        // back to the layer's first animated property, often Opacity).
+        let keyed = matches!(action, V4Action::Diamond | V4Action::AddKey);
         let result = self.adapter.action(model, caller, handle, action, time);
+        if keyed
+            && result.is_ok()
+            && let Some(layer) = model.primary()
+        {
+            self.commands
+                .push(("timeline.focusGraph".into(), vec![json!(layer), json!(path)]));
+        }
         if matches!(row, "position" | "scale" | "anchor") {
             self.adapter.dispose(handle);
         }

@@ -91,10 +91,15 @@ pub(crate) fn run_one(engine: &mut render::Engine, shared: &Arc<Shared>) {
         state.views.iter_mut().find_map(|(id, v)| {
             let p = v.surface_queries.pop_front()?;
             let scene = render::Scene {
-                doc: v.config.snapshot.document.clone(),
+                doc: v
+                    .transient_snapshot
+                    .as_ref()
+                    .unwrap_or(&v.config.snapshot)
+                    .document
+                    .clone(),
                 comp: v.config.composition.clone(),
                 media: v.paths.clone(),
-                content: v.content,
+                content: v.transient_content.unwrap_or(v.content),
             };
             let scale = v
                 .status

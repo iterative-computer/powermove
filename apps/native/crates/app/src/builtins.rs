@@ -27,6 +27,27 @@ pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElemen
     }
 }
 
+/// The scroll container owns input and offset; panels paint no scrollbar chrome.
+fn panel_scroll_body(
+    id: &str,
+    body: f32,
+    handle: &ScrollHandle,
+    content: AnyElement,
+) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(body))
+        .child(
+            div()
+                .id(SharedString::from(format!("panel-body-{id}")))
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(handle)
+                .child(content),
+        )
+        .into_any_element()
+}
 /// How long a panel's scroll thumb stays after the last scroll.
 const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
@@ -110,8 +131,11 @@ pub struct Host {
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     /// Each panel body's scroll (owner request 2026-11-14: side panels
     /// scroll when their content is taller than their slot), kept across
-    /// splitter drags, and when each last scrolled (its thumb shows a moment).
+    /// splitter drags and tab switches.
     scrolls: BTreeMap<String, ScrollHandle>,
+    /// Each side panel's body, a cached view: a wheel step on it only
+    /// replays its drawing at the new offset (PM-311).
+    bodies: BTreeMap<String, Entity<PanelBody>>,
     scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -127,8 +151,18 @@ pub struct Host {
     agent_dismissed: Option<std::time::Instant>,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
+    /// The Settings window's AppKit chrome while this editor hosts it, and
+    /// where its back and forward go (PM-375).
+    pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
+    pub(crate) settings_history: crate::settings_window::History,
+    /// This editor's entity while it hosts Settings (its picker lists the
+    /// other editors' projects without reading this one, being updated).
+    pub(crate) settings_me: Option<gpui::EntityId>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
+    /// Projects whose offline clips the person chose to export without, this
+    /// session: their later exports go without them and say so, not asking again.
+    pub export_without_offline: BTreeSet<String>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,
@@ -165,6 +199,10 @@ impl Controller {
         {
             return;
         }
+        self.host.borrow_mut().set_contributed_bindings(
+            "native.agent.cite.",
+            [crate::v4_quote::cite_binding()],
+        );
         if let Some(job) = &self.builtins.export_job {
             job.cancel.store(true, std::sync::atomic::Ordering::Release);
         }
@@ -174,8 +212,20 @@ impl Controller {
             runtime.close();
         }
         let windows = std::mem::take(&mut self.builtins.windows);
+        // The Settings window stays open across the restart: its chrome,
+        // where its back and forward go, and that this editor hosts it.
+        let settings = (
+            self.builtins.settings_chrome.take(),
+            std::mem::take(&mut self.builtins.settings_history),
+            self.builtins.settings_me.take(),
+        );
         self.builtins = Host::default();
         self.builtins.windows = windows;
+        (
+            self.builtins.settings_chrome,
+            self.builtins.settings_history,
+            self.builtins.settings_me,
+        ) = settings;
         self.builtins.agent_carry = carry;
         self.builtins.project = Some(project.clone());
         self.builtins.document = document;
@@ -241,6 +291,7 @@ impl Controller {
                 return;
             }
         };
+        runtime.set_presets_folder(&self.mcp.profile);
         let mut environment = pm_agents::launch::Environment::current(
             self.mcp.profile.clone(),
             pm_mcp::catalog::names(),
@@ -289,8 +340,12 @@ impl Controller {
                             // A panel window kept open across a restart (Export
                             // asked for before the project arrived) shows its
                             // panel from the new realm, not an empty sheet.
+                            // Settings, on the section it was showing.
                             if v.builtins.windows.contains_key(&id) {
-                                let _ = check.show(&id);
+                                let _ = match v.builtins.settings_history.current() {
+                                    Some(page) if id == "settings" => check.show_section(&id, &page),
+                                    _ => check.show(&id),
+                                };
                             }
                             v.builtins.ready.insert(id);
                         }
@@ -511,7 +566,7 @@ impl Controller {
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
             "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":self.settings_header(cx),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -896,6 +951,8 @@ impl Controller {
         .detach();
     }
     pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
+        // Settings › General › Open Projects In may have changed.
+        crate::tabs::follow(&self.kernel, cx);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -923,18 +980,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
-        let (working, attention, elapsed, background) = runtime.agent_status();
-        self.host
-            .borrow_mut()
-            .set_agent_status(pm_shell::AgentStatus {
-                working,
-                attention,
-                elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
-                background,
-                progress: runtime.agent_progress(),
-                paused: self.session.as_ref().is_some_and(|s| self.mcp.is_paused(&s.project)),
-                held: self.session.as_ref().is_some_and(|s| self.mcp.is_held(&s.project)),
-            });
+        self.sync_agent_launcher(cx);
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
         if painters != self.builtins.painters
@@ -1081,7 +1127,7 @@ impl Controller {
             let view = view.clone();
             canvas(
                 |_, _, _| (),
-                move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
+                move |_, _, window, cx| view.read(cx).keep_native_slots(window, cx),
             )
             .absolute()
             .size_0()
@@ -1110,34 +1156,85 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
+        let surface = view.clone();
+        view.update(cx, |v, _| v.scrolls_in(&handle));
+        let on_wheel = {
+            let panel = panel.clone();
+            cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
+                v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                // A panel that leaves rows out draws again as its body
+                // scrolls, so they come back before they show (`v4_cull`).
+                if surface.read(cx).culls() {
+                    surface.update(cx, |_, cx| cx.notify());
+                }
+                // The thumb goes once the scrolling has stopped.
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+                cx.notify();
+            })
+        };
+        // Only the Project panel's body is a view of its own, a scroll layer
+        // (PM-311). Every other body scrolls inside the window's own frame, as
+        // before: a cached body there drew its AppKit controls a row off their
+        // labels for a frame now and then while scrolling (PM-389).
+        if id != pm_builtins::PROJECT_PANEL {
+            return Some(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(body))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("panel-body-{id}")))
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&handle)
+                            .on_scroll_wheel(on_wheel)
+                            // As tall as its content, at least its slot.
+                            .child({
+                                let content = view.read(cx).in_body(body);
+                                view.clone().cached(content)
+                            })
+                            .child(keep),
+                    )
+                    .children(thumb)
+                    .into_any_element(),
+            );
+        }
+        // As tall as its content, at least its slot.
+        let height = view.read(cx).body_height(body);
+        let panel_body = self
+            .builtins
+            .bodies
+            .entry(id.into())
+            .or_insert_with(|| {
+                cx.new(|_| PanelBody {
+                    id: SharedString::from(format!("panel-body-{id}")),
+                    view: view.clone(),
+                    handle: handle.clone(),
+                    height,
+                })
+            })
+            .clone();
+        panel_body.update(cx, |b, cx| {
+            // Half a point: the content's height is measured again every frame.
+            if (b.height - height).abs() > 0.5 || b.view != view {
+                b.height = height;
+                b.view = view.clone();
+                cx.notify();
+            }
+        });
         Some(
             div()
                 .relative()
                 .w_full()
                 .h(px(body))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("panel-body-{id}")))
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&handle)
-                        .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
-                            v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
-                            // The thumb goes once the scrolling has stopped.
-                            cx.spawn_in(window, async move |this, cx| {
-                                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            })
-                            .detach();
-                            cx.notify();
-                        }))
-                        // As tall as its content, at least its slot.
-                        .child({
-                            let content = view.read(cx).in_body(body);
-                            view.clone().cached(content)
-                        })
-                        .child(keep),
-                )
+                .on_scroll_wheel(on_wheel)
+                .child(panel_body.cached(StyleRefinement::default().size_full()))
+                .child(keep)
                 .children(thumb)
                 .into_any_element(),
         )
@@ -1173,7 +1270,8 @@ impl Controller {
             cx.notify();
             return;
         }
-        self.close_tab_page("settings", cx);
+        self.close_settings(cx);
+        window.activate();
         self.show_builtin("agent", window, cx);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
@@ -1207,6 +1305,32 @@ impl Controller {
         })
         .detach();
     }
+    fn sync_agent_launcher(&self, cx: &App) {
+        let Some(runtime) = &self.builtins.runtime else { return; };
+        let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
+        let panel_open =
+            self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
+        self.host
+            .borrow_mut()
+            .set_agent_launcher(pm_shell::agent_launcher::Snapshot {
+                tasks: tasks
+                    .into_iter()
+                    .map(|(id, title, step, started_at, attention, running)| {
+                        pm_shell::agent_launcher::Task {
+                            id,
+                            title,
+                            step,
+                            started_at,
+                            attention,
+                            running,
+                        }
+                    })
+                    .collect(),
+                panel_open,
+                revision,
+                active_thread,
+            });
+    }
     /// Whether the Agent popover is showing (or on its way).
     pub fn agent_open(&self, cx: &App) -> bool {
         self.builtins.opening_windows.contains("agent")
@@ -1234,6 +1358,7 @@ impl Controller {
             return;
         };
         let _ = handle.update(cx, |_, w, _| w.remove_window());
+        self.sync_agent_launcher(cx);
         self.update_builtins(cx);
         gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
         cx.notify();
@@ -1277,34 +1402,26 @@ impl Controller {
             // and Settings › Storage what both folders take now.
             self.refresh_waiting_folders(cx);
             self.refresh_storage(cx);
-            // Settings is a page of this window (owner feedback S2): the
-            // panel shows (on the page asked for) and the page comes forward.
-            let already = self.pages.open.iter().any(|p| p == "settings");
-            self.open_tab_page("settings", cx);
-            let Some(runtime) = self.builtins.runtime.clone() else {
-                return;
-            };
-            let page = self.builtins.settings_page.take();
-            if already && page.is_none() {
+            // Settings is a window of its own, one for the app (PM-375): an
+            // open one comes forward on the page asked for; one another
+            // editor hosts closes, and this editor's opens in its place.
+            self.take_settings_from_others(cx);
+            if let Some(existing) = self.builtins.windows.get(id).copied()
+                && existing.update(cx, |_, w, _| w.activate()).is_ok()
+            {
+                if let Some(page) = self.builtins.settings_page.take()
+                    && let Some(runtime) = self.builtins.runtime.clone()
+                {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Ok(ticket) = runtime.show_section("settings", &page) {
+                                let _ = ticket.await;
+                            }
+                        })
+                        .detach();
+                }
                 return;
             }
-            let facts = (!already).then(|| self.facts(cx));
-            cx.background_executor()
-                .spawn(async move {
-                    if let Some(facts) = facts {
-                        runtime.update_facts(facts);
-                    }
-                    let shown = match &page {
-                        Some(page) => runtime.show_section("settings", page),
-                        None => runtime.show("settings"),
-                    };
-                    if let Ok(ticket) = shown {
-                        let _ = ticket.await;
-                    }
-                })
-                .detach();
-            let _ = window;
-            return;
         }
         if self.builtins.opening_windows.contains(id) {
             return;
@@ -1318,6 +1435,7 @@ impl Controller {
             return;
         };
         self.builtins.opening_windows.insert(id.into());
+        if id == "agent" { self.sync_agent_launcher(cx); }
         let owner = cx.entity();
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
@@ -1328,6 +1446,11 @@ impl Controller {
                     f32::from(window.viewport_size().height) - m.toolbar - m.status - 2. * m.gap,
                 ),
                 WindowKind::PopUp,
+            ),
+            "settings" => (
+                pm_shell::settings_window::DEFAULT_SIZE.0 as f32,
+                pm_shell::settings_window::DEFAULT_SIZE.1 as f32,
+                WindowKind::Normal,
             ),
             _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),
         };
@@ -1350,7 +1473,21 @@ impl Controller {
         } else {
             editor.origin + point(px(m.toolbar), px(m.toolbar))
         };
-        let title: SharedString = if id == "agent" { "Agent" } else { "Export" }.into();
+        let title: SharedString = match id {
+            "agent" => "Agent",
+            "settings" => "Settings",
+            _ => "Export",
+        }
+        .into();
+        // Settings opens on the page asked for, else the one it was left on.
+        let page = (id == "settings")
+            .then(|| {
+                self.builtins
+                    .settings_page
+                    .take()
+                    .or_else(pm_shell::settings_window::remembered_section)
+            })
+            .flatten();
         let id = id.to_owned();
         let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
         // Export is a sheet on the window that asked for it; the Agent popover
@@ -1362,12 +1499,24 @@ impl Controller {
         let facts = self.facts(cx);
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
-            cx.background_executor()
-                .spawn(async move { told.update_facts(facts) })
-                .await;
-            let shown = runtime.show(&id);
-            if let Ok(ticket) = shown {
-                let _ = ticket.await;
+            let page_for = page.clone();
+            let id_for = id.clone();
+            let show = async move {
+                told.update_facts(facts);
+                let shown = match &page_for {
+                    Some(page) => told.show_section(&id_for, page),
+                    None => told.show(&id_for),
+                };
+                if let Ok(ticket) = shown {
+                    let _ = ticket.await;
+                }
+            };
+            // Settings' window comes up at once; its page fills in when the
+            // panel has shown (a first show can take a while).
+            if id == "settings" {
+                cx.background_executor().spawn(show).detach();
+            } else {
+                cx.background_executor().spawn(show).await;
             }
             let current = this
                 .update(cx, |v, _| {
@@ -1397,13 +1546,15 @@ impl Controller {
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
+            let settings = panel == "settings";
             let result = cx.open_window(
                 options
                     // A popover has no title bar; other panel windows get a
-                    // seamless transparent one over their own material.
+                    // seamless transparent one over their own material
+                    // (Settings: AppKit's own, under its toolbar).
                     .titlebar(popover.is_none().then(|| TitlebarOptions {
                         title: Some(title),
-                        appears_transparent: true,
+                        appears_transparent: !settings,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
@@ -1448,13 +1599,23 @@ impl Controller {
                             })
                             .detach();
                         }
-                        SurfaceWindow {
-                            owner,
-                            panel,
-                            keys,
-                            drag: None,
-                            editor: parent,
+                        // Settings follows the app's appearance: when its
+                        // window changes, it draws again once the editor
+                        // has rebuilt the tokens it is drawn with.
+                        if panel == "settings" {
+                            cx.observe_window_appearance(window, |_: &mut SurfaceWindow, window, cx| {
+                                cx.notify();
+                                cx.spawn_in(window, async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(120))
+                                        .await;
+                                    let _ = this.update(cx, |_, cx| cx.notify());
+                                })
+                                .detach();
+                            })
+                            .detach();
                         }
+                        SurfaceWindow { owner, panel, keys, chrome: None, drag: None, editor: parent }
                     })
                 },
             );
@@ -1470,6 +1631,28 @@ impl Controller {
                         {
                             view.update(cx, |view, cx| {
                                 view.focus_when_ready("agent-composer-text", cx)
+                            });
+                        }
+                        // Settings' AppKit frame goes on once GPUI hears its
+                        // view's size changes (after the window is built).
+                        if settings {
+                            let owner = cx.entity();
+                            cx.defer(move |cx| {
+                                let Ok(view) = handle.update(cx, |_, window, _| {
+                                    pm_shell::settings_window::gpui_view(window)
+                                }) else {
+                                    return;
+                                };
+                                let chrome = view.and_then(|view| {
+                                    crate::settings_window::install(view, owner, cx)
+                                });
+                                // AppKit's layout told GPUI of the view's new
+                                // size while the app was busy (here), which
+                                // GPUI drops: it reads it now.
+                                let _ = handle.update(cx, |w, window, cx| {
+                                    w.chrome = chrome;
+                                    window.bounds_changed(cx);
+                                });
                             });
                         }
                         v.builtins.windows.insert(id, handle.into());
@@ -1595,6 +1778,16 @@ impl Controller {
                             }) =>
                         {
                             match effect.effect {
+                                pm_panel_media::Effect::Deleted { message } => {
+                                    let owner = effect.owner;
+                                    crate::v4_native::announce(&self.host.borrow().window, &message);
+                                    let kernel = self.kernel.clone();
+                                    self.delete_toast = Some(cx.new(|cx| crate::action_toast::ToastView::new(message, move |cx| {
+                                        let pending = kernel.call(&owner.project, pm_kernel::Request::new(pm_kernel::Caller::native(), pm_kernel::HistoryCall::Undo).with_document(owner.document).outside_revision(owner.revision));
+                                        cx.spawn(async move |_| { let _ = pending.await; }).detach();
+                                    }, cx)));
+                                    cx.notify();
+                                }
                                 pm_panel_media::Effect::OpenComposition(id) => {
                                     self.open_builtin_composition(&id, cx)
                                 }
@@ -1710,6 +1903,26 @@ impl Controller {
                     );
                     Ok(Value::Null)
                 }
+                "export.queue.add" => {
+                    self.begin_export_mode(request.input["options"].clone(), false, false, true, cx);
+                    Ok(Value::Null)
+                }
+                "export.queue.list" => { self.publish_render_queue(); Ok(Value::Null) }
+                "export.queue.render" => { self.render_pending(cx); Ok(Value::Null) }
+                "export.queue.action" => {
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let action = request.input["action"].as_str().unwrap_or("");
+                    let result = crate::render_queue::store(&self.profile).lock().unwrap().action(id, action);
+                    self.publish_render_queue();
+                    result.map(|_|Value::Null)
+                }
+                "export.queue.finder" => {
+                    let rows = crate::render_queue::store(&self.profile).lock().unwrap().projection();
+                    if let Some(path) = rows.as_array().and_then(|rows| rows.iter().find(|r|r["id"] == request.input["id"] && r["status"] == "Done")).and_then(|r|r["path"].as_str()) {
+                        crate::platform::reveal(std::path::Path::new(path));
+                    }
+                    Ok(Value::Null)
+                }
                 "export.cancel" => {
                     if let Some(job) = &self.builtins.export_job {
                         // Worker observes the flag and publishes terminal state
@@ -1718,6 +1931,12 @@ impl Controller {
                     } else {
                         let _ = runtime.observe_export(json!({"phase":"cancelled"}));
                         self.close_export_sheet(cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "export.showInFinder" => {
+                    if let Some(path) = request.input["path"].as_str() {
+                        crate::platform::reveal(std::path::Path::new(path));
                     }
                     Ok(Value::Null)
                 }
@@ -1744,6 +1963,15 @@ impl Controller {
                         .cloned()
                         .unwrap_or_default();
                     self.host.borrow().send_command(name, args);
+                    Ok(Value::Null)
+                }
+                "focus"
+                    if request.input.as_str() == Some("settings.search")
+                        && self.builtins.settings_chrome.is_some() =>
+                {
+                    if let Some(chrome) = &self.builtins.settings_chrome {
+                        chrome.focus_search();
+                    }
                     Ok(Value::Null)
                 }
                 "focus" => {
@@ -1965,12 +2193,28 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "settings.close" => {
-                    self.close_tab_page("settings", cx);
+                    self.close_settings(cx);
                     Ok(Value::Null)
                 }
-                // Settings is a page with its cell's title; its pages have
-                // no window title to name.
+                // The window's title and sidebar follow `settings.sidebar`.
                 "settings.title" => Ok(Value::Null),
+                "settings.sidebar" => {
+                    self.settings_sidebar(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                // The header's project picker and Show in Finder.
+                "settings.project" => {
+                    if let Some(id) = request.input.as_str() {
+                        self.settings_for_project(id, cx);
+                    }
+                    Ok(Value::Null)
+                }
+                "settings.reveal" => {
+                    if let Some(path) = self.path.clone() {
+                        crate::platform::reveal(&path);
+                    }
+                    Ok(Value::Null)
+                }
                 "settings.scroll" => {
                     if let Some(section) = request.input["section"].as_str()
                         && let Some(view) = self.builtins.views.get("settings")
@@ -2103,6 +2347,7 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        self.host.borrow_mut().defer_viewer_raster(after.is_some());
         if let Some(host) = &self.extensions.host {
             host.shell_state(serde_json::json!({
                 "zoom": self.view.zoom.unwrap_or(1.),
@@ -2115,7 +2360,28 @@ impl Controller {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
             }
-            let Ok(pending) = this.update(cx, |v, _| v.write_ui()) else {
+            let Ok(pending) = this.update(cx, |v, cx| {
+                if after.is_some() {
+                    let layer = metal::MetalLayer::new();
+                    let old = v.host.borrow().viewer_layer();
+                    if pm_engine_service::layers::configure_layer(
+                        objc2::MainThreadMarker::new().unwrap(),
+                        &layer,
+                        &old.device(),
+                    )
+                    .is_ok()
+                        && v.host.borrow_mut().stage_viewer_raster(layer.clone())
+                        && let Some(viewer) = &v.viewer
+                    {
+                        let crop = v.host.borrow().viewer_crop.get().map(|[x, y, canvas_width, canvas_height]| pm_engine_service::Crop { x, y, canvas_width, canvas_height });
+                        let _ = viewer.retarget(layer, crop);
+                        v.builtins.frame_outline = Default::default();
+                    }
+                }
+                v.host.borrow_mut().defer_viewer_raster(false);
+                cx.notify();
+                v.write_ui()
+            }) else {
                 return;
             };
             if let Some(pending) = pending {
@@ -2140,6 +2406,18 @@ impl Controller {
 }
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| {
+            if let Some(viewer) = &v.viewer {
+                let _ = viewer.transient_snapshot(snapshot.clone());
+            }
+            if let Some(popout) = &v.popout {
+                if let Some(viewer) = &*popout.viewer.borrow() {
+                    let _ = viewer.transient_snapshot(snapshot);
+                }
+            }
+        });
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
@@ -2170,6 +2448,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
+            E::Status(message) => {
+                v.message = message;
+                cx.notify();
+            }
             E::Seek(time) => v.seek(time),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
@@ -2323,6 +2605,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
+    fn focus_canvas(&self, window: &mut Window, cx: &mut App) {
+        let shell = self.0.upgrade().and_then(|c| c.read(cx).shell.clone());
+        if let Some(shell) = shell {
+            let _ = shell.update(cx, |shell, cx| shell.focus_canvas(window, cx));
+        }
+    }
+
     fn drop_project_items(&self, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             let at = v.time();
@@ -2516,6 +2805,11 @@ impl crate::gizmo::Host for ControllerDelegate {
             let center = v.viewer_center();
             v.view.navigate(change, center, limit);
             v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
+            if matches!(change, crate::gizmo::Navigate::Zoom { .. }) {
+                let mut host = v.host.borrow_mut();
+                host.viewer_transform(v.dimensions, Some(v.view.scale.get()), v.view.shown_pan());
+                host.place_cached_viewer();
+            }
             cx.notify();
         });
     }
@@ -2550,6 +2844,8 @@ struct SurfaceWindow {
     owner: Entity<Controller>,
     panel: String,
     keys: PopoverKeys,
+    /// Settings' AppKit chrome (the owner holds it too, to update it).
+    chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
     /// The Agent popover's header drag in progress.
     drag: Option<crate::popover_drag::HeaderDrag>,
     /// The editor window it belongs to (its drop targets, its bounds).
@@ -2727,6 +3023,14 @@ impl Render for SurfaceWindow {
         let popover = self.panel == "agent";
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
+        // Settings' page is under AppKit's toolbar, on the page's ground;
+        // its chrome follows the appearance as it changes.
+        let settings = self.panel == "settings";
+        if let Some(chrome) = &self.chrome {
+            let (dark, ground) =
+                crate::settings_window::scheme(&self.owner.read(cx).host.borrow().tokens);
+            chrome.set_scheme(dark, ground);
+        }
         if popover || sheet {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
@@ -2739,6 +3043,8 @@ impl Render for SurfaceWindow {
                 // `floating` inside the glass frame (agent-panel.md §8).
                 let colour = if popover {
                     t.colors.floating
+                } else if settings {
+                    t.colors.panel_secondary
                 } else {
                     t.colors.panel
                 };
@@ -2746,7 +3052,7 @@ impl Render for SurfaceWindow {
             };
             fill = colour;
             // Windows with a transparent title bar keep their content below it.
-            band = if popover || sheet {
+            band = if popover || sheet || settings {
                 0.
             } else {
                 titlebar
@@ -3277,7 +3583,11 @@ mod canvas_menu_tests {
 /// first snapshot; the Project panel asks for its list/grid choice before
 /// its first render (refused, its grid drew no thumbnails).
 fn answers_before_ready(operation: &str) -> bool {
-    matches!(operation, "export.estimate" | "project.view")
+    // Settings telling its window's sidebar what it lists edits nothing.
+    matches!(
+        operation,
+        "export.estimate" | "project.view" | "settings.sidebar"
+    )
 }
 
 /// The Project panel's view for `project` in the per-project choices at
@@ -3432,4 +3742,106 @@ pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
             pm_shell::MenuEntry::item("Composition…", "newComposition"),
         ],
     )
+}
+
+#[cfg(test)]
+mod panel_scroll_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn panel_scroll_capture() {
+        let dir = std::env::var("PM_DOCK_CAPTURE").ok();
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(gpui_parley::ParleyTextSystem::new(
+                    gpui_parley::SystemFonts::Load,
+                )),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            struct Frame(ScrollHandle);
+            impl Render for Frame {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    div().size_full().bg(rgb(0x202020)).child(panel_scroll_body(
+                        "test",
+                        160.,
+                        &self.0,
+                        div()
+                            .w(px(200.))
+                            .h(px(1000.))
+                            .flex_none()
+                            .bg(rgb(0x336699))
+                            .into_any_element(),
+                    ))
+                }
+            }
+            let handle = ScrollHandle::new();
+            let window = cx
+                .open_window(size(px(300.), px(160.)), |_, cx| {
+                    cx.new(|_| Frame(handle.clone()))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert!(
+                f32::from(handle.max_offset().y) > 0.,
+                "content really scrolls"
+            );
+            handle.set_offset(point(px(0.), px(-120.)));
+            window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+            cx.run_until_parked();
+            assert_eq!(f32::from(handle.offset().y), -120.);
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            if let Some(dir) = dir {
+                std::fs::create_dir_all(&dir).unwrap();
+                image.save(format!("{dir}/panel-scroll.png")).unwrap();
+            }
+            if std::env::var_os("PM_DOCK_BASELINE").is_none() {
+                let scale = image.width() / 300;
+                for y in 0..image.height() {
+                    for x in 292 * scale..image.width() {
+                        assert_eq!(
+                            &image.get_pixel(x, y).0[..3],
+                            &[32, 32, 32],
+                            "scrollbar thumb painted"
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// A side panel's body: the scroller, a scroll layer, around the panel. A
+/// view of its own, cached, so a wheel step that only moves the offset
+/// replays its drawing instead of the window laying the panel out again.
+pub(crate) struct PanelBody {
+    id: SharedString,
+    view: Entity<crate::v4_view::SurfaceView>,
+    handle: ScrollHandle,
+    /// The panel's height: its content, at least the slot.
+    height: f32,
+}
+impl Render for PanelBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Only the Project panel's body: measured on the release build, a
+        // panel that redraws while it scrolls (Properties follows the
+        // playhead and its springs) pays the recording on each redraw and
+        // lost frames with the layer (PM-311). A native view inside draws on
+        // its own: the body draws in full.
+        let native = self.view.read(cx).has_native();
+        div()
+            .id(self.id.clone())
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.handle)
+            .when(!native, |d| d.scroll_layer())
+            .child(
+                self.view
+                    .clone()
+                    .cached(StyleRefinement::default().w_full().h(px(self.height))),
+            )
+    }
 }

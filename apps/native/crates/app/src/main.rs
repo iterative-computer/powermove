@@ -1,3 +1,5 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 // Rust allocations use the system allocator. The bundle launches with
 // `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
 // freed large blocks go back to macOS at once; small blocks return per 16 KiB
@@ -7,12 +9,14 @@
 // the Rust heap is "Malloc Small/Large" (not mimalloc's tag-100
 // "IOAccelerator"). A bare binary needs `MallocLargeCache=0` exported to match.
 
+mod action_toast;
 mod access;
 mod after_open;
-mod agent_coedit;
 mod agent_clients;
 mod alert;
+mod appearance;
 mod builtins;
+mod tabs;
 #[cfg(test)]
 mod builtins_tests;
 mod cloud;
@@ -27,6 +31,7 @@ mod dialogs;
 mod entry;
 mod error_log;
 mod export_coordinator;
+mod render_queue;
 mod expression_sheet;
 mod extension_authoring;
 mod extension_transfer;
@@ -76,6 +81,7 @@ mod panel_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod project_capture_tests;
 mod panel_library;
+mod panel_library_preview;
 mod ghost;
 mod panels;
 #[cfg(test)]
@@ -98,6 +104,7 @@ mod render_frames;
 mod recent_work;
 mod rows;
 mod session;
+mod settings_window;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
@@ -126,6 +133,7 @@ mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
+mod v4_quote;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
@@ -198,6 +206,9 @@ mod lane_bundle_tests {
 fn main() -> Result<()> {
     diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--cold-playback-bench") {
+        return pro_media::cold_playback_bench();
+    }
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
@@ -386,6 +397,9 @@ fn main() -> Result<()> {
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
     let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // Projects open as tabs or in windows of their own, by the setting,
+    // before any window is restored.
+    pm_shell::set_tabs_mode(tabs::setting(&handle));
     // The command-line project opens in the first window only.
     let launch = Cell::new(launch);
     let result = pm_shell::run_gated(

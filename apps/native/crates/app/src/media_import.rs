@@ -69,12 +69,12 @@ impl Controller {
             cx.notify();
             return;
         }
-        let rx = platform::import_paths(
-            &self.host.borrow().window,
-            false,
-            true,
-            &["glb", "gltf", "obj", "fbx"],
-        );
+        let model_extensions = [
+            pm_scene3d::import::path::EXTENSIONS,
+            pm_scene3d::import::path::UNSUPPORTED,
+        ]
+        .concat();
+        let rx = platform::import_paths(&self.host.borrow().window, false, true, &model_extensions);
         cx.spawn(async move |this, cx| {
             if let Ok(paths) = rx.recv().await
                 && !paths.is_empty()
@@ -226,8 +226,12 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         let (dirs, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
-        if !dirs.is_empty() { self.link_media_folders(dirs, folder.clone(), cx); }
-        if !files.is_empty() { self.import_drop(files, as_folder, None, folder, cx); }
+        if !dirs.is_empty() {
+            self.link_media_folders(dirs, folder.clone(), cx);
+        }
+        if !files.is_empty() {
+            self.import_drop(files, as_folder, None, folder, cx);
+        }
     }
     /// Media dropped on the timeline: Finder files at the time and place in
     /// the stack under the pointer, or the Project panel's dragged items.
@@ -687,12 +691,20 @@ impl Controller {
                         if add_3d && !outcome.assets.is_empty() {
                             v.add_imported_models(outcome.assets.clone(), cx);
                         }
+                        for (file, error) in &outcome.failed {
+                            v.errors
+                                .borrow_mut()
+                                .push("Import", &format!("{file}: {error}"));
+                        }
                         match note {
                             Some(note) if outcome.failed.is_empty() && !outcome.cancelled => note,
                             _ => outcome.summary(),
                         }
                     }
-                    Err(error) => error,
+                    Err(error) => {
+                        v.errors.borrow_mut().push("Import", &error);
+                        error
+                    }
                 };
                 v.refresh(cx);
                 v.next_import(cx);
@@ -858,16 +870,52 @@ mod drop_tests {
 }
 
 impl Controller {
-    fn link_media_folders(&mut self, paths: Vec<PathBuf>, folder: Option<String>, cx: &mut Context<Self>) {
-        let (Some(runtime), Some(p)) = (self.builtins.runtime.clone(), self.published.clone()) else { return; };
+    fn link_media_folders(
+        &mut self,
+        paths: Vec<PathBuf>,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(runtime), Some(p)) = (self.builtins.runtime.clone(), self.published.clone())
+        else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move {
-                runtime.link_folders(p.snapshot.doc_id, &paths, folder, &std::sync::atomic::AtomicBool::new(false))
-            }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    runtime.link_folders(
+                        p.snapshot.doc_id,
+                        &paths,
+                        folder,
+                        &std::sync::atomic::AtomicBool::new(false),
+                    )
+                })
+                .await;
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result { v.message = error; }
+                match result {
+                    Ok((_, failed)) => {
+                        for (file, error) in &failed {
+                            v.errors
+                                .borrow_mut()
+                                .push("Import", &format!("{file}: {error}"));
+                        }
+                        if !failed.is_empty() {
+                            v.message = failed
+                                .iter()
+                                .map(|(file, error)| format!("{file}: {error}"))
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                        }
+                    }
+                    Err(error) => {
+                        v.errors.borrow_mut().push("Import", &error);
+                        v.message = error;
+                    }
+                }
                 v.refresh(cx);
             });
-        }).detach();
+        })
+        .detach();
     }
 }

@@ -131,7 +131,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -310,7 +313,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -489,7 +495,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -668,7 +677,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -847,7 +859,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -1026,7 +1041,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -1205,7 +1223,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,
@@ -1384,7 +1405,10 @@
       "mark_bracket": 6,
       "sync_badge": 16,
       "viewer_3d_labels": 860,
-      "viewer_3d_collapse": 560
+      "viewer_3d_collapse": 560,
+      "export_job_row": 44.0,
+      "export_job_progress_width": 80.0,
+      "export_job_progress_height": 2.0
     },
     "typography": {
       "minimum": 11,

@@ -67,6 +67,7 @@ pub struct EffectsPanel {
     /// Effect Controls: a grade instrument's parameters fold into summary
     /// rows (the Color panel, which asks for every row, leaves this off).
     pub fold_grades: bool,
+    add_to_selection: bool,
     range: Range<usize>,
     cache_key: Option<(u64, u64, String, Vec<bool>)>,
     cached_definitions: HashMap<String, crate::EffectDefinition>,
@@ -93,6 +94,10 @@ impl EffectsPanel {
     /// Folds grade instruments into summary rows (Effect Controls).
     pub fn folding_grades(mut self, fold: bool) -> Self {
         self.fold_grades = fold;
+        self
+    }
+    pub fn adding_to_selection(mut self, enabled: bool) -> Self {
+        self.add_to_selection = enabled;
         self
     }
     pub fn new(presentation: Presentation, range: Range<usize>) -> Self {
@@ -229,6 +234,11 @@ impl EffectsPanel {
         }
         if let Some(index) = anchor.and_then(|id| self.flat.iter().position(|row| row.id == id)) {
             self.range = index..index.saturating_add(length);
+        }
+        // Empty/native zero-height viewports can publish 0..0. Never let that
+        // stale window reserve list height while publishing no effect rows.
+        if !self.flat.is_empty() && (self.range.is_empty() || self.range.start >= self.flat.len()) {
+            self.range = 0..96;
         }
         self.cached_definitions = model.definitions.clone();
         self.cached_definition_generation = model.definition_generation;
@@ -828,6 +838,31 @@ impl EffectsPanel {
                         }
                     }
                 }
+                if self.add_to_selection {
+                    let others = model.selected_layers().to_vec();
+                    for target in others {
+                        if target == layer
+                            || !model.editable(&target)
+                            || matches!(text(&model.layer(&target)?, "type"), "audio" | "camera")
+                        {
+                            continue;
+                        }
+                        let extra = model.add_effect_at(caller, &target, kind, time)?;
+                        if let (
+                            Call::Transact {
+                                body: WriteBody::Commands(all),
+                                ..
+                            },
+                            Call::Transact {
+                                body: WriteBody::Commands(batch),
+                                ..
+                            },
+                        ) = (&mut request.call, extra.call)
+                        {
+                            all.extend(batch);
+                        }
+                    }
+                }
                 plan.request = Some(request);
             }
             "parameter" => {
@@ -916,7 +951,21 @@ impl EffectsPanel {
         if model.primary() == Some(&plan.layer)
             && let Some(selection) = plan.selection
         {
+            let focus = selection.focus.clone();
             model.effects = selection;
+            if self.range.end != usize::MAX {
+                let layer = model.layer(&plan.layer)?;
+                self.rebuild(model, &plan.layer, array(layer.get("fx")))?;
+                if let Some(index) = focus.and_then(|id| {
+                    self.flat
+                        .iter()
+                        .position(|r| r.id == format!("effect:{id}"))
+                }) {
+                    if index < self.range.start || index >= self.range.end {
+                        self.range = index..index.saturating_add(96);
+                    }
+                }
+            }
         }
         Ok(())
     }

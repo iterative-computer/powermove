@@ -1,6 +1,6 @@
 //! Tagged behaviors: threads.ts:139–239; spatial.ts:828–865,971–1061,
 //! 1702–1738,1762–1975; QuestionCard.svelte:17–45; ToolActivity.svelte:22–62.
-use pm_agents::{Access, Provider, persistence::Store};
+use pm_agents::{Access, ApprovalMode, Provider, persistence::Store};
 use pm_panel_agentpanel::{
     Error,
     activity::{Rows, Trace},
@@ -46,6 +46,69 @@ fn event(p: &mut Panel, seq: u64, value: Value) {
 fn question(secret: bool, transport: &str) -> Value {
     json!({"kind":"question","itemId":"q","requestId":"request1","transport":transport,"blocking":true,"questions":[{"id":"first","question":"Choose","multiSelect":true,"allowOther":true,"secret":secret,"options":[{"label":"A"},{"label":"B"}]}]})
 }
+#[test]
+fn fresh_profile_and_new_chats_start_on_auto() {
+    let mut p = panel();
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("t").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+    for (i, mode) in ["editor", "supervised", "auto", "full"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = p.active_id().to_owned();
+        if let Some(consent) = p.set_access(&id, mode).unwrap() {
+            p.acknowledge(consent.id, true).unwrap();
+        }
+        p.draft_mut(&id).unwrap().insert_text("keep", 1, false);
+        let new = format!("new-{i}");
+        assert_eq!(p.new_thread(&new, 2).unwrap(), new);
+        let settings = &p.session(&new).unwrap().settings;
+        assert_eq!(settings.access, Access::Project, "after {mode}");
+        assert_eq!(settings.approval, ApprovalMode::Auto, "after {mode}");
+    }
+}
+
+#[test]
+fn persisted_thread_without_access_starts_on_auto() {
+    let mut store = Memory::default();
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({
+            "version": 1, "activeId": "old", "threads": [
+                pm_agents::persistence::new_thread("old", 0)
+            ]
+        }),
+    );
+    let p = Panel::load(&mut store, "p", "unused", 1).unwrap();
+    assert_eq!(p.session("old").unwrap().settings.access, Access::Project);
+    assert_eq!(
+        p.session("old").unwrap().settings.approval,
+        ApprovalMode::Auto
+    );
+}
+
+#[test]
+fn saved_access_choices_survive_reload_and_blank_chat_reuse() {
+    for (mode, access, approval) in [
+        ("editor", Access::Editor, ApprovalMode::Auto),
+        ("supervised", Access::Project, ApprovalMode::Supervised),
+        ("auto", Access::Project, ApprovalMode::Auto),
+    ] {
+        let mut p = panel();
+        p.set_access("t", mode).unwrap();
+        let mut store = Memory::default();
+        p.save(&mut store, 1).unwrap();
+        let mut restored = Panel::load(&mut store, "p", "unused", 2).unwrap();
+        assert_eq!(restored.new_thread("unused", 3).unwrap(), "t");
+        let settings = &restored.session("t").unwrap().settings;
+        assert_eq!(settings.access, access, "{mode}");
+        assert_eq!(settings.approval, approval, "{mode}");
+    }
+}
+
 #[test]
 fn background_thread_preserves_drafts_run_and_streaming_without_switching_focus() {
     let mut p = panel();
@@ -340,7 +403,7 @@ fn question_skip_only_reply_transport_and_message_answer_preserves_composer() {
 fn computer_access_needs_matching_consent_and_late_grants_cannot_override_choice() {
     let mut p = panel();
     let effect = p.set_access("t", "full").unwrap().unwrap();
-    assert_eq!(p.session("t").unwrap().settings.access, Access::Editor);
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
     p.set_access("t", "editor").unwrap();
     assert!(p.acknowledge(effect.id, true).is_err());
     let effect = p.set_access("t", "full").unwrap().unwrap();
@@ -1323,4 +1386,139 @@ fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn citations_survive_save_reopen_and_send_structured_context() {
+    for provider in ["chatgpt", "claude", "compatible"] {
+        let mut store = Memory::default();
+        store.values.insert("agentThreads.p".into(), json!({"version":1,"activeId":"t","threads":[{"id":"t","provider":provider,"conversation":[],"composerDraft":"","attachments":[]}]}));
+        let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let quotes = vec![
+            json!({"messageId":"history:m","text":"😀 exact", "start":2,"end":10,"comment":"Explain this"}),
+        ];
+        p.draft_mut("t")
+            .unwrap()
+            .set_citations(quotes.clone())
+            .unwrap();
+        p.draft_mut("t").unwrap().set_text("My request", 1).unwrap();
+        p.save(&mut store, 2).unwrap();
+        let mut p = Panel::load(&mut store, "p", "t", 3).unwrap();
+        assert_eq!(p.session("t").unwrap().draft.citations(), quotes);
+        let effect = p.submit("t", "run", "request", 4).unwrap();
+        let EffectKind::Send { text, settings, .. } = effect.kind else {
+            panic!("send");
+        };
+        assert_eq!(settings.provider.name(), provider);
+        assert!(text.contains("<assistant_citations>"));
+        assert!(text.contains("Explain this"));
+        assert!(text.ends_with("My request"));
+        let message = p
+            .session("t")
+            .unwrap()
+            .conversation
+            .values()
+            .last()
+            .unwrap();
+        assert_eq!(message["text"], "My request");
+        assert_eq!(message["citations"], json!(quotes));
+        assert!(p.session("t").unwrap().draft.citations().is_empty());
+    }
+}
+#[test]
+fn invalid_citation_does_not_replace_existing_draft_context() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    let valid = vec![json!({"messageId":"m","text":"😀","start":0,"end":2,"comment":""})];
+    draft.set_citations(valid.clone()).unwrap();
+    assert!(draft.sendable());
+    assert!(
+        draft
+            .set_citations(vec![
+                json!({"messageId":"m","text":"😀","start":0,"end":1,"comment":""})
+            ])
+            .is_err()
+    );
+    assert_eq!(draft.citations(), valid);
+}
+
+#[test]
+fn undoing_composer_typing_keeps_reference_chips() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    draft.insert_text("before", 1, false);
+    let quote = vec![json!({"messageId":"m","text":"quote","start":0,"end":5,"comment":"Explain"})];
+    draft.set_citations(quote.clone()).unwrap();
+    draft.insert_text(" after", 100, false);
+    assert!(draft.undo(false));
+    assert_eq!(draft.request_text(), "before");
+    assert_eq!(draft.citations(), quote);
+}
+
+#[test]
+fn quotes_from_live_replies_keep_a_resolvable_source_after_finishing_and_reopening() {
+    let mut store = Memory::default();
+    let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "Reference".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    p.save(&mut store, 31).unwrap();
+    let p = Panel::load(&mut store, "p", "t", 32).unwrap();
+    let source = p.session("t").unwrap().draft.citations()[0]["messageId"]
+        .as_str()
+        .unwrap();
+    assert!(source.starts_with("history:"));
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let snapshot = window
+        .snapshot(&p, 0..window.count(&p).unwrap(), 33)
+        .unwrap();
+    assert!(
+        snapshot["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == source)
+    );
+}
+#[test]
+fn steering_with_a_live_quote_sends_its_archived_source_id() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    let effect = p.submit("t", "run1", "request2", 30).unwrap();
+    let EffectKind::Send { text, steer, .. } = effect.kind else {
+        panic!("send");
+    };
+    assert!(steer);
+    assert!(text.contains("history:message-1/step-0:"));
+    assert!(!text.contains(&format!("live:{source}")));
 }

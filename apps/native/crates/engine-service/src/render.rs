@@ -1187,6 +1187,11 @@ impl Engine {
             self.clear_cache();
         }
     }
+    /// A transient zoom surface must not leave a retained presentation cache.
+    pub fn forget_presenter(&mut self, presenter: usize) {
+        self.showing.retain(|(owner, _)| *owner != presenter);
+        debug_assert!(self.showing.iter().all(|(owner, _)| *owner != presenter));
+    }
     /// Every kept picture goes, a settled one not shown yet with them.
     pub fn clear_cache(&mut self) {
         self.cache.clear();

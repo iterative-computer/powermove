@@ -1,5 +1,18 @@
+//! Timeline gesture snapping parity with Electron. Viewer snapping is independent.
 //! Crossing latch ported from v1.2.0 directional-snap.ts:36–133.
-//! Tolerances are in time units supplied by the view; no visual constants here.
+//! Gesture profiles use Electron's screen-pixel thresholds at every zoom.
+
+pub const DIRECTIONAL_PX: f64 = 15.;
+pub const KEY_ACQUIRE_PX: f64 = 8.;
+pub const KEY_RELEASE_PX: f64 = 12.;
+pub fn tolerances(keys: bool, pps: f64) -> (f64, f64) {
+    let scale = pps.max(1.);
+    if keys {
+        (KEY_ACQUIRE_PX / scale, KEY_RELEASE_PX / scale)
+    } else {
+        (DIRECTIONAL_PX / scale, DIRECTIONAL_PX / scale)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
     In,

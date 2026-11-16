@@ -23,7 +23,8 @@ fn install_main_effects(
     }
     turn
 }
-fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
+#[track_caller]
+pub(crate) fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(result) = ticket.try_take() {
@@ -33,7 +34,7 @@ fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
         thread::sleep(Duration::from_millis(1));
     }
 }
-fn actor() -> KernelActor {
+pub(crate) fn actor() -> KernelActor {
     let actor = KernelActor::spawn(KernelConfig::default());
     let project=pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
     actor
@@ -787,7 +788,7 @@ fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
     assert_eq!((x("a"), x("b"), x("c")), (100., 300., 500.));
     assert_eq!(
         published.history.undo_label.as_deref(),
-        Some("Distribute Layers")
+        Some("Distribute Horizontally")
     );
 }
 
@@ -2216,27 +2217,9 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     let mut panels = Builtins::new(kernel.clone(), "P", || {}).unwrap();
     finish(panels.mount("settings").unwrap());
     finish(panels.show("settings").unwrap());
-    // Settings shows one section per page: open Memory from the sidebar.
-    let first = panels.take_publications().pop().unwrap();
-    let nav = first
-        .surface
-        .nodes()
-        .values()
-        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("settings.nav.memory"))
-        .unwrap()
-        .id;
-    finish(
-        panels
-            .event(
-                "settings",
-                first.generation,
-                first.surface.revision(),
-                nav,
-                "click",
-                EventDetail::default(),
-            )
-            .unwrap(),
-    );
+    // Settings' AppKit sidebar selects the page through the panel model.
+    panels.take_publications();
+    finish(panels.panel_act("settings", &json!({"select":"memory"})).unwrap());
     let publication = panels.take_publications().pop().unwrap();
     assert!(
         publication
@@ -5926,11 +5909,20 @@ fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs
         )
         .unwrap();
     if let crate::models::NativeCommand::Value(menu) = menu {
-        assert!(
-            menu.as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["label"] == "Close Others")
+        let labels: Vec<_> = menu
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Composition Settings…",
+                "New Composition…",
+                "Close",
+                "Close Others"
+            ]
         );
     }
     backend
@@ -5952,4 +5944,334 @@ fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs
     assert_eq!(pending["tabs"].as_array().unwrap().len(), 2);
     assert_eq!(pending["tabs"][1]["id"], "spinner");
     assert_eq!(pending["tabs"][0]["id"], "c");
+}
+
+#[test]
+fn delete_toast_is_emitted_only_after_project_delete_acknowledgement() {
+    use pm_surface::host_api::{HOST_API_VERSION, HostOperation, HostRequest, Identity};
+    use pm_surface::host_data::KernelData;
+    for input in [pm_panel_media::Input::DeleteAsset("file".into()), pm_panel_media::Input::Invoke(pm_panel_media::MenuCommand::DeleteComposition("C2".into()))] {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel.open("toast", OpenSource::Untitled(pm_model::json::parse(r#"{"id":"toast","compId":"C1","compName":"Main","w":640,"h":360,"fps":30,"dur":10,"layers":[],"assets":{"file":{"id":"file","name":"Clip.mov","kind":"video"}},"comps":{"C2":{"id":"C2","name":"Second","w":640,"h":360,"fps":30,"dur":10,"layers":[]}}}"#).unwrap())).wait().unwrap().unwrap();
+        let identity = Identity { realm: "assets".into(), generation: 1, project: "toast".into() };
+        let backend = Arc::new(Mutex::new(data::Backend::new(kernel.clone(), identity.clone(), "assets", false).unwrap()));
+        let before = kernel.published("toast").unwrap();
+        let catalog = pm_panel_media::Catalog::published(&before).unwrap();
+        let args = serde_json::to_value(pm_panel_media::v4::Request { owner: catalog.stamp, action: pm_panel_media::v4::Action::Input(input) }).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        data::Data(backend.clone()).enqueue(HostRequest { version: HOST_API_VERSION, realm: identity.realm, generation: 1, project: "toast".into(), request_id: 1, expected_revision: before.revision(), expected_state_revision: None, operation: HostOperation::Command { command: "panel.project".into(), args } }, tx).unwrap();
+        assert!(!backend.lock().unwrap().native.platform.iter().any(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v.clone()).is_ok_and(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. }))));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            backend.lock().unwrap().tick().unwrap();
+            if rx.try_recv().is_ok() { break; }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let effects = std::mem::take(&mut backend.lock().unwrap().native.platform);
+        let deleted: Vec<_> = effects.into_iter().filter(|(op, _)| op == "project.effect").map(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v).unwrap()).filter(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. })).collect();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].owner.revision, kernel.published("toast").unwrap().revision());
+        kernel.call("toast", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo).with_document(deleted[0].owner.document).outside_revision(deleted[0].owner.revision)).wait().unwrap().unwrap();
+        let restored = pm_panel_media::Catalog::published(&kernel.published("toast").unwrap()).unwrap();
+        assert!(restored.assets.contains_key("file"));
+        assert!(restored.compositions.contains_key("C2"));
+    }
+}
+
+#[test]
+fn layer_and_keyframe_deletion_never_emit_delete_toast() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity { realm: "assets".into(), generation: 1, project: "synthetic".into() };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "assets", false).unwrap();
+    let apply = |command: pm_kernel::Command| {
+        let ack = kernel.call("synthetic", Request::new(Caller::native(), pm_kernel::Call::Transact { label: None, expected_revision: None, body: pm_kernel::WriteBody::Commands(vec![command]) })).wait().unwrap().unwrap();
+        assert!(matches!(ack.reply, pm_kernel::Reply::Applied { .. }));
+    };
+    apply(pm_kernel::KeyframeCommand::Add { layer_id: "a".into(), channel: "opacity".into(), time: 0., key_id: "toast-key".into(), value: Some(pm_model::Value::Number(50.)) }.into());
+    for command in [pm_kernel::Command::Keyframe(pm_kernel::KeyframeCommand::Delete { key_ids: vec!["toast-key".into()] }), pm_kernel::Command::Layer(pm_kernel::LayerCommand::Delete { layer_ids: vec!["a".into()] })] {
+        let before = kernel.published("synthetic").unwrap().snapshot.document.to_value().unwrap();
+        apply(command);
+        backend.sync().unwrap();
+        backend.tick().unwrap();
+        assert!(!backend.native.platform.iter().any(|(_, v)| serde_json::from_value::<pm_panel_media::HostRequest>(v.clone()).is_ok_and(|r| matches!(r.effect, pm_panel_media::Effect::Deleted { .. }))));
+        kernel.call("synthetic", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo)).wait().unwrap().unwrap();
+        assert_eq!(kernel.published("synthetic").unwrap().snapshot.document.to_value().unwrap(), before);
+    }
+}
+
+#[test]
+fn properties_effects_stack_add_edit_and_multiselection_undo() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let mut project = data::wire(&pm_model::json::parse(r##"{"id":"synthetic","name":"Effects","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Shape","from":0,"dur":10,"on":true,"p":{},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap());
+    let mut second = project["layers"][0].clone();
+    second["id"] = json!("b");
+    project["layers"].as_array_mut().unwrap().push(second);
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into(), "b".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let backend = panels
+        .broker
+        .entry("inspector")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let send = |intent: Value| {
+        let p = backend.lock().unwrap().projection().unwrap();
+        let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":p["layer"],"intent":intent});
+        finish(
+            panels
+                .realms
+                .lock()
+                .unwrap()
+                .get("inspector")
+                .unwrap()
+                .eval(format!(
+                    "__pmBuiltin.command('panel.effect-controls',{args})"
+                ))
+                .unwrap(),
+        );
+    };
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    send(json!({"type":"add","definition":"blur"}));
+    let p = kernel.published("synthetic").unwrap();
+    assert_eq!(p.history.entries, before + 1);
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    for id in ["a", "b"] {
+        assert_eq!(
+            data::wire(&model.layer(id).unwrap())["fx"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let snapshot = properties::Properties::default()
+        .snapshot(&mut model, 0., false)
+        .unwrap();
+    let sections = snapshot["sections"].as_array().unwrap();
+    let effect_index = sections.iter().position(|s| s["id"] == "effects").unwrap();
+    assert!(effect_index < sections.iter().position(|s| s["id"] == "masks").unwrap());
+    let projection = backend.lock().unwrap().projection().unwrap();
+    assert_eq!(projection["effectCount"], 1);
+    assert!(
+        projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "parameter")
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    for id in ["a", "b"] {
+        assert!(
+            data::wire(&model.layer(id).unwrap())["fx"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Redo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in panels.publish() {
+        finish(ticket.unwrap());
+    }
+    let projection = backend.lock().unwrap().projection().unwrap();
+    let parameter = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "parameter" && r["parameter"]["control"] == "number")
+        .unwrap()["parameter"]
+        .clone();
+    finish(
+        panels
+            .write(
+                "inspector",
+                parameter["binding"].as_str().unwrap(),
+                json!(17.),
+            )
+            .unwrap(),
+    );
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let id = pm_panel_inspector::PropertyId::from_value(
+        &pm_model::json::parse(parameter["id"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(17.)
+    );
+}
+
+#[test]
+fn newly_added_effect_ack_publishes_controls_without_another_document_change() {
+    for panel in ["layer-effects", "inspector"] {
+        for definition in ["blur", "synthetic.glow"] {
+            let actor = actor();
+            let kernel = actor.handle();
+            register_synthetic_effect(&kernel);
+            select_layer(&kernel, "a");
+            let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+            finish(panels.mount(panel).unwrap());
+            let backend = panels
+                .broker
+                .entry(panel)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .backend
+                .clone();
+            let send = |intent: Value| {
+                let p = backend.lock().unwrap().projection().unwrap();
+                let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":"a","intent":intent});
+                finish(
+                    panels
+                        .realms
+                        .lock()
+                        .unwrap()
+                        .get(panel)
+                        .unwrap()
+                        .eval(format!(
+                            "__pmBuiltin.command('panel.effect-controls',{args})"
+                        ))
+                        .unwrap(),
+                )
+            };
+            // A zero-height viewport can arrive while the stack is empty.
+            send(json!({"type":"range","range":[0,0]}));
+            let before = kernel.published("synthetic").unwrap().history.entries;
+            send(json!({"type":"add","definition":definition}));
+            let p = backend.lock().unwrap().projection().unwrap();
+            assert_eq!(p["effectCount"], 1);
+            assert!(
+                p["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["kind"] == "parameter")
+            );
+            assert_eq!(
+                kernel.published("synthetic").unwrap().history.entries,
+                before + 1
+            );
+        }
+    }
+}
+
+/// PM-376: the Export sheet's subscription, published on every document
+/// change, plans the export and checks the encoders only while the sheet is
+/// open; closed, the project's own facts stay current and the last plan's
+/// figures are kept, so an edit or an undo no longer waits for a plan.
+#[test]
+fn the_export_subscription_plans_only_while_the_sheet_is_open() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-closed".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["capabilities"]["mp4"]["reason"], "Checking…");
+    assert_eq!(closed["project"]["summary"], "");
+    assert!(closed["project"]["id"].is_string());
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    let open = sheet.export_publication().unwrap();
+    assert_eq!(open["project"]["summary"], "300 frames · 10 s · 640×360");
+    assert_ne!(open["capabilities"]["mp4"]["reason"], "Checking…");
+    sheet.native_command("export.dismiss", &json!({})).unwrap();
+    let p = kernel.published("synthetic").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Composition Settings".into()),
+                    expected_revision: Some(p.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                width: Some(1280.0),
+                                height: Some(720.0),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["project"]["width"], 1280);
+    assert_eq!(closed["project"]["summary"], "300 frames · 10 s · 640×360");
+    // Opened again, it plans the project as it is now.
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    assert_eq!(
+        sheet.export_publication().unwrap()["project"]["summary"],
+        "300 frames · 10 s · 1280×720"
+    );
 }

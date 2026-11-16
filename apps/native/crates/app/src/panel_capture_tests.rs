@@ -36,7 +36,19 @@ fn capture_builtin_panels() {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let r = if let Ok(path) = std::env::var("PM_PANEL_CAPTURE_PROJECT") {
-                    rig_project(panel, &std::fs::read_to_string(path).unwrap())
+                    if std::path::Path::new(&path)
+                        .extension()
+                        .is_some_and(|e| e == "pmv")
+                    {
+                        let opened = pm_kernel::open_project(
+                            std::path::Path::new(&path),
+                            Default::default(),
+                        )
+                        .unwrap();
+                        crate::v4_view_tests::rig_source(panel, pm_kernel::OpenSource::File(opened))
+                    } else {
+                        rig_project(panel, &std::fs::read_to_string(path).unwrap())
+                    }
                 } else {
                     rig(panel, 8)
                 };
@@ -62,11 +74,91 @@ fn capture_builtin_panels() {
                         }
                     }
                 }
+                if let Ok(layer) = std::env::var("PM_PANEL_CAPTURE_EXPAND") {
+                    let ticket = r.runtime.timeline_action(serde_json::json!({"type":"disclosure", "id":pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer)), "open":true})).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    loop {
+                        if let Some(result) = ticket.try_take() {
+                            result.unwrap();
+                            break;
+                        }
+                        assert!(std::time::Instant::now() < deadline);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    let client = pm_panel_timeline::TimelineClient::new(
+                        r.kernel.clone(),
+                        PROJECT,
+                        pm_kernel::Caller::native(),
+                    )
+                    .unwrap();
+                    let rows =
+                        pm_panel_timeline::v4::project_window(&client.model, 0, 512).unwrap();
+                    std::fs::write(
+                        format!("{dir}/timeline-{name}-rows.json"),
+                        serde_json::to_vec_pretty(&rows).unwrap(),
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        format!("{dir}/timeline-{name}-ui.txt"),
+                        format!(
+                            "{:?}",
+                            r.kernel.published(PROJECT).unwrap().ui_state.timeline
+                        ),
+                    )
+                    .unwrap();
+                }
+                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                    let ticket = r.runtime.observe_render_queue(serde_json::json!([
+                        {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
+                        {"id":2,"name":"Logo","format":"prores","profile":"422","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
+                        {"id":3,"name":"Yesterday","format":"mp4","path":"/Exports/Yesterday.mp4","status":"Done","progress":1.,"error":"","finishedAt":1794686520},
+                        {"id":4,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Failed","progress":0.,"error":"Missing media","finishedAt":1794686460},
+                        {"id":5,"name":"Lower third","format":"mp4","path":"/Exports/Lower-third.mp4","status":"Cancelled","progress":0.,"error":"","finishedAt":1794686280}
+                    ])).unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
+                if panel == "export" {
+                    if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                        let ticket = r.runtime.observe_export(serde_json::json!({"phase":"rendering","frame":126,"total":300,"elapsed":12.,"eta":17.})).unwrap();
+                        while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                    }
+                    let ticket = r.runtime.show("export").unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(h);
-                let first = publication(&r);
+                let _preset_profile = tempfile::tempdir().unwrap();
+                if panel == "fxbrowser" && std::env::var_os("PM_PRESET_CAPTURE").is_some() {
+                    r.runtime.set_presets_folder(_preset_profile.path());
+                    let folder = _preset_profile.path().join("presets");
+                    std::fs::create_dir_all(&folder).unwrap();
+                    std::fs::write(folder.join("move.json"),r#"{"schemaVersion":1,"id":"move","name":"Gentle Move","effects":[],"properties":[{"path":"opacity","channel":{"v":100,"kf":[]}}]}"#).unwrap();
+                    if std::env::var("PM_PRESET_CAPTURE").as_deref() == Ok("sheet") {
+                        let ticket = r
+                            .runtime
+                            .preset_sheet(serde_json::json!({"layer":"l0"}))
+                            .unwrap();
+                        while ticket.try_take().is_none() {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    } else {
+                        for (_, t) in r.runtime.publish() {
+                            let t = t.unwrap();
+                            while t.try_take().is_none() {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                        }
+                    }
+                }
+                let mut first = publication(&r);
+                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                    let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("queue.job.4")).unwrap().id;
+                    let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "pointerenter", Default::default()).unwrap();
+                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                    first = r.runtime.take_publications().pop().unwrap_or(first);
+                }
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
                     Arc::new(
@@ -95,6 +187,16 @@ fn capture_builtin_panels() {
                 for _ in 0..40 {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                if std::env::var_os("PM_PANEL_CAPTURE_BOTTOM").is_some() {
+                    window
+                        .update(&mut cx, |frame, _, cx| {
+                            frame
+                                .view
+                                .update(cx, |view, cx| view.review_scroll_to(f32::MAX, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image.save(format!("{dir}/{panel}-{name}.png")).unwrap();
@@ -132,6 +234,7 @@ impl gpui::Render for Frame {
 #[test]
 #[ignore = "writes PNGs; set PM_AGENT_STATES and PM_PANEL_CAPTURE"]
 fn capture_agent_states() {
+    let timeline = std::env::var_os("PM_COMP_TAB_STATES").is_some();
     let Ok(states) = std::env::var("PM_AGENT_STATES") else {
         return;
     };
@@ -156,9 +259,13 @@ fn capture_agent_states() {
         for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = (tokens.metrics.agent_width, tokens.metrics.agent_height);
+                let (w, h) = if timeline {
+                    (900., 200.)
+                } else {
+                    (tokens.metrics.agent_width, tokens.metrics.agent_height)
+                };
                 let first = pm_builtins::Publication {
-                    panel: "agent".into(),
+                    panel: if timeline { "timeline" } else { "agent" }.into(),
                     generation: 1,
                     surface: surface.clone(),
                 };
@@ -179,7 +286,18 @@ fn capture_agent_states() {
                 let window = cx
                     .open_window(size(px(w), px(h)), |window, cx| {
                         let view = cx.new(|cx| {
-                            SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
+                            let mut view = SurfaceView::new(
+                                runtime,
+                                first,
+                                tokens,
+                                Natives::default(),
+                                window,
+                                cx,
+                            );
+                            if timeline {
+                                view.capture_composition_tab_hover(name.contains("-hover"));
+                            }
+                            view
                         });
                         cx.new(|_| Frame { view, fill })
                     })
@@ -190,7 +308,11 @@ fn capture_agent_states() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
-                    .save(format!("{dir}/agent-{name}-{scheme_name}.png"))
+                    .save(if timeline {
+                        format!("{dir}/{name}-{scheme_name}.png")
+                    } else {
+                        format!("{dir}/agent-{name}-{scheme_name}.png")
+                    })
                     .unwrap();
             });
         }

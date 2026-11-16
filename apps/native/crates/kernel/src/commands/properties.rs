@@ -28,6 +28,7 @@ pub enum KeyMode {
 }
 
 /// `set_property`.
+/// Interactive edits can carry the kernel key selection to update selected keys together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetProperty {
     pub layer_id: String,
@@ -200,18 +201,19 @@ pub(crate) fn resolve(
     // The 3D source preserves hand-authored channels for every generated
     // origin, including expressions and full keyframe replacements.
     if cx.origin().is_generated()
-        && (layer.get("d").and_then(|d|d.get("extrusion")).is_some() || layer
-            .get("d")
-            .and_then(|d| d.get("definition"))
-            .and_then(Value::as_str)
-            .is_some_and(|d| {
-                [
-                    pm_scene3d::schema::OBJECT,
-                    pm_scene3d::schema::LIGHT,
-                    pm_scene3d::schema::CAMERA,
-                ]
-                .contains(&d)
-            }))
+        && (layer.get("d").and_then(|d| d.get("extrusion")).is_some()
+            || layer
+                .get("d")
+                .and_then(|d| d.get("definition"))
+                .and_then(Value::as_str)
+                .is_some_and(|d| {
+                    [
+                        pm_scene3d::schema::OBJECT,
+                        pm_scene3d::schema::LIGHT,
+                        pm_scene3d::schema::CAMERA,
+                    ]
+                    .contains(&d)
+                }))
         && (locked_intent(&layer, &key) || locked_intent(&layer, "3d"))
     {
         return Err(CommandError::PreservedHandEdit {
@@ -373,8 +375,10 @@ pub(crate) fn plan_set(
     origin: super::Origin,
     c: &SetProperty,
     presets: &mut Presets,
+    selection: &crate::selection::Selection,
 ) -> Result<Vec<pm_model::Op>, CommandError> {
     let mut cx = Cx::new(root, origin);
+    cx.selection = Some(selection);
     set_property_inner(&mut cx, c, Some(presets), true)?;
     Ok(cx.finish())
 }
@@ -416,10 +420,52 @@ fn set_property_inner(
     let local = track::local_time(&layer, time);
     // Migrate only an inactive legacy atmosphere when it is first enabled.
     // This remains part of this single-writer edit and its Undo record.
-    if migrate_fog && channel == "world.fogDensity" && !keyed && value.as_f64().is_some_and(|v| v > 0.) {
+    if migrate_fog
+        && channel == "world.fogDensity"
+        && !keyed
+        && value.as_f64().is_some_and(|v| v > 0.)
+    {
         migrate_inactive_fog(&mut layer)?;
     }
-    if keyed {
+    // Selection belongs to the kernel document, never a panel's cached rows.
+    // Only the addressed scalar channel is changed (linked axes are separate commands).
+    let selected: Vec<String> = if keyed && cx.origin().is_human() {
+        cx.selection
+            .map(|selection| {
+                track::keys_of(&prop)
+                    .iter()
+                    .filter_map(|key| key.get("i").and_then(Value::as_str))
+                    .filter(|id| selection.key_selected(&c.layer_id, id))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let snapped = values::snap(local, fps).max(0.0);
+    let multi = selected.len() > 1
+        && track::keys_of(&prop).iter().any(|key| {
+            key.get("t")
+                .and_then(Value::as_f64)
+                .is_some_and(|t| (t - snapped).abs() < 0.5 / fps)
+                && key
+                    .get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| selected.iter().any(|s| s == id))
+        });
+    if multi {
+        let prop = channels::get_mut(&mut layer, &path).expect("resolved");
+        for key in track::keys_mut(prop) {
+            if key
+                .get("i")
+                .and_then(Value::as_str)
+                .is_some_and(|id| selected.iter().any(|s| s == id))
+            {
+                values::obj(key).insert("v", value.clone());
+            }
+        }
+    } else if keyed {
         let prop = channels::get_mut(&mut layer, &path).expect("resolved");
         let before = track::keys_of(prop).len();
         let (id, _) = track::set_key_on(

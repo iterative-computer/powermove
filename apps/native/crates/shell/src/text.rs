@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 pub struct TextField {
     slot: Rc<NativeTextSlot>,
+    /// Where the slot was painted inside a scroll layer, to follow it.
+    layer: Rc<crate::layer_stage::LayerStage>,
     kind: TextKind,
     value: String,
     placeholder: SharedString,
@@ -95,6 +97,7 @@ impl TextField {
         .detach();
         Self {
             slot,
+            layer: Rc::default(),
             kind,
             value: value.into(),
             placeholder: SharedString::default(),
@@ -218,14 +221,26 @@ impl TextField {
             self.placeholder = text.to_owned().into();
         }
     }
-    pub fn keep(&self) {
-        self.slot.keep();
+    /// Stages the slot again on a frame whose cached paint did not run: as
+    /// last painted, or shifted with the scroll layer it is in.
+    pub fn keep(&self, window: &Window) {
+        match self.layer.kept(window) {
+            Some((bounds, clip)) => self.slot.stage(
+                crate::native_control::ns_rect(bounds),
+                crate::native_control::ns_rect(clip),
+            ),
+            None => self.slot.keep(),
+        }
     }
     pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
         self.slot.accessibility_item()
     }
     pub fn value(&self) -> &str {
         &self.value
+    }
+    /// Whether this value is currently accepting typed text.
+    pub fn is_editing(&self) -> bool {
+        self.slot.is_editing()
     }
     /// The text as it stands in the editor, typed but not yet committed.
     pub fn editing_text(&self) -> String {
@@ -312,6 +327,7 @@ const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
+        let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
             .then(|| self.lines(window, 2));
         // A composer grows with its wrapped lines too, not only its returns:
@@ -464,6 +480,7 @@ impl Render for TextField {
                             bounds.origin.y += px(DENSE_EDIT_DROP);
                             bounds.size.height -= px(DENSE_EDIT_DROP);
                         }
+                        let (bounds, mask) = layer.painted(bounds, mask, window);
                         slot.stage(rect(bounds), rect(mask));
                     },
                 )

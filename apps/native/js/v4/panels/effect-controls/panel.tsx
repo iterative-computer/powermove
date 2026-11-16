@@ -17,6 +17,8 @@ const stop = (e: SurfaceEvent) => e.stopPropagation();
 /** The rows the panel first publishes (the native side's 0..96 window). */
 const ROW_WINDOW = 96;
 export interface PanelProps {
+  /** Properties shares the stack without the standalone panel chrome. */
+  embedded?: boolean;
   controller: EffectsController;
   /** Must be resolved from pm-design Tokens.metrics.row by the native worker. */
   rowHeight: number;
@@ -149,32 +151,34 @@ export function EffectControls(props: PanelProps) {
         setKeyboard(false);
       }}
     >
-      <div
-        role="group"
-        label={PANEL_TITLE}
-        data-pm-slot="header"
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "end",
-          height: t("metrics.header"),
-          paddingLeft: t("metrics.inset"),
-        }}
-      >
-        {p.target === "Layer" && (
-          <UI.ToolbarItem
-            id={`${PANEL_ID}:add`}
-            label="Add Effect"
-            title="Add Effect"
-            disabled={!editable}
-            attr={{ symbol: "plus" }}
-            onClick={add}
-            style={{ symbolSize: t("metrics.symbol_panel") }}
-          />
-        )}
-      </div>
-      {p.layer && (
+      {!props.embedded && (
+        <div
+          role="group"
+          label={PANEL_TITLE}
+          data-pm-slot="header"
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "end",
+            height: t("metrics.header"),
+            paddingLeft: t("metrics.inset"),
+          }}
+        >
+          {p.target === "Layer" && (
+            <UI.ToolbarItem
+              id={`${PANEL_ID}:add`}
+              label="Add Effect"
+              title="Add Effect"
+              disabled={!editable}
+              attr={{ symbol: "plus" }}
+              onClick={add}
+              style={{ symbolSize: t("metrics.symbol_panel") }}
+            />
+          )}
+        </div>
+      )}
+      {!props.embedded && p.layer && (
         <div
           role="heading"
           label={`${p.name} · ${p.typeLabel}`}
@@ -263,7 +267,9 @@ export function EffectControls(props: PanelProps) {
               // The rows keep their height: in a dock too short for them the
               // panel's body scrolls (a short dock left them none, U4). A
               // stack longer than the first row window scrolls in the list.
-              rowFloor: Math.min(p.count, ROW_WINDOW),
+              rowFloor: props.embedded
+                ? p.count
+                : Math.min(p.count, ROW_WINDOW),
               rowCount: p.count,
               effectCount: p.effectCount,
               focus: p.focus,
@@ -274,7 +280,8 @@ export function EffectControls(props: PanelProps) {
             onDragOver={(e) => dragOver(e, p.effectCount)}
             onDrop={drop}
           >
-            <virtual-list
+            <StackRows
+              embedded={props.embedded}
               count={p.count}
               range={p.range}
               itemSize={props.rowHeight}
@@ -283,7 +290,7 @@ export function EffectControls(props: PanelProps) {
                 overscanViewports: 1,
                 anchor: p.rows[0]?.id ?? null,
               }}
-              onRangeChange={(e) => {
+              onRangeChange={(e: SurfaceEvent) => {
                 if (e.range) {
                   const [start, end] = e.range,
                     length = end - start;
@@ -349,6 +356,9 @@ export function EffectControls(props: PanelProps) {
                       dragging: drag?.id === row.id,
                       dragOpacity: drag?.id === row.id ? 0.5 : 1,
                       insertBefore: drag?.slot === row.ordinal,
+                      insertAfter:
+                        drag?.slot === p.effectCount &&
+                        row.ordinal === p.effectCount - 1,
                       reduceMotion: !!props.reduceMotion,
                     }}
                     onPointerMove={(e) => {
@@ -384,7 +394,13 @@ export function EffectControls(props: PanelProps) {
                       if (editable && e.target === e.currentTarget)
                         setDrag({ id: row.id, slot: row.ordinal });
                     }}
-                    onDragOver={(e) => dragOver(e, row.ordinal)}
+                    onDragOver={(e) =>
+                      dragOver(
+                        e,
+                        row.ordinal + (e.y !== undefined && e.y > 0.5 ? 1 : 0),
+                      )
+                    }
+                    onDrop={drop}
                     onDragEnd={() => setDrag(null)}
                     style={{
                       display: "flex",
@@ -403,6 +419,19 @@ export function EffectControls(props: PanelProps) {
                       fontWeight: t("typography.semibold_weight"),
                       paddingLeft: t("metrics.border"),
                       borderRadius: t("metrics.control_radius"),
+                      ...(drag?.slot === row.ordinal
+                        ? {
+                            borderTopWidth: t("metrics.border"),
+                            borderColor: t("colors.accent"),
+                          }
+                        : {}),
+                      ...(drag?.slot === p.effectCount &&
+                      row.ordinal === p.effectCount - 1
+                        ? {
+                            borderBottomWidth: t("metrics.border"),
+                            borderColor: t("colors.accent"),
+                          }
+                        : {}),
                       ...(row.ordinal ? { marginTop: t("metrics.gap") } : {}),
                       ...(hover === row.id && !row.selected && !p.locked
                         ? { background: t("colors.hover") }
@@ -539,7 +568,7 @@ export function EffectControls(props: PanelProps) {
                   </UI.ListItem>
                 ),
               )}
-            </virtual-list>
+            </StackRows>
           </UI.List>
           {drag && (
             <div
@@ -818,5 +847,13 @@ function ParameterView({
         {field}
       </UI.InspectorRow>
     </div>
+  );
+}
+
+function StackRows({ embedded, children, ...props }: any) {
+  return embedded ? (
+    <div>{children}</div>
+  ) : (
+    <virtual-list {...props}>{children}</virtual-list>
   );
 }

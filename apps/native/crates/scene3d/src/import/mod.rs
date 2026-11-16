@@ -1,5 +1,6 @@
 //! Bounded imports of explicitly supplied bytes. No URL or sibling-file reads.
 pub mod archive;
+pub mod path;
 pub mod cad;
 mod obj;
 pub mod splats;

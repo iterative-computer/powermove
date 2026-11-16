@@ -265,6 +265,31 @@ impl ViewerDecode {
         n: usize,
         want: Want,
     ) -> Result<Fetched> {
+        self.fetch_inner(source, instance, n, want, false)
+            .map(|frame| frame.expect("a waiting fetch always returns a frame"))
+    }
+
+    /// Playback's deadline applies even before the first source frame exists.
+    /// None means preparation continues asynchronously. Exact/paused requests
+    /// still wait; callers can hold an earlier picture while the rest draws.
+    pub fn fetch_ready(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        n: usize,
+        want: Want,
+    ) -> Result<Option<Fetched>> {
+        self.fetch_inner(source, instance, n, want, true)
+    }
+
+    fn fetch_inner(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        n: usize,
+        want: Want,
+        allow_pending: bool,
+    ) -> Result<Option<Fetched>> {
         let sample = source
             .index
             .frames
@@ -279,7 +304,15 @@ impl ViewerDecode {
         self.stats.lock().unwrap().requests += 1;
         loop {
             let worker = self.worker(source, instance);
-            if let Some(fetched) = self.fetch_on(&worker.shared, &key, n, want) {
+            if let Some(fetched) = self.fetch_on(
+                &worker.shared,
+                &key,
+                n,
+                want,
+                allow_pending
+                    && matches!(want, Want::Playback(_))
+                    && super::diag::knob("PM_ABL_BLOCK_COLD_DECODE") != Some(1),
+            ) {
                 return fetched;
             }
             // The worker exited idle before it saw the request: `worker`
@@ -297,7 +330,8 @@ impl ViewerDecode {
         key: &FrameKey,
         n: usize,
         want: Want,
-    ) -> Option<Result<Fetched>> {
+        allow_pending: bool,
+    ) -> Option<Result<Option<Fetched>>> {
         if let Some(frame) = self.service.cache().get(key) {
             let mut st = shared.state.lock().unwrap();
             if !shared.alive.load(Ordering::Acquire) {
@@ -312,11 +346,11 @@ impl ViewerDecode {
             st.ahead_from = Some(n);
             drop(st);
             shared.wake.notify_one();
-            return Some(Ok(Fetched {
+            return Some(Ok(Some(Fetched {
                 frame,
                 shown: n,
                 exact: true,
-            }));
+            })));
         }
         let mut st = shared.state.lock().unwrap();
         if !shared.alive.load(Ordering::Acquire) {
@@ -340,12 +374,12 @@ impl ViewerDecode {
             shared.wake.notify_one();
             if let Some((shown, frame)) = shared.nearest(n, &st) {
                 self.stats.lock().unwrap().stand_ins += 1;
-                    super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
-                return Some(Ok(Fetched {
+                super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
+                return Some(Ok(Some(Fetched {
                     frame,
                     shown,
                     exact: false,
-                }));
+                })));
             }
             // Nothing decoded yet to stand in: wait for the exact frame.
         }
@@ -365,7 +399,10 @@ impl ViewerDecode {
         };
         loop {
             if let Some(frame) = st.delivered.get(&n).cloned() {
-                super::diag::bump(&super::diag::FETCH_WAIT_US, waited.elapsed().as_micros() as u64);
+                super::diag::bump(
+                    &super::diag::FETCH_WAIT_US,
+                    waited.elapsed().as_micros() as u64,
+                );
                 let left = st.waiting.get_mut(&n).map(|w| {
                     *w -= 1;
                     *w
@@ -376,11 +413,11 @@ impl ViewerDecode {
                 }
                 st.unfirm(n, want);
                 st.present(n, want, n, &frame);
-                return Some(Ok(Fetched {
+                return Some(Ok(Some(Fetched {
                     frame,
                     shown: n,
                     exact: true,
-                }));
+                })));
             }
             if let Some(e) = st.failed.get(&n).cloned() {
                 let left = st.waiting.get_mut(&n).map(|w| {
@@ -413,11 +450,15 @@ impl ViewerDecode {
                     st.present(n, want, shown, &frame);
                     self.stats.lock().unwrap().stand_ins += 1;
                     super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
-                    return Some(Ok(Fetched {
+                    return Some(Ok(Some(Fetched {
                         frame,
                         shown,
                         exact: false,
-                    }));
+                    })));
+                }
+                if allow_pending {
+                    st.leave(n);
+                    return Some(Ok(None));
                 }
                 st = shared.done.wait(st).unwrap();
                 continue;
@@ -608,10 +649,7 @@ impl Shared {
             .filter(|&m| (*floor..=n).contains(&m))
             .max()
             .and_then(|m| cache.get(&self.key(m)).map(|f| (m, f)));
-        let latest = st
-            .latest
-            .clone()
-            .filter(|(m, _)| (*floor..=n).contains(m));
+        let latest = st.latest.clone().filter(|(m, _)| (*floor..=n).contains(m));
         [cached, latest]
             .into_iter()
             .flatten()
@@ -640,7 +678,11 @@ impl Shared {
                         && st.presented.is_some()
                         && !st.firm.contains_key(&n);
                     if st.stride < 0 {
-                        (self.reverse_reach(&st), st.stride.unsigned_abs() as usize, forward)
+                        (
+                            self.reverse_reach(&st),
+                            st.stride.unsigned_abs() as usize,
+                            forward,
+                        )
                     } else {
                         (0, 1, forward)
                     }
@@ -917,7 +959,11 @@ mod tests {
             purpose: DecodePurpose::Display,
         };
         for want in [Want::Exact, Want::Scrub] {
-            assert!(viewer.fetch_on(&worker.shared, &key(5), 5, want).is_none());
+            assert!(
+                viewer
+                    .fetch_on(&worker.shared, &key(5), 5, want, false)
+                    .is_none()
+            );
         }
         let st = worker.shared.state.lock().unwrap();
         assert!(st.exact.is_empty() && st.scrub.is_none());
@@ -947,7 +993,11 @@ mod tests {
         let shown = viewer.fetch(&src, 1, 8, Want::Exact).unwrap();
         assert!(shown.exact && shown.shown == 8);
         // Playing reaches frame 8 from the cache.
-        let play = |n| viewer.fetch(&src, 1, n, Want::Playback(Duration::ZERO)).unwrap();
+        let play = |n| {
+            viewer
+                .fetch(&src, 1, n, Want::Playback(Duration::ZERO))
+                .unwrap()
+        };
         assert!(play(8).exact);
         // Frame 8 and everything after it is evicted; frame 3 stays. (The
         // look-ahead from 8 settles first and is not restarted.)
@@ -974,7 +1024,11 @@ mod tests {
             st.latest = Some((3, early.frame.clone()));
         }
         let looped = play(2);
-        assert!(looped.exact || looped.shown < 8, "a loop held frame {}", looped.shown);
+        assert!(
+            looped.exact || looped.shown < 8,
+            "a loop held frame {}",
+            looped.shown
+        );
     }
 
     /// Playing forward, a frame the decoder's run has passed (decoded ahead,
@@ -1023,16 +1077,46 @@ mod tests {
         }
         let before = viewer.stats();
         let held = play(7, 0);
-        assert!(!held.exact && held.shown == 6, "held {} ({})", held.shown, held.exact);
+        assert!(
+            !held.exact && held.shown == 6,
+            "held {} ({})",
+            held.shown,
+            held.exact
+        );
         let t = std::time::Instant::now();
         while viewer.stats().passed_over == before.passed_over {
-            assert!(t.elapsed().as_secs() < 20, "frame 7 was decoded again from its sync sample");
+            assert!(
+                t.elapsed().as_secs() < 20,
+                "frame 7 was decoded again from its sync sample"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(viewer.stats().decoded, before.decoded);
         // A paused viewer still gets the exact frame.
         let exact = viewer.fetch(&src, 1, 7, Want::Exact).unwrap();
         assert!(exact.exact && exact.shown == 7);
+    }
+
+    #[test]
+    fn cold_playback_deadline_does_not_wait_for_its_first_frame() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
+        let src = MediaSource::open(&path).unwrap();
+        let viewer = ViewerDecode::new(Arc::new(DecodeService::new(Default::default())));
+        let before = Instant::now();
+        let first = viewer
+            .fetch_ready(&src, 1, 0, Want::Playback(Duration::ZERO))
+            .unwrap();
+        assert!(before.elapsed() < Duration::from_millis(100));
+        assert!(
+            first.is_none(),
+            "cold request queues work without blocking the composition"
+        );
+        let frame = viewer.fetch(&src, 1, 0, Want::Exact).unwrap();
+        assert!(
+            frame.exact && frame.shown == 0,
+            "the queued decode still lands exactly"
+        );
     }
 
     /// A playing viewer never waits out a decode: past the allowance it gets

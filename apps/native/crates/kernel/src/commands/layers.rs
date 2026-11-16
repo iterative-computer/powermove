@@ -785,6 +785,145 @@ fn set_switch(
     }
 }
 
+/// Plan a pure bar-move batch against one revision. Locations and inherited
+/// group locks are resolved once, rather than scanning the layer stack for
+/// every member. Mixed edits retain the sequential command planner.
+pub(crate) fn plan_starts(
+    root: &pm_model::Node,
+    commands: &[super::Command],
+) -> Option<Result<Vec<Op>, CommandError>> {
+    use crate::model;
+    use std::collections::HashMap;
+    let mut requested = Vec::with_capacity(commands.len());
+    let mut unique = HashSet::new();
+    for command in commands {
+        let super::Command::Layer(LayerCommand::Set { layer_id, patch }) = command else {
+            return None;
+        };
+        let from = patch.from?;
+        if *patch
+            != (LayerPatch {
+                from: Some(from),
+                ..Default::default()
+            })
+            || !unique.insert(layer_id.as_str())
+        {
+            return None;
+        }
+        requested.push((layer_id.as_str(), from));
+    }
+    if requested.is_empty() {
+        return None;
+    }
+    let locations = Cx::new(root, super::Origin::Interface).all_layers();
+    let mut facts = HashMap::new();
+    let mut visited_comps = HashSet::new();
+    for loc in &locations {
+        if !visited_comps.insert(loc.comp_id.clone()) {
+            continue;
+        }
+        let comp = model::comp_node(root, loc.comp_id.as_deref())?;
+        let layers: Vec<_> = model::layers_of(comp).collect();
+        let mut by_id = HashMap::new();
+        for (i, layer) in layers.iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(model::str_of) {
+                by_id.entry(id).or_insert(i);
+            }
+        }
+        let mut locked = vec![None; layers.len()];
+        for first in 0..layers.len() {
+            let mut chain = Vec::new();
+            let mut seen = HashSet::new();
+            let mut at = Some(first);
+            let mut inherited = false;
+            while let Some(i) = at {
+                if let Some(value) = locked[i] {
+                    inherited |= value;
+                    break;
+                }
+                if !seen.insert(i) {
+                    inherited |= chain.iter().any(|i: &usize| {
+                        layers[*i].get("lock").and_then(model::bool_of) == Some(true)
+                    });
+                    break;
+                }
+                chain.push(i);
+                at = layers[i]
+                    .get("group")
+                    .and_then(model::str_of)
+                    .and_then(|id| by_id.get(id))
+                    .copied()
+                    .filter(|i| layers[*i].get("type").and_then(model::str_of) == Some("group"));
+            }
+            for i in chain.into_iter().rev() {
+                inherited |= layers[i].get("lock").and_then(model::bool_of) == Some(true);
+                locked[i] = Some(inherited);
+            }
+        }
+        for (index, layer) in layers.iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(model::str_of) {
+                facts.entry(id).or_insert((
+                    model::LayerLoc {
+                        comp_id: loc.comp_id.clone(),
+                        index,
+                    },
+                    *layer,
+                    locked[index].unwrap_or(false),
+                ));
+            }
+        }
+    }
+    Some((|| {
+        let mut ops = Vec::with_capacity(requested.len());
+        for (id, from) in requested {
+            let (loc, layer, locked) = facts
+                .get(id)
+                .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+            if *locked {
+                super::spine::check_lock(root, loc, layer, id)?;
+            }
+            let from = values::finite(from, "layer start")?;
+            if layer
+                .get("from")
+                .is_some_and(|n| values::same(n, &Value::Number(from)))
+            {
+                continue;
+            }
+            let mut path = loc.path();
+            path.push("from".into());
+            ops.push(Op::Leaf(pm_model::Patch::set(path, Value::Number(from))));
+        }
+        Ok(ops)
+    })())
+}
+
+/// Scalar strip movement retains the normal lock and finite-number rules,
+/// while leaving all channel/key payloads in the immutable document.
+pub(super) fn plan_start(
+    root: &pm_model::Node,
+    id: &str,
+    from: f64,
+) -> Result<Vec<Op>, CommandError> {
+    let loc = crate::model::find_layer(root, id)
+        .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+    let layer = crate::model::layer_at(root, &loc)
+        .ok_or_else(|| CommandError::LayerNotFound(id.to_owned()))?;
+    super::spine::check_lock(root, &loc, layer, id)?;
+    let from = values::finite(from, "layer start")?;
+    if layer
+        .get("from")
+        .is_some_and(|n| values::same(n, &Value::Number(from)))
+    {
+        return Ok(vec![]);
+    }
+    let mut path = loc.path();
+    path.push("from".into());
+    Ok(vec![Op::Leaf(pm_model::Patch::set(
+        path,
+        Value::Number(from),
+    ))])
+}
+
 /// `setLayer(command)` with `policyCommand`'s lock rule.
 fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), CommandError> {
     let (loc, layer) = cx.layer(layer_id)?;
@@ -1219,8 +1358,8 @@ fn content_audio(layer: &mut Value) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// `delete_layers` with `policyCommand`'s lock filtering, then
-/// `PM.removeLayers`.
+/// Resolve IDs per composition, expand groups once, then skip locked items.
+/// Unlike Electron's group-wide rejection, editable targets still delete.
 fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandError> {
     let mut by_comp: Vec<(Option<String>, Vec<String>)> = Vec::new();
     for id in layer_ids {
@@ -1236,41 +1375,31 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
     for (comp, ids) in by_comp {
         let layers = cx.layer_stack(comp.as_deref());
         let base: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let expanded = expand_groups(&layers, &base);
-        let find = |id: &str| layers.iter().find(|l| values::text(l, "id") == Some(id));
-        let locked: Vec<&Value> = expanded
-            .iter()
-            .filter_map(|id| find(id))
-            .filter(|l| is_locked_in(&layers, l))
-            .collect();
-        let mut remove: HashSet<String> = expanded.iter().cloned().collect();
-        if !locked.is_empty() {
-            if ids
-                .iter()
-                .filter_map(|id| find(id))
-                .any(|l| values::text(l, "type") == Some("group"))
-            {
-                return Err(CommandError::Invalid(
-                    "Unlock the group and its contents before deleting".into(),
-                ));
-            }
-            let names: Vec<String> = locked
-                .iter()
-                .map(|l| format!("“{}”", values::layer_name(l, "")))
-                .collect();
-            if locked.len() == expanded.len() {
-                return Err(CommandError::Invalid(format!(
-                    "All targeted layers are locked: {}",
-                    names.join(", ")
-                )));
-            }
-            for l in &locked {
-                remove.remove(values::text(l, "id").unwrap_or_default());
+        // Normalize overlapping selections first. A protected selected group
+        // protects its entire subtree, including separately selected children.
+        let roots = layers.iter().filter(|l| {
+            values::text(l, "id").is_some_and(|id| base.contains(id))
+                && !ancestors(&layers, l)
+                    .iter()
+                    .any(|g| values::text(g, "id").is_some_and(|id| base.contains(id)))
+        });
+        let mut gone = HashSet::new();
+        for root in roots {
+            let id = values::text(root, "id").unwrap();
+            let subtree = expand_groups(&layers, &HashSet::from([id]));
+            let protected = subtree.iter().any(|id| {
+                layers
+                    .iter()
+                    .find(|l| values::text(l, "id") == Some(id.as_str()))
+                    .is_some_and(|l| is_locked_in(&layers, l))
+            });
+            if !protected {
+                gone.extend(subtree);
             }
         }
-        // `PM.removeLayers`: expand again, drop, unparent survivors.
-        let again: HashSet<&str> = remove.iter().map(String::as_str).collect();
-        let gone: HashSet<String> = expand_groups(&layers, &again).into_iter().collect();
+        if gone.is_empty() {
+            continue;
+        }
         // Survivors parented to a deleted layer are unparented first (their
         // indexes still hold), then each deleted layer goes by id.
         let path = cx.layers_path(comp.as_deref());

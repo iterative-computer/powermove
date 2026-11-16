@@ -32,6 +32,10 @@ async function page(events: unknown[]) {
     "<!doctype html><html><head></head><body></body></html>",
     { runScripts: "outside-only" },
   );
+  // Use window-owned timers so close() cancels queued measurement frames.
+  dom.window.requestAnimationFrame = (callback: FrameRequestCallback) =>
+    dom.window.setTimeout(() => callback(dom.window.performance.now()), 0);
+  dom.window.cancelAnimationFrame = (id: number) => dom.window.clearTimeout(id);
   const calls: any[] = [],
     draws: any[] = [],
     resources: string[] = [];
