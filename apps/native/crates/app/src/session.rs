@@ -130,8 +130,10 @@ pub struct Controller {
     pub workspaces_status: String,
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
-    pub(crate) agent_panel_builds: std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
-    pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    pub(crate) agent_panel_builds:
+        std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
+    pub(crate) panel_builds:
+        std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
     /// Generated panels' Off/On toggles: the system's segmented control per
     /// `panel#index`, kept while the control is shown.
     pub(crate) generated_switches:
@@ -496,10 +498,18 @@ impl pm_shell::integration::Integration for Bridge {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
     }
     fn native_panel_id(&self, id: &str, cx: &App) -> String {
-        self.0.read(cx).agent_panel_builds.get(id).and_then(|b| b.target.clone()).unwrap_or_else(|| id.to_owned())
+        self.0
+            .read(cx)
+            .agent_panel_builds
+            .get(id)
+            .and_then(|b| b.target.clone())
+            .unwrap_or_else(|| id.to_owned())
     }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
-        self.0.read(cx).extensions.owns_panel(&self.native_panel_id(id, cx))
+        self.0
+            .read(cx)
+            .extensions
+            .owns_panel(&self.native_panel_id(id, cx))
     }
     fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
         if id != "timeline" {
@@ -537,7 +547,11 @@ impl pm_shell::integration::Integration for Bridge {
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
         let v = self.0.read(cx);
         let mut panels = v.extensions.contributed.clone();
-        panels.extend(v.agent_panel_builds.iter().map(|(id, b)| (id.clone(), b.title.clone())));
+        panels.extend(
+            v.agent_panel_builds
+                .iter()
+                .map(|(id, b)| (id.clone(), b.title.clone())),
+        );
         panels
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
@@ -546,7 +560,15 @@ impl pm_shell::integration::Integration for Bridge {
             v.builtins.timeline_place = None;
             v.builtins.viewer_place = None;
             let mut effective: Vec<&str> = open.to_vec();
-            for id in open { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.as_deref()) { effective.push(target); } }
+            for id in open {
+                if let Some(target) = v
+                    .agent_panel_builds
+                    .get(*id)
+                    .and_then(|b| b.target.as_deref())
+                {
+                    effective.push(target);
+                }
+            }
             let effective: Vec<String> = effective.into_iter().map(str::to_owned).collect();
             v.sync_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             v.sync_parking(open, cx);
@@ -570,7 +592,11 @@ impl pm_shell::integration::Integration for Bridge {
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
-            for id in shown { if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) { effective.push(target); } }
+            for id in shown {
+                if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) {
+                    effective.push(target);
+                }
+            }
             v.hide_extension_panels(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.
@@ -1406,9 +1432,15 @@ impl Controller {
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
-            let json = |v: &pm_model::Value| serde_json::from_str::<serde_json::Value>(
-                &pm_model::json::to_canonical_string(v)).unwrap_or_default();
-            crate::generated_panel::publication(&mut self.panel_builds, &json(&previous.workspace), &json(&p.workspace));
+            let json = |v: &pm_model::Value| {
+                serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v))
+                    .unwrap_or_default()
+            };
+            crate::generated_panel::publication(
+                &mut self.panel_builds,
+                &json(&previous.workspace),
+                &json(&p.workspace),
+            );
         }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
@@ -3465,9 +3497,11 @@ impl Controller {
                 let (group, value) = (arg(0), arg(1));
                 if cmd.token.is_some() {
                     let canvas = self.host.borrow().canvas_focus.get();
-                    let takes = self.builtins.gizmos.as_ref().is_some_and(|g| {
-                        g.read(cx).studio_takes_key(&group, canvas, window)
-                    });
+                    let takes = self
+                        .builtins
+                        .gizmos
+                        .as_ref()
+                        .is_some_and(|g| g.read(cx).studio_takes_key(&group, canvas, window));
                     if !takes {
                         return false;
                     }

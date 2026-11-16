@@ -12,7 +12,8 @@ use std::{
 
 /// Tools the running app answers on its main thread (`SurfaceHook`).
 const PANEL_TOOLS: &[&str] = &[
-    "panel_begin", "panel_build",
+    "panel_begin",
+    "panel_build",
     "open_panel",
     "get_panel_state",
     "interact_panel",
@@ -362,7 +363,9 @@ impl McpSession {
             let owner = agent(self.agent_token.as_deref(), &host).map(|(run, _)| run);
             drop(host);
             let mut surface_args = args.clone();
-            if name == "panel_begin" { surface_args["_panel_owner"] = json!(owner); }
+            if name == "panel_begin" {
+                surface_args["_panel_owner"] = json!(owner);
+            }
             let live = surfaces.call(name, project.as_deref(), &surface_args);
             if acting && let Some(id) = project.as_deref() {
                 // Panel handlers may edit asynchronously; later reads see it.
