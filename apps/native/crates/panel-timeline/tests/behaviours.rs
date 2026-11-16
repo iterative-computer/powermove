@@ -2548,3 +2548,51 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
         assert!(m.reveal.layers.values().all(|d| d.collapsed));
     }
 }
+/// v1's keyframe menu (timeline.ts pushKeyframeMenu): a header naming what
+/// it acts on, the dialogs, the ten eases with the one every key has
+/// checked, hold, a separator, then Copy and Delete with the count.
+#[test]
+fn keyframe_menu_names_what_it_acts_on_and_checks_the_keys_ease() {
+    let (_actor, mut c) = client();
+    let one = Context::Keys { ids: strings(&["a0"]) };
+    let labels = |c: &TimelineClient, ctx: &Context| -> Vec<String> {
+        c.model.menu(ctx).iter().map(|i| i.label.clone()).collect()
+    };
+    let menu = c.model.menu(&one);
+    assert_eq!(menu[0].id, MenuItem::HEADER);
+    assert_eq!(
+        labels(&c, &one),
+        [
+            "Keyframe", "Edit Value…", "Keyframe Velocity…", "Scale Keyframes…", "Linear", "Ease In",
+            "Ease Out", "Easy Ease", "Swish", "Power", "Exponential Out", "Overshoot", "Snap",
+            "Glide", "Toggle Hold", "", "Copy Keyframe", "Delete Keyframe",
+        ]
+    );
+    let plan = c.model.menu_action(&one, "ease.glide", 0.).unwrap();
+    run(&mut c, plan);
+    let checked: Vec<&str> = c.model.menu(&one).iter().filter(|i| i.checked).map(|i| i.id).collect();
+    assert_eq!(checked, ["ease.glide"]);
+    let two = Context::Keys { ids: strings(&["a0", "a2"]) };
+    let two_labels = labels(&c, &two);
+    assert_eq!(two_labels[0], "2 Keyframes");
+    assert!(two_labels.ends_with(&["Copy 2 Keyframes".into(), "Delete 2 Keyframes".into()]));
+    assert!(two_labels.contains(&"Hold Keyframes".into()));
+    // Only one of the two has Glide: no ease is checked.
+    assert!(c.model.menu(&two).iter().all(|i| !i.checked));
+}
+/// The ruler's menu (v1 onCtx): Add Marker Here, a separator, the work
+/// area's three, a separator, then the switch naming the timeline it goes to.
+#[test]
+fn ruler_menu_groups_marker_work_area_and_the_switch() {
+    let m = model(fixture());
+    let menu = m.menu(&Context::Ruler { time: 2. });
+    let labels: Vec<&str> = menu.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Add Marker Here", "", "Set Work Area Start", "Set Work Area End", "Reset Work Area", "",
+            "Switch to Track Timeline",
+        ]
+    );
+    assert_eq!(menu[1].id, MenuItem::SEPARATOR);
+}

@@ -89,6 +89,10 @@ pub struct Editor {
     /// The workspace this window last showed by choice (restored or
     /// activated); a new window follows the store's last activated one.
     preferred: Option<String>,
+    /// The project that choice was made for (`None`: Home). Another
+    /// project bound to the window later never takes it: a new project
+    /// starts with the default workspace as shipped (PM-454).
+    preferred_for: Option<String>,
     /// Writes for the kernel, sent on the next frame.
     outbox: Vec<workspace::Write>,
     /// The status last passed to the app's status line.
@@ -166,6 +170,7 @@ impl Editor {
             pending: vec![],
             seen: None,
             preferred: None,
+            preferred_for: None,
             outbox: vec![],
             noted: String::new(),
             project,
@@ -277,6 +282,7 @@ impl Editor {
         self.window_id = state.id;
         self.project = state.project.clone();
         self.preferred = Some(state.workspace.clone());
+        self.preferred_for = Some(state.project.clone()).filter(|p| !p.is_empty());
         self.show_record(self.workspaces.active(self.preferred.as_deref()));
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -428,6 +434,12 @@ impl Editor {
         self.pending.push(after.clone());
         self.record = after;
     }
+    /// This window's choice, when it was made for the project it shows now.
+    fn preferred_here(&self) -> Option<&str> {
+        self.preferred
+            .as_deref()
+            .filter(|_| self.preferred_for == self.workspaces.project_id)
+    }
     fn show_record(&mut self, record: serde_json::Value) {
         self.maximized_panel = None;
         self.layout = workspace::layout(&record);
@@ -436,6 +448,7 @@ impl Editor {
     /// Shows workspace `record` in this window and makes it the active one.
     fn activate_record(&mut self, record: serde_json::Value) {
         self.preferred = workspace::record_id(&record).map(str::to_owned);
+        self.preferred_for = self.workspaces.project_id.clone();
         self.show_record(record.clone());
         self.commit(record);
         self.persist_session();
@@ -466,7 +479,7 @@ impl Editor {
         if !Rc::ptr_eq(&store, &self.workspaces) {
             self.workspaces = store;
         }
-        let target = self.workspaces.active(self.preferred.as_deref());
+        let target = self.workspaces.active(self.preferred_here());
         if self.seen.as_ref() == Some(&target) {
             return;
         }
@@ -528,7 +541,17 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        let offered = self.workspaces.offered();
+        // One entry per name: the one this window shows, else its project's,
+        // else the last used (PM-449).
+        let prefer: Vec<&str> = [
+            workspace::record_id(&self.record),
+            self.workspaces.project.as_ref().and_then(workspace::record_id),
+            self.workspaces.current.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let offered = workspace::one_per_name(self.workspaces.offered(), &prefer);
         let names: Vec<String> = offered
             .iter()
             .map(|r| workspace::record_name(r).to_owned())
@@ -3958,6 +3981,59 @@ mod tests {
             String::new()
         }
         fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    /// Acceptance run 22: a window that showed an edited copy of Design (its
+    /// timeline collapsed) takes a new project, which has no workspace of
+    /// its own: the project starts with Design as shipped (PM-454).
+    #[gpui::test]
+    fn a_new_project_in_a_window_never_takes_the_windows_last_workspace(cx: &mut TestAppContext) {
+        let mut edited = workspace::preset("design").unwrap();
+        edited["id"] = "wsedited".into();
+        edited["name"] = "Design (edited)".into();
+        edited["builtin"] = false.into();
+        edited["layout"]["docks"] = serde_json::json!([{"id": "center", "panels": ["viewer"]}]);
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&edited)),
+            current: Some("wsedited".into()),
+            default: None,
+            project: Some(edited.clone()),
+            project_id: Some("old".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e.restore(&crate::session::WindowState {
+                id: 1,
+                frame: [0., 0., 1440., 900.],
+                project: "old".into(),
+                workspace: "wsedited".into(),
+                tab_group: None,
+                tab_index: 0,
+                pages: vec![],
+                fullscreen: false,
+            });
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "wsedited", "its own project keeps it");
+                // The window takes a new project with no workspace of its own.
+                let before = (**kernel.store.borrow()).clone();
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    project: None,
+                    project_id: Some("new".into()),
+                    ..before
+                });
+                v.sync_workspaces(cx);
+                assert_eq!(v.workspace_record(), &workspace::preset("design").unwrap());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

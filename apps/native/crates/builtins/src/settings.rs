@@ -298,6 +298,8 @@ impl Backend {
             if id == "project.duration" {
                 row["min"] = json!(0.1);
                 row["unit"] = json!("s");
+                // As every duration field shows it: two places, none trailing.
+                row["precision"] = json!(2);
             }
             rows.push(row);
         }

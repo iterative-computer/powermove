@@ -309,6 +309,10 @@ pub struct Metrics {
     /// a row's value column (it takes what the label column leaves).
     pub field: f32,
     pub value_column: f32,
+    /// The most a row's value column takes when its panel asks for a cap
+    /// (Effect Controls): on a wide panel the label and its control stay
+    /// together instead of the control stretching to the far edge.
+    pub value_column_most: f32,
     /// The most a row's label takes before its value; it gives way first
     /// when the panel is too narrow for both.
     pub label_column: f32,
@@ -860,6 +864,7 @@ impl Tokens {
                 segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
+                value_column_most: 240.,
                 label_column: 120.,
                 keyframe: 9.,
                 // v1's row height: the strip is 26 pt, tall enough for its

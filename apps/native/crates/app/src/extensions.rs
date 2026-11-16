@@ -1034,6 +1034,12 @@ impl Controller {
                         return MenuEntry::separator();
                     }
                     let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
                     let mut entry = match row["children"].as_array() {
                         Some(children) if !children.is_empty() => {
                             MenuEntry::submenu(label, entries(children, token, next))
@@ -1042,6 +1048,7 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
+                    entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()

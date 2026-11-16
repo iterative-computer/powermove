@@ -1396,6 +1396,51 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
     });
 }
+/// A marquee whose release the viewer never hears (the button came up over
+/// another view) ends when the window reports the release: the rectangle is
+/// gone and it selects what it encloses, as a heard release does.
+#[gpui::test]
+fn a_marquee_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let from = s.point_of([120., 80.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    for step in 1..=4 {
+        let at = from + point(px(40. * step as f32), px(35. * step as f32));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+    // A second report changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
+    });
+}
 /// A move that brings the box's right edge within 8 points of the
 /// composition's centre snaps onto it; Command moves freely.
 #[gpui::test]
