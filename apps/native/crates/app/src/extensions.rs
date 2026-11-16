@@ -808,7 +808,7 @@ impl Controller {
                     return;
                 };
                 let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
-                let (title, body) = match request["name"].as_str() {
+                let (title, mut body) = match request["name"].as_str() {
                     Some(name) if request["disables"] == true => (
                         format!("“{name}” isn’t responding"),
                         format!(
@@ -816,11 +816,25 @@ impl Controller {
                         ),
                     ),
                     Some(name) => (format!("“{name}” isn’t responding"), restart.to_owned()),
+                    // No extension's code was running: the extension host's
+                    // own work (a project change, its answers) ran long.
                     None => (
-                        "An extension isn’t responding".to_owned(),
+                        "Powermove’s extension host isn’t responding".to_owned(),
                         restart.to_owned(),
                     ),
                 };
+                // What it was doing, and for how long.
+                let busy = request["seconds"].as_f64().map(|s| format!("{s:.0} s"));
+                let place = request["where"].as_str();
+                if busy.is_some() || place.is_some() {
+                    body.push_str(&format!(
+                        "\n\nBusy{}{}.",
+                        busy.as_deref().map_or_else(String::new, |b| format!(" for {b}")),
+                        place.map_or_else(String::new, |p| format!(" in {p}"))
+                    ));
+                }
+                crate::diag::line(serde_json::json!({"unresponsive": request["name"],
+                    "where": request["where"], "seconds": request["seconds"]}));
                 let shell = self.host.borrow();
                 use crate::alert::{Alert, Button};
                 let answer = Alert::new(
