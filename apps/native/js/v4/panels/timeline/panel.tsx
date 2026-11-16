@@ -872,7 +872,14 @@ const TimelineRow = memo(
           nativeRow: row.id,
           depth: row.depth,
           designTodo: "T4",
-          ...(row.kind === "layer" ? { media: row.media } : {}),
+          ...(row.kind === "layer"
+            ? {
+                media: row.media,
+                // The native host derives the drag source from nativeRow.
+                // An open field explicitly opts out until rename is finished.
+                ...(row.nameEditor ? { timelineLayerDrag: null } : {}),
+              }
+            : {}),
         }}
         onClickCapture={(event) => {
           clickModifiers = modifiers(event);

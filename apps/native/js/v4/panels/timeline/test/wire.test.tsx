@@ -172,7 +172,8 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     overflow: "hidden",
   });
   expect(switches.props.style).toMatchObject({ flexShrink: 0 });
-  // v1: the name is the reorder handle (the native surface lifts it).
+  // The whole header is a source; interactive children keep their own pointer handlers.
+  expect(row.props.metadata).toMatchObject({ nativeRow: "layer:headline" });
   expect(
     byId(root, "timeline:name:layer:headline").props.metadata,
   ).toMatchObject({
@@ -544,11 +545,20 @@ test("effect headings validate without editable controls and static layers hide 
   const { root, commits } = recorder();
   const staticLayer = { ...layer(), canOpen: false };
   const heading = {
-    id: '["effect","headline","blur"]', kind: "heading" as const,
-    layer: "headline", label: "Blur", accessibilityLabel: "Blur",
-    depth: 1, selected: false, focused: false, hovered: false, locked: false,
+    id: '["effect","headline","blur"]',
+    kind: "heading" as const,
+    layer: "headline",
+    label: "Blur",
+    accessibilityLabel: "Blur",
+    depth: 1,
+    selected: false,
+    focused: false,
+    hovered: false,
+    locked: false,
   };
-  const f = frame({ window: { total: 2, first: 0, rows: [staticLayer, heading] } });
+  const f = frame({
+    window: { total: 2, first: 0, rows: [staticLayer, heading] },
+  });
   checkFrame(f, { first: 0, visible: 10 });
   await root.render(<TimelinePanel frame={f} send={() => {}} />);
   expect(byId(root, `timeline:disclosure:${staticLayer.id}`)).toBeUndefined();
@@ -568,5 +578,52 @@ test("effect headings validate without editable controls and static layers hide 
   expect(selected()).toMatchObject({background:{token:"colors.fill_strong"}});
   expect(byId(root,"timeline:shy:layer:headline")).toBeDefined();
   expect(byId(root,"timeline:solo:layer:headline")).toBeDefined();
+  await root.dispose();
+});
+
+test("reorder sources belong to layer headers and pause during inline rename", async () => {
+  const { root } = recorder();
+  const header = layer();
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [header] } })}
+      send={() => {}}
+    />,
+  );
+  for (const id of ["disclosure", "parent", "visibility"])
+    expect(
+      (
+        byId(root, `timeline:${id}:${header.id}`).props.metadata as Record<
+          string,
+          unknown
+        >
+      )?.timelineLayerDrag,
+    ).toBeUndefined();
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        window: {
+          total: 1,
+          first: 0,
+          rows: [
+            {
+              ...header,
+              nameEditor: { value: header.label, binding: "rename" },
+            },
+          ],
+        },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(
+    (
+      byId(root, `timeline:row:${header.id}`).props.metadata as Record<
+        string,
+        unknown
+      >
+    ).timelineLayerDrag,
+  ).toBeNull();
+  expect(byId(root, `timeline:rename:${header.id}`)).toBeDefined();
   await root.dispose();
 });
