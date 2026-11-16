@@ -1875,6 +1875,7 @@ pub fn detached_publication(project: &str, stored: Value) -> Published {
         changes: Vec::new().into(),
         history: HistorySummary::default(),
         entry: None,
+        entry_before: None,
         selection: store.selection().clone(),
         workspace: Value::Null,
         ui_state: Default::default(),
