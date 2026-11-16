@@ -1436,9 +1436,6 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexBasis" => {
                 if let Some(v) = len {
                     e = e.flex_basis(Length::from(v));
-                } else if value.as_str() == Some("auto") {
-                    // Its content's width (a rail as wide as its names).
-                    e = e.flex_basis(Length::Auto);
                 }
             }
             "borderRadius" => e = with(e, n, |e, n| e.rounded(px(n))),
