@@ -82,12 +82,25 @@ fn snapshot_geometry(source: Rect, target: Rect, height: f64) -> (Rect, Rect) {
 }
 #[derive(Default)]
 struct PanelSnapshot {
+    request_sequence:u64,
     failed: bool,
     build_done: bool,
     requested: u64,
     revision: u64,
     captured_revision: u64,
     image: Option<(Rect, Retained<NSImage>)>,
+}
+impl PanelSnapshot {
+    fn invalidate_build(&mut self) {
+        self.request_sequence=self.request_sequence.wrapping_add(1);
+        self.requested=0;self.failed=false;self.build_done=false;
+    }
+    fn begin_capture(&mut self,generation:u64)->u64 {
+        self.request_sequence=self.request_sequence.wrapping_add(1);
+        self.requested=generation;self.failed=false;self.build_done=false;
+        self.request_sequence
+    }
+    fn accepts(&self,sequence:u64)->bool {self.request_sequence==sequence}
 }
 #[derive(Clone)]
 struct Overscan {
@@ -1214,7 +1227,7 @@ impl MacDomHost {
         if self.build_masks.get(id).map(|v|v.0)!=Some(revision) {
             let mut snapshots=self.shared.snapshots.borrow_mut();
             let snapshot=snapshots.entry(id.to_owned()).or_default();
-            snapshot.requested=0;snapshot.failed=false;snapshot.build_done=false;
+            snapshot.invalidate_build();
         }
         if self.build_masks.insert(id.to_owned(),(revision,live_alpha))!=Some((revision,live_alpha)) {
             self.shared.geometry_dirty.set(true);
@@ -1385,9 +1398,7 @@ impl MacDomHost {
                 {
                     continue;
                 }
-                snapshot.requested = generation;
-                snapshot.failed = false;
-                snapshot.build_done = false;
+                let request_sequence=snapshot.begin_capture(generation);
                 drop(snapshots);
                 let shared = self.shared.clone();
                 let configuration =
@@ -1407,7 +1418,8 @@ impl MacDomHost {
                             .layouts
                             .borrow()
                             .get(&id)
-                            .is_some_and(|(g, _, applied)| *g == generation && *applied);
+                            .is_some_and(|(g, _, applied)| *g == generation && *applied)
+                            && shared.snapshots.borrow().get(&id).is_some_and(|s|s.accepts(request_sequence));
                         if !valid {
                             return;
                         }
@@ -2055,6 +2067,15 @@ fn subtract_build_region(r:Rect,cut:Rect)->Vec<Rect> {
 }
 #[cfg(test)] mod build_mask_tests {
     use super::*;
+    #[test] fn stale_commit_snapshots_cannot_release_a_newer_control() {
+        let mut snapshot=PanelSnapshot::default();
+        let first=snapshot.begin_capture(10);
+        snapshot.invalidate_build();
+        assert!(!snapshot.accepts(first));
+        let second=snapshot.begin_capture(10);
+        assert!(!snapshot.accepts(first));
+        assert!(snapshot.accepts(second));
+    }
     #[test] fn building_panel_mask_does_not_hide_its_neighbour() {
         let a=Rect::new(0.,0.,100.,100.);let b=Rect::new(100.,0.,100.,100.);
         assert_eq!(subtract_build_region(b,a),vec![b]);

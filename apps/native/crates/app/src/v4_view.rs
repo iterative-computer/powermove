@@ -736,6 +736,7 @@ impl SurfaceView {
             mounts.2 += 1;
             mounts.3 += started.elapsed();
         }
+        if let Some(build)=self.panel_build.clone(){self.set_panel_build(Some(build),cx);}
         if crate::diag::enabled() {
             crate::diag::line(
                 serde_json::json!({"ui": "reconcile", "nodes": prepared.nodes.len(),
@@ -868,6 +869,7 @@ impl SurfaceView {
         };
         self.mount_control(kind, view, node, view.binding.clone(), window, cx);
         self.host_rows(id, node, cx);
+        if let Some(build)=self.panel_build.clone(){self.set_panel_build(Some(build),cx);}
     }
     fn mount_control(
         &mut self,

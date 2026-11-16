@@ -1065,11 +1065,11 @@ impl Controller {
         let build=self.agent_panel_builds.iter().find(|(_,b)|b.target.as_deref()==Some(id))
             .and_then(|(slot,_)|self.panel_builds.get(slot)).or_else(||self.panel_builds.get(id)).cloned();
         view.update(cx, |v, cx| {
-            v.set_panel_build(build,cx);
             v.attach(window, cx);
             if *v.tokens() != t {
                 v.retheme(t.clone(), cx);
             }
+            v.set_panel_build(build,cx);
         });
         if id == "timeline" {
             if let Some(timeline) = self.builtins.timeline.clone() {
