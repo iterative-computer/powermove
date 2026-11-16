@@ -141,12 +141,26 @@ function Para({ runs, style }: { runs: Run[]; style?: Style }) {
 }
 /** Markdown as native text: paragraphs, headings, lists, quotes and code. */
 function Prose({ text, style = reading }: { text: string; style?: Style }) {
-  const blocks = markdown(text);
+  // As v1 reads: paragraphs apart, a list's items close together.
+  const groups: Block[][] = [];
+  for (const block of markdown(text)) {
+    const last = groups.at(-1);
+    if (block.kind === "li" && last?.[0]?.kind === "li") last.push(block);
+    else groups.push([block]);
+  }
   return (
-    <div style={{ ...column, ...shrink, gap: t("metrics.text_padding") }}>
-      {blocks.map((b, i) => (
-        <ProseBlock key={i} block={b} style={style} />
-      ))}
+    <div style={{ ...column, ...shrink, gap: t("metrics.inset") }}>
+      {groups.map((g, i) =>
+        g.length === 1 ? (
+          <ProseBlock key={i} block={g[0]!} style={style} />
+        ) : (
+          <div key={i} style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}>
+            {g.map((b, j) => (
+              <ProseBlock key={j} block={b} style={style} />
+            ))}
+          </div>
+        ),
+      )}
     </div>
   );
 }
@@ -178,7 +192,7 @@ function ProseBlock({
             paddingLeft: b.depth ? t("metrics.agent_gap") : t("metrics.gap"),
           }}
         >
-          <text style={{ ...style, color: t("colors.muted"), flexShrink: 0 }}>
+          <text style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}>
             {b.marker}
           </text>
           <Para runs={b.runs} style={{ ...style, flexGrow: 1 }} />
@@ -1797,7 +1811,8 @@ function Composer({
         ...column,
         flexShrink: 0,
         gap: t("metrics.gap"),
-        background: t("colors.panel_secondary"),
+        // A slight lift over the panel, as v1's tray; the field is set into it.
+        background: t("colors.raised"),
         borderRadius: t("metrics.popover_radius"),
         padding: t("metrics.composer_tray"),
         marginLeft: t("metrics.text_padding"),
@@ -2034,8 +2049,9 @@ function Composer({
                 height: t("metrics.control"),
                 borderRadius: t("metrics.control_radius"),
                 symbolSize: t("metrics.symbol_panel"),
+                // A quiet square until there is something to send (v1's).
                 background: t(
-                  !disabled && s.sendable ? "colors.accent" : "colors.fill",
+                  !disabled && s.sendable ? "colors.accent" : "colors.raised",
                 ),
                 color: t(
                   !disabled && s.sendable
@@ -2110,6 +2126,8 @@ function Composer({
             id="agent-effort"
             label={`Reasoning effort, ${effortName}`}
             text={effortName}
+            // A qualifier of the model beside it: the quieter step (v1's).
+            tone="colors.muted"
             fixed
             disabled={choicesLocked}
             open={(anchor) =>

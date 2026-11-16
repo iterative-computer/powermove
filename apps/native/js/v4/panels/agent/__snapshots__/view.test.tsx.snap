@@ -694,7 +694,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -954,7 +954,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -1196,7 +1196,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -1235,7 +1235,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -2502,7 +2502,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -2762,7 +2762,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -3004,7 +3004,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -3043,7 +3043,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -4310,7 +4310,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -4570,7 +4570,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -4812,7 +4812,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -4851,7 +4851,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -6116,7 +6116,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -6376,7 +6376,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -6618,7 +6618,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -6657,7 +6657,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -9412,7 +9412,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -9566,7 +9566,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -9628,7 +9628,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -9945,7 +9945,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -10159,7 +10159,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -10198,7 +10198,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -10966,7 +10966,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -11478,7 +11478,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -11517,7 +11517,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -12304,7 +12304,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -12816,7 +12816,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -12855,7 +12855,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -13671,7 +13671,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -14340,7 +14340,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -14628,7 +14628,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -14842,7 +14842,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -14891,7 +14891,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -15805,7 +15805,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -16103,7 +16103,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -16374,7 +16374,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -16413,7 +16413,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -17168,7 +17168,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -17284,7 +17284,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -17384,7 +17384,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -17644,7 +17644,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -17915,7 +17915,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -17954,7 +17954,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -18714,7 +18714,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -18830,7 +18830,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -18930,7 +18930,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -19190,7 +19190,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -19461,7 +19461,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -19500,7 +19500,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -20755,7 +20755,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -21015,7 +21015,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -21257,7 +21257,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -21296,7 +21296,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -22593,7 +22593,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -22881,7 +22881,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -23095,7 +23095,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -23134,7 +23134,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -24411,7 +24411,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -24627,7 +24627,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -24869,7 +24869,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -24908,7 +24908,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -25667,7 +25667,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -25783,7 +25783,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -25883,7 +25883,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -26143,7 +26143,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -26414,7 +26414,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -26453,7 +26453,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -27213,7 +27213,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -27329,7 +27329,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -27429,7 +27429,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -27689,7 +27689,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -27960,7 +27960,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -27999,7 +27999,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -28694,7 +28694,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -28810,7 +28810,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -28909,7 +28909,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -29169,7 +29169,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -29440,7 +29440,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -29479,7 +29479,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -30186,7 +30186,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -30302,7 +30302,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "flexDirection": "column",
           "flexShrink": 1,
           "gap": {
-            "token": "metrics.text_padding",
+            "token": "metrics.inset",
           },
           "overflow": "hidden",
         },
@@ -30401,7 +30401,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -30661,7 +30661,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -30932,7 +30932,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -30971,7 +30971,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -32241,7 +32241,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -32501,7 +32501,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -32743,7 +32743,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -32782,7 +32782,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -34049,7 +34049,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -34309,7 +34309,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -34551,7 +34551,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -34590,7 +34590,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
@@ -35857,7 +35857,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         },
         "style": {
           "background": {
-            "token": "colors.panel_secondary",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -36117,7 +36117,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
@@ -36359,7 +36359,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.inner_radius",
           },
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "display": "flex",
           "flexDirection": "row",
@@ -36398,7 +36398,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "flexShrink": 1,
           "fontSize": {
