@@ -4371,11 +4371,30 @@ fn is_drag_from_this_window(this: &Objc2Object, dragging_info: ObjcId) -> bool {
     !window.is_null() && std::ptr::eq(source as *const Objc2Object, window as *const Objc2Object)
 }
 
+/// A window with a sheet takes no drops: the sheet is modal to it.
+/// `this` is the window, or its drawing view.
+fn covered_by_sheet(this: &Objc2Object) -> bool {
+    let is_view: bool = unsafe { msg_send![this, isKindOfClass: class!(NSView)] };
+    let window: ObjcId = if is_view {
+        unsafe { msg_send![this, window] }
+    } else {
+        this as *const Objc2Object as ObjcId
+    };
+    if window.is_null() {
+        return false;
+    }
+    let sheet: ObjcId = unsafe { msg_send![window, attachedSheet] };
+    !sheet.is_null()
+}
+
 unsafe extern "C" fn dragging_entered(
     this: &Objc2Object,
     _: Sel,
     dragging_info: ObjcId,
 ) -> NSDragOperation {
+    if covered_by_sheet(this) {
+        return NSDragOperationNone;
+    }
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
@@ -4398,6 +4417,11 @@ unsafe extern "C" fn dragging_updated(
 ) -> NSDragOperation {
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
+    if covered_by_sheet(this) {
+        // A sheet that came up mid-drag: the window lets go of it.
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+        return NSDragOperationNone;
+    }
     let position = drag_event_position(&window_state, dragging_info);
     if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
         if is_source_window {
@@ -4421,6 +4445,10 @@ unsafe extern "C" fn perform_drag_operation(
     dragging_info: ObjcId,
 ) -> Bool {
     let window_state = unsafe { get_window_state(this) };
+    if covered_by_sheet(this) {
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+        return Bool::NO;
+    }
     let position = drag_event_position(&window_state, dragging_info);
     Bool::new(send_file_drop_event(
         window_state,

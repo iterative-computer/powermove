@@ -3267,7 +3267,11 @@ impl Controller {
             return true;
         }
         // Edit menu items reach a focused text field before the document.
-        if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {
+        // Under a sheet, one that no field took goes nowhere.
+        if cmd.name.starts_with("context")
+            && (self.host.borrow().system(&cmd.name)
+                || self.host.borrow().window.attachedSheet().is_some())
+        {
             return true;
         }
         // Escape on Home clears its search, then returns to the project (v1).
