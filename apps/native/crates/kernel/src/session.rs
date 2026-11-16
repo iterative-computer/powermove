@@ -3271,16 +3271,9 @@ impl Kernel {
             unconfirmed: None,
         }
     }
-    /// Private files beside a project that no save's record names go to the
-    /// host's Error Log: a staged file was removed (`Settled::cleared`), any
-    /// other is left as it is.
+    /// Private files beside a project that no save's record names are never
+    /// touched: they go to the host's Error Log.
     fn log_unrecorded(&mut self, settled: &project_io::Settled) {
-        for path in &settled.cleared {
-            self.log(format!(
-                "Removed the unfinished file a save cut short left beside a project: {}",
-                path.display()
-            ));
-        }
         for path in &settled.unrecorded {
             self.log(format!(
                 "A file a save left beside a project is not named by any save's record and                  was left as it is: {}",
