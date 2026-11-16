@@ -334,6 +334,10 @@ pub struct Publication {
 }
 
 struct Shared {
+    /// Set by `ExtensionHost::close` itself: an owner still waiting for
+    /// isolate admission (its boot or the Svelte compiler) stops waiting
+    /// at once, before it could read the queued close.
+    closing: AtomicBool,
     published: Mutex<Published>,
     changed: Condvar,
     /// What the confined helpers registered, in contribution-list form.
@@ -403,9 +407,11 @@ impl Shared {
     }
 }
 
-/// The extensions a project draws with: the `<extension>` of every
-/// `type` named `<extension>.<name>` (an effect's, a layer's) in its
-/// compositions and layers.
+/// The extensions a project draws with, by every `type` (an effect's, a
+/// layer's) in its compositions and layers: an effect's type is often its
+/// extension's id itself (`progressive-blur`), else `<extension>.<name>`
+/// (`deep-glow.effect`). Reading only the second form left most of a real
+/// project's extensions loading in name order (PM-384).
 fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
     use pm_model::NodeKind;
     let mut used = std::collections::HashSet::new();
@@ -416,8 +422,9 @@ fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
                 for (key, value) in map.iter() {
                     if key.as_str() == Some("type")
                         && let NodeKind::String(ty) = value.kind()
-                        && let Some((extension, _)) = ty.as_str().and_then(|t| t.split_once('.'))
+                        && let Some(ty) = ty.as_str()
                     {
+                        let extension = ty.split_once('.').map_or(ty, |(extension, _)| extension);
                         used.insert(extension.to_owned());
                     }
                     // Keyframes and values hold no types: not walked.
@@ -848,6 +855,7 @@ impl ExtensionHost {
         let shared = Arc::new(Shared {
             published: Mutex::default(),
             changed: Condvar::new(),
+            closing: AtomicBool::new(false),
             store: Mutex::new(json!({})),
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
@@ -1188,6 +1196,9 @@ impl ExtensionHost {
         }
     }
     pub fn close(&mut self) {
+        // Read at once by a boot still waiting for admission (it cannot read
+        // the inbox until its boot returns).
+        self.shared.closing.store(true, Ordering::Release);
         let _ = self.inbox.send(Input::Close);
         if let Some(worker) = self.worker.take() {
             // The owner stops V8 and exits; joined off the main thread.
@@ -2180,7 +2191,8 @@ impl Owner {
         let live = self.realm.take().expect("a live realm to compile in");
         self.confined.clear();
         let records = {
-            let compiler = compile::LazySvelte::new(&live.pool);
+            let shared = self.shared.clone();
+            let compiler = compile::LazySvelte::new(&live.pool).stopped_by(&shared.closing);
             found
                 .iter()
                 .map(|f| {
@@ -2430,6 +2442,12 @@ impl Owner {
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         trace(json!({"realm": "pool"}));
+        // Its turn in the heap account; a window closed meanwhile withdraws it.
+        crate::admitted(&realm, &|| {
+            if self.shared.closing.load(Ordering::Acquire) {
+                realm.close();
+            }
+        })?;
         crate::boot_realm(&realm, &host, "")?;
         *self.transport.lock().unwrap() = Some(host.clone());
         self.router = Some(
@@ -2851,6 +2869,22 @@ mod tests {
                 .any(|command| command["id"] == id)
         })
     }
+    /// A project's extensions, by its effects' and layers' types in either
+    /// form (`progressive-blur`, `deep-glow.effect`), load first (PM-384).
+    #[test]
+    fn a_projects_extensions_are_named_by_its_types_in_either_form() {
+        let doc = pm_model::Document::new(
+            Some(pm_model::json::parse(r#"{"layers":[{"type":"solid","fx":[{"type":"progressive-blur","p":{"radius":{"v":3}}}]},
+                {"type":"deep-glow.effect","kf":[{"type":"ignored-in-keyframes"}]}],"comps":{"c":{"layers":[{"type":"ascii-magic-effects.characters"}]}}}"#).unwrap()),
+            1,
+        );
+        let used = extensions_used(doc.root().unwrap());
+        for id in ["progressive-blur", "deep-glow", "ascii-magic-effects"] {
+            assert!(used.contains(id), "{id} in {used:?}");
+        }
+        assert!(!used.contains("ignored-in-keyframes"));
+    }
+
     #[test]
     fn appkit_answers_reach_realm_closures_and_storage_outlives_the_realm() {
         let root = tempfile::tempdir().unwrap();
@@ -3817,6 +3851,34 @@ mod tests {
     /// A value that has been taken away (its entry removed, its declaration
     /// gone) is gone from the extension's next load: each load replaces what
     /// the realm holds with what the host chose for it, nothing is kept.
+    /// A window closed while its extensions' realm waits its turn for heap
+    /// leaves the queue at once: nothing behind it waits for a dead window.
+    #[test]
+    fn closing_a_window_withdraws_its_start_from_the_admission_queue() {
+        let cage = pm_runtime_v8::Admission::cage();
+        // Less than a window realm's slice left.
+        let held = cage.hold(cage.budget() - cage.used() - 16 * 1024 * 1024).unwrap();
+        let waiting = cage.waiting();
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "waits",
+            &[("index.ts", "export default function(_api: any): void {}")],
+        );
+        let mut fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cage.waiting() <= waiting {
+            assert!(Instant::now() < deadline, "its start waits its turn");
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.host.close();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cage.waiting() > waiting {
+            assert!(Instant::now() < deadline, "closing withdrew it");
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(held);
+    }
     #[test]
     fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
         const SECRET: &str = "sk-removed-later";

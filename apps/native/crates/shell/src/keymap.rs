@@ -256,7 +256,7 @@ fn menu_bar_keys() -> Vec<(String, String, String)> {
         .collect()
 }
 /// `Command+Alt+H` (an Electron accelerator) as a table chord.
-fn from_accelerator(text: &str) -> Option<String> {
+pub fn from_accelerator(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
@@ -282,6 +282,21 @@ fn from_accelerator(text: &str) -> Option<String> {
 
 thread_local! {
     static CURRENT: RefCell<Option<Vec<Binding>>> = const { RefCell::new(None) };
+    static USER: RefCell<Vec<Assign>> = const { RefCell::new(Vec::new()) };
+}
+/// The person's own keys over the preset, for the menu bar: a menu item whose
+/// command they gave keys (or took them from) shows theirs, not its own.
+pub fn set_user(bindings: &[Assign]) {
+    USER.with(|u| *u.borrow_mut() = bindings.to_vec());
+}
+/// The keys the person gave `command` (no arguments), if they changed it.
+pub fn user_keys(command: &str) -> Option<Vec<String>> {
+    USER.with(|u| {
+        u.borrow()
+            .iter()
+            .find(|a| a.command == command && a.args.is_empty())
+            .map(|a| a.keys.clone())
+    })
 }
 /// The table in use on this thread (the default keymap until one is set).
 pub fn current() -> Vec<Binding> {

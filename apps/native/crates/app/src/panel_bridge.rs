@@ -363,6 +363,11 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             Ok(workspace(windows, c, editor, window, cx))
         }),
         "panel_begin" => target.with(cx, |c, editor, _, cx| {
+            let lease = args["_panel_session"].as_str().filter(|id| pm_mcp::panel_lease::live(id))
+                .ok_or_else(|| Error::invalid("Panel session has ended."))?;
+            if args["_panel_owner"].as_str().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
+                return Err(Error::invalid("Panel agent run has ended."));
+            }
             let title = args["title"].as_str().unwrap_or_default().trim();
             if title.is_empty() || title.chars().count() > 80 { return Err(Error::invalid("Give the panel a title up to 80 characters.")); }
             let id = format!("panel-build-{}", pm_shell::workspace::new_id());
@@ -374,7 +379,16 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: Some(lease.to_owned()), agent_run: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
+                if !v.agent_panel_sweep {
+                    v.agent_panel_sweep = true;
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor().timer(Duration::from_millis(100)).await;
+                            if !this.update(cx, |v, cx| crate::generated_panel::sweep_agent_builds(v, cx)).unwrap_or(false) { break; }
+                        }
+                    }).detach();
+                }
                 cx.notify();
             });
             editor.update(cx, |_, cx| cx.notify());
@@ -386,7 +400,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             let row = args["row"].as_u64().unwrap_or(0) as usize;
             let target_id = args["panelId"].as_str().unwrap_or_default().to_owned();
             target.with(cx, |c, editor, _, cx| {
-                if !c.read(cx).agent_panel_builds.contains_key(&id) { return Err(Error::invalid("Unknown or completed build_id.")); }
+                authorize_build(c.read(cx).agent_panel_builds.get(&id), &args)?;
                 if (event == "ready" || (event == "commit" && !target_id.is_empty())) && (!registered(editor, &target_id, cx) || target_id == id || c.read(cx).agent_panel_builds.contains_key(&target_id)) {
                     return Err(Error::invalid("Publish the new panel first, then supply its registered panelId."));
                 }
@@ -421,12 +435,14 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
             if ["ready", "cancel", "error"].contains(&event) {
                 if event == "ready" {
                     let rendered = until(call, &target, cx, Duration::from_secs(90), |c, _, cx| {
-                        c.read(cx).panel_builds.get(&id).is_some_and(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
+                        c.read(cx).panel_builds.get(&id).is_none_or(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
                     }).await?;
                     if !rendered { return Err(Error::invalid("Panel has not committed its first render. Build slot remains; inspect the extension or cancel.")); }
                 }
                 cx.background_executor().timer(Duration::from_millis(if event == "ready" {700} else {360})).await;
+                call.live()?;
                 target.with(cx, |c, editor, _, cx| {
+                    authorize_build(c.read(cx).agent_panel_builds.get(&id), &args)?;
                     editor.update(cx, |e, cx| {
                         if event == "ready" {
                             for dock in &mut e.layout.docks { for group in &mut dock.groups { for tab in &mut group.tabs { if *tab == id { *tab = target_id.clone(); } } } }
@@ -435,13 +451,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                         } else { e.release_agent_panel(&id); cx.notify(); }
                     });
                     c.update(cx, |v, cx| {
-                        if let Some(build) = v.agent_panel_builds.remove(&id) {
-                            if let Some(target) = build.target {
-                                if let Some(page)=v.extensions.page_of(&target){page.borrow_mut().finish_panel_build(&target);}
-                                v.panel_builds.remove(&target);
-                            }
-                        }
-                        v.panel_builds.remove(&id); cx.notify();
+                        v.forget_agent_build(&id); cx.notify();
                     });
                     Ok(())
                 })?;
@@ -1619,5 +1629,45 @@ mod tests {
         assert_eq!((w, h), (1600, 5));
         assert_eq!(pixels.len(), 1600 * 5 * 4);
         assert!(pixels.iter().all(|p| *p == 255));
+    }
+}
+
+fn authorize_build(build: Option<&crate::generated_panel::AgentBuild>, args: &Value) -> Result<()> {
+    let allowed = build.is_some_and(|b| {
+        crate::generated_panel::slot_authorized(
+            b.owner.as_deref(),
+            args["_panel_session"].as_str(),
+            b.live(),
+        )
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(Error::invalid("Unknown, expired or foreign build_id."))
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn panel_bridge_rechecks_owner_after_async_handoff_wait() {
+        let lease = pm_mcp::panel_lease::Lease::new();
+        let args = json!({"_panel_session":lease.id()});
+        let b = crate::generated_panel::AgentBuild {
+            title: "Synthetic".into(),
+            planned: vec![],
+            target: None,
+            finishing: false,
+            owner: Some(lease.id().into()),
+            agent_run: None,
+            snapshot: None,
+            snapshot_key: None,
+        };
+        assert!(authorize_build(Some(&b), &args).is_ok());
+        assert!(authorize_build(Some(&b), &json!({"_panel_session":"foreign"})).is_err());
+        drop(lease);
+        assert!(authorize_build(Some(&b), &args).is_err());
+        assert!(authorize_build(None, &args).is_err());
     }
 }

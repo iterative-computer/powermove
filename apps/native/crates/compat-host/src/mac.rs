@@ -1828,7 +1828,11 @@ impl MacDomHost {
         }
         self.slot.removeFromSuperview();
         a.window.setContentView(Some(&self.slot));
-        a.window.orderFront(None);
+        // Ordered in so WebKit keeps the page running; never while the person
+        // hid the app, which ordering a window in would undo (PM-401).
+        if !NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).isHidden() {
+            a.window.orderFront(None);
+        }
         a.parked = true;
     }
     pub fn end_background_job(&mut self) {

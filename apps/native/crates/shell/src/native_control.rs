@@ -136,7 +136,7 @@ define_class!(
         #[unsafe(method(act:))]
         fn act(&self,sender:&AnyObject){
             let value=match self.ivars().kind{
-                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|row_value(o).clone()).unwrap_or(Value::Null)},
+                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};let pulls:bool=unsafe{msg_send![sender,pullsDown]};let index=index-isize::from(pulls);self.ivars().options.borrow().get(index as usize).map(|o|row_value(o).clone()).unwrap_or(Value::Null)},
                 Kind::Checkbox|Kind::Radio|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
@@ -227,6 +227,27 @@ impl Control {
     }
     fn value(&self, value: &Value, options: &[Value]) {
         match self {
+            Self::Popup(v) if v.pullsDown() => {
+                // A value no row has titles the button itself (Publish).
+                let title = options
+                    .iter()
+                    .find(|o| row_value(o) == value)
+                    .map(row_title)
+                    .unwrap_or_else(|| NSString::from_str(value.as_str().unwrap_or("")));
+                if let Some(item) = v.itemAtIndex(0) {
+                    item.setTitle(&title);
+                }
+                // The value's row is ticked (a pull-down selects none).
+                for (i, option) in options.iter().enumerate() {
+                    if let Some(item) = v.itemAtIndex(i as isize + 1) {
+                        item.setState(if row_value(option) == value {
+                            NSControlStateValueOn
+                        } else {
+                            NSControlStateValueOff
+                        });
+                    }
+                }
+            }
             Self::Popup(v) => {
                 if let Some(index) = options.iter().position(|o| row_value(o) == value) {
                     v.selectItemAtIndex(index as isize);
@@ -465,6 +486,9 @@ pub struct ControlSpec<'a> {
     /// content it qualifies (a composer's option bar, a list's sort). A bar
     /// of controls keeps the primary ink, so its titles never read disabled.
     pub quiet: bool,
+    /// A pull-down (the menu drops below a title that names the value, as
+    /// the Project header's picker): its first item is the title.
+    pub pull: bool,
     /// The view's one accent action: a push button tinted with this colour.
     pub tint: Option<u32>,
     /// A push button's leading SF Symbol. On a search field, its shortcut
@@ -528,6 +552,7 @@ impl NativeControl {
             destructive,
             inline,
             quiet,
+            pull,
             tint,
             symbol,
             glass,
@@ -564,7 +589,7 @@ impl NativeControl {
                 let v = NSPopUpButton::initWithFrame_pullsDown(
                     NSPopUpButton::alloc(mtm),
                     NSRect::ZERO,
-                    false,
+                    pull,
                 );
                 add_items(&v, &options);
                 unsafe {
@@ -572,7 +597,25 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 watch_menu(&target, &v);
-                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+                let font = if pull && inline {
+                    // A header's title (borderless): the name it heads, in
+                    // its type. A bezelled pull-down (Publish) is a button.
+                    unsafe {
+                        NSFont::systemFontOfSize_weight(
+                            t.typography.heading as f64,
+                            objc2_app_kit::NSFontWeightSemibold,
+                        )
+                    }
+                } else {
+                    NSFont::systemFontOfSize(t.typography.body as f64)
+                };
+                v.setFont(Some(&font));
+                if pull && inline {
+                    // The title is a heading; its menu lists in menu type.
+                    if let Some(menu) = v.menu() {
+                        unsafe { menu.setFont(Some(&NSFont::menuFontOfSize(0.))) };
+                    }
+                }
                 if inline || well {
                     v.setBordered(false);
                 }
@@ -1176,6 +1219,18 @@ fn row_title(option: &Value) -> Retained<NSString> {
 fn add_items(popup: &NSPopUpButton, options: &[Value]) {
     let Some(menu) = popup.menu() else { return };
     let mtm = MainThreadMarker::new().expect("main thread");
+    // A pull-down's first item is its title (`Control::value` names it).
+    if popup.pullsDown() {
+        let title = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        menu.addItem(&title);
+    }
     for option in options {
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -1207,8 +1262,9 @@ fn checks(popup: &NSPopUpButton, options: &[Value]) {
     if !options.iter().any(|o| o.get("checked").is_some()) {
         return;
     }
+    let first = isize::from(popup.pullsDown());
     for (i, option) in options.iter().enumerate() {
-        if let Some(item) = popup.itemAtIndex(i as isize) {
+        if let Some(item) = popup.itemAtIndex(i as isize + first) {
             item.setState(if option.get("checked") == Some(&Value::Bool(true)) {
                 NSControlStateValueOn
             } else {
@@ -1237,9 +1293,10 @@ fn set_rows(target: &Target, popup: &NSPopUpButton, next: &[Value], value: &Valu
     if same_rows {
         state.pending.take();
         if shown.as_slice() != next {
+            let first = isize::from(popup.pullsDown());
             for (index, option) in next.iter().enumerate() {
                 let title = row_title(option);
-                if let Some(item) = popup.itemAtIndex(index as isize) {
+                if let Some(item) = popup.itemAtIndex(index as isize + first) {
                     if item.title() != title {
                         item.setTitle(&title);
                     }

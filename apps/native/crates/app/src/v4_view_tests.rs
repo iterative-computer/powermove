@@ -33,6 +33,14 @@ pub(crate) struct Rig {
     pub runtime: Arc<Builtins>,
     _actor: KernelActor,
 }
+/// A test's window outlives the test (GPUI's test app keeps it), and with it
+/// the panel's runtime: its isolates are closed when the test ends, or every
+/// test kept one and the process's heap account filled over the suite.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.runtime.close();
+    }
+}
 /// Three adjacent static strips on one lane, with handles: pro-edit material.
 pub(crate) fn strips_json() -> String {
     let strip = |id: &str, from: f64| {
@@ -62,7 +70,10 @@ pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
         .unwrap();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A mount waits its turn in the process's shared heap account while
+    // other tests' isolates hold it (the whole suite runs in parallel), then
+    // runs: the time in line counts here too.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(result) = ticket.try_take() {
             result.expect("built-in mount");
@@ -1224,6 +1235,11 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
     let click = |vcx: &mut VisualTestContext, id: &str| {
         let deadline = Instant::now() + Duration::from_secs(20);
         let b = loop {
+            // As the app does on a wake: the sheet's finished encoder checks
+            // are published (Export Video is off until they are).
+            if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+                wait(ticket);
+            }
             for p in rig.runtime.take_publications() {
                 view.update(vcx, |v, cx| v.publish(p, cx));
             }
@@ -1237,6 +1253,17 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
         vcx.simulate_click(b.center(), Modifiers::none());
         vcx.run_until_parked();
     };
+    // Export Video is on once the sheet's encoder checks have finished and
+    // been published.
+    let checked = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+            wait(ticket);
+            break;
+        }
+        assert!(Instant::now() < checked, "the encoder checks never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     click(&mut vcx, "export.start");
     until_asked(&mut vcx, "export.begin");
     wait(

@@ -98,13 +98,45 @@ fn normalize(path: &Path) -> PathBuf {
 pub struct LazySvelte<'a> {
     pool: &'a RuntimePool,
     made: std::cell::OnceCell<Result<SvelteCompiler, String>>,
+    /// Set when the host closes: a compiler still waiting its turn for heap
+    /// stops waiting.
+    stop: Option<&'a std::sync::atomic::AtomicBool>,
+    /// How long one compile may take once the compiler has its heap.
+    deadline: Duration,
 }
 impl<'a> LazySvelte<'a> {
     pub fn new(pool: &'a RuntimePool) -> Self {
         Self {
             pool,
             made: std::cell::OnceCell::new(),
+            stop: None,
+            deadline: Duration::from_secs(60),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+    pub fn stopped_by(mut self, stop: &'a std::sync::atomic::AtomicBool) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+    /// The compiler, once its realm has had its turn in the heap account:
+    /// time spent in line never counts against a compile's deadline.
+    fn admitted(&self) -> Result<&SvelteCompiler, String> {
+        let compiler = self.get()?;
+        let realm = compiler.realm();
+        crate::admitted(realm, &|| {
+            if self
+                .stop
+                .is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire))
+            {
+                realm.close();
+            }
+        })
+        .map_err(|e| format!("Extensions could not compile: {e}"))?;
+        Ok(compiler)
     }
     #[cfg(test)]
     pub(crate) fn started(&self) -> bool {
@@ -191,10 +223,10 @@ impl Sources<'_> {
         let filename = file.to_string_lossy();
         let mut ticket = self
             .svelte
-            .get()?
+            .admitted()?
             .compile(source, &filename, unit)
             .map_err(|e| e.to_string())?;
-        let result = wait_until(&mut ticket, Instant::now() + Duration::from_secs(60))
+        let result = wait_until(&mut ticket, Instant::now() + self.svelte.deadline)
             .ok_or("Svelte compiler timed out")?;
         result.map(|o| o.javascript).map_err(|e| e.to_string())
     }

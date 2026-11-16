@@ -355,6 +355,7 @@ impl Editor {
     }
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
+        let after = workspace::persistent_record(after);
         let before = self
             .pending
             .last()
@@ -556,7 +557,12 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        layout::Panels::new(contributed)
+        let remembered = self
+            .integration
+            .as_ref()
+            .map(|i| i.remembered_panel_titles(cx))
+            .unwrap_or_default();
+        layout::Panels::new(contributed).with_remembered(remembered)
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
@@ -626,6 +632,18 @@ impl Editor {
             return true;
         }
         let panels = self.panels(cx);
+        if kind == "panel"
+            && (verb == "close" || (verb == "toggle" && self.layout.find(rest).is_some()))
+            && self.agent_build_slots.contains_key(rest)
+        {
+            self.release_agent_panel(rest);
+            if let Some(integration) = self.integration.clone() {
+                integration.panel_closed(rest, cx);
+            }
+            self.save();
+            cx.notify();
+            return true;
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
@@ -664,6 +682,28 @@ impl Editor {
                         })
                         .or_else(|_| self.layout.show_panel(rest, &panels))
                 }
+                _ => self.layout.show_panel(rest, &panels),
+            },
+            // A panel coming back (its extension restarted as the project
+            // opens): in its place, or shown if it had none, but never taking
+            // the showing tab of a stack it is already in (PM-427).
+            ("panel", "restore") => match self.parked.remove(rest) {
+                Some((place, showing)) if self.layout.find(rest).is_none() => {
+                    let mut next = self.layout.clone();
+                    next.show_panel(rest, &panels)
+                        .and_then(|_| next.move_panel_to(rest, place))
+                        .map(|_| {
+                            if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
+                                && next
+                                    .find(rest)
+                                    .is_some_and(|(d, g, _)| (d, g) == (dock, group))
+                            {
+                                next.docks[dock].groups[group].active = tab;
+                            }
+                            self.layout = next
+                        })
+                }
+                _ if self.layout.find(rest).is_some() => Ok(()),
                 _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {
@@ -2165,6 +2205,7 @@ impl Render for Editor {
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                crate::input::noted();
                 // A drag still in flight (its release never came) ends where
                 // it showed before this press is handled, never on it.
                 if this.gesture.is_some() {
@@ -2678,6 +2719,25 @@ impl Render for Editor {
                 let mut empty = empty_state(&t, heading, line)
                     .h(px((p.rect.h - m.header).max(0.)))
                     .overflow_hidden();
+                // A panel still on its way (its extension starting): the
+                // loading state under its own title, never an empty body.
+                if coming {
+                    static SINCE: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    let turns = SINCE
+                        .get_or_init(std::time::Instant::now)
+                        .elapsed()
+                        .as_secs_f64();
+                    empty = empty.child(crate::welcome_view::spinner(
+                        if t.accessibility.reduce_motion {
+                            0.
+                        } else {
+                            turns
+                        },
+                        &t,
+                    ));
+                    w.request_animation_frame();
+                }
                 // Actions run only with an app attached (the bare shell has no importer).
                 if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
                     empty = empty.child(
@@ -3201,6 +3261,81 @@ mod keyboard_tests {
             .unwrap();
     }
 
+    #[::core::prelude::v1::test]
+    fn p4_explicit_close_releases_build_slot() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-close",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(v.shell_command("panel:close:panel-build-close", cx));
+                assert!(!v.agent_build_slots.contains_key("panel-build-close"));
+                assert!(v.layout.find("panel-build-close").is_none());
+            })
+            .unwrap();
+    }
+    #[::core::prelude::v1::test]
+    fn p5_save_agent_layout_never_persists_build_ids() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-save",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                v.save_agent_layout("Synthetic slots", v.layout.docks.clone(), cx)
+                    .unwrap();
+                assert!(!v.record.to_string().contains("panel-build-save"));
+                // Every other persistent writer uses this same serialization boundary.
+                v.reserve_agent_panel(
+                    "panel-build-copy",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(
+                    !workspace::write(&v.layout, &v.record)
+                        .to_string()
+                        .contains("panel-build-copy")
+                );
+                v.shell_command("layout:save:Synthetic copy", cx);
+                assert!(!v.record.to_string().contains("panel-build-copy"));
+                let mut raw = v.record.clone();
+                raw["layout"]["docks"][0]["panels"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"id":"panel-build-injected"}));
+                v.commit(raw);
+                assert!(!v.record.to_string().contains("panel-build-injected"));
+            })
+            .unwrap();
+    }
+
     /// At launch an extension's panels park while its realm starts, then come
     /// back: in their places, with the stack still showing what it showed.
     /// A window whose extensions contribute these panels.
@@ -3281,6 +3416,16 @@ mod keyboard_tests {
                 }
                 // Asking for a panel still shows it.
                 assert!(v.shell_command("panel:show:ext.pexels", cx));
+                assert_eq!(showing(v), "ext.pexels");
+                // An extension's panel opening again as it restarts (PM-427):
+                // in its stack, it never takes the showing tab, parked or not.
+                for id in ["ext.voice", "inspector"] {
+                    assert!(v.shell_command(&format!("panel:restore:{id}"), cx));
+                    assert_eq!(showing(v), "ext.pexels", "{id} restored in place");
+                }
+                assert!(v.shell_command("panel:park:ext.voice", cx));
+                assert!(v.shell_command("panel:restore:ext.voice", cx));
+                assert!(v.layout.find("ext.voice").is_some(), "back in its place");
                 assert_eq!(showing(v), "ext.pexels");
             })
             .unwrap();
