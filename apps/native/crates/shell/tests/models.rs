@@ -841,3 +841,124 @@ fn dock_wheel_hit_test_includes_edge_grabs_and_stacked_gaps_only() {
     });
     assert_eq!(geometry.wheel_dock(500., 605., 6.), None);
 }
+
+#[test]
+fn p1_flex_basis_survives_first_tab_changes() {
+    use pm_shell::layout::DropTarget;
+    for operation in 0..6 {
+        let mut layout = Layout::preset("design");
+        let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+        layout.docks[di].groups = [vec!["inspector", "notes"], vec!["easing", "fxbrowser"]]
+            .into_iter()
+            .map(|tabs| Group {
+                tabs: tabs.into_iter().map(str::to_owned).collect(),
+                active: 0,
+                size: None,
+                collapsed: false,
+            })
+            .collect();
+        layout.flex_bases = [("inspector".into(), 340.), ("easing".into(), 260.)].into();
+        match operation {
+            0 => layout.reorder_tab(di, 0, 0, 2).unwrap(),
+            1 => layout.close_panel("inspector").unwrap(),
+            2 => layout.insert_at(
+                "shader",
+                DropTarget::Tab {
+                    dock: di,
+                    group: 0,
+                    index: 0,
+                },
+            ),
+            3 => layout
+                .move_panel_to(
+                    "inspector",
+                    DropTarget::Tab {
+                        dock: di,
+                        group: 1,
+                        index: 0,
+                    },
+                )
+                .unwrap(),
+            4 => layout.close_others("notes").unwrap(),
+            _ => {
+                let dest = layout.docks.iter().position(|d| d.id == "left").unwrap();
+                layout
+                    .move_panel_to(
+                        "inspector",
+                        DropTarget::Tab {
+                            dock: dest,
+                            group: 0,
+                            index: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let key = &layout.docks[di].groups[0].tabs[0];
+        assert_eq!(
+            layout.flex_bases.get(key),
+            Some(&340.),
+            "source basis operation {operation}"
+        );
+        let key = &layout.docks[di].groups[1].tabs[0];
+        assert_eq!(
+            layout.flex_bases.get(key),
+            Some(&260.),
+            "destination basis operation {operation}"
+        );
+        let saved =
+            pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+        let restored = pm_shell::workspace::layout(&saved);
+        for g in &layout.docks[di].groups {
+            assert_eq!(
+                restored.flex_bases.get(&g.tabs[0]),
+                layout.flex_bases.get(&g.tabs[0])
+            );
+        }
+    }
+}
+
+#[test]
+fn p1_resize_keeps_unrelated_fluid_group() {
+    let t = tokens();
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1200.,
+        h: 900. + 2. * t.metrics.dock_gap,
+    };
+    for delta in [40., 0.] {
+        let mut layout = Layout::preset("design");
+        let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+            .into_iter()
+            .map(|id| Group {
+                tabs: vec![id.into()],
+                active: 0,
+                size: None,
+                collapsed: false,
+            })
+            .collect();
+        let natural = [
+            ("inspector".into(), 200.),
+            ("easing".into(), 200.),
+            ("fxbrowser".into(), 200.),
+        ]
+        .into();
+        let before = layout.geometry_with_panel_heights(bounds, &t, &natural);
+        let divider = before
+            .dividers
+            .iter()
+            .find(|d| d.dock == di && d.group == Some(0))
+            .unwrap();
+        layout.resize_with_panel_heights(divider, delta, bounds, &t, &natural);
+        let after = layout.geometry_with_panel_heights(bounds, &t, &natural);
+        let heights: Vec<_> = after
+            .panels
+            .iter()
+            .filter(|p| p.dock == di)
+            .map(|p| p.rect.h)
+            .collect();
+        assert_eq!(heights, vec![300. + delta, 300. - delta, 300.]);
+    }
+}
