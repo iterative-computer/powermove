@@ -1813,6 +1813,21 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     settle(&mut s);
     assert!(renders(&s) > rendered);
 }
+/// PM-431: the background render reports every frame it stores; a report
+/// that changes no bar the ruler draws draws nothing (the app in front and
+/// untouched stays idle).
+#[gpui::test]
+fn a_render_cache_report_that_moves_no_bar_draws_nothing(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(20), true);
+    s.idle(cx);
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let rendered = renders(&s);
+    for _ in 0..5 {
+        s.surface.update(&mut s.vcx, |t, cx| t.render_bars_changed(cx));
+        s.vcx.run_until_parked();
+    }
+    assert_eq!(renders(&s), rendered);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
