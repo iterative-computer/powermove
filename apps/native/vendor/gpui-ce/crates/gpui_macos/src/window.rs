@@ -917,6 +917,8 @@ struct MacWindowState {
     sync_present_requested: bool,
     // Powermove P-120: when the previous GPUI frame was drawn.
     last_draw: Option<std::time::Instant>,
+    // Powermove P-120: when a frame last moved a hosted view.
+    last_moved: Option<std::time::Instant>,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<crate::composition_accessibility::Adapter>,
     // The parent window if this window is a sheet (Dialog kind)
@@ -1488,6 +1490,7 @@ impl MacWindow {
                 activated_least_once: false,
                 sync_present_requested: false,
                 last_draw: None,
+                last_moved: None,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
                 sheet_parent: None,
@@ -2532,6 +2535,12 @@ impl PlatformWindow for MacWindow {
             .last_draw
             .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
         this.last_draw = Some(now);
+        if moved {
+            this.last_moved = Some(now);
+        }
+        let lingering = this
+            .last_moved
+            .is_some_and(|t| now.duration_since(t) < crate::composition::DIRECT_LINGER);
         let direct = this.direct_moved.is_some();
         let sync = direct
             || crate::composition::presents_with_transaction(
@@ -2539,6 +2548,7 @@ impl PlatformWindow for MacWindow {
                 transaction.as_ref(),
                 continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
                 this.ca_display_link.is_some(),
+                lingering,
             );
         this.renderer.set_presents_with_transaction(sync);
         // A host that cannot say beforehand that it will move (it gave no
