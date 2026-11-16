@@ -1000,6 +1000,17 @@ impl Kernel {
                 let unchanged = match &self.sessions[&handle.project].destination {
                     Destination::File(_) => !store.needs_save(),
                     Destination::Library(slot) => {
+                        if std::env::var_os("PM_SAVE_TRACE").is_some() {
+                            eprintln!(
+                                "PM_SAVE close {}: own slot {}, unsaved {}, as saved {}, upgraded {}, slot holds {}",
+                                handle.project,
+                                slot == &handle.project,
+                                store.needs_save(),
+                                store.as_saved(),
+                                store.upgraded_on_open(),
+                                self.library_slot_holds(slot, store),
+                            );
+                        }
                         slot == &handle.project
                             && store.as_saved()
                             && self.library_slot_holds(slot, store)
@@ -3755,8 +3766,11 @@ impl Kernel {
     /// where the person left off, without rewriting the project body.
     /// Whether library slot `slot` already holds what a close would write
     /// for a store that is as saved: no closed-project rename waiting to be
-    /// written into its body, and every media item stored in the library
-    /// (a close stores the others).
+    /// written into its body, and every media item kept by the app: in the
+    /// library's media store, in the slot's own backing file under the
+    /// profile's recovery files (a recovered copy's), or a link the project
+    /// keeps outside. Media still read from another file (one that may go
+    /// away) are stored by the close.
     fn library_slot_holds(&self, slot: &str, store: &crate::DocumentStore) -> bool {
         let Some(writer) = &self.library else {
             return false;
@@ -3765,11 +3779,30 @@ impl Kernel {
             return false;
         };
         let media = profile.join(crate::library_media::DIR);
-        writer.store().renamed(slot).ok().flatten().is_none()
-            && store
-                .media()
-                .iter()
-                .all(|entry| crate::library_media::is_stored(entry, &media))
+        let own_file = store
+            .path()
+            .filter(|path| path.starts_with(profile.join("recovery-files")));
+        let kept = |entry: &project_io::MediaEntry| {
+            crate::library_media::is_stored(entry, &media)
+                || store.media().is_linked(&entry.id)
+                || match &entry.source {
+                    project_io::MediaSource::Embedded { file, .. } => {
+                        own_file.is_some_and(|own| own == file.path.as_path())
+                    }
+                    _ => false,
+                }
+        };
+        let renamed = writer.store().renamed(slot).ok().flatten().is_some();
+        let unstored: Vec<&str> = store
+            .media()
+            .iter()
+            .filter(|entry| !kept(entry))
+            .map(|entry| entry.id.as_str().unwrap_or("?"))
+            .collect();
+        if std::env::var_os("PM_SAVE_TRACE").is_some() {
+            eprintln!("PM_SAVE slot {slot}: renamed {renamed}, media not in the library {unstored:?}");
+        }
+        !renamed && unstored.is_empty()
     }
     fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
         let Some(writer) = &self.library else {
