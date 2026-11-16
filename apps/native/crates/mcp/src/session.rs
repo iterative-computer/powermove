@@ -258,6 +258,9 @@ impl McpSession {
     }
     /// Called before the app acquires its session-transition fence.
     pub fn wait_for_pause(&self) -> Result<()> {
+        if self.agent_token.is_none() {
+            return Ok(());
+        }
         if let Some(project) = self.active.as_ref().and_then(|s| s.project.as_deref()) {
             let gate = self
                 .host
@@ -788,6 +791,15 @@ impl McpSession {
             } else {
                 views::timeline(&host, &id, args)?
             };
+            if name == "get_project_state" {
+                session.known_layers.extend(
+                    result["layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|layer| layer["id"].as_str().map(str::to_owned)),
+                );
+            }
             refresh(session, &mut host, &id, self.writer)?;
             return Ok(result);
         }
@@ -983,6 +995,7 @@ impl McpSession {
                         session.focus.clear();
                     }
                     for id in ids {
+                        session.known_layers.insert(id.clone());
                         if !session.focus.contains(&id) {
                             session.focus.push(id);
                         }
@@ -1167,7 +1180,7 @@ impl McpSession {
                                     crate::presence::Kind::Create
                                 }
                                 "replace_keyframes" => crate::presence::Kind::Key,
-                                "set_property" if result["command"]["mode"] == "keyframe" => {
+                                "set_property" if result["command"]["mode"] != "static" => {
                                     crate::presence::Kind::Key
                                 }
                                 "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
@@ -1196,8 +1209,10 @@ impl McpSession {
                                 .collect();
                             if kind == crate::presence::Kind::Key && times.is_empty() {
                                 times.push(
-                                    result["command"]["time"].as_f64().unwrap_or(session.time)
-                                        + offset,
+                                    result["command"]["time"]
+                                        .as_f64()
+                                        .unwrap_or(session.time)
+                                        .max(offset),
                                 );
                             }
                             host.presence_detail(
@@ -1214,7 +1229,6 @@ impl McpSession {
                 };
                 let tx = session.transaction.as_mut().unwrap();
                 tx.revision = ack.revision;
-                session.observed_revision = ack.revision;
                 tx.label = label.clone();
                 if let Some(app) = host.coedit_host() {
                     app.record_turn(
@@ -1226,6 +1240,7 @@ impl McpSession {
                 tx.changed |= ack.revision != revision;
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
+                observe_foreign(session, &host, &id);
                 let message = if name == "edit_video" && ack.revision == revision {
                     "No source changes"
                 } else {
@@ -1663,30 +1678,70 @@ fn observe_foreign(session: &mut Active, host: &Automation, id: &str) {
     let Some(publication) = app.kernel.published(id) else {
         return;
     };
-    if publication.entry.is_some() || crate::coedit::typing(id) {
-        return;
-    }
+    // An open gesture is provisional. Its immutable starting revision is the
+    // committed frontier, even when another composition commits meanwhile.
+    let frontier = publication
+        .entry_before
+        .as_ref()
+        .map_or(publication.revision(), |before| before.revision);
+    let mut human_paths = Vec::new();
+    let mut gesture_paths: Vec<Vec<pm_model::patch::PathPart>> = Vec::new();
+    let mut entry_id = None;
     for change in publication
         .changes
         .iter()
-        .filter(|c| c.revision > session.observed_revision)
+        .filter(|c| c.revision > session.observed_revision && c.revision <= frontier)
     {
-        let human = match &change.cause {
-            pm_kernel::ChangeCause::Write { origin, .. }
-            | pm_kernel::ChangeCause::Edit { origin, .. }
-            | pm_kernel::ChangeCause::Restore { origin, .. } => *origin == Origin::Interface,
-            pm_kernel::ChangeCause::Undo { .. }
-            | pm_kernel::ChangeCause::Redo { .. }
-            | pm_kernel::ChangeCause::GestureStep { .. } => true,
-            _ => false,
-        };
-        if human {
-            session
-                .owned_scopes
-                .extend(change.ops.iter().map(|o| o.path().to_vec()));
+        match &change.cause {
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                entry: Some(entry),
+                ..
+            } => {
+                if entry_id != Some(*entry) {
+                    human_paths.append(&mut gesture_paths);
+                    entry_id = Some(*entry);
+                }
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::GestureStep { .. } => {
+                gesture_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            pm_kernel::ChangeCause::Revert { .. }
+            | pm_kernel::ChangeCause::GestureCancel { .. } => {
+                // Cancel erases only provisional ownership, never an earlier
+                // committed edit to that same path.
+                gesture_paths.retain(|path| {
+                    !change
+                        .ops
+                        .iter()
+                        .any(|op| path.starts_with(op.path()) || op.path().starts_with(path))
+                });
+            }
+            pm_kernel::ChangeCause::Write {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Edit {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Restore {
+                origin: Origin::Interface,
+                ..
+            }
+            | pm_kernel::ChangeCause::Undo { .. }
+            | pm_kernel::ChangeCause::Redo { .. } => {
+                human_paths.append(&mut gesture_paths);
+                entry_id = None;
+                human_paths.extend(change.ops.iter().map(|o| o.path().to_vec()));
+            }
+            _ => {}
         }
     }
-    session.observed_revision = publication.revision();
+    human_paths.append(&mut gesture_paths);
+    session.owned_scopes.extend(human_paths);
+    session.observed_revision = frontier;
 }
 fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
     observe_foreign(session, host, id);

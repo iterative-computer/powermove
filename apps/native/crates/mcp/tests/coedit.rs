@@ -600,3 +600,316 @@ fn non_open_composition_commits_independently_of_user_commit_or_cancel() {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn pause_keeps_the_turn_past_tool_ack_timeout_and_legacy_mcp_bypasses_it() {
+    use std::time::Duration;
+    let (root, host, actor, mut session, id) = attached_fixture();
+    let app = host.lock().unwrap().coedit_host().unwrap();
+    assert!(app.toggle_pause(&id));
+    let mut legacy = McpSession::new(host.clone());
+    ok(legacy.call("start_session", json!({"prompt":"Legacy client"})));
+    let started = std::time::Instant::now();
+    legacy.wait_for_pause().unwrap();
+    assert!(started.elapsed() < Duration::from_millis(200));
+    let gate = app.clone();
+    let project = id.clone();
+    let (send, result) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        send.send(gate.wait_if_paused(&project, || true)).unwrap();
+    });
+    // Pause is intentional; the four-second tool acknowledgement timeout
+    // must not release it or end the provider turn.
+    assert!(matches!(
+        result.recv_timeout(Duration::from_millis(4200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    app.resume_project(&id);
+    assert!(result.recv_timeout(Duration::from_secs(1)).unwrap());
+    worker.join().unwrap();
+    legacy.finish(true).unwrap();
+    session.finish(true).unwrap();
+    drop(legacy);
+    drop(session);
+    drop(host);
+    drop(app);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn ui_call(
+    actor: &pm_kernel::KernelActor,
+    id: &str,
+    call: impl Into<pm_kernel::Call>,
+) -> pm_kernel::Reply {
+    let ack = actor
+        .handle()
+        .call(
+            id,
+            pm_kernel::Request::new(pm_kernel::Caller::native(), call),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(
+        !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+        "{:?}",
+        ack.reply
+    );
+    ack.reply
+}
+fn user_opacity(actor: &pm_kernel::KernelActor, id: &str, value: f64) {
+    ui_call(
+        actor,
+        id,
+        pm_kernel::Call::Transact {
+            label: Some("User opacity".into()),
+            expected_revision: None,
+            body: vec![pm_kernel::Command::SetStaticOpacity {
+                layer_id: "L".into(),
+                value,
+            }]
+            .into(),
+        },
+    );
+}
+
+#[test]
+fn ownership_survives_a_remote_write_a_cancelled_drag_and_a_composition_switch() {
+    use pm_kernel::{Call, CompCommand, GestureCall, Reply};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    session.finish(true).unwrap();
+    ui_call(
+        &actor,
+        &id,
+        Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: vec![
+                CompCommand::Create {
+                    comp_id: "pre".into(),
+                    settings: Default::default(),
+                }
+                .into(),
+            ]
+            .into(),
+        },
+    );
+    let document = actor.handle().published(&id).unwrap().snapshot.doc_id;
+    let original = actor
+        .handle()
+        .published(&id)
+        .unwrap()
+        .snapshot
+        .render_comp();
+    ok(session.call("start_session", json!({"prompt":"Respect user ownership"})));
+    user_opacity(&actor, &id, 33.);
+    let Reply::Gesture(gesture) = ui_call(
+        &actor,
+        &id,
+        GestureCall::Begin {
+            label: "User drag".into(),
+        },
+    ) else {
+        panic!()
+    };
+    ui_call(
+        &actor,
+        &id,
+        GestureCall::Step {
+            gesture,
+            replace: false,
+            body: vec![pm_kernel::Command::SetStaticOpacity {
+                layer_id: "L".into(),
+                value: 17.,
+            }]
+            .into(),
+        },
+    );
+    let remote = session.dispatch("apply_commands", &json!({"compositionId":"pre","commands":[{"type":"add_layer","id":"remote","layerType":"shape"}]})).unwrap();
+    assert_ne!(remote["status"], "held", "{remote}");
+    ui_call(&actor, &id, GestureCall::Cancel { gesture });
+    ui_call(
+        &actor,
+        &id,
+        Call::OpenComposition {
+            comp_id: "pre".into(),
+            document,
+        },
+    );
+    // Default targeting stays bound to the run's original composition.
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    assert_eq!(result["status"], "dropped", "{result}");
+    assert_eq!(result["error"], "user_owned");
+    assert_eq!(
+        actor
+            .handle()
+            .published(&id)
+            .unwrap()
+            .snapshot
+            .render_comp(),
+        "pre"
+    );
+    let state = ok(session.call("get_project_state", json!({"compositionId":original})));
+    let layer = state["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == "L")
+        .unwrap();
+    let opacity = layer["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == "opacity")
+        .unwrap();
+    assert_eq!(opacity["value"], 33);
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelled_provisional_edit_does_not_claim_ownership() {
+    use pm_kernel::{GestureCall, Reply};
+    let (root, host, actor, mut session, id) = attached_fixture();
+    let Reply::Gesture(gesture) = ui_call(
+        &actor,
+        &id,
+        GestureCall::Begin {
+            label: "Cancelled drag".into(),
+        },
+    ) else {
+        panic!()
+    };
+    ui_call(
+        &actor,
+        &id,
+        GestureCall::Step {
+            gesture,
+            replace: false,
+            body: vec![pm_kernel::Command::SetStaticOpacity {
+                layer_id: "L".into(),
+                value: 17.,
+            }]
+            .into(),
+        },
+    );
+    ui_call(&actor, &id, GestureCall::Cancel { gesture });
+    let result = session
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"set_property","target":"L","path":"opacity","value":40}]}),
+        )
+        .unwrap();
+    assert_ne!(result["status"], "dropped", "{result}");
+    assert_eq!(
+        host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["p"]["opacity"]["v"],
+        40
+    );
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    drop(actor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn key_presence_uses_composition_time_and_includes_auto_keyframes() {
+    let (root, host, mut session, id) = fixture();
+    ok(session.call("apply_commands", json!({"commands":[{"type":"add_layer","id":"offset","layerType":"shape","from":2,"duration":4}]})));
+    let events = host.lock().unwrap().subscribe_presence();
+    ok(session.call("apply_commands", json!({"commands":[{"type":"set_property","target":"offset","path":"opacity","mode":"keyframe","time":3,"value":40}]})));
+    let first = events
+        .try_iter()
+        .find(|e| e.kind == pm_mcp::presence::Kind::Key)
+        .unwrap();
+    assert_eq!(first.times, vec![3.]);
+    ok(session.call("apply_commands", json!({"commands":[{"type":"set_property","target":"offset","path":"opacity","time":3.5,"value":60}]})));
+    let second = events
+        .try_iter()
+        .find(|e| e.kind == pm_mcp::presence::Kind::Key)
+        .unwrap();
+    assert_eq!(second.times, vec![3.5]);
+    session.finish(true).unwrap();
+    drop(session);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
+    let _ = id;
+}
+
+#[test]
+fn remote_layer_seen_in_state_or_selection_reports_target_removed() {
+    use pm_kernel::{Call, CompCommand, LayerCommand};
+    for select in [false, true] {
+        let (root, host, actor, mut session, id) = attached_fixture();
+        session.finish(true).unwrap();
+        ui_call(
+            &actor,
+            &id,
+            Call::Transact {
+                label: None,
+                expected_revision: None,
+                body: vec![
+                    CompCommand::Create {
+                        comp_id: "pre".into(),
+                        settings: Default::default(),
+                    }
+                    .into(),
+                ]
+                .into(),
+            },
+        );
+        ok(session.call("start_session", json!({"prompt":"Setup remote layer"})));
+        ok(session.call("apply_commands",json!({"compositionId":"pre","commands":[{"type":"add_layer","id":"existing","layerType":"shape"}]})));
+        session.finish(true).unwrap();
+        ok(session.call("start_session", json!({"prompt":"Observe remote layer"})));
+        if select {
+            ok(session.call(
+                "select_layers",
+                json!({"compositionId":"pre","layerIds":["existing"]}),
+            ));
+        } else {
+            ok(session.call("get_project_state", json!({"compositionId":"pre"})));
+        }
+        let document = actor.handle().published(&id).unwrap().snapshot.doc_id;
+        ui_call(
+            &actor,
+            &id,
+            Call::OpenComposition {
+                comp_id: "pre".into(),
+                document,
+            },
+        );
+        ui_call(
+            &actor,
+            &id,
+            Call::Transact {
+                label: Some("User delete".into()),
+                expected_revision: None,
+                body: vec![
+                    LayerCommand::Delete {
+                        layer_ids: vec!["existing".into()],
+                    }
+                    .into(),
+                ]
+                .into(),
+            },
+        );
+        let result=session.call("apply_commands",json!({"compositionId":"pre","commands":[{"type":"set_property","target":"existing","path":"opacity","value":30}]}));
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(result.to_string().contains("target_removed"), "{result}");
+        session.finish(true).unwrap();
+        drop(session);
+        drop(host);
+        drop(actor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

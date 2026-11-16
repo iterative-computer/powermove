@@ -116,32 +116,37 @@ impl McpSession {
             return Ok(None);
         };
         let (host, baseline, scopes) = {
-            let mut automation = self
-                .host
-                .lock()
-                .map_err(|_| Error::unavailable("MCP host stopped"))?;
-            let view = automation.view(&project)?;
+            let mut automation = Automation::fenced(&self.host, active.document)?;
+            let original = automation.original_view(&project)?;
             let target = args["compositionId"]
                 .as_str()
                 .map(str::to_owned)
                 .or_else(|| active.default_comp.clone());
-            if target
+            let non_open = target
                 .as_ref()
-                .is_some_and(|id| view.snapshot.render_comp() != *id)
-            {
+                .is_some_and(|id| original.snapshot.render_comp() != *id);
+            automation.composition = target;
+            let view = automation.view(&project)?;
+            let comp = view.snapshot.open_comp();
+            if active.focus_comp != comp {
+                active
+                    .comp_focus
+                    .insert(active.focus_comp.clone(), std::mem::take(&mut active.focus));
+                active.focus = active.comp_focus.get(&comp).cloned().unwrap_or_default();
+                active.focus_comp = comp;
+            }
+            if non_open {
                 refresh(active, &mut automation, &project, self.writer)?;
-                return Ok(None);
+            } else {
+                observe_foreign(active, &automation, &project);
             }
-            observe_foreign(active, &automation, &project);
-            let touching = automation.coedit_host().is_some_and(|h| {
-                h.kernel
-                    .published(&project)
-                    .is_some_and(|p| p.entry.is_some())
-            }) || crate::coedit::typing(&project)
-                || Ticket::queued(&project, view.snapshot.doc_id);
-            if !touching && active.owned_scopes.is_empty() {
-                return Ok(None);
-            }
+            let touching = !non_open
+                && (automation.coedit_host().is_some_and(|h| {
+                    h.kernel
+                        .published(&project)
+                        .is_some_and(|p| p.entry.is_some())
+                }) || crate::coedit::typing(&project)
+                    || Ticket::queued(&project, view.snapshot.doc_id));
 
             for command in args["commands"].as_array().into_iter().flatten() {
                 let target = command["target"]
@@ -165,6 +170,10 @@ impl McpSession {
                     }
                 }
             }
+            if !touching && active.owned_scopes.is_empty() {
+                return Ok(None);
+            }
+
             let scopes = if name == "apply_commands" {
                 let cleaned = commands::clean_commands(
                     args["commands"]
@@ -210,6 +219,11 @@ impl McpSession {
                 return Ok(Some(
                     json!({"error":"user_owned","status":"dropped","reason":"The user owns this value for this turn. A fresh human steer must explicitly ask to change it; then send only those requested values with preserveHandEdits:false."}),
                 ));
+            }
+            // A different composition bypasses the user's hold, but never
+            // the ownership check above.
+            if non_open {
+                return Ok(None);
             }
             let Some(host) = automation.coedit_host() else {
                 return Ok(None);
@@ -296,7 +310,10 @@ impl McpSession {
                     let _ = events.recv_timeout(Duration::from_millis(50));
                 }
                 if !host.wait_if_paused(&project, || {
-                    !stop.load(Ordering::Acquire) && !worker.run_revoked()
+                    !stop.load(Ordering::Acquire)
+                        && !worker.run_revoked()
+                        && waiting_since.elapsed()
+                            < Duration::from_millis(crate::coedit::MAX_HOLD_MS)
                 }) {
                     return Ok(
                         json!({"status":"dropped","reason":"The run stopped before this write landed."}),
