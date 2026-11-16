@@ -522,6 +522,11 @@ impl Controller {
             return;
         }
         let Some(project) = project else {
+            // The window mounts while its project still opens: the
+            // extensions started for that open stay (PM-384).
+            if self.opening_name.is_some() && self.extensions.project.is_some() {
+                return;
+            }
             let mut shell = self.host.borrow_mut();
             shell.native_present = None;
             shell.native_accessibility = vec![];
