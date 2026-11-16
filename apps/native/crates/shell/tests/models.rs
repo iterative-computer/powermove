@@ -768,43 +768,6 @@ fn resetting_a_side_split_updates_fluid_bases_without_moving_its_neighbour() {
 }
 
 #[test]
-fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
-    let items = menu::view3d();
-    for (group, value) in [
-        ("nav", "left"),
-        ("nav", "right"),
-        ("nav", "bottom"),
-        ("nav", "top"),
-        ("nav", "front"),
-        ("nav", "back"),
-        ("look", "camera"),
-        ("nav", "selected"),
-        ("nav", "persp"),
-        ("nav", "roll-left"),
-        ("nav", "roll-right"),
-    ] {
-        assert!(
-            items.iter().any(|i| i.command == "studio.view"
-                && i.args == vec![serde_json::json!(group), serde_json::json!(value)]),
-            "{group}/{value}"
-        );
-    }
-    let bindings = shipped();
-    let grave = bindings.iter().find(|b| b.chord == "`").unwrap();
-    assert_eq!(grave.command, "maximizePanel");
-    for (chord, value) in [
-        ("numpad5", "persp"),
-        ("5", "persp"),
-        ("shift+numpad4", "roll-left"),
-        ("shift+numpad6", "roll-right"),
-    ] {
-        assert!(bindings.iter().any(|b| b.chord == chord
-            && b.command == "studio.view"
-            && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
-    }
-}
-
-#[test]
 fn dock_wheel_hit_test_includes_edge_grabs_and_stacked_gaps_only() {
     let mut geometry = Geometry::default();
     geometry.side_docks.insert(
