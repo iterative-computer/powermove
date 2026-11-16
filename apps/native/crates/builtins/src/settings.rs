@@ -910,28 +910,10 @@ impl Backend {
             // The window's extension host follows this state and activates or unloads.
             Some("extension.enabled") => {
                 let id = action["id"].as_str().ok_or("Extension id")?;
-                let mut entry = self
-                    .kernel
-                    .state()
-                    .extensions
-                    .get(id)
-                    .cloned()
-                    .ok_or("Unknown extension")?;
-                entry.enabled = action["enabled"] == true;
-                // Turning on an extension D11 stopped this run runs it again.
-                if entry.enabled
-                    && let Some(record) = entry
-                        .source
-                        .as_object_mut()
-                        .and_then(|source| source.get_mut("hostRecord"))
-                        .and_then(pm_model::Value::as_object_mut)
-                {
-                    record.remove("stopped");
-                }
-                Ok(NativeCommand::State(pm_kernel::state::StateTransaction {
-                    expected_revision: None,
-                    ops: vec![pm_kernel::state::StateOp::Extension(entry)],
-                }))
+                let enabled = action["enabled"] == true;
+                pm_kernel::state::switch_extension(&self.kernel.state(), id, enabled)
+                    .map(NativeCommand::State)
+                    .ok_or_else(|| "Unknown extension".into())
             }
             // Mods (S105): Show in Finder and Delete… are the app's (Finder,
             // a confirmation, then the archive), for what the row allows.
