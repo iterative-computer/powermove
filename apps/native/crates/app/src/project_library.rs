@@ -964,6 +964,8 @@ impl ProjectLibrary {
         };
         let (id, stamp) = (row.id.clone(), row.modified_ms.unwrap_or(0));
         let (file, stamp_file) = crate::poster::files(&source.dir, &id);
+        // What a poster render needs, so drawing one at idle can borrow the view.
+        let (renderer, dir) = (source.renderer.clone(), source.dir.clone());
         let fade = kit::key(&format!("poster-{id}"));
         let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
             v.thumbs.insert(
@@ -1021,12 +1023,11 @@ impl ProjectLibrary {
         let fresh = cached.is_some_and(|(at, image)| image.is_some() && at as i64 >= stamp);
         if !fresh
             && self.active.as_deref() == Some(id.as_str())
-            && let Some(renderer) = source.renderer.clone()
+            && let Some(renderer) = renderer
             && self.posters_started.insert((id.clone(), stamp))
         {
             let size = row.dimensions().unwrap_or((1920, 1080));
             let duration = row.summary.as_ref().and_then(|s| s.duration_seconds);
-            let dir = source.dir.clone();
             let taken = crate::poster::now_ms().max(stamp);
             cx.spawn(async move |this, cx| {
                 let poster = id.clone();
