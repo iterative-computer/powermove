@@ -2011,16 +2011,13 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -3719,16 +3716,13 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -5427,16 +5421,13 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -7132,16 +7123,13 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -8837,16 +8825,13 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -9976,16 +9961,13 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -11617,16 +11599,13 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -13258,16 +13237,13 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -14966,16 +14942,13 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -15709,16 +15682,13 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -16553,16 +16523,13 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -17651,16 +17618,13 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -19113,16 +19077,13 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -20460,16 +20421,13 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -21572,16 +21530,13 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,
@@ -23999,16 +23954,13 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
             "token": "metrics.hit",
           },
           "minWidth": {
-            "token": "metrics.hit",
+            "token": "metrics.label_column",
           },
           "paddingLeft": {
             "token": "metrics.gap",
           },
           "paddingRight": {
             "token": "metrics.gap",
-          },
-          "width": {
-            "token": "metrics.label_column",
           },
         },
         "tabIndex": 0,

@@ -765,6 +765,18 @@ fn compile(
                 .items_center()
                 .min_w(px(t.metrics.value_column))
                 .gap(px(t.metrics.inner_radius));
+            // A row whose panel caps its value column (`valueMostToken`, a
+            // metric) keeps label and control together on a wide panel.
+            let most = node
+                .parent
+                .and_then(|p| surface.node(p))
+                .filter(|row| Component::of(row) == Some(Component::InspectorRow))
+                .and_then(|row| row.props.get("metadata")?.get("valueMostToken")?.as_str())
+                .filter(|name| name.starts_with("metrics."))
+                .and_then(|name| table.number(&serde_json::json!({ "token": name })));
+            if let Some(most) = most {
+                compiled.sheet = compiled.sheet.max_w(px(most));
+            }
             if joined(Some(node.id)) {
                 compiled.sheet = compiled
                     .sheet
