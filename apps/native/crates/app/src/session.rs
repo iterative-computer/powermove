@@ -225,6 +225,8 @@ pub struct Controller {
     /// state revision and keymap value this window's keys follow, and the
     /// page as last built (`stamp` changes with it).
     pub(crate) shortcut_recording: Option<String>,
+    /// The key the recording row asked about (another command had it).
+    pub(crate) shortcut_asked: Option<String>,
     /// First run's Bring My Workspace waits for the project being created.
     pub(crate) workspace_after_open: bool,
     pub(crate) keymap_revision: Option<u64>,
@@ -959,6 +961,7 @@ impl Controller {
             imports: Default::default(),
             importing: None,
             shortcut_recording: None,
+            shortcut_asked: None,
             workspace_after_open: false,
             keymap_revision: None,
             keymap_seen: None,

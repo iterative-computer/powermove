@@ -1063,7 +1063,16 @@ impl SurfaceView {
             .props
             .get("metadata")
             .is_some_and(|m| m.get("submitOnReturn") == Some(&Value::Bool(true)));
-        let kind = if number {
+        // A form's field (Settings, `metadata.form`): AppKit's bordered field
+        // shown at all times; a number one may carry a stepper.
+        let meta = node.props.get("metadata");
+        let form = meta.and_then(|m| m.get("form")) == Some(&Value::Bool(true));
+        let stepper = meta.and_then(|m| m.get("stepper")) == Some(&Value::Bool(true));
+        let kind = if form && number {
+            TextKind::FormNumber
+        } else if form && node.r#type != "textarea" {
+            TextKind::Form
+        } else if number {
             TextKind::DenseNumber
         } else if node.r#type == "textarea" && composer {
             TextKind::Composer
@@ -1084,6 +1093,7 @@ impl SurfaceView {
             field.set_ink(Self::ink(view));
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
+            field.set_stepper(stepper);
             field
         });
         self.subscriptions
@@ -3926,6 +3936,13 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
             Some(Kind::Search)
         }
         Some(Component::Slider) => Some(Kind::Slider),
+        // A colour well its panel marks native (Settings): AppKit's own.
+        Some(Component::ColourWell)
+            if node.props.get("metadata").and_then(|m| m.get("native"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::Well)
+        }
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node
