@@ -45,6 +45,7 @@ impl Gesture {
 pub struct Editor {
     pub integration: Option<Rc<dyn crate::integration::Integration>>,
     pub layout: Layout,
+    agent_build_slots: HashMap<String, (serde_json::Value, f32)>,
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
@@ -137,6 +138,7 @@ impl Editor {
         let layout = workspace::layout(&record);
         let project = "shell-untitled".to_string();
         Self {
+            agent_build_slots: HashMap::new(),
             integration: None,
             layout,
             tokens,
@@ -389,6 +391,9 @@ impl Editor {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
         let mut written = self.layout.clone();
+        for id in self.agent_build_slots.keys() {
+            layout::remove_build(&mut written, id);
+        }
         for (id, (place, showing)) in &self.parked {
             written.insert_at(id, *place);
             // It was the stack's showing tab: the saved stack still shows it,
@@ -407,6 +412,7 @@ impl Editor {
     }
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
+        let after = workspace::persistent_record(after);
         let before = self
             .pending
             .last()
@@ -696,6 +702,18 @@ impl Editor {
             return true;
         }
         let panels = self.panels(cx);
+        if kind == "panel"
+            && (verb == "close" || (verb == "toggle" && self.layout.find(rest).is_some()))
+            && self.agent_build_slots.contains_key(rest)
+        {
+            self.release_agent_panel(rest);
+            if let Some(integration) = self.integration.clone() {
+                integration.panel_closed(rest, cx);
+            }
+            self.save();
+            cx.notify();
+            return true;
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
@@ -1650,6 +1668,30 @@ impl Editor {
         let name = workspace::record_name(&self.record);
         serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
     }
+    pub fn reserve_agent_panel(
+        &mut self,
+        id: &str,
+        placement: &serde_json::Value,
+        height: f32,
+    ) -> serde_json::Value {
+        self.maximized_panel = None;
+        let used = layout::reserve_build(&mut self.layout, id, placement, height);
+        self.agent_build_slots
+            .insert(id.into(), (used.clone(), height));
+        used
+    }
+    pub fn release_agent_panel(&mut self, id: &str) {
+        if self.layout.find(id).is_some() {
+            self.slides.armed = true;
+        }
+        self.agent_build_slots.remove(id);
+        layout::remove_build(&mut self.layout, id);
+    }
+    /// Persist the final id in exactly the pre-reserved build geometry.
+    pub fn commit_agent_panel_layout(&mut self, cx: &mut Context<Self>) {
+        self.save();
+        cx.notify();
+    }
     /// set_panel_layout: `docks` become a new workspace (a copy of this one,
     /// named `name`, or `name 2`… when taken) that this window shows and new
     /// projects start with. Returns its id and name.
@@ -2031,6 +2073,11 @@ impl Render for Editor {
             self.bind_project(id);
         }
         self.sync_workspaces(cx);
+        for (id, (placement, height)) in &self.agent_build_slots {
+            if !self.layout.open_panels().contains(&id.as_str()) {
+                layout::reserve_build(&mut self.layout, id, placement, *height);
+            }
+        }
         let t = self.tokens.clone();
         let m = t.metrics;
         let c = t.colors.clone();
@@ -2508,7 +2555,12 @@ impl Render for Editor {
                     w: (p.rect.w - edge * 2.).max(0.),
                     h: (p.rect.h - m.header - edge).max(0.),
                 };
-                native_bodies.push((id.to_string(), body));
+                native_bodies.push((
+                    self.integration
+                        .as_ref()
+                        .map_or_else(|| id.to_string(), |i| i.native_panel_id(&id, cx)),
+                    body,
+                ));
                 // The panel's material everywhere around the page (its header
                 // and the edge it leaves the dividers), and in the corners the
                 // page rounds off: one surface, as every other panel.
@@ -2919,10 +2971,18 @@ impl Render for Editor {
                 // A panel still on its way (its extension starting): the
                 // loading state under its own title, never an empty body.
                 if coming {
-                    static SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-                    let turns = SINCE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+                    static SINCE: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    let turns = SINCE
+                        .get_or_init(std::time::Instant::now)
+                        .elapsed()
+                        .as_secs_f64();
                     empty = empty.child(crate::welcome_view::spinner(
-                        if t.accessibility.reduce_motion { 0. } else { turns },
+                        if t.accessibility.reduce_motion {
+                            0.
+                        } else {
+                            turns
+                        },
                         &t,
                     ));
                     w.request_animation_frame();
@@ -3450,6 +3510,118 @@ mod keyboard_tests {
             args: vec![],
             token: None,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn panel_build_slot_stays_transient_and_handoff_preserves_geometry() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "test-build",
+                    &serde_json::json!({"beside":"inspector"}),
+                    280.,
+                );
+                let (dock, group, tab) = v.layout.find("test-build").unwrap();
+                let before = v.layout.docks[dock].groups[group].clone();
+                v.save();
+                assert!(!v.record.to_string().contains("test-build"));
+                v.layout.docks[dock].groups[group].tabs[tab] = "test-final".into();
+                v.release_agent_panel("test-build");
+                v.commit_agent_panel_layout(cx);
+                let (d, g, _) = v.layout.find("test-final").unwrap();
+                assert_eq!((d, g), (dock, group));
+                assert_eq!(v.layout.docks[d].groups[g].size, before.size);
+                assert!(v.record.to_string().contains("test-final"));
+                assert!(!v.record.to_string().contains("test-build"));
+            })
+            .unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn p4_explicit_close_releases_build_slot() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-close",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(v.shell_command("panel:close:panel-build-close", cx));
+                assert!(!v.agent_build_slots.contains_key("panel-build-close"));
+                assert!(v.layout.find("panel-build-close").is_none());
+            })
+            .unwrap();
+    }
+    #[::core::prelude::v1::test]
+    fn p5_save_agent_layout_never_persists_build_ids() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.reserve_agent_panel(
+                    "panel-build-save",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                v.save_agent_layout("Synthetic slots", v.layout.docks.clone(), cx)
+                    .unwrap();
+                assert!(!v.record.to_string().contains("panel-build-save"));
+                // Every other persistent writer uses this same serialization boundary.
+                v.reserve_agent_panel(
+                    "panel-build-copy",
+                    &serde_json::json!({"tab_in":"inspector"}),
+                    280.,
+                );
+                assert!(
+                    !workspace::write(&v.layout, &v.record)
+                        .to_string()
+                        .contains("panel-build-copy")
+                );
+                v.shell_command("layout:save:Synthetic copy", cx);
+                assert!(!v.record.to_string().contains("panel-build-copy"));
+                let mut raw = v.record.clone();
+                raw["layout"]["docks"][0]["panels"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"id":"panel-build-injected"}));
+                v.commit(raw);
+                assert!(!v.record.to_string().contains("panel-build-injected"));
+            })
+            .unwrap();
     }
 
     /// At launch an extension's panels park while its realm starts, then come
