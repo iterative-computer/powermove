@@ -11,6 +11,61 @@ use std::{
     },
 };
 
+/// Most windows (tabs included) a launch reopens: a session that grew past
+/// it (lane runs, a crash loop) opens its key window's group and the most
+/// recently opened others, never hundreds (PM-400).
+pub const MAX_RESTORED: usize = 24;
+/// The project a window showing only Home records.
+pub const NO_PROJECT: &str = "shell-untitled";
+/// A launch plan without windows that showed only Home (one stays when
+/// nothing else would), and at most `MAX_RESTORED` windows: the key
+/// window's group first, then whole groups from the most recently opened.
+fn bounded(plan: Vec<WindowState>, key: Option<u64>) -> Vec<WindowState> {
+    let home = |w: &WindowState| w.project.is_empty() || w.project == NO_PROJECT;
+    let mut plan: Vec<WindowState> = if plan.iter().all(home) {
+        plan.into_iter().take(1).collect()
+    } else {
+        plan.into_iter().filter(|w| !home(w)).collect()
+    };
+    let group = |w: &WindowState| w.tab_group.unwrap_or(w.id);
+    let ids: Vec<u64> = plan.iter().map(|w| w.id).collect();
+    for w in &mut plan {
+        // A tab whose group's first window was left out leads its group.
+        if w.tab_group.is_some_and(|g| !ids.contains(&g)) {
+            w.tab_group = None;
+        }
+    }
+    if plan.len() <= MAX_RESTORED {
+        return plan;
+    }
+    let key_group = key
+        .and_then(|k| plan.iter().find(|w| w.id == k))
+        .map(group);
+    // Groups in the order they were opened (a group's place: its last window).
+    let mut groups: Vec<u64> = Vec::new();
+    for w in &plan {
+        let g = group(w);
+        groups.retain(|x| *x != g);
+        groups.push(g);
+    }
+    let size = |g: u64| plan.iter().filter(|w| group(w) == g).count();
+    let mut kept: Vec<u64> = key_group.into_iter().collect();
+    let mut count = key_group.map_or(0, size);
+    for g in groups.into_iter().rev() {
+        if kept.contains(&g) {
+            continue;
+        }
+        if count + size(g) > MAX_RESTORED {
+            continue;
+        }
+        count += size(g);
+        kept.push(g);
+    }
+    plan.retain(|w| kept.contains(&group(w)));
+    // The key window's group alone can be larger still.
+    plan.truncate(MAX_RESTORED);
+    plan
+}
 /// Smallest frame that is restored as-is; smaller frames are enlarged to this.
 pub const MIN_FRAME: [f64; 2] = [640., 400.];
 
@@ -103,11 +158,12 @@ impl Session {
     /// window's arrangement, which is all that build reopened.
     pub fn launch_plan(&self, tabs: bool, all: bool) -> Vec<WindowState> {
         let all = all && self.complete;
-        if tabs {
+        let plan = if tabs {
             self.restore_plan_tabs(all)
         } else {
             self.restore_plan(all)
-        }
+        };
+        bounded(plan, self.key)
     }
     /// Separate windows mode: the windows to reopen. With `all == false` (the system's "Close windows when
     /// quitting an app" setting) only the key window's arrangement is restored.
@@ -553,5 +609,53 @@ mod order_tests {
         };
         let plan = s.launch_plan(true, true);
         assert_eq!(plan.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 4, 2, 3]);
+    }
+}
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    fn w(id: u64, project: &str, tab_group: Option<u64>) -> WindowState {
+        WindowState {
+            id,
+            frame: [10., 10., 800., 600.],
+            project: project.into(),
+            workspace: "design".into(),
+            tab_group,
+            tab_index: 0,
+            pages: Vec::new(),
+            fullscreen: false,
+        }
+    }
+    #[test]
+    fn a_session_of_seventy_windows_reopens_its_projects_and_no_home_windows() {
+        // PM-400's profile: 70 windows, 65 of them Home.
+        let mut windows: Vec<WindowState> = (1..=65).map(|id| w(id, NO_PROJECT, None)).collect();
+        windows.extend((66..=70).map(|id| w(id, &format!("p{id}"), None)));
+        let s = Session { version: 1, windows, key: Some(3), complete: true };
+        for tabs in [true, false] {
+            let plan = s.launch_plan(tabs, true);
+            assert_eq!(plan.iter().map(|w| w.id).collect::<Vec<_>>(), [66, 67, 68, 69, 70]);
+        }
+        // Home alone: one window, not 65.
+        let s = Session {
+            version: 1,
+            windows: (1..=65).map(|id| w(id, NO_PROJECT, None)).collect(),
+            key: None,
+            complete: true,
+        };
+        assert_eq!(s.launch_plan(true, true).len(), 1);
+    }
+    #[test]
+    fn at_most_a_bounded_number_of_windows_reopen_the_key_windows_group_first() {
+        // 40 windows; the key window's group (1 with tabs 2 and 3) opened first.
+        let mut windows = vec![w(1, "a", None), w(2, "b", Some(1)), w(3, "c", Some(1))];
+        windows.extend((4..=40).map(|id| w(id, &format!("p{id}"), None)));
+        let s = Session { version: 1, windows, key: Some(2), complete: true };
+        let plan = s.launch_plan(true, true);
+        assert_eq!(plan.len(), MAX_RESTORED);
+        let ids: Vec<u64> = plan.iter().map(|w| w.id).collect();
+        assert!(ids.starts_with(&[1]) && ids.contains(&2) && ids.contains(&3));
+        // The most recently opened others fill the rest.
+        assert!(ids.contains(&40) && !ids.contains(&4));
     }
 }

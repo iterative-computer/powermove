@@ -1934,7 +1934,20 @@ fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
     };
     match hint {
         Some(hint) => (format!("{hint} · {}", tab.title), true),
-        None => (tab.title.clone(), false),
+        // Projects of the library (no file) named alike: the later ones in
+        // the strip say which they are, as copies are numbered.
+        None => {
+            let place = tabs
+                .iter()
+                .filter(|t| t.title == tab.title)
+                .position(|t| t.window == tab.window)
+                .unwrap_or(0);
+            if place == 0 {
+                (tab.title.clone(), false)
+            } else {
+                (format!("{} ({})", tab.title, place + 1), false)
+            }
+        }
     }
 }
 /// A tab's tooltip: its whole name, and where its file is.
@@ -5796,6 +5809,27 @@ fn fade(view: &NSView, alpha: f64, seconds: f64) {
 /// over quiet rows in sections, on glass. Nothing is lit when it opens; one
 /// highlight follows the pointer and the keyboard, gliding between rows on
 /// the layout spring, and leaves with the pointer.
+/// What a pop-up does when its window's appearance changes (PM-400): every
+/// window's change once rebuilt its palette's and field menu's material and
+/// rows, so restoring N windows rebuilt them N times over at launch.
+#[derive(Debug, PartialEq)]
+enum TokenChange {
+    /// The same tokens: nothing.
+    Unchanged,
+    /// Hidden: built for the new tokens when it next shows.
+    Later,
+    /// Showing: built now.
+    Now,
+}
+fn token_change(same: bool, stale: bool, open: bool) -> TokenChange {
+    if same && !stale {
+        TokenChange::Unchanged
+    } else if open {
+        TokenChange::Now
+    } else {
+        TokenChange::Later
+    }
+}
 pub struct Popup {
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
@@ -5825,6 +5859,10 @@ pub struct Popup {
     /// Tallest the panel may grow (`palette_height` / `field_menu_height`).
     max_height: f32,
     row_focus: bool,
+    /// The appearance changed while the pop-up was hidden: its material and
+    /// rows are built for it when it next shows, not with every window's
+    /// appearance change (PM-400).
+    stale: bool,
     /// Where a menu a control opened hangs from (screen points: the
     /// control's frame); `None` places it as the palette.
     anchor: Option<NSRect>,
@@ -5938,6 +5976,7 @@ impl Popup {
             previous: None,
             max_height: height,
             row_focus: false,
+            stale: false,
             anchor: None,
             dismiss: None,
             picked: false,
@@ -5963,8 +6002,24 @@ impl Popup {
         popup
     }
     fn update_tokens(&mut self, t: &Tokens, surface: Surface) {
+        let change = token_change(
+            self.tokens == *t && self.surface == surface,
+            self.stale,
+            self.model.open,
+        );
         self.tokens = t.clone();
         self.surface = surface;
+        match change {
+            TokenChange::Unchanged => {}
+            TokenChange::Later => self.stale = true,
+            TokenChange::Now => self.restyle(),
+        }
+    }
+    /// Rebuilds the material and rows for the current tokens.
+    fn restyle(&mut self) {
+        self.stale = false;
+        let t = &self.tokens.clone();
+        let surface = self.surface;
         appearance(&self.window, t);
         let frame = NSRect::new(NSPoint::ZERO, self.window.frame().size);
         let mat = popup_material(MainThreadMarker::new().unwrap(), frame, t, surface);
@@ -6381,7 +6436,11 @@ impl Popup {
         self.lit = false;
         self.glider.setAlphaValue(0.);
         self.picked = false;
-        self.refresh_if_changed();
+        if self.stale {
+            self.restyle();
+        } else {
+            self.refresh_if_changed();
+        }
         let p = self.parent.frame();
         let s = self.window.frame().size;
         let origin = match self.anchor {
@@ -7296,6 +7355,17 @@ mod tab_layout_tests {
         assert_eq!(tab_label(&twins[0], &twins).0, "a · Run6 — Native — Native");
         assert!(tab_tooltip(&twins[1]).ends_with("\n/p/b/Run6.pmv"));
         assert_eq!(tab_label(&tabs[2], &tabs), ("Paper".into(), false));
+        // No files to tell them apart: the second says it is the second.
+        let library = |window: isize| Tab {
+            window,
+            title: "Run6".into(),
+            edited: false,
+            selected: false,
+            file: None,
+        };
+        let twins = [library(1), library(2)];
+        assert_eq!(tab_label(&twins[0], &twins).0, "Run6");
+        assert_eq!(tab_label(&twins[1], &twins).0, "Run6 (2)");
         let runs = [
             tab("Accept - acceptance run eleven copy one - Native"),
             tab("Accept - acceptance run eleven copy two - Native"),
@@ -7306,6 +7376,19 @@ mod tab_layout_tests {
         );
     }
 
+    #[test]
+    fn a_hidden_pop_up_is_built_for_new_tokens_only_when_it_shows() {
+        use super::{TokenChange, token_change};
+        // Unchanged tokens never rebuild, however many windows report them.
+        assert_eq!(token_change(true, false, false), TokenChange::Unchanged);
+        assert_eq!(token_change(true, false, true), TokenChange::Unchanged);
+        // Hidden: deferred to its next show; showing: now.
+        assert_eq!(token_change(false, false, false), TokenChange::Later);
+        assert_eq!(token_change(false, false, true), TokenChange::Now);
+        // Deferred and still hidden: still deferred, then built on show.
+        assert_eq!(token_change(true, true, false), TokenChange::Later);
+        assert_eq!(token_change(true, true, true), TokenChange::Now);
+    }
     #[test]
     fn one_tab_in_no_room_is_still_a_tab() {
         assert_eq!(tab_layout(&[150.], 0, 10.), (0, vec![TAB_MIN], false));

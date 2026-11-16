@@ -252,7 +252,7 @@ impl Editor {
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
-            self.tokens = crate::theme::tokens(
+            let tokens = crate::theme::tokens(
                 match window.appearance() {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark => {
                         pm_design::Scheme::Dark
@@ -261,6 +261,12 @@ impl Editor {
                 },
                 crate::native::settings(),
             );
+            // A window's appearance is reported more often than it changes:
+            // the same look rebuilds nothing (PM-400).
+            if tokens == self.tokens {
+                return;
+            }
+            self.tokens = tokens;
             if let Some(h) = &self.host {
                 h.borrow_mut().update_tokens(self.tokens.clone());
             }
