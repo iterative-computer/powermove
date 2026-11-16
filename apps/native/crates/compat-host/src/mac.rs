@@ -1545,6 +1545,13 @@ impl MacDomHost {
                 );
             }
         }
+        self.ground.setFrame(self.slot.bounds());
+        self.ground.setPath(Some(&path));
+        let color = self
+            .fill
+            .map(|[r, g, b, a]| NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor());
+        self.ground.setFillColor(color.as_deref());
+        drop(panels);
         self.web.setWantsLayer(true);
         if let Some(layer) = self.web.layer() {
             match &self.content {
@@ -1592,7 +1599,6 @@ impl MacDomHost {
                 None => unsafe { layer.setMask(None) },
             }
         }
-        drop(panels);
         self.present_snapshots(viewport);
         self.overscan_snapshot(viewport);
         refuse_drags(&self.web);
