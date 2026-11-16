@@ -3597,11 +3597,13 @@ impl SurfaceView {
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
+        // A symbol leading a line of text stands in the text's leading
+        // inset, level with its first line; the words keep the width and
+        // wrap under themselves (a row would keep them on one line).
         if node.symbol_leads {
             element = element
-                .flex_row()
-                .items_center()
-                .gap(px(t.metrics.gap / 2.));
+                .relative()
+                .pl(px(node.symbol_size + t.metrics.gap / 2.));
         }
         if let Some(symbol) = &node.symbol {
             // The glyph takes the colour the panel declared (an active toggle's
@@ -3615,13 +3617,18 @@ impl SurfaceView {
                     (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
                 })
             };
-            element = element.child(pm_shell::symbol::symbol(
+            let glyph = pm_shell::symbol::symbol(
                 symbol,
                 node.symbol_size,
                 pm_shell::symbol::Weight::Regular,
                 ink,
                 window,
-            ));
+            );
+            element = if node.symbol_leads {
+                element.child(div().absolute().left_0().top_0().child(glyph))
+            } else {
+                element.child(glyph)
+            };
         }
         // A picture the host made (a Project thumbnail): it fills the node,
         // cropped to its shape; until it exists the node shows its fill.
