@@ -29,6 +29,9 @@ pub enum Shape {
     Circle,
     /// A stroke to here (the composition's unit square), `width` points wide.
     To([f32; 2]),
+    /// A solid arrow tip at `at`, `size` points long, pointing along this
+    /// direction on screen (x right, y down): a 3D Move axis's tip.
+    Arrow([f32; 2]),
 }
 /// A mark of the gizmo that keeps its size on screen whatever the zoom
 /// (viewer-chrome.md): a handle, the rotation knob, the anchor's rings, the
@@ -75,6 +78,8 @@ pub enum Draw {
     Rect(NSRect),
     Ellipse(NSRect),
     Line([f64; 4]),
+    /// A closed triangle: three points.
+    Triangle([f64; 6]),
 }
 /// What the gizmo layer draws, as shape layers bottom to top: keylines under
 /// the lines, the lines (1 pt, grouped by colour), then the marks over them.
@@ -117,6 +122,19 @@ pub fn drawing(lines: &[OverlayLine], marks: &[Mark], at: Placement) -> Vec<(Loo
                         continue;
                     }
                     Draw::Line([x, y, x1, y1])
+                }
+                Shape::Arrow([dx, dy]) => {
+                    // The layer is y-up: the screen's down is its minus y.
+                    let (dx, dy) = (f64::from(dx), -f64::from(dy));
+                    let l = dx.hypot(dy);
+                    if !(l > 0. && l.is_finite()) {
+                        continue;
+                    }
+                    let (ux, uy) = (dx / l, dy / l);
+                    let s = 2. * half;
+                    let (bx, by) = (x - ux * s, y - uy * s);
+                    let (px, py) = (-uy * half, ux * half);
+                    Draw::Triangle([x, y, bx + px, by + py, bx - px, by - py])
                 }
             };
             push(groups, look, draw);
@@ -201,6 +219,12 @@ impl GizmoLayer {
                         Draw::Line([x0, y0, x1, y1]) => {
                             CGMutablePath::move_to_point(Some(&path), null, x0, y0);
                             CGMutablePath::add_line_to_point(Some(&path), null, x1, y1);
+                        }
+                        Draw::Triangle([x0, y0, x1, y1, x2, y2]) => {
+                            CGMutablePath::move_to_point(Some(&path), null, x0, y0);
+                            CGMutablePath::add_line_to_point(Some(&path), null, x1, y1);
+                            CGMutablePath::add_line_to_point(Some(&path), null, x2, y2);
+                            CGMutablePath::close_subpath(Some(&path));
                         }
                     }
                 }

@@ -3246,7 +3246,9 @@ impl TimelineSurface {
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key(x,y,((m.hit-m.keyframe) as f64/2.).max(0.)).is_some()) {
-            CursorStyle::PointingHand
+            // A keyframe shows the arrow (After Effects): never the pointing
+            // hand, which the app does not use anywhere.
+            CursorStyle::Arrow
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {

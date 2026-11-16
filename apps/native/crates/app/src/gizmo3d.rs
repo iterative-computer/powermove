@@ -4,6 +4,7 @@
 //! as engine overlay lines, on the frame they're pressed. Every drag is one
 //! kernel gesture; navigation never edits the document or Undo.
 use super::{GizmoSurface, Job, ViewFrame, set};
+use crate::gizmo_layer::{Mark, Shape};
 use gpui::*;
 use pm_engine_service::{OverlayLine, studio::FreeView};
 use pm_kernel::{Caller, Command, Request, Scene3dCommand, SelectionCall};
@@ -939,7 +940,7 @@ impl GizmoSurface {
     /// overlay's fixed budget (`OverlayGeometry::MAX_LINES`, truncated from the
     /// end): handles first, then the selected lights' emitter and aim, the
     /// light markers, and last the shot camera's frustum.
-    pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+    pub(super) fn studio_lines(&self, frame: ViewFrame) -> (Vec<OverlayLine>, Vec<Mark>) {
         // Flying: only a small crosshair at the centre, where the view heads.
         if self.studio.fly.is_some() {
             let v = self.studio_visible(frame);
@@ -950,17 +951,20 @@ impl GizmoSurface {
                 ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|x| x as f32),
                 color: ink,
             };
-            return vec![
-                line([c[0] - s, c[1]], [c[0] + s, c[1]]),
-                line([c[0], c[1] - s], [c[0], c[1] + s]),
-            ];
+            return (
+                vec![
+                    line([c[0] - s, c[1]], [c[0] + s, c[1]]),
+                    line([c[0], c[1] - s], [c[0], c[1] + s]),
+                ],
+                vec![],
+            );
         }
-        let mut lines = self.studio_handle_lines(frame);
+        let (mut lines, marks) = self.studio_handle_lines(frame);
         let (selected, markers, camera) = self.studio_light_lines(frame);
         lines.extend(selected);
         lines.extend(markers);
         lines.extend(camera);
-        lines
+        (lines, marks)
     }
     /// The shot camera while looking around, and every light: the selected
     /// lights' emitter, aim line and ◆ target; markers for all of them.
@@ -1161,13 +1165,43 @@ impl GizmoSurface {
         }
         (selected, markers, camera)
     }
-    fn studio_handle_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+    fn studio_handle_lines(&self, frame: ViewFrame) -> (Vec<OverlayLine>, Vec<Mark>) {
         let mut lines = vec![];
+        let mut marks: Vec<Mark> = vec![];
         let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
-            return lines;
+            return (lines, marks);
         };
         let [w, h] = frame.size;
         let t = &self.tokens;
+        let m = &t.metrics;
+        let unit = |p: [f64; 2]| [(p[0] / w) as f32, (p[1] / h) as f32];
+        // 3d-studio.md §5: the outline's `c.media_badge` keyline under it,
+        // axis lines and rings `m.gizmo_keyline × 2`, filled tips keylined
+        // dark as viewer-chrome.md's handles.
+        let keyline = {
+            let mut c = rgb(t.colors.media_badge);
+            c[3] = super::BOX_KEYLINE_ALPHA;
+            c
+        };
+        let stroke = |a: [f64; 2], b: [f64; 2], color: [f32; 4], width: f32, under: bool| Mark {
+            shape: Shape::To(unit(b)),
+            at: unit(a),
+            size: 0.,
+            fill: None,
+            stroke: Some(color),
+            width,
+            under,
+        };
+        let tip = |shape: Shape, p: [f64; 2], color: [f32; 4]| Mark {
+            shape,
+            at: unit(p),
+            size: m.gizmo_handle,
+            fill: Some(color),
+            stroke: Some(super::MARK_DARK),
+            width: m.gizmo_keyline,
+            under: false,
+        };
+        let axis_width = 2. * m.gizmo_keyline;
         let mut push = |a: [f64; 2], b: [f64; 2], color: [f32; 4]| {
             lines.push(OverlayLine {
                 ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
@@ -1213,22 +1247,23 @@ impl GizmoSurface {
                     (eye.project(corner(a)), eye.project(corner(c)))
                 {
                     push(pa, pb, accent);
+                    marks.push(stroke(pa, pb, keyline, 1. + 2. * m.gizmo_keyline, true));
                 }
             }
         }
         let items = self.studio.movable();
         let Some(pivot) = State::pivot(&items) else {
-            return lines;
+            return (lines, marks);
         };
         let pivot = drag.map_or(pivot, |d| add(d.pivot, d.offset));
         if matches!(
             self.studio.tool,
             Tool::Orbit | Tool::Pan | Tool::Zoom | Tool::Light
         ) {
-            return lines;
+            return (lines, marks);
         }
         let Some((c, _)) = eye.project(pivot) else {
-            return lines;
+            return (lines, marks);
         };
         let axis_px = t.metrics.rotation_stem as f64 * 4. / frame.scale;
         let len = axis_px * eye.units_per_pixel(pivot);
@@ -1238,18 +1273,6 @@ impl GizmoSurface {
             t.colors.scope_blue,
         ]
         .map(rgb);
-        let half = t.metrics.gizmo_handle as f64 / 2. / frame.scale;
-        let square = |p: [f64; 2], color, push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4])| {
-            let q = [
-                [p[0] - half, p[1] - half],
-                [p[0] + half, p[1] - half],
-                [p[0] + half, p[1] + half],
-                [p[0] - half, p[1] + half],
-            ];
-            for i in 0..4 {
-                push(q[i], q[(i + 1) % 4], color);
-            }
-        };
         let active = drag.map(|d| d.handle);
         let basis = drag.map_or_else(|| self.studio.basis(), |d| d.basis);
         let ink = rgb(t.colors.text);
@@ -1316,40 +1339,22 @@ impl GizmoSurface {
                     if active.is_some_and(|h| h != Handle::Axis(i)) {
                         continue;
                     }
-                    let Some((tip, _)) = eye.project(add(pivot, mul(*axis, len))) else {
+                    let Some((tip_at, _)) = eye.project(add(pivot, mul(*axis, len))) else {
                         continue;
                     };
                     let color = tint(Handle::Axis(i), colors[i]);
-                    push(c, tip, color);
-                    letter(i, tip, c, color, &mut push);
-                    if self.studio.tool == Tool::Move {
-                        // Arrowhead: two short strokes back from the tip.
-                        let (dx, dy) = (tip[0] - c[0], tip[1] - c[1]);
-                        let l = dx.hypot(dy).max(1e-6);
-                        let (ux, uy) = (dx / l, dy / l);
-                        let s = half * 2.;
-                        push(
-                            tip,
-                            [
-                                tip[0] - ux * s - uy * s * 0.6,
-                                tip[1] - uy * s + ux * s * 0.6,
-                            ],
-                            color,
-                        );
-                        push(
-                            tip,
-                            [
-                                tip[0] - ux * s + uy * s * 0.6,
-                                tip[1] - uy * s - ux * s * 0.6,
-                            ],
-                            color,
-                        );
+                    marks.push(stroke(c, tip_at, color, axis_width, false));
+                    letter(i, tip_at, c, color, &mut push);
+                    marks.push(if self.studio.tool == Tool::Move {
+                        // A solid arrow tip along the axis, as on screen.
+                        let direction = [(tip_at[0] - c[0]) as f32, (tip_at[1] - c[1]) as f32];
+                        tip(Shape::Arrow(direction), tip_at, color)
                     } else {
-                        square(tip, color, &mut push);
-                    }
+                        tip(Shape::Square, tip_at, color)
+                    });
                 }
                 if self.studio.tool == Tool::Scale && active.is_none_or(|h| h == Handle::Uniform) {
-                    square(c, tint(Handle::Uniform, accent), &mut push);
+                    marks.push(tip(Shape::Square, c, tint(Handle::Uniform, accent)));
                 }
             }
             Tool::Rotate => {
@@ -1370,7 +1375,7 @@ impl GizmoSurface {
                         if active.is_none() && (za + zb) / 2. > pivot_depth + len * 0.05 {
                             continue;
                         }
-                        push(a, b, color);
+                        marks.push(stroke(a, b, color, axis_width, false));
                     }
                     // The letter sits beyond the ring's front-most point on
                     // the screen-right side.
@@ -1383,7 +1388,7 @@ impl GizmoSurface {
             }
             _ => {}
         }
-        lines
+        (lines, marks)
     }
     /// The part of the composition the viewer shows, in composition pixels
     /// (`[x0, y0, x1, y1]`): all of it at Fit, less when the editor view
@@ -2447,7 +2452,9 @@ impl GizmoSurface {
             _ => match self.studio_handle(at, frame) {
                 Some(Handle::Plane | Handle::Marker(_, false)) => CursorStyle::OpenHand,
                 Some(Handle::Target(_)) => CursorStyle::Crosshair,
-                Some(_) => CursorStyle::PointingHand,
+                // A handle shows the arrow, as a native control: never the
+                // pointing hand (the owner's rule, native conventions).
+                Some(_) => CursorStyle::Arrow,
                 None => return None,
             },
         })

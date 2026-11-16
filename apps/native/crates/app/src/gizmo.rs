@@ -892,7 +892,7 @@ impl GizmoSurface {
         } else {
             &[]
         };
-        let (mut lines, marks) = overlay(poses, frame, &self.tokens);
+        let (mut lines, mut marks) = overlay(poses, frame, &self.tokens);
         // The hover outline: the accent at 60% (viewer-chrome.md), never
         // over a gesture or on a layer the selection already outlines.
         if let Some((id, c)) = &self.hover_box
@@ -931,7 +931,9 @@ impl GizmoSurface {
             }
         }
         if self.controls && !editing {
-            lines.extend(self.studio_lines(frame));
+            let (studio, studio_marks) = self.studio_lines(frame);
+            lines.extend(studio);
+            marks.extend(studio_marks);
         }
         lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
         // The composition's rectangle in the viewer view (the gizmo covers it).
