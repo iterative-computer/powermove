@@ -165,10 +165,14 @@ fn disc(side: u32, dark: bool) -> Arc<RenderImage> {
         d.borrow_mut()
             .entry((side, dark))
             .or_insert_with(|| {
-                // Quiet and matte, as a grading tool's wheels are: a neutral
-                // ground that stays grey near the centre, the colours rising
-                // toward the rim.
-                let (ground, strength) = if dark { (0.22, 0.24) } else { (0.84, 0.14) };
+                // Luminous toward the rim, as a colourist expects of a wheel:
+                // the centre falls to a neutral grey, and the hues rise in
+                // strength and in light as they reach the edge.
+                let (ground, lift, strength) = if dark {
+                    (0.13, 0.30, 0.50)
+                } else {
+                    (0.92, -0.06, 0.40)
+                };
                 let r = side as f64 / 2.;
                 let mut bgra = Vec::with_capacity((side * side * 4) as usize);
                 for row in 0..side {
@@ -176,10 +180,12 @@ fn disc(side: u32, dark: bool) -> Arc<RenderImage> {
                         let (x, y) = ((col as f64 + 0.5 - r) / r, (r - row as f64 - 0.5) / r);
                         let radius = x.hypot(y);
                         let edge = ((1. - radius) * r + 0.5).clamp(0., 1.);
-                        let rise = radius.min(1.).powf(0.6) / radius.max(1e-6);
+                        let reach = radius.min(1.);
+                        let rise = reach.powf(0.7) / radius.max(1e-6);
                         let (u, v) = (x * rise * strength, y * rise * strength);
+                        let light = ground + lift * reach.powf(1.6);
                         let rgb = offset(u, v).map(|c| {
-                            let s = (ground + c).clamp(0., 1.);
+                            let s = (light + c).clamp(0., 1.);
                             (s * 255.).round() as u8
                         });
                         bgra.extend([rgb[2], rgb[1], rgb[0], (edge * 255.).round() as u8]);
@@ -496,7 +502,7 @@ pub fn paint_wheel(
         0.,
         &[BoxShadow {
             inset: true,
-            ..shadow(BLACK, if dark { 0.7 } else { 0.28 } * alpha, 3., 7.)
+            ..shadow(BLACK, if dark { 0.5 } else { 0.22 } * alpha, 3., 7.)
         }],
     );
     // Glass over the disc: a sheen from the top, gone by the middle, and the
@@ -623,6 +629,252 @@ pub fn paint_wheel(
         w,
         crate::kit::ink(BLACK, 0.3 * alpha),
     ));
+}
+
+/// A master strip's height under its wheel: a row the hand can take.
+pub fn master_height(t: &Tokens) -> f32 {
+    t.metrics.hit
+}
+/// A wheel's bounds split into its square and, with a master, the strip
+/// under it.
+pub fn wheel_parts(
+    bounds: Bounds<Pixels>,
+    master: bool,
+    t: &Tokens,
+) -> (Bounds<Pixels>, Option<Bounds<Pixels>>) {
+    if !master {
+        return (bounds, None);
+    }
+    let h = master_height(t);
+    let square = Bounds::new(
+        bounds.origin,
+        size(
+            bounds.size.width,
+            (bounds.size.height - px(h + t.metrics.gap)).max(px(1.)),
+        ),
+    );
+    let strip = Bounds::new(
+        point(bounds.origin.x, bounds.bottom() - px(h)),
+        size(bounds.size.width, px(h)),
+    );
+    (square, Some(strip))
+}
+/// Where a master strip's parts stand, for a wheel `d` across: its track
+/// (the knob's centre travels from its left to its right), and the room its
+/// number takes beside it; the two centred under the wheel.
+pub fn master_layout(strip: Bounds<Pixels>, d: f32, t: &Tokens) -> (f32, f32, Bounds<Pixels>) {
+    let number = t.metrics.grade_field * 0.6;
+    let total = d.min(f32::from(strip.size.width));
+    let left = f32::from(strip.center().x) - total / 2.;
+    let knob = master_knob(t);
+    let track_right = left + total - number - t.metrics.gap;
+    let figure = Bounds::new(
+        point(px(track_right + t.metrics.gap), strip.origin.y),
+        size(px(number), strip.size.height),
+    );
+    (left + knob / 2. + 2., track_right - knob / 2. - 2., figure)
+}
+/// Where `value` stands along a master's track, 0 to 1: neutral in the
+/// middle, each side its own half of the range (Gain's 1 of 0 to 8 is the
+/// middle, as the bezel's arc draws it).
+pub fn master_place(value: f64, range: [f64; 2], neutral: f64) -> f64 {
+    let half = |span: f64| if span > 1e-9 { 0.5 / span } else { 0. };
+    if value >= neutral {
+        (0.5 + (value - neutral) * half(range[1] - neutral)).min(1.)
+    } else {
+        (0.5 - (neutral - value) * half(neutral - range[0])).max(0.)
+    }
+}
+/// The value at `place` (0 to 1) along a master's track: `master_place`'s
+/// inverse.
+pub fn master_value(place: f64, range: [f64; 2], neutral: f64) -> f64 {
+    let place = place.clamp(0., 1.);
+    if place >= 0.5 {
+        neutral + (place - 0.5) * 2. * (range[1] - neutral)
+    } else {
+        neutral - (0.5 - place) * 2. * (neutral - range[0])
+    }
+}
+fn master_knob(t: &Tokens) -> f32 {
+    t.metrics.keyframe + 5.
+}
+
+/// A wheel's master as a strip under it, in the bezel's material: a machined
+/// capsule with a groove, the push from neutral lit in the groove, a knob
+/// with weight, and the number beside it. `value` within `range`, its
+/// neutral at `neutral`.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_master(
+    strip: Bounds<Pixels>,
+    d: f32,
+    value: f64,
+    range: [f64; 2],
+    neutral: f64,
+    look: Look,
+    t: &Tokens,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let c = &t.colors;
+    let dark = t.scheme == pm_design::Scheme::Dark;
+    let alpha = if look.disabled { 0.4 } else { 1. };
+    let w = t.metrics.border;
+    let (from, to, figure) = master_layout(strip, d, t);
+    let at = |v: f64| from + (to - from) * master_place(v, range, neutral) as f32;
+    let knob = master_knob(t);
+    let cy = f32::from(strip.center().y);
+    // The body: the bezel's capsule.
+    let body_h = knob + 4.;
+    let body = Bounds::new(
+        point(px(from - knob / 2. - 2.), px(cy - body_h / 2.)),
+        size(px(to - from + knob + 4.), px(body_h)),
+    );
+    let pill = Corners::all(px(body_h / 2.));
+    window.paint_drop_shadows(
+        body,
+        pill,
+        0.,
+        &[if dark {
+            shadow(BLACK, 0.5 * alpha, 1., 3.)
+        } else {
+            shadow(BLACK, 0.14 * alpha, 1., 2.5)
+        }],
+    );
+    let fill_body = if dark {
+        vertical((WHITE, 0.15 * alpha), (WHITE, 0.06 * alpha))
+    } else {
+        vertical((WHITE, alpha), (0xe2e2e2, alpha))
+    };
+    window.paint_quad(
+        PaintQuad::new(body)
+            .background(fill_body)
+            .corner_radii(pill),
+    );
+    let edge = if dark { (BLACK, 0.6) } else { (BLACK, 0.16) };
+    window.paint_quad(
+        PaintQuad::new(body)
+            .corner_radii(pill)
+            .border_widths(px(w))
+            .border_color(crate::kit::ink(edge.0, edge.1 * alpha)),
+    );
+    let (side, top) = if dark {
+        ((WHITE, 0.0), (WHITE, 0.22 * alpha))
+    } else {
+        ((WHITE, 0.0), (WHITE, alpha))
+    };
+    rim(
+        body.inset(px(w)),
+        px(body_h / 2. - w),
+        px(w),
+        side,
+        top,
+        window,
+    );
+    // The groove the knob runs in, sunk into the body.
+    let groove_h = 4.;
+    let groove = Bounds::new(
+        point(px(from - 1.), px(cy - groove_h / 2.)),
+        size(px(to - from + 2.), px(groove_h)),
+    );
+    let slot = Corners::all(px(groove_h / 2.));
+    window.paint_quad(
+        PaintQuad::new(groove)
+            .background(crate::kit::ink(
+                BLACK,
+                if dark { 0.5 } else { 0.14 } * alpha,
+            ))
+            .corner_radii(slot),
+    );
+    window.paint_inset_shadows(
+        groove,
+        slot,
+        0.,
+        &[BoxShadow {
+            inset: true,
+            ..shadow(BLACK, if dark { 0.6 } else { 0.2 } * alpha, 1., 2.)
+        }],
+    );
+    // The push from neutral, lit in the groove (as the bezel's arc).
+    let (n, v) = (at(neutral), at(value));
+    if (v - n).abs() > 0.5 {
+        let lit = Bounds::new(
+            point(px(n.min(v)), groove.origin.y),
+            size(px((v - n).abs()), px(groove_h)),
+        );
+        let ink = if dark { WHITE } else { c.text };
+        window.paint_quad(
+            PaintQuad::new(lit)
+                .background(crate::kit::ink(ink, 0.85 * alpha))
+                .corner_radii(slot),
+        );
+    }
+    // Neutral: a short mark across the groove.
+    let ink = crate::kit::ink(if dark { WHITE } else { c.text }, 0.35 * alpha);
+    window.paint_quad(fill(
+        Bounds::new(
+            point(px(n - w / 2.), px(cy - groove_h / 2. - 2.)),
+            size(px(w), px(groove_h + 4.)),
+        ),
+        ink,
+    ));
+    // The knob: weight, a domed body lit along its top, a keyline.
+    let side_k = knob + if look.active { 2. } else { 0. };
+    let b = Bounds::new(
+        point(px(v - side_k / 2.), px(cy - side_k / 2.)),
+        size(px(side_k), px(side_k)),
+    );
+    let round_k = Corners::all(px(side_k / 2.));
+    let (lift, spread) = if look.active { (3., 6.) } else { (1.5, 3.) };
+    window.paint_drop_shadows(
+        b,
+        round_k,
+        0.,
+        &[
+            shadow(BLACK, 0.45 * alpha, 0.5, 1.),
+            shadow(BLACK, 0.3 * alpha, lift, spread),
+        ],
+    );
+    let knob_body = if dark {
+        vertical((0xfafafa, alpha), (0xbdbdbd, alpha))
+    } else {
+        vertical((WHITE, alpha), (0xd6d6d6, alpha))
+    };
+    window.paint_quad(round(b, knob_body, w, crate::kit::ink(BLACK, 0.35 * alpha)));
+    lit_ring(
+        b.center(),
+        side_k / 2. - w * 1.5,
+        w,
+        0.9 * alpha,
+        TOP,
+        window,
+    );
+    // The number beside it, in the panel's caption face.
+    let text = format!("{value:.2}").replace('-', "\u{2212}");
+    let size_pt = t.typography.label;
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            family: pm_design::TEXT_FONT.into(),
+            ..window.text_style().font()
+        },
+        color: gpui::rgb_to_hsla(crate::kit::ink(c.secondary, alpha)),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+        letter_spacing: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.into(), px(size_pt), &[run]);
+    let line_h = px(size_pt * 1.3);
+    let _ = line.paint(
+        point(figure.origin.x, figure.center().y - line_h / 2.),
+        line_h,
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 /// Where the curve editor's graph sits in `bounds`, and the mapping between
@@ -821,6 +1073,131 @@ fn fill(b: Bounds<Pixels>, color: impl Into<Background>) -> PaintQuad {
     PaintQuad::new(b).background(color)
 }
 /// A circle in `b` (a square), filled and stroked.
+/// Where a point stands on its pad, 0 to 1 across and down (v1's pad: the
+/// least X at the left, the least Y at the top), held to the pad.
+pub fn pad_unit(point: [f64; 2], min: [f64; 2], max: [f64; 2]) -> (f64, f64) {
+    let at = |i: usize| {
+        let span = max[i] - min[i];
+        if span.is_finite() && span > 0. {
+            ((point[i] - min[i]) / span).clamp(0., 1.)
+        } else {
+            0.5
+        }
+    };
+    (at(0), at(1))
+}
+/// The point a place on the pad (0 to 1 across and down) stands for.
+pub fn pad_point(unit: (f64, f64), min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
+    [
+        min[0] + unit.0.clamp(0., 1.) * (max[0] - min[0]),
+        min[1] + unit.1.clamp(0., 1.) * (max[1] - min[1]),
+    ]
+}
+/// v1's point pad: a field with its centre lines, and the point as a dot
+/// (ringed while it is held).
+pub fn paint_pad(bounds: Bounds<Pixels>, at: (f64, f64), look: Look, t: &Tokens, window: &mut Window) {
+    let c = &t.colors;
+    let alpha = if look.disabled { 0.5 } else { 1. };
+    let radius = px(t.metrics.control_radius);
+    window.paint_quad(
+        PaintQuad::new(bounds)
+            .corner_radii(Corners::all(radius))
+            .background(crate::kit::ink(c.field, alpha))
+            .border_widths(px(t.metrics.border))
+            .border_color(crate::kit::ink(c.separator, alpha)),
+    );
+    let line = px(t.metrics.border);
+    let mid = bounds.center();
+    for b in [
+        Bounds::new(point(bounds.left(), mid.y - line / 2.), size(bounds.size.width, line)),
+        Bounds::new(point(mid.x - line / 2., bounds.top()), size(line, bounds.size.height)),
+    ] {
+        window.paint_quad(PaintQuad::new(b).background(crate::kit::ink(c.separator, alpha)));
+    }
+    let dot = px(t.metrics.status_dot.max(8.));
+    let centre = point(
+        bounds.left() + bounds.size.width * at.0 as f32,
+        bounds.top() + bounds.size.height * at.1 as f32,
+    );
+    let ring = if look.active { dot * 2. } else { dot };
+    window.paint_quad(round(
+        Bounds::new(centre - point(ring / 2., ring / 2.), size(ring, ring)),
+        if look.active { crate::kit::ink(c.accent, 0.25 * alpha) } else { crate::kit::ink(c.text, alpha) },
+        if look.active { 1.5 } else { 0. },
+        crate::kit::ink(c.accent, alpha),
+    ));
+    if look.active {
+        window.paint_quad(round(
+            Bounds::new(centre - point(dot / 2., dot / 2.), size(dot, dot)),
+            crate::kit::ink(c.text, alpha),
+            0.,
+            gpui::transparent_black(),
+        ));
+    }
+}
+/// v1's gradient bar: the start colour to the end colour (meeting halfway
+/// between them at the midpoint, 0 to 1, when there is one), and the
+/// midpoint as a diamond on the bar.
+pub fn paint_ramp(
+    bounds: Bounds<Pixels>,
+    start: u32,
+    end: u32,
+    midpoint: Option<f64>,
+    look: Look,
+    t: &Tokens,
+    window: &mut Window,
+) {
+    let c = &t.colors;
+    let alpha = if look.disabled { 0.5 } else { 1. };
+    let radius = px(t.metrics.control_radius);
+    let half = |a: u32, b: u32| {
+        let ch = |s: u32| ((a >> s & 0xff) + (b >> s & 0xff)) / 2;
+        ch(16) << 16 | ch(8) << 8 | ch(0)
+    };
+    let m = midpoint.unwrap_or(0.5).clamp(0.01, 0.99) as f32;
+    let split = bounds.size.width * m;
+    let left = Bounds::new(bounds.origin, size(split, bounds.size.height));
+    let right = Bounds::new(
+        point(bounds.left() + split, bounds.top()),
+        size(bounds.size.width - split, bounds.size.height),
+    );
+    let middle = half(start, end);
+    let corners = |l: bool| Corners {
+        top_left: if l { radius } else { px(0.) },
+        bottom_left: if l { radius } else { px(0.) },
+        top_right: if l { px(0.) } else { radius },
+        bottom_right: if l { px(0.) } else { radius },
+    };
+    for (b, from, to, l) in [(left, start, middle, true), (right, middle, end, false)] {
+        window.paint_quad(
+            PaintQuad::new(b).corner_radii(corners(l)).background(linear_gradient(
+                90.,
+                linear_color_stop(crate::kit::ink(from, alpha), 0.),
+                linear_color_stop(crate::kit::ink(to, alpha), 1.),
+            )),
+        );
+    }
+    window.paint_quad(
+        PaintQuad::new(bounds)
+            .corner_radii(Corners::all(radius))
+            .background(gpui::transparent_black())
+            .border_widths(px(t.metrics.border))
+            .border_color(crate::kit::ink(c.separator, alpha)),
+    );
+    if midpoint.is_some() {
+        let side = px(if look.active { 9. } else { 7. });
+        let at = point(bounds.left() + split, bounds.top() + bounds.size.height / 2.);
+        let mut diamond = PathBuilder::fill();
+        diamond.move_to(at - point(px(0.), side));
+        diamond.line_to(at + point(side, px(0.)));
+        diamond.line_to(at + point(px(0.), side));
+        diamond.line_to(at - point(side, px(0.)));
+        diamond.close();
+        if let Ok(path) = diamond.build() {
+            window.paint_path(path, crate::kit::ink(if look.active { c.accent } else { c.text }, alpha));
+        }
+    }
+}
 fn round(
     b: Bounds<Pixels>,
     fill: impl Into<Background>,
@@ -834,6 +1211,21 @@ fn round(
         .border_color(stroke)
 }
 
+#[cfg(test)]
+mod pad_tests {
+    use super::{pad_point, pad_unit};
+    /// v1's pad: the least X at the left, the least Y at the top; a point
+    /// past its bounds stands at the edge, and a place maps back to it.
+    #[test]
+    fn a_point_and_its_place_on_the_pad_map_both_ways() {
+        let (min, max) = ([-100., -50.], [100., 50.]);
+        assert_eq!(pad_unit([0., 0.], min, max), (0.5, 0.5));
+        assert_eq!(pad_unit([-100., 50.], min, max), (0., 1.));
+        assert_eq!(pad_unit([500., -500.], min, max), (1., 0.));
+        assert_eq!(pad_point((0.25, 0.75), min, max), [-50., 25.]);
+        assert_eq!(pad_unit([3., 4.], [0., 0.], [0., 0.]), (0.5, 0.5), "no span: the middle");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,6 +1251,20 @@ mod tests {
         assert!(right[2] > 0. && right[0] == 0.);
         // A puck past the rim stays on it.
         assert!((puck([1., -1., 1.], 0.).0.hypot(puck([1., -1., 1.], 0.).1) - 1.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_master_track_has_neutral_in_the_middle_and_round_trips() {
+        // Gain: neutral 1 of 0 to 8 is the middle; the ends are the ends.
+        let gain = [0., 8.];
+        assert_eq!(master_place(1., gain, 1.), 0.5);
+        assert_eq!(master_place(8., gain, 1.), 1.);
+        assert_eq!(master_place(0., gain, 1.), 0.);
+        for v in [0., 0.4, 1., 2.5, 8.] {
+            assert!((master_value(master_place(v, gain, 1.), gain, 1.) - v).abs() < 1e-9);
+        }
+        // Lift: -1 to 1 about 0.
+        assert_eq!(master_place(0.5, [-1., 1.], 0.), 0.75);
     }
 
     #[test]

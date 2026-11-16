@@ -156,6 +156,9 @@ pub enum Kit {
         /// Its master's push from neutral, -1 to 1 of the master's range
         /// (shown on the wheel's bezel).
         master: Option<f64>,
+        /// The master as its strip under the wheel sets it: its value and
+        /// range, and the binding a drag there writes.
+        master_strip: Option<(f64, [f64; 2], SharedString)>,
     },
     /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
     Curve {
@@ -166,6 +169,20 @@ pub enum Kit {
     Ease {
         curve: [f64; 4],
         thumbnail: bool,
+    },
+    /// v1's point pad: the point (X, Y) and its bounds.
+    Pad {
+        point: [f64; 2],
+        min: [f64; 2],
+        max: [f64; 2],
+    },
+    /// v1's gradient bar: its ends (`0xRRGGBB`) and, when it has one, its
+    /// midpoint and the midpoint's range.
+    Ramp {
+        start: u32,
+        end: u32,
+        midpoint: Option<f64>,
+        range: [f64; 2],
     },
 }
 #[derive(Clone, Debug)]
@@ -1101,11 +1118,51 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 };
                 ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
             });
+            let master_strip = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("masterBinding"))
+                .and_then(Value::as_str)
+                .zip(option("master"))
+                .map(|(binding, value)| {
+                    (
+                        value,
+                        [
+                            option("masterMin").unwrap_or(neutral - 1.),
+                            option("masterMax").unwrap_or(neutral + 1.),
+                        ],
+                        SharedString::from(binding.to_owned()),
+                    )
+                });
             Kit::Wheel {
                 rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
                 neutral,
                 range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
                 master,
+                master_strip,
+            }
+        }
+        Some(component @ (Component::PointPad | Component::GradientBar)) => {
+            let option = |key: &str| node.props.get("metadata").and_then(|m| m.get("pmKit")).and_then(|k| k.get(key));
+            let number = |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
+            if component == Component::PointPad {
+                let n = numbers(value);
+                Kit::Pad {
+                    point: [n.first().copied().unwrap_or(0.), n.get(1).copied().unwrap_or(0.)],
+                    min: [number("minX", -100.), number("minY", -100.)],
+                    max: [number("maxX", 100.), number("maxY", 100.)],
+                }
+            } else {
+                let colour = |key: &str, default: u32| {
+                    option(key).and_then(Value::as_str).and_then(parse_hex).unwrap_or(default)
+                };
+                Kit::Ramp {
+                    start: colour("start", 0x000000),
+                    end: colour("end", 0xffffff),
+                    midpoint: value.and_then(Value::as_f64),
+                    range: [number("min", 0.), number("max", 100.)],
+                }
             }
         }
         Some(Component::CurveEditor) => Kit::Curve {
