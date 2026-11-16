@@ -16,6 +16,7 @@
   { "id": "assets", "folder": "project", "title": "Project", "parks": true },
   { "id": "fxbrowser", "folder": "effects", "title": "Effects", "parks": true },
   { "id": "color", "folder": "color", "title": "Color", "parks": true },
+  { "id": "easing", "folder": "easing", "title": "Easing", "parks": true },
   { "id": "agent", "folder": "agent", "title": "Agent", "application": true },
   {
     "id": "settings",

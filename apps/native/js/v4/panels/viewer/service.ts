@@ -1,3 +1,4 @@
+import { compTrail, type CompTrail } from "./comp-trail";
 import type { HostClient } from "../../src/host-api";
 import { json, type Json } from "../../src/protocol";
 import { snapshot, type ViewerSnapshot } from "./contract";
@@ -10,6 +11,7 @@ export const viewerCommand = "viewer.chrome.drive";
 export class ViewerService {
   private current: ViewerSnapshot | undefined;
   private stopped = false;
+  private trail: CompTrail | null = null;
   private registration?: Promise<() => Promise<void>>;
   private stopJob?: Promise<void>;
   constructor(readonly host: HostClient) {}
@@ -27,6 +29,16 @@ export class ViewerService {
         const next = snapshot(value);
         if (next.model && next.model.project !== this.host.identity.project)
           throw new Error("Foreign viewer project");
+        if (next.model) {
+          const comps = next.model.compositions ?? [];
+          this.trail = compTrail(
+            this.trail,
+            next.model.composition,
+            (id) => comps.find((c) => c.id === id)?.parents ?? [],
+            (id) => comps.some((c) => c.id === id),
+          );
+          next.model.trail = this.trail;
+        } else this.trail = null;
         this.current = next;
         changed(snapshot(next));
       },

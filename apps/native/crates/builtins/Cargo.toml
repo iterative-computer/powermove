@@ -11,6 +11,7 @@ pm-runtime-v8 = { path = "../runtime-v8" }
 pm-surface = { path = "../surface" }
 pm-design = { path = "../design" }
 pm-kernel = { path = "../kernel" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-panel-inspector = { path = "../panel-inspector" }
 pm-panel-studio3d = { path = "../panel-studio3d" }
 pm-scene3d = { path = "../scene3d" }
@@ -43,4 +44,3 @@ pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-pm-eval = { path = "../../../../engine/crates/pm-eval" }

@@ -779,6 +779,43 @@ export function CurveEditor(props: CurveEditorProps) {
     },
   );
 }
+export interface EaseCurveProps extends SurfaceProps {
+  label: string;
+  /** A local field binding (the panel owns the curve). */
+  binding: string;
+  /** `[x1, y1, x2, y2]`: the outgoing handle, then the incoming one. */
+  value: number[];
+}
+/** An easing curve editor (drawn by the host): a cubic Bézier from rest to
+ * rest with its two direction handles. Dragging a handle sends `change` with
+ * the four numbers on every move (Option drags finely, Shift snaps to a
+ * twentieth); a preview dot runs the curve after it changes. */
+export function EaseCurve(props: EaseCurveProps) {
+  return kit(
+    "ease-curve",
+    "div",
+    {
+      ...props,
+      control: "ease-curve",
+      metadata: kitMetadata(props, {}),
+    },
+    // Across its group; the host makes it a little taller than wide.
+    {
+      minWidth: token("metrics.hit"),
+      minHeight: token("metrics.curve_editor"),
+    },
+  );
+}
+/** A drawing of an easing curve `[x1, y1, x2, y2]` (a preset's thumbnail):
+ * not a control; a press goes to what holds it. */
+export function EaseThumbnail(
+  props: SurfaceProps & { label: string; value: number[] },
+) {
+  return kit("ease-thumbnail", "div", {
+    ...props,
+    metadata: kitMetadata(props, {}),
+  });
+}
 export function Switch(props: Bound<boolean>) {
   return field(
     "switch",

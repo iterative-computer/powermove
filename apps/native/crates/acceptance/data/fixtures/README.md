@@ -20,3 +20,8 @@ They retain their original source/hash metadata and independent expected values.
 The source-backed 3D acceptance tests now use these owned snapshots, so they do
 not require another lane's fixture directory to be present. No oracle value or
 numeric comparison tolerance was changed.
+
+`composition-native-catalog.json` pins the optional `compositionId` that the
+composition tools take (9a88988d2, `docs/native/mcp.md` › Target any composition).
+It is applied over `catalog-main.json`, which stays the bare main snapshot; the
+property is never required, so main's calls keep their meaning.

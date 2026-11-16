@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObservedRuntime {
     stamp: Option<Stamp>,
+    pub folders: BTreeMap<String, crate::FolderSync>,
     states: BTreeMap<String, RuntimeState>,
 }
 impl ObservedRuntime {
@@ -21,6 +22,7 @@ impl ObservedRuntime {
     }
     pub fn new(stamp: Stamp, states: BTreeMap<String, RuntimeState>) -> Self {
         Self {
+            folders: BTreeMap::new(),
             stamp: Some(stamp),
             states,
         }
@@ -41,6 +43,9 @@ impl ObservedRuntime {
     }
 }
 impl MediaRuntime for ObservedRuntime {
+    fn folder_state(&self, stamp: &Stamp, id: &str) -> Option<crate::FolderSync> {
+        (self.stamp.as_ref() == Some(stamp)).then(|| self.folders.get(id).cloned()).flatten()
+    }
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState {
         if self.stamp.as_ref() != Some(stamp) {
             return RuntimeState::default();
