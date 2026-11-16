@@ -558,11 +558,12 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
-                // `glass`: the system's capsule at the large size (macOS 26's
+                // Every segmented control is the system's capsule (macOS 26's
                 // liquid glass control), selection still the neutral pill (the
-                // system's own lights it in the accent).
+                // system's own lights it in the accent); `glass` at the large
+                // size (a header's mode switch), a well's at the small one.
+                v.setBorderShape(NSControlBorderShape::Capsule);
                 if glass {
-                    v.setBorderShape(NSControlBorderShape::Capsule);
                     v.setControlSize(NSControlSize::Large);
                 }
                 if well {
