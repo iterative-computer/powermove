@@ -138,6 +138,13 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
+/// Whether the window menu commands go to has a sheet up.
+fn editor_has_sheet() -> bool {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    editor_window_number()
+        .and_then(|n| app.windowWithWindowNumber(n))
+        .is_some_and(|w| w.attachedSheet().is_some())
+}
 fn active_send(command: Command) {
     if let Some(n) = editor_window_number() {
         ROUTES.with(|r| {
@@ -676,7 +683,9 @@ define_class!(
                     n => item.setState(if state.checked.contains(n) {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
+                // A sheet on the editor window holds its commands (HIG).
                 !state.disabled.contains(name)
+                    && (menu::runs_beside_sheet(name) || !editor_has_sheet())
             } else {
                 true
             }
