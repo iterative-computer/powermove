@@ -332,16 +332,24 @@ fn arc(
     }
     path.build().ok()
 }
-/// A round rim lit from above: a band round `radius`, brightest at the top
+/// A round rim lit from one side: a band round `radius`, brightest at
+/// `toward` (radians, counter-clockwise from the right; `TOP` or `BOTTOM`)
 /// and fading to nothing by the sides (a round object's light, where a
 /// straight band would end in a bright stub).
-fn lit_ring(centre: Point<Pixels>, radius: f32, width: f32, alpha: f32, window: &mut Window) {
+fn lit_ring(
+    centre: Point<Pixels>,
+    radius: f32,
+    width: f32,
+    alpha: f32,
+    toward: f64,
+    window: &mut Window,
+) {
     const PARTS: usize = 12;
     let span = std::f64::consts::PI * 0.85;
     let half = std::f64::consts::FRAC_PI_2;
     for k in 0..PARTS {
-        let from = half - span / 2. + span * k as f64 / PARTS as f64;
-        let mid = from + span / PARTS as f64 / 2. - half;
+        let from = toward - span / 2. + span * k as f64 / PARTS as f64;
+        let mid = from + span / PARTS as f64 / 2. - toward;
         let fall = (mid / (span / 2.) * half).cos().max(0.).powf(1.5) as f32;
         if let Some(p) = arc(centre, radius, from, span / PARTS as f64 + 0.01, width) {
             window.paint_path(p, crate::kit::ink(WHITE, alpha * fall));
@@ -354,10 +362,29 @@ fn lit_ring(centre: Point<Pixels>, radius: f32, width: f32, alpha: f32, window: 
 pub fn wheel_diameter(bounds: Bounds<Pixels>) -> f32 {
     f32::from(bounds.size.width).min(f32::from(bounds.size.height))
 }
+const TOP: f64 = std::f64::consts::FRAC_PI_2;
+const BOTTOM: f64 = -std::f64::consts::FRAC_PI_2;
+
+/// The puck across, at rest, on a wheel `d` across: a knob big enough to
+/// feel held, growing a little with the wheel.
+fn puck_side(d: f32, t: &Tokens) -> f32 {
+    let least = t.metrics.keyframe + 7.;
+    (d * 0.065).clamp(least, least + 6.)
+}
+/// A curve point's knob across, at rest.
+fn knob_side(t: &Tokens) -> f32 {
+    t.metrics.keyframe + 3.
+}
+/// How far a curve editor's graph sits inside its bounds: points on its
+/// edges show whole, clear of the well's rounded corners.
+pub fn curve_inset(t: &Tokens) -> f32 {
+    knob_side(t) / 2. + t.metrics.border * 3.
+}
+
 /// How far from a wheel's centre the puck's centre goes at the rim, for a
 /// wheel `d` across: inside the bezel, the puck wholly on the disc.
 pub fn wheel_reach(d: f32, t: &Tokens) -> f32 {
-    (d / 2. - bezel(d) - t.metrics.keyframe / 2. - 1.).max(1.)
+    (d / 2. - bezel(d) - puck_side(d, t) / 2. - 1.).max(1.)
 }
 fn bezel(d: f32) -> f32 {
     (d * 0.065).max(5.)
@@ -426,8 +453,8 @@ pub fn paint_wheel(
         w,
         crate::kit::ink(edge.0, edge.1 * strong * alpha),
     ));
-    let light = if dark { 0.3 } else { 1. };
-    lit_ring(centre, d / 2. - w * 1.5, w, light * alpha, window);
+    let light = if dark { 0.45 } else { 1. };
+    lit_ring(centre, d / 2. - w * 1.5, w, light * alpha, TOP, window);
     // Notches where each primary and secondary lies: the direction a push
     // takes reads at the edge.
     for hue in [
@@ -472,6 +499,20 @@ pub fn paint_wheel(
             ..shadow(BLACK, if dark { 0.7 } else { 0.28 } * alpha, 3., 7.)
         }],
     );
+    // Glass over the disc: a sheen from the top, gone by the middle, and the
+    // light through the lens gathering along its lower rim.
+    let sheen = if dark { 0.16 } else { 0.38 };
+    window.paint_quad(
+        PaintQuad::new(disc_bounds)
+            .background(linear_gradient(
+                180.,
+                linear_color_stop(crate::kit::ink(WHITE, sheen * alpha), 0.),
+                linear_color_stop(crate::kit::ink(WHITE, 0.), 0.55),
+            ))
+            .corner_radii(round_of(disc_bounds)),
+    );
+    let caught = if dark { 0.34 } else { 0.85 };
+    lit_ring(centre, inner_d / 2. - w, w, caught * alpha, BOTTOM, window);
     // The master on the bezel: an arc from the top, its length the push.
     let r = d / 2. - bezel / 2.;
     let ink = crate::kit::ink(if dark { WHITE } else { c.text }, 0.22 * alpha * strong);
@@ -525,28 +566,28 @@ pub fn paint_wheel(
             window.paint_path(path, crate::kit::ink(ink, 0.55 * alpha));
         }
     }
-    // The puck has weight: a shadow under it, a light body, its push colour
-    // at its centre.
-    let side = t.metrics.keyframe + 3. + if look.active { 3. } else { 0. };
+    // The puck has weight: a contact shadow and a softer one that lifts
+    // while held, a domed body lit along its top, its push colour in a
+    // dimple at its centre.
+    let side = puck_side(d, t) + if look.active { 3. } else { 0. };
     let b = Bounds::new(
         at - point(px(side / 2.), px(side / 2.)),
         size(px(side), px(side)),
     );
+    let (lift, spread) = if look.active { (4., 9.) } else { (2., 5.) };
     window.paint_drop_shadows(
         b,
         round_of(b),
         0.,
-        &[shadow(
-            BLACK,
-            0.55 * alpha,
-            1.5,
-            if look.active { 6. } else { 3. },
-        )],
+        &[
+            shadow(BLACK, 0.45 * alpha, 0.5, 1.),
+            shadow(BLACK, 0.35 * alpha, lift, spread),
+        ],
     );
     let body = if dark {
-        vertical((0xf4f4f4, alpha), (0xcfcfcf, alpha))
+        vertical((0xfafafa, alpha), (0xbdbdbd, alpha))
     } else {
-        vertical((WHITE, alpha), (0xe2e2e2, alpha))
+        vertical((WHITE, alpha), (0xd6d6d6, alpha))
     };
     window.paint_quad(PaintQuad::new(b).background(body).corner_radii(round_of(b)));
     window.paint_quad(round(
@@ -555,7 +596,8 @@ pub fn paint_wheel(
         w,
         crate::kit::ink(BLACK, 0.35 * alpha),
     ));
-    let dot = side * 0.42;
+    lit_ring(at, side / 2. - w * 1.5, w, 0.95 * alpha, TOP, window);
+    let dot = side * 0.44;
     let core = Bounds::new(
         at - point(px(dot / 2.), px(dot / 2.)),
         size(px(dot), px(dot)),
@@ -564,6 +606,15 @@ pub fn paint_wheel(
         PaintQuad::new(core)
             .background(crate::kit::ink(push_colour(puck, dark), alpha))
             .corner_radii(round_of(core)),
+    );
+    window.paint_inset_shadows(
+        core,
+        round_of(core),
+        0.,
+        &[BoxShadow {
+            inset: true,
+            ..shadow(BLACK, 0.45 * alpha, 1., 2.)
+        }],
     );
     // A keyline outside, so the puck reads on every colour.
     window.paint_quad(round(
@@ -632,7 +683,7 @@ pub fn paint_curve(
     };
     let alpha = if look.disabled { 0.4 } else { 1. };
     let w = t.metrics.border;
-    let pad = px(t.metrics.keyframe / 2. + w);
+    let pad = px(curve_inset(t));
     let a = graph.area;
     let well = Bounds::new(
         a.origin - point(pad, pad),
@@ -682,43 +733,86 @@ pub fn paint_curve(
     }
     let ink = channel_ink(channel, t);
     let steps = (f32::from(graph.area.size.width) / 2.).ceil().max(16.) as usize;
-    let mut line = PathBuilder::stroke(px(w * 2.));
-    for s in 0..=steps {
-        let x = s as f64 / steps as f64;
-        let y = curve.sample(x).clamp(-0.02, 1.02);
-        let p = graph.to_point((x, y));
-        if s == 0 {
-            line.move_to(p);
-        } else {
-            line.line_to(p);
+    let along: Vec<_> = (0..=steps)
+        .map(|s| {
+            let x = s as f64 / steps as f64;
+            graph.to_point((x, curve.sample(x).clamp(-0.02, 1.02)))
+        })
+        .collect();
+    // Under the curve, the channel's tint: a glass slab lit from above,
+    // fading toward the floor.
+    let (top, floor) = match (channel, dark) {
+        (0, true) => (0.10, 0.015),
+        (0, false) => (0.07, 0.01),
+        (_, true) => (0.26, 0.04),
+        (_, false) => (0.20, 0.03),
+    };
+    let mut under = PathBuilder::fill();
+    under.move_to(graph.to_point((0., 0.)));
+    for p in &along {
+        under.line_to(*p);
+    }
+    under.line_to(graph.to_point((1., 0.)));
+    under.close();
+    if let Ok(path) = under.build() {
+        window.paint_path(
+            path,
+            linear_gradient(
+                180.,
+                linear_color_stop(crate::kit::ink(ink, top * alpha), 0.),
+                linear_color_stop(crate::kit::ink(ink, floor * alpha), 1.),
+            ),
+        );
+    }
+    // The curve, with a soft glow of its own light beneath it.
+    for (width, strength) in [(w * 6., if dark { 0.16 } else { 0.10 }), (w * 2., 1.)] {
+        let mut line = PathBuilder::stroke(px(width));
+        for (s, p) in along.iter().enumerate() {
+            if s == 0 {
+                line.move_to(*p);
+            } else {
+                line.line_to(*p);
+            }
+        }
+        if let Ok(path) = line.build() {
+            window.paint_path(path, crate::kit::ink(ink, strength * alpha));
         }
     }
-    if let Ok(path) = line.build() {
-        window.paint_path(path, crate::kit::ink(ink, alpha));
-    }
-    // Points you want to grab: knobs with a shadow, filled while held.
-    let d = t.metrics.keyframe;
+    // Points you want to grab: domed knobs with weight, lit along their top,
+    // ringed in the channel's ink, filled with it while held.
+    let k = knob_side(t);
     for (i, p) in curve.points.iter().enumerate() {
         let at = graph.to_point((p.0.clamp(0., 1.), p.1.clamp(0., 1.)));
-        let side = if held == Some(i) { d + 2. * w + 2. } else { d };
+        let side = if held == Some(i) { k + 3. } else { k };
         let b = Bounds::new(
             at - point(px(side / 2.), px(side / 2.)),
             size(px(side), px(side)),
         );
         let gone = leaving && held == Some(i);
         let fade = alpha * if gone { 0.3 } else { 1. };
+        let lift = if held == Some(i) {
+            (3., 7.)
+        } else {
+            (1.5, 3.5)
+        };
         window.paint_drop_shadows(
             b,
             Corners::all(b.size.width / 2.),
             0.,
-            &[shadow(BLACK, 0.55 * fade, 1., 2.5)],
+            &[
+                shadow(BLACK, 0.4 * fade, 0.5, 1.),
+                shadow(BLACK, 0.35 * fade, lift.0, lift.1),
+            ],
         );
         let body = if held == Some(i) {
-            crate::kit::ink(ink, fade)
+            vertical((ink, fade), (ink, 0.8 * fade))
+        } else if dark {
+            vertical((0xfafafa, fade), (0xc4c4c4, fade))
         } else {
-            crate::kit::ink(if dark { 0xf2f2f2 } else { WHITE }, fade)
+            vertical((WHITE, fade), (0xdadada, fade))
         };
         window.paint_quad(round(b, body, w * 1.5, crate::kit::ink(ink, fade)));
+        lit_ring(at, side / 2. - w * 2., w, 0.8 * fade, TOP, window);
     }
 }
 
