@@ -6146,7 +6146,9 @@ mod tests {
         wait(&first, "turned off", &toggled_gone);
         drop(first);
         let again = start();
-        wait(&again, "the next launch leaves it off", &toggled_gone);
+        wait(&again, "the next launch leaves it off, the others run", &|now| {
+            toggled_gone(now) && contributes(now, "commands", "switcher.on")
+        });
         assert_eq!(
             again.publication().provides.get("toggled"),
             Some(&vec!["toggled.tint".to_owned()]),
