@@ -169,6 +169,9 @@ impl State {
                     self.event("plan", *self.planned.first().unwrap());
                 }
             }
+            if age >= 2. && self.stage != Stage::Rest && self.pending.is_empty() && !self.complete {
+                self.event("rest", self.row);
+            }
             return;
         }
         match self.stage {
@@ -187,6 +190,9 @@ impl State {
                 } else if age >= 2. {
                     self.event("rest", self.row);
                 }
+            }
+            Stage::Wake | Stage::Rest if self.complete && self.pending.is_empty() => {
+                self.event("ready", self.row)
             }
             _ => {}
         }
