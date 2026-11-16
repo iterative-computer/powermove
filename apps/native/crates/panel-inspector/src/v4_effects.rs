@@ -645,6 +645,18 @@ impl EffectsPanel {
                 }
                 .to_owned();
             }
+            "duplicate" => {
+                model.effect(&layer, id)?;
+                plan.request = Some(model.commands(
+                    caller,
+                    vec![EffectCommand::Duplicate {
+                    layer_id: layer.clone(),
+                    effect_ids: vec![id.to_owned()],
+                    new_ids: vec![pm_kernel::new_id("f")],
+                }.into()],
+                )?);
+                label = "Duplicate Effect".into();
+            }
             "remove" => {
                 let (r, s) = model.delete_effects(caller, &layer, id)?;
                 let count = if let Call::Transact {

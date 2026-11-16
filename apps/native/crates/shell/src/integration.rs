@@ -16,6 +16,9 @@ pub trait Integration {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement>;
+    /// Whether panel `id` holds the keyboard, told each time the shell lays
+    /// it out (the timeline's selected rows take the accent only then).
+    fn panel_focused(&self, _id: &str, _focused: bool, _cx: &mut App) {}
     /// Content for panel `id`'s 32 pt header, replacing the shell's title
     /// (a tab group keeps its tab strip, and then `tabbed`: the tab names
     /// the panel, so its header leaves out its own title). `None` = the
@@ -43,8 +46,14 @@ pub trait Integration {
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
-    /// Recent projects (library id, name), newest first, for the project
-    /// name's menu in the bar.
+    /// Layer ids and names in the active composition.
+    fn palette_effects(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    fn palette_layers(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Recent projects (library id, name), newest first.
     fn recent(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }

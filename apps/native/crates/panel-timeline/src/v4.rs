@@ -152,6 +152,11 @@ pub async fn dispatch(
             context.millis,
             context.property_facts,
         )?,
+        // The shell's word on whether the timeline holds the keyboard.
+        "panelFocus" => {
+            client.model.panel_blurred = !boolean(intent, "focused")?;
+            Plan::default()
+        }
         "mode" => {
             client.model.mode = match string(intent, "mode")? {
                 "Layers" => TimelineMode::Layers,
@@ -245,7 +250,24 @@ pub async fn dispatch(
             } else {
                 current.map(|d| d.collapsed).unwrap_or(layer.collapsed)
             };
-            if open == closed {
+            if intent.get("all").and_then(Value::as_bool) == Some(true) {
+                let ids: Vec<_> = client
+                    .model
+                    .index
+                    .layers
+                    .iter()
+                    .map(|l| l.id.clone())
+                    .collect();
+                for id in ids {
+                    let layer = client.model.index.layer(&id).unwrap();
+                    let d = client.model.reveal.layers.entry(id).or_default();
+                    d.collapsed = !open;
+                    if layer.kind == "group" {
+                        d.group_collapsed = !open;
+                    }
+                }
+                client.model.rebuild_rows();
+            } else if open == closed {
                 client.model.toggle_disclosure(&id)?;
             }
             persist = true;
@@ -293,6 +315,135 @@ pub async fn dispatch(
             )],
             ..Plan::default()
         },
+        "propertyValue" => {
+            let layer = string(intent, "layer")?;
+            let path = string(intent, "path")?;
+            let value = intent["value"]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or(Error::InvalidIntent("value"))?;
+            let targets = client.model.property_targets(layer, &[path.to_owned()])?;
+            let published = client
+                .kernel
+                .published(&client.project)
+                .ok_or(Error::MissingHost("project"))?;
+            let mut mirror = pm_kernel::QueryMirror::new(&published);
+            let mut commands = Vec::new();
+            for (layer, path) in targets {
+                let evaluated =
+                    |mirror: &mut pm_kernel::QueryMirror, path: &str| -> Result<f64, Error> {
+                        mirror
+                            .queries()
+                            .evaluate(
+                                client.model.index.comp_id.as_deref(),
+                                &layer,
+                                path,
+                                context.time,
+                            )
+                            .map_err(|_| Error::MissingHost("evaluated property"))?
+                            .as_f64()
+                            .ok_or(Error::InvalidIntent("numeric property"))
+                    };
+                let baseline = evaluated(&mut mirror, &path)?;
+                let l = client
+                    .model
+                    .index
+                    .layer(&layer)
+                    .ok_or(Error::InvalidIntent("layer"))?;
+                let channel = client
+                    .model
+                    .index
+                    .channel(&layer, &path)
+                    .ok_or(Error::InvalidIntent("path"))?;
+                let paired = match path.as_str() {
+                    "scale.x" => client.model.index.channel(&layer, "scale.y"),
+                    "scale.y" => client.model.index.channel(&layer, "scale.x"),
+                    _ => None,
+                };
+                let current = |c: &crate::Channel| {
+                    c.keys.iter().any(|k| {
+                        (l.from + k.time - context.time).abs() < 0.5 / client.model.index.fps
+                    })
+                };
+                let at_key = current(channel) || paired.is_some_and(current);
+                let selected: Vec<_> = channel
+                    .keys
+                    .iter()
+                    .filter(|k| client.model.selection.keys().contains(&k.id))
+                    .collect();
+                let paired_selected = paired.is_some_and(|c| {
+                    c.keys.iter().any(|k| {
+                        client.model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
+                    })
+                });
+                if !at_key && (!selected.is_empty() || paired_selected) {
+                    for key in selected {
+                        if let Some(start) = key.value.as_f64() {
+                            commands.push(
+                                pm_kernel::KeyframeCommand::Edit {
+                                    key_id: key.id.clone(),
+                                    time: None,
+                                    value: Some(pm_model::Value::Number(start + value - baseline)),
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    if l.scale_linked {
+                        if let Some(paired) = paired {
+                            for key in paired
+                                .keys
+                                .iter()
+                                .filter(|k| client.model.selection.keys().contains(&k.id))
+                            {
+                                if let Some(start) = key.value.as_f64() {
+                                    commands.push(
+                                        pm_kernel::KeyframeCommand::Edit {
+                                            key_id: key.id.clone(),
+                                            time: None,
+                                            value: Some(pm_model::Value::Number(
+                                                start + value - baseline,
+                                            )),
+                                        }
+                                        .into(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if matches!(path.as_str(), "scale.x" | "scale.y") {
+                    let paired = if path == "scale.x" {
+                        "scale.y"
+                    } else {
+                        "scale.x"
+                    };
+                    let other = evaluated(&mut mirror, paired)?;
+                    for call in client
+                        .model
+                        .scale_value(&layer, &path, value, context.time, baseline, other)?
+                        .calls
+                    {
+                        if let pm_kernel::Call::Transact {
+                            body: pm_kernel::WriteBody::Commands(c),
+                            ..
+                        } = call
+                        {
+                            commands.extend(c);
+                        }
+                    }
+                } else {
+                    let mut set = pm_kernel::commands::properties::SetProperty::new(
+                        &layer,
+                        &path,
+                        pm_model::Value::Number(value),
+                        context.time,
+                    );
+                    set.preserve_hand_edits = false;
+                    commands.push(pm_kernel::PropertyCommand::Set(set).into());
+                }
+            }
+            Plan::edit(commands, client.model.index.revision)
+        }
         "keyToggle" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;
@@ -452,11 +603,7 @@ pub fn project_window(
                         json!(crate::render::display_kind(&layer.kind, definition));
                     value["labelColor"] =
                         json!(crate::render::Label::for_layer(&layer.kind, definition).name());
-                    value["index"] = if layer.group.is_some() {
-                        Value::Null
-                    } else {
-                        json!(model.index.layer_ordinal(id).map(|n| n + 1))
-                    };
+                    value["index"] = json!(model.index.layer_ordinal(id).map(|n| n + 1));
                     value["label"] = json!(layer.name.to_string_lossy());
                     value["selected"] = json!(selected.contains(id));
                     value["locked"] = json!(layer.effectively_locked);
@@ -572,6 +719,7 @@ fn frame_facts(
     json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
         "hasComposition": model.index.has_composition(),
+        "focused": !model.panel_blurred,
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,

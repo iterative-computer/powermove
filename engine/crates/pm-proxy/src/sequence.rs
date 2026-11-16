@@ -17,7 +17,7 @@ use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
 
 use crate::generate::{GeneratedProxy, GenerationControl, GenerationRequest, PauseReason};
-use crate::{ProxyError, ProxyRecipe, Result, disk_guard};
+use crate::{ProxyError, ProxyRecipe, Result, disk_guard_for_job, estimated_output_bytes};
 
 const MAX_MANIFEST_BYTES: u64 = 32 << 20;
 
@@ -646,17 +646,22 @@ fn write_normalized_frame(
     Ok(())
 }
 
-fn disk_ok(root: &Path, disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>) -> Result<bool> {
+fn disk_ok(
+    root: &Path,
+    disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
+    output_bytes: u64,
+) -> Result<bool> {
     let (available, capacity) = disk_space(root)?;
-    Ok(disk_guard(available, capacity))
+    Ok(disk_guard_for_job(available, capacity, output_bytes))
 }
 
 fn wait_for_disk(
     request: &GenerationRequest<'_>,
     disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
+    output_bytes: u64,
 ) -> Result<()> {
     let mut reported = false;
-    while !disk_ok(request.store.root(), disk_space)? {
+    while !disk_ok(request.store.root(), disk_space, output_bytes)? {
         if request.control.cancel.load(Ordering::Relaxed) {
             return Err(ProxyError::Cancelled);
         }
@@ -723,7 +728,11 @@ fn transcode(
         let target = staged.path().join(format!("frame-{index:09}.{ext}"));
         if color == SequenceColor::Bt2020Pq {
             write_normalized_frame(&frame.path, &target, &pool, &request.control)?;
-            wait_for_disk(request, disk_space)?;
+            wait_for_disk(
+                request,
+                disk_space,
+                estimated_output_bytes(recipe, manifest.frames.len() as u64),
+            )?;
         } else {
             symlink(&frame.path, target)?;
         }
@@ -866,7 +875,12 @@ fn transcode(
                 .collect::<String>();
             return Err(ProxyError::Codec(format!("{status}: {tail}")));
         }
-        let reason = if !disk_ok(request.store.root(), disk_space)? {
+        let reason = if !disk_ok(
+            request.store.root(),
+            disk_space,
+            estimated_output_bytes(recipe, manifest.frames.len() as u64)
+                .saturating_sub(fs::metadata(destination).map_or(0, |m| m.len())),
+        )? {
             Some(PauseReason::LowDisk)
         } else if (request.control.pause)() {
             Some(PauseReason::InteractiveWork)
@@ -1013,7 +1027,11 @@ pub(crate) fn generate_sequence(
         Ok(None) => (),
         Err(error) => return Err(error),
     }
-    wait_for_disk(&request, disk_space)?;
+    wait_for_disk(
+        &request,
+        disk_space,
+        estimated_output_bytes(&recipe, manifest.frames.len() as u64),
+    )?;
     let staged = tempfile::Builder::new()
         .prefix("pm-sequence-")
         .tempdir_in(request.store.root())?;

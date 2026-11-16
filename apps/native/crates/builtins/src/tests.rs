@@ -1720,6 +1720,195 @@ fn the_viewer_shows_transport_only_when_no_timeline_is_shown() {
     assert!(shown["host"]["transport"]["timecode"].is_string());
 }
 
+/// "When I adjust position of the camera, it rotates the view" (Chike,
+/// 2026-11-14): a camera aims at its point of interest, so moving it re-aims
+/// it. Properties now shows that point and an Auto-Orient choice; Off keeps
+/// the view exactly when switched, and from then on Position only slides it.
+#[test]
+fn camera_position_only_translates_once_auto_orient_is_off() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    run(json!({"operation":"add_object","id":"ui","object":{"source":{"primitive":"box"}}}));
+    run(
+        json!({"operation":"add_camera","id":"cam","camera":{"p":{"x":0,"y":0,"z":50,"targetX":0,"targetY":0,"targetZ":0,"fov":13}}}),
+    );
+    let mut presenter = properties::Properties::default();
+    select_layer(&kernel, "cam");
+    let publish = |presenter: &mut properties::Properties| {
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        (model, publication)
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let transform = |p: &Value| -> Vec<String> {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "transform")
+            .unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let write = |presenter: &properties::Properties,
+                 model: &mut pm_panel_inspector::Inspector,
+                 row: &Value,
+                 axis: usize,
+                 value: Value| {
+        let handle = row["control"]["binding"]["handle"]
+            .as_str()
+            .or(row["control"]["axes"][axis]["binding"]["handle"].as_str())
+            .unwrap();
+        let request = presenter
+            .write(
+                model,
+                Caller::native(),
+                handle,
+                data::model(&value).unwrap(),
+                0.,
+            )
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{value}: {e}");
+        }
+    };
+    // Where the shot camera stands and which way it looks.
+    let view = || {
+        let p = kernel.published("synthetic").unwrap();
+        let r = pm_kernel::commands::scene3d::resolve_scene(
+            &p.snapshot,
+            p.snapshot.open_comp().as_deref(),
+            0.,
+        )
+        .unwrap();
+        let at = r.camera_position.unwrap();
+        let t = r.targets[r.camera_id.as_ref().unwrap()];
+        let d = [t[0] - at[0], t[1] - at[1], t[2] - at[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        (at, [d[0] / l, d[1] / l, d[2] / l])
+    };
+    let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
+
+    // Aiming at its point of interest: Properties shows the point, and moving
+    // the camera turns it (the reported behaviour, now explained).
+    let (mut model, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+    assert_eq!(
+        row(&p, "3d.autoOrient").unwrap()["control"]["value"],
+        "target"
+    );
+    let (_, straight) = view();
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "position").unwrap(),
+        0,
+        json!(8.),
+    );
+    let (_, turned) = view();
+    assert!(
+        !close(straight, turned),
+        "a two-node camera re-aims when it moves"
+    );
+
+    // Auto-Orient Off keeps that turned view exactly (a real yaw, so the
+    // rotation it writes is checked), and shows Rotation instead.
+    let before = view();
+    let (mut model, p) = publish(&mut presenter);
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.autoOrient").unwrap(),
+        0,
+        json!("off"),
+    );
+    let after = view();
+    assert!(
+        close(before.0, after.0) && close(before.1, after.1),
+        "{before:?} -> {after:?}"
+    );
+    let (mut model, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Rotation"]);
+
+    // Now Position only slides the camera: the view direction is unchanged
+    // and the camera moved by exactly the edit.
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "position").unwrap(),
+        0,
+        json!(16.),
+    );
+    let moved = view();
+    assert!(
+        close(moved.1, after.1),
+        "orientation unchanged: {:?} -> {:?}",
+        after.1,
+        moved.1
+    );
+    assert!(
+        close(moved.0, [after.0[0] + 8., after.0[1], after.0[2]]),
+        "{:?}",
+        moved.0
+    );
+
+    // Back toward a point of interest, the view still doesn't jump.
+    let (mut model, p) = publish(&mut presenter);
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.autoOrient").unwrap(),
+        0,
+        json!("target"),
+    );
+    let back = view();
+    assert!(
+        close(back.0, moved.0) && close(back.1, moved.1),
+        "{moved:?} -> {back:?}"
+    );
+    let (_, p) = publish(&mut presenter);
+    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+}
+
 #[test]
 fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -4103,6 +4292,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         labels(&p, "Camera"),
         [
             "Projection",
+            "Auto-Orient",
             "Field of View",
             "Clip Start",
             "Clip End",
@@ -4127,7 +4317,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         json!("orthographic"),
     );
     let (_, p) = publish(&mut presenter, "cam");
-    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert_eq!(labels(&p, "Camera")[2], "Zoom");
     // The camera shows the composition's Render Quality, not a second sampler.
     assert!(row(&p, "3d.samples").is_none());
     assert_eq!(
@@ -5562,4 +5752,348 @@ fn the_export_subscription_plans_only_while_the_sheet_is_open() {
         sheet.export_publication().unwrap()["project"]["summary"],
         "300 frames · 10 s · 1280×720"
     );
+}
+
+/// The Easing panel, as the app mounts it, offers v1's actions on the
+/// selected keyframes; a preset, Easy Ease, an interpolation and a custom
+/// curve each ease them as one Undo step, and nothing changes with no
+/// keyframe selected.
+#[test]
+fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let add = |id: &str, time: f64, value: f64| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::Transact {
+                        label: None,
+                        expected_revision: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::KeyframeCommand::Add {
+                                layer_id: "a".into(),
+                                channel: "opacity".into(),
+                                time,
+                                key_id: id.into(),
+                                value: Some(pm_model::Value::from(value)),
+                            }
+                            .into(),
+                        ]),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    add("k0", 0., 0.);
+    add("k1", 1., 100.);
+    let key = |id: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        data::wire(&index.key(id).unwrap().2.stored.to_value())
+    };
+    let mut backend = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "easing".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "easing",
+        false,
+    )
+    .unwrap();
+    let state = backend.easing_state().unwrap();
+    assert_eq!(state["count"], 0);
+    assert_eq!(state["presets"].as_array().unwrap().len(), 27);
+    assert!(
+        backend
+            .native_command("panel.easing", &json!({"type":"preset","preset":"easeOut"}))
+            .is_err(),
+        "nothing selected: refused"
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), SelectionCall::Keys(vec!["k0".into()])),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(backend.easing_state().unwrap()["count"], 1);
+    let untouched = key("k1");
+    let run = |backend: &mut data::Backend, action: Value| {
+        let models::NativeCommand::Kernel(request) =
+            backend.native_command("panel.easing", &action).unwrap()
+        else {
+            panic!("a kernel request")
+        };
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{action}");
+    };
+    let before = key("k0");
+    run(&mut backend, json!({"type":"preset","preset":"expoOut"}));
+    let eased = key("k0");
+    assert_eq!(eased["outInterp"], "bezier", "{eased}");
+    assert_ne!(eased["outEase"], before["outEase"]);
+    // The curve shapes the segment after the selected key; the next key
+    // keeps its time and value.
+    assert_eq!(
+        (&key("k1")["t"], &key("k1")["v"]),
+        (&untouched["t"], &untouched["v"])
+    );
+    run(&mut backend, json!({"type":"easyEase","side":"both"}));
+    let easy = key("k0");
+    assert_eq!(easy["outInterp"], "bezier");
+    assert_ne!(easy["outEase"], eased["outEase"]);
+    run(
+        &mut backend,
+        json!({"type":"interpolation","interpolation":"hold","side":"both"}),
+    );
+    assert_eq!(key("k0")["outInterp"], "hold");
+    // A curve takes a key off Hold.
+    run(
+        &mut backend,
+        json!({"type":"curve","curve":[0.9, 0., 0.1, 1.]}),
+    );
+    let custom = key("k0");
+    assert_eq!(custom["outInterp"], "bezier");
+    assert_ne!(custom["outEase"], eased["outEase"]);
+    // Each action is one Undo step: undo the curve, Hold and Easy Ease to
+    // reach the preset again.
+    for _ in 0..3 {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(key("k0"), eased);
+    for bad in [
+        json!({"type":"preset","preset":"wobble"}),
+        json!({"type":"curve","curve":[0.1, 0.2]}),
+        json!({"type":"interpolation","interpolation":"spline"}),
+    ] {
+        assert!(
+            backend.native_command("panel.easing", &bad).is_err(),
+            "{bad}"
+        );
+    }
+    // Mounted as the app mounts it: the drawn curve, a thumbnail per preset
+    // and the actions, each named for VoiceOver.
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("easing").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let components: Vec<(String, String)> = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| {
+            Some((
+                n.props.get("data-pm-component")?.as_str()?.to_owned(),
+                n.props.get("label")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    assert!(components.contains(&("ease-curve".into(), "Easing curve".into())));
+    let thumbnails = components
+        .iter()
+        .filter(|(c, _)| c == "ease-thumbnail")
+        .count();
+    assert_eq!(thumbnails, 27, "a thumbnail per preset");
+    let labels: Vec<String> = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| {
+            n.props
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for label in ["Expo Out", "Easy Ease", "Hold", "Apply Curve", "Outgoing X"] {
+        assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+    }
+}
+#[test]
+fn composition_tab_closing_preserves_the_last_tab() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "tabs".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "timeline", false).unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(frame["tabs"][0]["showClose"], false);
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tab","id":"c","close":true}),
+        )
+        .unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 1);
+    assert!(
+        backend
+            .native_command(
+                "panel.timeline",
+                &json!({"type":"tabMenu","id":"missing","action":"closeOthers"})
+            )
+            .is_err()
+    );
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tabMenu","id":"c","action":"settings"}),
+        )
+        .unwrap();
+    assert!(
+        backend
+            .native
+            .platform
+            .iter()
+            .any(|(_, action)| action["kind"] == "compositionSettings" && action["id"] == "c")
+    );
+}
+#[test]
+fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "tabs".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "timeline", false).unwrap();
+    backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Create {
+                            comp_id: "logo".into(),
+                            settings: Default::default(),
+                        }
+                        .into(),
+                        pm_kernel::CompCommand::Open {
+                            comp_id: "logo".into(),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 2);
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Create {
+                            comp_id: "spinner".into(),
+                            settings: Default::default(),
+                        }
+                        .into(),
+                        pm_kernel::CompCommand::Open {
+                            comp_id: "spinner".into(),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    let document = kernel.published("synthetic").unwrap().snapshot.doc_id;
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::OpenComposition {
+                    comp_id: "logo".into(),
+                    document,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["tabs"].as_array().unwrap().len(), 3);
+    let menu = backend
+        .native_command(
+            "panel.timeline.menu",
+            &json!({"type":"tabContext","id":"logo"}),
+        )
+        .unwrap();
+    if let crate::models::NativeCommand::Value(menu) = menu {
+        assert!(
+            menu.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["label"] == "Close Others")
+        );
+    }
+    backend
+        .native_command(
+            "panel.timeline",
+            &json!({"type":"tab","id":"logo","close":true}),
+        )
+        .unwrap();
+    assert!(
+        backend
+            .native
+            .platform
+            .iter()
+            .any(|(_, action)| action["kind"] == "openComposition" && action["id"] == "spinner")
+    );
+    let pending = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(pending["tabs"].as_array().unwrap().len(), 2);
+    assert_eq!(pending["tabs"][1]["id"], "spinner");
+    assert_eq!(pending["tabs"][0]["id"], "c");
 }

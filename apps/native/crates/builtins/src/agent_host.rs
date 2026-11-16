@@ -544,6 +544,12 @@ fn launch_request(
         .filter(|e| !e.is_empty() && e != "default"),
         access: settings.access,
         approval: settings.approval,
+        // Full access runs only with the person's consent for this thread.
+        computer_consent: settings.access == pm_agents::Access::Computer
+            && state
+                .panel
+                .session(thread)
+                .is_ok_and(|s| s.computer_consent),
         workspace: directory,
         images,
         role: None,

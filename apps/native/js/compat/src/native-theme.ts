@@ -1,8 +1,8 @@
 /**
  * The active v1–3 theme for the native shell (plan 3.6.5): the shipped theme
  * translator, run in the trusted realm, turns its tokens and CSS into a patch
- * of pm-design token fields. Chrome and native panels take that patch; WebKit
- * panels keep their own CSS. Both schemes are evaluated so the window can
+ * of pm-design token fields. Chrome, native panels and the host-injected WebKit kit take that patch.
+ * Author rules override the WebKit base cascade layer. Both schemes are evaluated so the window can
  * follow its appearance without asking the realm again.
  */
 import { evaluateTheme, translateTheme } from "../../themes/index.mjs";

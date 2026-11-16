@@ -105,3 +105,43 @@ test("row menu accepts only enabled authored actions and rejects unknown choices
     await f.session.dispose();
   }
 });
+
+test("Position menu has Electron dimension and easing labels with lock guards", async () => {
+  const { rowMenu } = await import("../property-menu");
+  const base = {
+    id: "position",
+    label: "Position",
+    control: { kind: "status" as const, value: "" },
+    animation: "animated" as const,
+    separateDimensions: true,
+  };
+  const items = rowMenu(base);
+  expect(items.find((i) => i.label === "Separate Dimensions")?.checked).toBe(
+    true,
+  );
+  expect(
+    items.filter((i) => i.action.startsWith("ease:")).map((i) => i.label),
+  ).toEqual([
+    "Easing for All Keys",
+    "Power",
+    "Linear",
+    "Ease In and Out",
+    "Exponential Out",
+    "Back Out",
+    "Glide",
+    "Snap",
+  ]);
+  expect(
+    rowMenu({ ...base, animation: "static" }).some((i) =>
+      i.action.startsWith("ease:"),
+    ),
+  ).toBe(false);
+  expect(
+    rowMenu({ ...base, locked: true })
+      .filter(
+        (i) =>
+          i.action === "separate-dimensions" || i.action.startsWith("ease:"),
+      )
+      .every((i) => !i.enabled),
+  ).toBe(true);
+});

@@ -515,7 +515,7 @@ impl MediaPanel {
                         self.active.as_ref().or(self.asset_order.first()) == Some(id),
                     ),
                     ItemId::Folder(id) => (
-                        RowData::Folder(c.folders[id].clone()),
+                        RowData::Folder({ let mut f = c.folders[id].clone(); f.sync = runtime.folder_state(&c.stamp, id); f }),
                         self.exclusive.as_ref() == Some(&ItemId::Folder(id.clone())),
                         false,
                     ),
@@ -737,6 +737,7 @@ impl MediaPanel {
                 if self.folder.is_some() {
                     commands.push((MoveOut(ItemId::Folder(id.clone())), true));
                 }
+                if c.folders[&id].link.is_some() { commands.push((Reveal(id.clone()), true)); }
                 commands.push((DeleteFolder(id), true));
             }
             Some(ItemId::Composition(id)) => {

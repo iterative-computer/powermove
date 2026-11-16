@@ -1233,6 +1233,68 @@ mod tests {
     }
 
     #[test]
+    fn parity_add_composition_uses_drop_placement_at_playhead() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{"nested":{"id":"nested","name":"Nested","w":320,"h":180,"fps":30,"dur":4,"layers":[]}},"layers":[]}"##,
+        );
+        let kernel = f.actor.handle();
+        let p = kernel.published("p").unwrap();
+        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None).unwrap();
+        assert_eq!(ids.len(), 1);
+        kernel
+            .call(
+                "p",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::Transact {
+                        label: Some("Add to Timeline".into()),
+                        expected_revision: Some(p.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        let layers = pm_kernel::model::comp_node(
+            p.snapshot.root().unwrap(),
+            p.snapshot.open_comp().as_deref(),
+        )
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .to_value();
+        assert_eq!(layers.as_array().unwrap().len(), 1);
+        assert_eq!(
+            layers.as_array().unwrap()[0].get("from").unwrap().as_f64(),
+            Some(2.5)
+        );
+        kernel
+            .call(
+                "p",
+                Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        assert!(
+            pm_kernel::model::comp_node(
+                p.snapshot.root().unwrap(),
+                p.snapshot.open_comp().as_deref()
+            )
+            .unwrap()
+            .get("layers")
+            .unwrap()
+            .to_value()
+            .as_array()
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn a_picked_image_is_retained_admitted_placed_and_survives_source_deletion() {
         let f = fixture();
         let source = write(&f.root, "Sky.png", PNG);
@@ -2649,4 +2711,12 @@ mod tests {
             ]
         );
     }
+}
+
+/// Probe a linked original without retaining or copying its bytes.
+pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
+    let (kind, _) = classify(path).ok_or("Unsupported media")?;
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let (record, _) = metadata(path, kind, size, Default::default())?;
+    Ok(crate::data::wire(&record))
 }

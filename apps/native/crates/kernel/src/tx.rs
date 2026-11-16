@@ -118,6 +118,8 @@ pub struct Request {
     /// Pins all call kinds, including selection and gesture lifecycle, to one
     /// document lifetime. A reused project/layer ID grants no authority.
     pub expected_document: Option<u64>,
+    /// Outside-history workers must not race a newer revision or an open edit.
+    pub outside_revision: Option<u64>,
     pub call: Call,
 }
 
@@ -127,8 +129,14 @@ impl Request {
             caller,
             txid: None,
             expected_document: None,
+            outside_revision: None,
             call: call.into(),
         }
+    }
+
+    pub fn outside_revision(mut self, revision: u64) -> Request {
+        self.outside_revision = Some(revision);
+        self
     }
 
     pub fn with_document(mut self, document: u64) -> Request {
@@ -760,8 +768,12 @@ impl Project {
             caller,
             txid,
             expected_document,
+            outside_revision,
             call,
         } = request;
+        if outside_revision.is_some_and(|r| r != self.revision() || self.entry.is_some()) {
+            return Handled::reply(self.ack(None, None, None, Reply::Throw(KernelError::Guard("The project changed or has an open edit".into()))));
+        }
         if expected_document.is_some_and(|document| document != self.store.doc_id()) {
             return Handled::reply(self.ack(
                 None,

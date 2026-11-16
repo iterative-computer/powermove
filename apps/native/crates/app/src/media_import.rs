@@ -134,6 +134,8 @@ impl Controller {
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
+                    // v1: the folder's media are imported (copied into the
+                    // library) as media folders that keep its structure.
                     v.import(
                         ImportRequest {
                             paths,

@@ -98,6 +98,7 @@ export interface PropertyRow extends RowBase {
   next: boolean;
   /** A compound Scale readout stays one semantic row, with real axis keys. */
   readout: string;
+  axes?: Array<{ path: string; readout: string; editor?: TextLease }>;
   numeric?: NumericLease;
   scaleLinked?: boolean;
 }
@@ -116,6 +117,8 @@ export interface TimelineFrame {
   document: string | null;
   revision: string;
   hasComposition: boolean;
+  /** The timeline panel holds the keyboard; absent counts as yes. */
+  focused?: boolean;
   mode: Mode;
   view: View;
   playing: boolean;
@@ -150,8 +153,10 @@ export type Intent =
   | { type: "graphOptions" }
   | { type: "timeEdit" }
   | { type: "tab"; id: string; close: boolean }
+  | { type: "tabMenu"; id: string; action: string }
+  | { type: "tabContext"; id: string }
   | { type: "selectRow"; id: string; modifiers: Modifiers }
-  | { type: "disclosure"; id: string; open: boolean }
+  | { type: "disclosure"; id: string; open: boolean; all?: boolean }
   | { type: "rename"; id: string }
   /** A name or time field closed: its text, or empty when cancelled. */
   | { type: "editDone"; value: string }

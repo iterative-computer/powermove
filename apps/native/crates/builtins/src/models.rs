@@ -38,6 +38,9 @@ pub(crate) struct Models {
     /// Timeline panel reads it.
     timeline_source: Option<(KernelHandle, String, Caller)>,
     pub viewer: pm_panel_viewerchrome::v4::Session,
+    composition_tabs: Vec<String>,
+    tabs_document: Option<u64>,
+    tab_switch: Option<String>,
     viewer_projection: Option<(
         pm_panel_viewerchrome::Stamp,
         pm_panel_viewerchrome::Viewport,
@@ -132,6 +135,9 @@ impl Models {
             timeline: None,
             timeline_source,
             viewer: Default::default(),
+            composition_tabs: vec![],
+            tabs_document: None,
+            tab_switch: None,
             viewer_projection: None,
             project: ProjectBridge::default(),
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
@@ -352,6 +358,25 @@ impl Backend {
                     at_key &= state.key_at_playhead;
                 }
                 row["readout"] = json!(values.join(", "));
+                row["axes"] = json!(
+                    channels
+                        .iter()
+                        .zip(values.iter())
+                        .map(|(channel, value)| {
+                            let mut axis = json!({"path":channel.path,"readout":value});
+                            if self.native.timeline_editor
+                                == Some(TimelineEditor::Property(
+                                    layer.clone(),
+                                    channel.path.clone(),
+                                ))
+                            {
+                                axis["editor"] =
+                                    json!({"value":value,"binding":editor_field.clone()});
+                            }
+                            axis
+                        })
+                        .collect::<Vec<_>>()
+                );
                 row["animated"] = json!(animated);
                 row["keyAtPlayhead"] = json!(at_key);
                 row["previous"] = json!(
@@ -383,18 +408,50 @@ impl Backend {
         }
         frame["frameRate"] = json!(format!("{fps} fps"));
 
-        let title = p
-            .snapshot
-            .root()
-            .and_then(|r| r.get("name"))
-            .and_then(|n| match n.kind() {
-                pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        // Root-level layers are the composition the shipped app calls `root`.
-        let tab = client.model.index.comp_id.as_deref().unwrap_or("root");
-        frame["tabs"] = json!([{"id":tab,"name":title,"active":true,"showClose":false}]);
+        let root = p.snapshot.root().ok_or("closed")?;
+        let active = client
+            .model
+            .index
+            .comp_id
+            .as_deref()
+            .unwrap_or("root")
+            .to_owned();
+        if self.native.tabs_document != Some(p.snapshot.doc_id) {
+            self.native.composition_tabs.clear();
+            self.native.tab_switch = None;
+            self.native.tabs_document = Some(p.snapshot.doc_id);
+        }
+        self.native
+            .composition_tabs
+            .retain(|id| id == "root" || root.get("comps").and_then(|c| c.get(id)).is_some());
+        if self.native.tab_switch.as_deref() == Some(active.as_str()) {
+            self.native.tab_switch = None;
+        }
+        if self.native.tab_switch.is_none() && !self.native.composition_tabs.contains(&active) {
+            self.native.composition_tabs.push(active.clone());
+        }
+        let closable = self.native.composition_tabs.len() > 1;
+        frame["tabs"] = json!(
+            self.native
+                .composition_tabs
+                .iter()
+                .map(|id| {
+                    let comp = if id == "root" {
+                        Some(root)
+                    } else {
+                        root.get("comps").and_then(|c| c.get(id))
+                    };
+                    let name = comp
+                        .and_then(|c| c.get("name"))
+                        .and_then(|node| match node.kind() {
+                            pm_model::NodeKind::String(text) => text.as_str(),
+                            _ => None,
+                        })
+                        .unwrap_or("Composition");
+                    json!({"id":id,"name":name,"active":id == &active,"showClose":closable})
+                })
+                .collect::<Vec<_>>()
+        );
         frame["renderSummary"] = json!("");
         frame["feedback"] = json!({});
         Ok(frame)
@@ -459,6 +516,14 @@ impl Backend {
         let mut model = model;
         // Refine progress for the status capsule (3d-studio.md §3).
         if model["studio"].is_object() {
+            // Flying (Shift+`): the viewer shows its keys.
+            model["studio"]["fly"] = json!(
+                p.ui_state
+                    .viewer
+                    .get("studioFly")
+                    .and_then(pm_model::Value::as_str)
+                    == Some("on")
+            );
             model["studio"]["denoiser"] = self.native.facts["studioDenoiser"].clone();
             let refine = &self.native.facts["studioRefineProgress"];
             if refine.is_object() {
@@ -945,6 +1010,7 @@ fn property_label(path: &str) -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineEditor {
     Name(String),
+    Property(String, String),
     Time,
 }
 pub(crate) enum NativeCommand {
@@ -960,6 +1026,59 @@ impl Backend {
         use pm_panel_timeline::{RowId, v4};
         let done = |v: Value| Ok(NativeCommand::Value(v));
         match args["type"].as_str() {
+            Some("tab") if args["close"] == true => {
+                let id = args["id"].as_str().ok_or("composition id")?;
+                if self.native.composition_tabs.len() <= 1 {
+                    return done(Value::Null);
+                }
+                let index = self
+                    .native
+                    .composition_tabs
+                    .iter()
+                    .position(|tab| tab == id)
+                    .ok_or("Unknown composition tab")?;
+                self.native.composition_tabs.remove(index);
+                let p = self.published().ok_or("closed")?;
+                if p.snapshot.open_comp().as_deref().unwrap_or("root") == id {
+                    let next = &self.native.composition_tabs
+                        [index.min(self.native.composition_tabs.len() - 1)];
+                    self.native.tab_switch = Some(next.clone());
+                    self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"openComposition","id":next}),
+                    ));
+                }
+                done(Value::Null)
+            }
+            Some("tabMenu") => {
+                let id = args["id"].as_str().ok_or("composition id")?.to_owned();
+                if !self.native.composition_tabs.contains(&id) {
+                    return Err("Unknown composition tab".into());
+                }
+                match args["action"].as_str() {
+                    Some("close") => {
+                        return self.timeline_intent(&json!({"type":"tab","id":id,"close":true}));
+                    }
+                    Some("closeOthers") => {
+                        self.native.composition_tabs = vec![id.clone()];
+                        self.native.tab_switch = Some(id.clone());
+                        self.native.platform.push((
+                            "timeline.effect".into(),
+                            json!({"kind":"openComposition","id":id}),
+                        ));
+                    }
+                    Some("settings") => self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"compositionSettings","id":id}),
+                    )),
+                    Some("new") => self.native.platform.push((
+                        "timeline.effect".into(),
+                        json!({"kind":"command","name":"newComposition","args":[]}),
+                    )),
+                    _ => return Err("Unknown composition tab action".into()),
+                }
+                done(Value::Null)
+            }
             Some("rename") => {
                 let RowId::Layer(id) =
                     v4::parse_row(args["id"].as_str().ok_or("row")?).map_err(|e| e.to_string())?
@@ -967,6 +1086,17 @@ impl Backend {
                     return Err("Only layers can be renamed".into());
                 };
                 self.native.timeline_editor = Some(TimelineEditor::Name(id));
+                done(Value::Null)
+            }
+            Some("propertyEdit") => {
+                let layer = args["layer"].as_str().ok_or("layer")?.to_owned();
+                let path = args["path"].as_str().ok_or("path")?.to_owned();
+                self.native.ensure_timeline()?;
+                let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
+                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                if !l.effectively_locked && client.model.index.channel(&layer, &path).is_some() {
+                    self.native.timeline_editor = Some(TimelineEditor::Property(layer, path));
+                }
                 done(Value::Null)
             }
             Some("timeEdit") => {
@@ -985,6 +1115,15 @@ impl Backend {
                         let id = v4::row_id(&RowId::Layer(id));
                         Ok(NativeCommand::Timeline(
                             json!({"type":"setName","id":id,"name":value}),
+                        ))
+                    }
+                    Some(TimelineEditor::Property(layer, path)) => {
+                        let value: f64 = value.trim().parse().map_err(|_| "Enter a number")?;
+                        if !value.is_finite() {
+                            return Err("Enter a finite number".into());
+                        }
+                        Ok(NativeCommand::Timeline(
+                            json!({"type":"propertyValue","layer":layer,"path":path,"value":value}),
                         ))
                     }
                     Some(TimelineEditor::Time) => {
@@ -1010,6 +1149,26 @@ impl Backend {
     /// Rows for a native menu the Timeline header opens, and the intent each
     /// row sends back. Graph options come from the model's own menu.
     fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
+        if args["type"] == "tabContext" {
+            let id = args["id"].as_str().ok_or("composition id")?;
+            if !self.native.composition_tabs.iter().any(|tab| tab == id) {
+                return Err("Unknown composition tab".into());
+            }
+            let row = |action: &str, label: &str| json!({"id":action,"label":label,"intent":{"type":"tabMenu","id":id,"action":action}});
+            let mut rows = vec![
+                row("settings", "Composition Settings…"),
+                Value::Null,
+                row("new", "New Composition…"),
+            ];
+            if self.native.composition_tabs.len() > 1 {
+                rows.extend([
+                    Value::Null,
+                    row("close", "Close"),
+                    row("closeOthers", "Close Others"),
+                ]);
+            }
+            return Ok(json!(rows));
+        }
         use pm_panel_timeline::v4;
         self.native.ensure_timeline()?;
         let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
@@ -1489,6 +1648,7 @@ impl Backend {
             }
             "profile.set" => Ok(json!({"stateRevision":self.kernel.state().revision})),
             "panel.settings" => self.settings_snapshot(),
+            "panel.easing" => self.easing_state(),
             "panel.inspector" | "panel.binding" => self.inspector_snapshot(),
             "viewer.chrome.drive" => self.viewer_snapshot(),
             "panel.project" => {
@@ -1502,6 +1662,94 @@ impl Backend {
             }
             _ => self.projection(),
         }
+    }
+    /// The Easing panel's view: how many keyframes are selected (what its
+    /// actions change) and the preset curves it offers, in v1's order.
+    pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let Some(p) = self.published() else {
+            return Ok(json!({"open": false, "count": 0, "presets": easing_presets()}));
+        };
+        Ok(json!({
+            "open": true,
+            "count": p.selection.keys().len(),
+            "revision": p.revision().to_string(),
+            "presets": easing_presets(),
+        }))
+    }
+    /// An Easing panel action on the selected keyframes, as one Undo step:
+    /// `{type:"preset", preset}`, `{type:"curve", curve:[x1,y1,x2,y2]}`,
+    /// `{type:"easyEase", side:"both"|"in"|"out"}` or
+    /// `{type:"interpolation", interpolation:"linear"|"bezier"|"hold"|"auto"|"continuous"}`.
+    pub(crate) fn easing_intent(&mut self, args: &Value) -> Result<Request, String> {
+        use pm_kernel::commands::keyframes::{EaseSide, EaseSpec, Interpolation};
+        self.sync()?;
+        let p = self.published().ok_or("No open project")?;
+        let key_ids: Vec<String> = p.selection.keys().to_vec();
+        if key_ids.is_empty() {
+            return Err("Select keyframes to apply easing".into());
+        }
+        let side = |v: &Value| match v["side"].as_str().unwrap_or("both") {
+            "in" => Ok(EaseSide::In),
+            "out" => Ok(EaseSide::Out),
+            "both" => Ok(EaseSide::Both),
+            _ => Err("Unknown easing side".to_string()),
+        };
+        let command: Command = match args["type"].as_str().unwrap_or("") {
+            "preset" => {
+                let name = args["preset"].as_str().unwrap_or("");
+                if !pm_eval::easing::PRESETS.iter().any(|(n, _)| *n == name) {
+                    return Err(format!("Unknown easing preset {name}"));
+                }
+                KeyframeCommand::SetEasing {
+                    key_ids,
+                    curve: EaseSpec::Preset(name.into()),
+                }
+                .into()
+            }
+            "curve" => {
+                let numbers: Vec<f64> = args["curve"]
+                    .as_array()
+                    .filter(|a| a.len() == 4)
+                    .ok_or("A curve is four numbers")?
+                    .iter()
+                    .map(|n| n.as_f64().filter(|n| n.is_finite()))
+                    .collect::<Option<_>>()
+                    .ok_or("A curve is four numbers")?;
+                KeyframeCommand::SetEasing {
+                    key_ids,
+                    curve: EaseSpec::Curve([numbers[0], numbers[1], numbers[2], numbers[3]]),
+                }
+                .into()
+            }
+            "easyEase" => KeyframeCommand::EasyEase {
+                key_ids,
+                side: side(args)?,
+            }
+            .into(),
+            "interpolation" => KeyframeCommand::SetInterpolation {
+                key_ids,
+                side: side(args)?,
+                interpolation: match args["interpolation"].as_str().unwrap_or("") {
+                    "linear" => Interpolation::Linear,
+                    "bezier" => Interpolation::Bezier,
+                    "hold" => Interpolation::Hold,
+                    "auto" => Interpolation::Auto,
+                    "continuous" => Interpolation::Continuous,
+                    other => return Err(format!("Unknown interpolation {other}")),
+                },
+            }
+            .into(),
+            other => return Err(format!("Unknown easing action {other}")),
+        };
+        Ok(Request::new(
+            self.caller,
+            Call::Transact {
+                label: None,
+                expected_revision: Some(p.revision()),
+                body: WriteBody::Commands(vec![command]),
+            },
+        ))
     }
     pub(crate) fn native_command(
         &mut self,
@@ -1581,6 +1829,7 @@ impl Backend {
             "panel.timeline" => {
                 return self.timeline_intent(args);
             }
+            "panel.easing" => return self.easing_intent(args).map(NativeCommand::Kernel),
             "panel.timeline.menu" => self.timeline_menu(args)?,
             "panel.timeline.dispose" => {
                 return Ok(NativeCommand::Timeline(json!({"type":"dispose"})));
@@ -1623,6 +1872,9 @@ impl Backend {
                                 }
                                 TransportAction::Pause => json!({"kind":"pause"}),
                             },
+                            HostAction::OpenComposition(id) => {
+                                json!({"kind":"openComposition","id":id})
+                            }
                             HostAction::Command { id, args } => {
                                 json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})
                             }
@@ -1731,7 +1983,9 @@ impl Backend {
                             request: &request,
                             new_thread: &new_thread,
                             now: crate::agent_host::now_ms(),
-                            popover_open: true,
+                            // Escape closes a popover; docked, it hands the
+                            // keyboard back to the editor.
+                            popover_open: self.native.facts["agentPopover"] == true,
                             catalogs: &catalogs,
                         },
                     )
@@ -1766,6 +2020,8 @@ impl Backend {
                         EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
                         EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
                         EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
+                        // Escape in the docked composer: the editor takes the keyboard back.
+                        EffectKind::Shell(ShellAction::Blur) => Some(("agent.blur", Value::Null)),
                         // Pinned, the panel docks into the workspace (unpinning is
                         // its dock's Close, which returns it to the popover).
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
@@ -1961,6 +2217,14 @@ impl Backend {
 }
 /// A move of media alone is a plain kernel edit; other Project edits restore
 /// the reviewed whole-project result under its document guard.
+/// The preset curves the Easing panel offers: v1's `PM.Ease.PRESETS` (the
+/// kernel's own list), each with its cubic Bézier numbers.
+fn easing_presets() -> Value {
+    pm_eval::easing::PRESETS
+        .iter()
+        .map(|(name, curve)| json!({"id": name, "curve": curve}))
+        .collect()
+}
 pub(crate) fn project_edit_request(
     edit: pm_panel_media::Edit,
     prepared: &pm_panel_media::PreparedEdit,
