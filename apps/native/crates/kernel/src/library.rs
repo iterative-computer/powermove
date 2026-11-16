@@ -303,15 +303,18 @@ impl LibraryStore {
         self.rows("projectTrash")
     }
 
-    /// The name of project `id`'s row (in the index or the trash): a project
-    /// renamed while no window had it open has it there, not in its body
-    /// (`LibraryWriter::rename_entry`).
-    pub fn row_name(&self, id: &str) -> Result<Option<String>, LibraryError> {
+    /// The name project `id` was given while no window had it open: its
+    /// row's (in the index or the trash) when the row is marked
+    /// [`crate::persistence::RENAMED`]; its body has the one before.
+    pub fn renamed(&self, id: &str) -> Result<Option<String>, LibraryError> {
         for key in ["projects", "projectTrash"] {
             if let Some(Value::Array(rows)) = self.read(key)?
                 && let Some(name) = rows
                     .iter()
                     .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                    .filter(|r| {
+                        r.get(crate::persistence::RENAMED).and_then(Value::as_bool) == Some(true)
+                    })
                     .and_then(|r| r.get("name")?.as_str())
             {
                 return Ok(Some(name.to_owned()));

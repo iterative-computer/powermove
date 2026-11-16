@@ -88,6 +88,9 @@ enum WriteMsg {
     Flush(FlushReply),
     Stop,
 }
+/// A Home row's mark: its name is newer than its project's body (a rename
+/// while no window had it open), and an open names the project from it.
+pub const RENAMED: &str = "renamed";
 /// Owned by the kernel. A worker debounces each key for 150 ms. Failed writes
 /// stay pending, and every explicit save/close uses the error-reporting barrier.
 pub struct LibraryWriter {
@@ -241,7 +244,14 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
-        let (rows, trash) = self.entry_rows(id, &project, preserve_trash)?;
+        let (mut rows, trash) = self.entry_rows(id, &project, preserve_trash)?;
+        // The body has the name now.
+        if let Some(Value::Object(row)) = rows
+            .iter_mut()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+        {
+            row.remove(RENAMED);
+        }
         let mut envelope = Map::new();
         envelope.insert("v", Value::from("1.2.0"));
         envelope.insert("proj", project);
@@ -256,10 +266,10 @@ impl LibraryWriter {
         ])
     }
     /// The rename of a project no window has open: its row's name, where the
-    /// row is (in `projects` or the trash) and with its date. Its body keeps
-    /// the name it was saved under until it is saved again; an open takes
-    /// the row's ([`crate::library::LibraryStore::row_name`]). False when it
-    /// has no row.
+    /// row is (in `projects` or the trash) and with its date, marked
+    /// [`RENAMED`]. Its body keeps the name it was saved under until it is
+    /// saved again; an open takes the marked row's
+    /// ([`crate::library::LibraryStore::renamed`]). False when it has no row.
     pub fn rename_entry(&self, id: &str, name: &str) -> Result<bool, LibraryError> {
         for key in ["projects", "projectTrash"] {
             let mut rows = self.rows(key)?;
@@ -270,6 +280,7 @@ impl LibraryWriter {
                 continue;
             };
             row.insert("name", Value::from(name));
+            row.insert(RENAMED, Value::Bool(true));
             self.batch(vec![(key.into(), Some(Value::Array(rows)))])?;
             return Ok(true);
         }

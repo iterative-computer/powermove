@@ -1756,7 +1756,7 @@ impl Kernel {
                     return self.open_without_file(id, &project);
                 };
                 // Renamed while no window had it open: the row has the name.
-                if let Some(name) = reader.row_name(&project).map_err(failure)?
+                if let Some(name) = reader.renamed(&project).map_err(failure)?
                     && let Value::Object(m) = &mut p.project
                 {
                     m.insert("name", Value::from(name));
