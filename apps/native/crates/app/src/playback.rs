@@ -177,6 +177,19 @@ impl Placeholder {
 fn placeholder_kept(shown: Option<u64>, staged: bool, doc: Option<u64>) -> bool {
     !staged && shown.is_some() && shown == doc
 }
+impl Placeholder {
+    fn show(&self, on: bool) {
+        unsafe {
+            let hidden: bool = msg_send![&*self.layer, isHidden];
+            if hidden == on {
+                let _: () = msg_send![objc2::class!(CATransaction), begin];
+                let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
+                let _: () = msg_send![&*self.layer, setHidden: !on];
+                let _: () = msg_send![objc2::class!(CATransaction), commit];
+            }
+        }
+    }
+}
 impl Drop for Placeholder {
     fn drop(&mut self) {
         unsafe {
@@ -284,7 +297,6 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // and timecode will be seen, rather than where the last sample stood.
     let mut vsync = None::<f64>;
     let mut placeholder = None::<Placeholder>;
-    let mut retire_ghost = false;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
@@ -316,9 +328,6 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             .and_then(|(poster, doc)| Placeholder::over(&host.borrow().viewer_layer(), &poster, doc));
                     }
                     crate::diag::line(serde_json::json!({"placeholder": placeholder.is_some()}));
-                    // Over the viewer now: the ghost's copy beneath it (laid
-                    // out at another size) would show around it.
-                    retire_ghost = placeholder.is_some() && v.ghost_picture.is_some();
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
@@ -328,9 +337,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { vsync=Some(target); let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
-                if std::mem::take(&mut retire_ghost) {
-                    v.ghost_retire();
-                    cx.notify();
+                // Shown only once the viewer's ghost is gone: while the panel
+                // shows its ghost (with the same picture, at its own size),
+                // both would show, or neither when the ghost's went early.
+                if let Some(p) = &placeholder {
+                    p.show(!crate::panels::ghost_shows(v, "viewer"));
                 }
                 let next_studio_status=(status.refine_progress,status.export_estimate.clone());
                 if studio_status.as_ref()!=Some(&next_studio_status) {

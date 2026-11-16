@@ -2706,10 +2706,17 @@ impl Owner {
                 .to_owned()
         });
         let disables = culprit.is_some();
+        // What it was doing: its innermost frames, and for how long.
+        let place = live.realm.culprit_place(execution);
+        let seconds = live
+            .realm
+            .active_execution()
+            .filter(|active| active.execution == execution)
+            .map(|active| (active.elapsed.as_secs_f64() * 10.).round() / 10.);
         self.asking = Some(execution);
         self.asking_culprit = culprit;
-        let request =
-            json!({"kind":"unresponsive","execution":execution,"name":name,"disables":disables});
+        let request = json!({"kind":"unresponsive","execution":execution,"name":name,
+            "disables":disables,"where":place,"seconds":seconds});
         self.shared.update(|p| p.requests.push(request));
     }
     fn activating_now(&self) -> Option<String> {
@@ -4796,6 +4803,43 @@ mod tests {
                 .iter()
                 .any(|r| r["kind"] == "unresponsive")
         );
+    }
+    /// A hang with no extension's code on the stack (a timer callback made
+    /// with `new Function`) is named for the extension whose work started
+    /// it, and the question says where it was and for how long (PM-453
+    /// follow-up: the notice under load named nobody).
+    #[test]
+    fn a_hang_without_extension_frames_is_named_for_whose_task_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-anonymous",
+            &[(
+                "index.ts",
+                "export default function(api){setTimeout(new Function('for(;;);'),300)}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let request = loop {
+            if let Some(request) = fixture
+                .host
+                .take_requests()
+                .into_iter()
+                .find(|r| r["kind"] == "unresponsive")
+            {
+                break request;
+            }
+            assert!(Instant::now() < deadline, "no unresponsive prompt");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(request["name"], "synthetic-anonymous", "{request}");
+        let place = request["where"].as_str().unwrap_or_default();
+        assert!(place.contains(" < "), "its innermost frames: {request}");
+        assert!(request["seconds"].as_f64().is_some_and(|s| s > 0.), "{request}");
+        fixture
+            .host
+            .answer_unresponsive(request["execution"].as_u64().unwrap(), true);
     }
     /// A page that answers before the read starts waiting is not missed.
     type Answers = Arc<Mutex<Vec<(u64, Value)>>>;

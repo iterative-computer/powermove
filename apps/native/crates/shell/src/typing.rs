@@ -53,7 +53,9 @@ pub fn decide(text: bool, field: bool, held: bool) -> Hold {
     if field && (held || waiting) {
         return Hold::Release;
     }
-    if waiting && text {
+    // Once letters wait, everything typed after them waits behind them (an
+    // Escape must not end the text before its letters reach it).
+    if waiting && (text || held) {
         return Hold::Held;
     }
     Hold::Pass
@@ -79,9 +81,19 @@ pub(crate) fn release(then: Option<objc2::rc::Retained<objc2_app_kit::NSEvent>>)
         return;
     };
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-    for key in keys.into_iter().chain(then) {
-        app.postEvent_atStart(&key, false);
+    // Ahead of anything queued since: they were typed first.
+    let keys: Vec<_> = keys.into_iter().chain(then).collect();
+    for key in keys.iter().rev() {
+        app.postEvent_atStart(key, true);
     }
+}
+
+/// The keys held for a field, taken in order to hand over at once (the
+/// field has the keyboard and its edit is ending). The wait is over.
+#[cfg(target_os = "macos")]
+pub(crate) fn take_held() -> Vec<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    EXPECTED.with(|e| e.set(None));
+    HELD.with(|h| std::mem::take(&mut *h.borrow_mut()))
 }
 
 /// The field the person opened has the keyboard (its view saw it take it):
@@ -118,6 +130,11 @@ mod tests {
         expect();
         assert_eq!(decide(true, false, false), Hold::Held, "on its way: held");
         assert_eq!(decide(false, false, false), Hold::Pass, "Escape and arrows pass");
+        assert_eq!(
+            decide(false, false, true),
+            Hold::Held,
+            "but wait behind letters already held (PM-465)"
+        );
         assert_eq!(decide(true, true, true), Hold::Release, "the field has it");
         EXPECTED.with(|e| e.set(Some(Instant::now() - Duration::from_millis(1))));
         assert_eq!(decide(true, false, false), Hold::Pass, "the wait ran out");

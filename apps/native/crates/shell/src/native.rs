@@ -4,7 +4,7 @@ mod flowchart;
 pub use flowchart::FlowchartRow;
 
 use crate::{
-    keyboard::{Class, Effect, Key, Resolver},
+    keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
     transient::{Choice, Picker},
 };
@@ -35,10 +35,19 @@ thread_local! {
     static ROUTES:RefCell<HashMap<isize,async_channel::Sender<Command>>>=RefCell::new(HashMap::new());
     static MENU_TARGET:RefCell<Option<Retained<Target>>>=const{RefCell::new(None)};
     static REPLAYING:Cell<bool>=const{Cell::new(false)};
+    /// A press replayed in its turn: the key monitor handles it as a press
+    /// but does not queue it again.
+    static ORDERED:Cell<bool>=const{Cell::new(false)};
+    /// Each editor window's host by window number, for what must reach it
+    /// from outside its own event handling (the text being typed, flushed).
+    static HOSTS:RefCell<HashMap<isize,std::rc::Weak<RefCell<Host>>>>=RefCell::new(HashMap::new());
     /// Latest shell state per editor window number, read by menus and the palette.
     static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
     /// AppKit window number → session window id.
     static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
+    /// A restored window's place in its group's strip (`WindowState::tab_index`), by window number: a tab that
+    /// joins its group after a later one takes its own place (`add_tab`).
+    static RESTORE_TAB_INDEX:RefCell<HashMap<isize,usize>>=RefCell::new(HashMap::new());
     /// Each editor window's open pages (Settings, the Store): a tab strip
     /// shows the pages of every window in its group.
     static PAGES:RefCell<HashMap<isize,Vec<(String,String)>>>=RefCell::new(HashMap::new());
@@ -273,6 +282,73 @@ fn active_send(command: Command) {
                 let _ = tx.try_send(command);
             }
         });
+    }
+}
+/// A press or its gesture's other events (not a move or a scroll).
+fn is_pointer(e: &NSEvent) -> bool {
+    matches!(
+        e.r#type(),
+        NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::LeftMouseDragged
+            | NSEventType::RightMouseDown
+            | NSEventType::RightMouseUp
+            | NSEventType::RightMouseDragged
+    )
+}
+/// Sends an event the key queue held, in its turn. A key goes past the key
+/// monitor (it was handled there); a press goes through it, so its pointer
+/// handling runs, without being queued again; afterwards the keys queued
+/// behind it go where the keyboard now is (a click that opened a text).
+fn send_replayed(event: &NSEvent, host: Option<&Rc<RefCell<Host>>>) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if is_pointer(event) {
+        ORDERED.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
+        });
+        if let Some(mut h) = host.and_then(|h| h.try_borrow_mut().ok()) {
+            if crate::typing::expecting() {
+                // The press opens a text a turn from now: what was typed
+                // after it waits for that text, in order (typing::hold).
+                for key in h.resolver.take_queued() {
+                    h.typed.remove(&key.token);
+                    if let Some(event) = h.events.remove(&key.token) {
+                        crate::typing::hold(event);
+                    }
+                }
+            } else {
+                let field = h.text_has_keyboard();
+                h.resolver.retarget(field);
+            }
+        }
+    } else {
+        REPLAYING.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
+        });
+    }
+}
+/// Every key still on its way to the text being edited in the key window
+/// reaches it now, in order (`Host::flush_typing`): the canvas text editor
+/// asks before it commits, so no key typed before the edit ends is lost.
+pub fn flush_typing() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(number) = NSApplication::sharedApplication(mtm)
+        .keyWindow()
+        .map(|w| w.windowNumber())
+    else {
+        return;
+    };
+    if let Some(host) = HOSTS.with(|h| h.borrow().get(&number).and_then(|w| w.upgrade())) {
+        Host::flush_typing(&host);
     }
 }
 /// Sends `name` to the current editor exactly as its menu item would.
@@ -616,6 +692,9 @@ pub fn contents(v: &NSView) -> Retained<NSView> {
 type PendingMenu = (Retained<NSMenu>, NSPoint, Retained<NSView>);
 struct TargetState {
     replays: RefCell<HashMap<usize, u64>>,
+    /// The host whose keys it replays: a replay completes there at once,
+    /// without a turn through the editor's command queue.
+    host: RefCell<std::rc::Weak<RefCell<Host>>>,
     commands: Vec<(String, Vec<serde_json::Value>)>,
     sender: Option<async_channel::Sender<Command>>,
     /// A context menu to pop up on the next run-loop turn (outside GPUI's event dispatch).
@@ -838,8 +917,24 @@ define_class!(
         #[unsafe(method(replayEvent:))]
         fn replay_event(&self,event:&NSEvent){
             let token=self.ivars().replays.borrow_mut().remove(&(event as *const NSEvent as usize));
-            REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});
-            if let (Some(token),Some(sender))=(token,&self.ivars().sender){let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
+            let host=self.ivars().host.borrow().upgrade();
+            // Typed for a text that has since lost the keyboard (Escape or a
+            // click ended it, another app came forward): it goes nowhere, as
+            // keys held for a field that never came do; replayed now it would
+            // be a shortcut on the canvas.
+            let stale=token.is_some_and(|t|host.as_ref().and_then(|h|h.try_borrow_mut().ok()).is_some_and(|mut h|h.typed.remove(&t)&&!h.text_has_keyboard()));
+            if !stale{send_replayed(event,host.as_ref());}
+            let Some(token)=token else{return};
+            // The next key goes on now: a turn through the editor's queue per
+            // key let typing fall behind a busy frame (and Escape or a click
+            // overtake it). A host being changed hears it through the queue.
+            if let Some(mut h)=host.as_ref().and_then(|h|h.try_borrow_mut().ok()){
+                h.in_flight.remove(&token);
+                h.replayed(token);
+                drop(h);
+                // The keys queued behind it go on in this same turn.
+                if let Some(host)=&host{Host::deliver_waiting(host);}
+            }else if let Some(sender)=&self.ivars().sender{let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
         }
         /// A Shape variant from the Shape segment's menu.
         #[unsafe(method(shapeVariant:))]
@@ -874,6 +969,7 @@ impl Target {
             msg_send![
                 super(Self::alloc(mtm).set_ivars(TargetState {
                     replays: RefCell::new(HashMap::new()),
+                    host: RefCell::new(std::rc::Weak::new()),
                     commands,
                     sender,
                     pending_menu: RefCell::new(None),
@@ -954,10 +1050,30 @@ fn add_tab(into: &NSWindow, window: &NSWindow) {
         .map(|t| t.windowNumber())
         .filter(|n| *n != window.windowNumber())
         .collect();
-    let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
-        Retained::retain(into as *const _ as *mut NSWindow).unwrap()
+    // A restored tab takes its own place among the restored tabs already
+    // there (the front one opens early); any other joins at the end.
+    let places = RESTORE_TAB_INDEX.with(|m| {
+        let m = m.borrow();
+        let existing: Vec<Option<usize>> = tab_windows(into)
+            .iter()
+            .map(|t| m.get(&t.windowNumber()).copied())
+            .collect();
+        m.get(&window.windowNumber())
+            .and_then(|index| tab_insert_index(&existing, *index))
+            .filter(|at| *at < existing.len())
     });
-    last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    match places {
+        Some(at) => unsafe {
+            let group: *mut AnyObject = msg_send![into, tabGroup];
+            let _: () = msg_send![group, insertWindow: window, atIndex: at as isize];
+        },
+        None => {
+            let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
+                Retained::retain(into as *const _ as *mut NSWindow).unwrap()
+            });
+            last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+        }
+    }
     hide_system_tab_bar(window);
     hide_system_tab_bar(into);
     let numbers: Vec<isize> = tab_windows(into)
@@ -1049,6 +1165,15 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     add_tab(&lead, window);
+    // While a launch's front window opens its project, its tab stays the one
+    // shown: a restored tab that joins after it opens behind it.
+    let front = front_restoring()
+        .and_then(session_window)
+        .filter(|front| {
+            front.windowNumber() != window.windowNumber()
+                && tab_windows(&lead).iter().any(|t| t.windowNumber() == front.windowNumber())
+        });
+    let window: &NSWindow = front.as_deref().unwrap_or(window);
     if app.isActive() {
         gpui_macos::child_window::present(window, true);
     } else {
@@ -2160,13 +2285,29 @@ pub fn set_front_restoring(id: Option<u64>) {
 pub fn front_restoring() -> Option<u64> {
     Some(FRONT_RESTORING.load(std::sync::atomic::Ordering::Acquire)).filter(|id| *id != 0)
 }
+/// The editor window with session id `id`.
+fn session_window(id: u64) -> Option<Retained<NSWindow>> {
+    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n))?;
+    let mtm = MainThreadMarker::new()?;
+    NSApplication::sharedApplication(mtm).windowWithWindowNumber(number)
+}
+/// Records a restored window's place in its group's strip, before it joins.
+pub fn restore_tab_index(window: &NSWindow, index: usize) {
+    RESTORE_TAB_INDEX.with(|m| m.borrow_mut().insert(window.windowNumber(), index));
+}
+/// Where a restored tab with place `index` goes among a group's tabs, whose
+/// places are `existing` in strip order: after every one placed before it.
+/// None (it joins at the end) when a tab there was not restored.
+fn tab_insert_index(existing: &[Option<usize>], index: usize) -> Option<usize> {
+    let places: Option<Vec<usize>> = existing.iter().copied().collect();
+    Some(places?.iter().filter(|place| **place < index).count())
+}
 pub fn bring_session_window(id: u64) {
-    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let Some(window) = number.and_then(|n| app.windowWithWindowNumber(n)) else {
+    let Some(window) = session_window(id) else {
         return;
     };
     if app.isActive() {
@@ -3096,6 +3237,12 @@ pub struct Host {
     /// The next key pressed goes to Settings › Shortcuts, not to a command.
     recording: bool,
     events: HashMap<u64, Retained<NSEvent>>,
+    /// Keys posted for replay and not yet replayed, by token: a flush
+    /// takes them back and hands them over at once.
+    in_flight: HashMap<u64, Retained<NSEvent>>,
+    /// Keys typed while a text field had the keyboard: replayed after it
+    /// lost it, they go nowhere rather than act as shortcuts.
+    typed: std::collections::HashSet<u64>,
     /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
     releases: Rc<RefCell<HashMap<u16, Command>>>,
     /// Pending keys that came up before their command was answered.
@@ -3303,6 +3450,8 @@ impl Host {
             contributed: vec![],
             recording: false,
             events: HashMap::new(),
+            in_flight: HashMap::new(),
+            typed: Default::default(),
             releases: Default::default(),
             up_early: Default::default(),
             next_token: 0,
@@ -3332,6 +3481,11 @@ impl Host {
             pages: RefCell::default(),
             sidebar: RefCell::new(None),
         }));
+        HOSTS.with(|h| {
+            h.borrow_mut()
+                .insert(host.borrow().window.windowNumber(), Rc::downgrade(&host))
+        });
+        host.borrow()._target.ivars().host.replace(Rc::downgrade(&host));
         let weak = Rc::downgrade(&host);
         let native_rects = host.borrow().native_panel_clips.clone();
         let reg = gpui_macos::composition::register_tracked(
@@ -3371,6 +3525,39 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // PM-465: input is handled in the order it arrived. A
+                    // press made while keys still wait their turn (⌘T whose
+                    // command the editor has not answered yet, behind a slow
+                    // frame) joins their queue, with the rest of its gesture:
+                    // a click after ⌘T acts with the Text tool.
+                    if is_pointer(e) && !ORDERED.with(|o| o.get()) {
+                        let mut h = host.borrow_mut();
+                        if e.windowNumber() == h.window.windowNumber() && h.resolver.busy() {
+                            h.next_token += 1;
+                            let token = h.next_token;
+                            h.events
+                                .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
+                            let effects = h.resolver.submit(Key {
+                                token,
+                                chord: POINTER.into(),
+                                field: false,
+                                repeat: false,
+                                up: false,
+                                compat: false,
+                            });
+                            h.effects(effects);
+                            return std::ptr::null_mut();
+                        }
+                    }
+                    // Drags and the right button's release only take a turn.
+                    if matches!(
+                        e.r#type(),
+                        NSEventType::LeftMouseDragged
+                            | NSEventType::RightMouseUp
+                            | NSEventType::RightMouseDragged
+                    ) {
+                        return event.as_ptr();
+                    }
                     // Every release of the button is told to the session, which
                     // ends a pointer gesture whose own view never heard it (it
                     // was drawn again, or covered, while held).
@@ -3392,6 +3579,13 @@ impl Host {
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        // Keys typed before this press reach the text first:
+                        // the press may take the keyboard from it (a click
+                        // elsewhere, a toolbar tool), and keys replayed after
+                        // that would land on the canvas as shortcuts.
+                        if e.windowNumber() == window.windowNumber() {
+                            Host::flush_typing(&host);
+                        }
                         host.borrow().keyboard_navigated.set(false);
                         // A press on the window's own content (a timeline, a
                         // canvas, a list), not on a hosted control or inside
@@ -3666,6 +3860,9 @@ impl Host {
                         up: e.r#type() == NSEventType::KeyUp,
                         compat: false,
                     };
+                    if field {
+                        h.typed.insert(token);
+                    }
                     h.events
                         .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
                     let effects = h.resolver.submit(key);
@@ -3680,7 +3877,10 @@ impl Host {
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
                     | NSEventMask::LeftMouseUp
-                    | NSEventMask::RightMouseDown,
+                    | NSEventMask::LeftMouseDragged
+                    | NSEventMask::RightMouseDown
+                    | NSEventMask::RightMouseUp
+                    | NSEventMask::RightMouseDragged,
                 &handler,
             )
         };
@@ -3841,6 +4041,7 @@ impl Host {
                 }
                 Effect::Replay(token) => {
                     if let Some(event) = self.events.remove(&token) {
+                        self.in_flight.insert(token, event.clone());
                         self._target
                             .ivars()
                             .replays
@@ -3853,6 +4054,7 @@ impl Host {
                 }
                 Effect::Consumed(token) => {
                     self.events.remove(&token);
+                    self.typed.remove(&token);
                 }
             }
         }
@@ -5063,6 +5265,104 @@ impl Host {
         let effects = self.resolver.replayed(token);
         self.effects(effects);
     }
+    /// Every key the shell still holds for the text being edited reaches it
+    /// now, in the order typed: keys held for a field on its way, the one
+    /// posted for replay, and those queued behind it. Whatever ends the edit
+    /// (Escape, Command-Return, a click elsewhere, another tool) then reads
+    /// all of them; none is left to land on the canvas as a shortcut after.
+    /// Stops at a key that waits on a command's answer.
+    pub fn flush_typing(host: &Rc<RefCell<Self>>) {
+        {
+            let Ok(mut h) = host.try_borrow_mut() else {
+                return;
+            };
+            let field = h.window.firstResponder().is_some_and(|r| unsafe {
+                msg_send![&*r, isKindOfClass: NSTextView::class()]
+            });
+            if !field {
+                return;
+            }
+            // Typed before the field had the keyboard: first in line.
+            for event in crate::typing::take_held() {
+                h.next_token += 1;
+                let token = h.next_token;
+                let key = Key {
+                    token,
+                    chord: chord(&event),
+                    field: true,
+                    repeat: event.isARepeat(),
+                    up: event.r#type() == NSEventType::KeyUp,
+                    compat: false,
+                };
+                h.events.insert(token, event);
+                let effects = h.resolver.submit(key);
+                h.effects(effects);
+            }
+        }
+        Self::deliver_waiting(host);
+    }
+    /// Hands every key already waiting its replay to the window now, in
+    /// order, each freeing the next; stops at one that waits on a command's
+    /// answer. One key per run-loop turn let typing fall seconds behind a
+    /// slow frame, and what came after it (Escape's blurField) land on the
+    /// next text. A key typed for a text that has since lost the keyboard
+    /// goes nowhere (it would be a shortcut on the canvas).
+    fn deliver_waiting(host: &Rc<RefCell<Self>>) {
+        // Bounded: a key handed over can queue no more than it was.
+        for _ in 0..4096 {
+            let next = {
+                let Ok(mut h) = host.try_borrow_mut() else {
+                    return;
+                };
+                h.take_in_flight().map(|(token, event)| {
+                    let stale = h.typed.remove(&token) && !h.text_has_keyboard();
+                    (token, event, stale)
+                })
+            };
+            let Some((token, event, stale)) = next else { return };
+            if !stale {
+                send_replayed(&event, Some(host));
+            }
+            let Ok(mut h) = host.try_borrow_mut() else {
+                return;
+            };
+            h.replayed(token);
+        }
+    }
+    /// Whether a text field in this window has the keyboard.
+    fn text_has_keyboard(&self) -> bool {
+        self.window.firstResponder().is_some_and(|r| unsafe {
+            msg_send![&*r, isKindOfClass: NSTextView::class()]
+        })
+    }
+    /// The key posted for replay that has not reached the window yet, its
+    /// posting withdrawn; one already replayed completes here and the next
+    /// is looked at.
+    fn take_in_flight(&mut self) -> Option<(u64, Retained<NSEvent>)> {
+        loop {
+            let token = self.resolver.waiting_replay()?;
+            let event = self.in_flight.remove(&token)?;
+            let posted = self
+                ._target
+                .ivars()
+                .replays
+                .borrow_mut()
+                .remove(&(Retained::as_ptr(&event) as usize))
+                .is_some();
+            if posted {
+                unsafe {
+                    let _: () = msg_send![
+                        NSObject::class(),
+                        cancelPreviousPerformRequestsWithTarget: &*self._target,
+                        selector: sel!(replayEvent:),
+                        object: &*event
+                    ];
+                }
+                return Some((token, event));
+            }
+            self.replayed(token);
+        }
+    }
     pub fn resolve(&mut self, token: u64, handled: bool) {
         let effects = self.resolver.resolve(token, handled);
         self.effects(effects);
@@ -5832,6 +6132,7 @@ impl Drop for Host {
             r.borrow_mut().remove(&self.window.windowNumber());
         });
         MENU_STATES.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
+        HOSTS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
         WINDOW_IDS.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
         self.registration.take();
         self.viewer.removeFromSuperview();
@@ -8383,4 +8684,19 @@ pub fn viewer_preference(key: &str, default: bool) -> bool {
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
     objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+}
+
+#[cfg(test)]
+mod restore_tab_tests {
+    /// A restored tab takes its place among the restored tabs already in its
+    /// group (the front one opened early), whatever order they opened in.
+    #[test]
+    fn a_restored_tab_takes_its_own_place_in_the_strip() {
+        // Leader 0, then the front tab (place 7) opened early.
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(7)], 1), Some(1));
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(1), Some(7)], 8), Some(3));
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(1), Some(7), Some(8)], 3), Some(2));
+        // A tab there that was not restored: it joins at the end.
+        assert_eq!(super::tab_insert_index(&[Some(0), None], 1), None);
+    }
 }

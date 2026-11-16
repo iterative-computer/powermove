@@ -507,24 +507,30 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
     let row = |label: &str, command: &str, args: serde_json::Value, enabled: bool| json!({"id":command,"label":label,"args":args,"disabled":!enabled});
     let plain = |label: &str, command: &str| row(label, command, json!([]), editable);
     let submenu = |label: &str, children: Vec<serde_json::Value>| json!({"id":"","label":label,"disabled":!editable,"children":children});
+    // v1.3.2's layer menu, its words and order: the most-used edits, then
+    // where the layer sits, then its switches, and Delete last on its own.
+    // A title only for a multiple selection, to say what the commands act on.
     let mut rows = Vec::new();
-    // v1: Rename… leads, for one layer (↩ opens the same field).
+    if facts.selected.len() > 1 {
+        rows.push(json!({"header":true,"label":format!("{} Layers", facts.selected.len())}));
+    }
+    // Rename… leads, for one layer (↩ opens the same field).
     if facts.selected.len() == 1 {
         rows.push(plain("Rename…", "renameLayer"));
     }
     rows.extend([
         plain("Duplicate", "duplicate"),
-        plain("Group", "groupLayers"),
-        plain("Simplify Keyframes", "simplifyKeyframes"),
-        plain("Pre-compose…", "precompose"),
+        plain("Group Layers", "groupLayers"),
     ]);
-    if facts.selected.len() == 2 {
-        rows.push(row(
-            "Use Bottom Layer as Mask",
-            "useBottomLayerAsMask",
-            json!([]),
-            editable && matte_pair(published, &facts).is_some(),
-        ));
+    if facts.selected.iter().any(|l| l.kind == "group") {
+        rows.push(plain("Ungroup Layers", "ungroupLayers"));
+    }
+    rows.push(plain("Pre-compose…", "precompose"));
+    // Un-precompose: the pre-comp becomes a group of its layers.
+    if let [only] = facts.selected.as_slice()
+        && only.kind == "precomp"
+    {
+        rows.push(plain("Release Pre-comp", "releasePrecomp"));
     }
     if every(&|l| l.kind == "text") {
         rows.push(submenu(
@@ -536,9 +542,15 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
             ],
         ));
     }
-    if facts.selected.iter().any(|l| l.kind == "group") {
-        rows.push(plain("Ungroup", "ungroupLayers"));
+    if facts.selected.len() == 2 {
+        rows.push(row(
+            "Use Bottom Layer as Mask",
+            "useBottomLayerAsMask",
+            json!([]),
+            editable && matte_pair(published, &facts).is_some(),
+        ));
     }
+    rows.push(serde_json::Value::Null);
     let groups = facts.groups();
     if !groups.is_empty() || facts.selected.iter().any(|l| l.group.is_some()) {
         let mut children = vec![row(
@@ -566,7 +578,7 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
                 "checked":every(&|l| l.parent.as_deref() == Some(c.id.as_str()))})
                 }),
         );
-        rows.push(submenu("Parent", items));
+        rows.push(submenu("Link Layers", items));
     }
     if every(&|l| l.kind != "group") {
         let inside = every(&|l| time > l.in_time && time < l.out_time);
@@ -626,6 +638,27 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         None if target.locked => row("Unlock", "unlockSelectedLayers", json!([]), true),
         None => row("Lock", "lockSelectedLayers", json!([]), true),
     });
+    // v1's 3D Layer: the same switch as the timeline row's; audio and
+    // adjustment layers have no depth.
+    if every(&|l| !matches!(l.kind.as_str(), "audio" | "adjustment")) {
+        let on = facts.selected.iter().all(|l| {
+            layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                == Some(true)
+        });
+        let mut depth = row("3D Layer", "toggleThreeD", json!([!on]), editable);
+        depth["checked"] = json!(on);
+        rows.push(depth);
+    }
+    if every(&|l| l.kind == "precomp") {
+        let on = facts.selected.iter().all(|l| {
+            layer(published, &l.id)
+                .and_then(|v| v.get("continuousRaster").and_then(Value::as_bool))
+                == Some(true)
+        });
+        let mut raster = plain("Continuously Rasterize", "toggleContinuousRaster");
+        raster["checked"] = json!(on);
+        rows.push(raster);
+    }
     rows.push(serde_json::Value::Null);
     rows.push(plain("Delete", "delete"));
     rows
@@ -646,7 +679,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 52] = [
+pub const PLANNED: [&str; 53] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -697,6 +730,7 @@ pub const PLANNED: [&str; 52] = [
     "separateAudio",
     "toggleVisibility",
     "toggleSolo",
+    "toggleThreeD",
     "unlockSelectedLayers",
     "unlockGroup",
 ];
@@ -1163,6 +1197,7 @@ pub fn command_plan(
         | "separateAudio"
         | "toggleVisibility"
         | "toggleSolo"
+        | "toggleThreeD"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
         "rippleDelete" => ripple_delete(&layers, &selected),
@@ -1631,6 +1666,22 @@ fn layer_menu_plan(
                 "Solo Layers",
                 each(&|_| LayerPatch {
                     solo: Some(solo),
+                    time,
+                    ..Default::default()
+                }),
+            ))
+        }
+        "toggleThreeD" => {
+            // On for every selected layer unless all are 3D already.
+            let all = facts.selected.iter().all(|l| {
+                layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                    == Some(true)
+            });
+            let depth = asked.unwrap_or(!all);
+            Some(plain(
+                "3D Layer",
+                each(&|_| LayerPatch {
+                    three_d: Some(depth),
                     time,
                     ..Default::default()
                 }),
