@@ -52,6 +52,7 @@ mod captions_panel;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
+mod frame_facts;
 #[path = "surfaces/library.rs"]
 mod library_surface;
 mod lifecycle;
