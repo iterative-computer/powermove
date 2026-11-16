@@ -170,6 +170,7 @@ pub struct Host {
     pub(crate) settings_watch: Option<gpui::Subscription>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
+    pub export_destination: Option<crate::export_coordinator::Destination>,
     /// Projects whose offline clips the person chose to export without, this
     /// session: their later exports go without them and say so, not asking again.
     pub export_without_offline: BTreeSet<String>,
@@ -1960,6 +1961,10 @@ impl Controller {
                         request.operation == "export.without",
                         cx,
                     );
+                    Ok(Value::Null)
+                }
+                "export.destination.choose" => {
+                    self.choose_builtin_export_destination(request.input.clone(), cx);
                     Ok(Value::Null)
                 }
                 "export.queue.add" => {

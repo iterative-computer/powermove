@@ -323,7 +323,7 @@ test("subscriptions accept real host publications and reject stale/retired gener
   await f.model.dispose();
   expect(await f.publish(initial())).toBe(false);
 });
-test("completion stays visible and permits another export only after native reset", async () => {
+test("completion stays visible, permits the next export, and reopening resets the banner", async () => {
   const f = fixture();
   await f.model.connect("export.fixture");
   await f.model.show();
@@ -331,6 +331,7 @@ test("completion stays visible and permits another export only after native rese
   s.run = { phase: "done", path: "fixture.mp4" };
   await f.publish(s);
   expect(f.model.open).toBe(true);
+  expect(f.model.canExport).toBe(true);
   await f.model.showInFinder();
   expect(commands(f)).toContain("export.showInFinder");
   await f.model.dismissCompleted();
@@ -646,4 +647,33 @@ test("queue submission freezes displayed options without starting a single expor
   expect((request.operation as any).args.options).toEqual(f.model.options);
   await f.model.queueAction(7, "retry");
   expect(commands(f)).toContain("export.queue.action");
+});
+
+test("destination choice is separate from starting work, cancelled choices preserve it, and formats scope it", async () => {
+  const f = fixture();
+  await f.model.chooseDestination();
+  expect(commands(f)).toEqual(["export.destination.choose"]);
+  expect(f.model.destination?.path).toBe("/Exports/Chosen.mp4");
+  expect(f.model.state.run.phase).toBe("idle");
+  f.cancelled = true;
+  await f.model.chooseDestination();
+  expect(f.model.destination?.path).toBe("/Exports/Chosen.mp4");
+  f.model.set("format", "prores");
+  expect(f.model.destination).toBeUndefined();
+  f.model.set("format", "mp4");
+  expect(f.model.destination?.path).toBe("/Exports/Chosen.mp4");
+});
+test("destination projection rejects malformed paths and picker states", () => {
+  expect(() =>
+    snapshot({ ...initial(), destination: { path: 2, format: "mp4" } }),
+  ).toThrow();
+  expect(() =>
+    snapshot({
+      ...initial(),
+      destination: { path: "fixture.mp4", format: "bad" },
+    }),
+  ).toThrow();
+  expect(() =>
+    snapshot({ ...initial(), destinationChoosing: "yes" }),
+  ).toThrow();
 });

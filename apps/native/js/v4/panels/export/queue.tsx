@@ -242,78 +242,75 @@ export function RenderQueue({
     .sort(
       (a, b) => (b.finishedAt ?? b.id) - (a.finishedAt ?? a.id) || b.id - a.id,
     );
+  if (!pending.length && !history.length)
+    return (
+      <UI.EmptyState
+        id="export.queue.empty"
+        label="No exports yet"
+        explanation=""
+        compact
+      />
+    );
   return (
     <div id="export.queue" style={{ ...stack, gap: t("space.lg") }}>
-      <div role="group" label="Queue" style={stack}>
-        <div
-          style={{
-            ...row,
-            justifyContent: "space-between",
-            height: t("metrics.hit"),
-            marginBottom: t("space.xs"),
-          }}
-        >
-          <text style={sectionLabel}>{`Queue · ${pending.length}`}</text>
-          <UI.PushButton
-            id="export.queue.render"
-            label="Render Pending"
-            title="Render pending jobs"
-            disabled={
-              !pending.some((j) => j.status === "Pending") ||
-              pending.some((j) => j.status === "Rendering")
-            }
+      {pending.length ? (
+        <div role="group" label="Queue" style={stack}>
+          <div
             style={{
-              fontSize: t("typography.minimum"),
+              ...row,
+              justifyContent: "space-between",
               height: t("metrics.hit"),
+              marginBottom: t("space.xs"),
             }}
-            onClick={() => watch(model.command("export.queue.render"))}
-          />
-        </div>
-        {pending.length ? (
-          pending.map((job) => (
-            <JobRow key={job.id} job={job} model={model} watch={watch} />
-          ))
-        ) : (
-          <UI.EmptyState
-            label="Queue is empty"
-            explanation="Add a composition to render it later."
-            symbol="clock"
-          />
-        )}
-      </div>
-      <div role="group" label="History" style={stack}>
-        <div
-          style={{
-            ...row,
-            justifyContent: "space-between",
-            height: t("metrics.hit"),
-            marginBottom: t("space.xs"),
-          }}
-        >
-          <text style={sectionLabel}>History</text>
-          <UI.ToolbarItem
-            id="export.queue.clear"
-            label="Clear"
-            title="Clear finished jobs"
-            disabled={!history.length}
-            style={{ fontSize: t("typography.minimum") }}
-            onClick={() => watch(model.queueAction(0, "clear"))}
           >
-            Clear
-          </UI.ToolbarItem>
-        </div>
-        {history.length ? (
-          history.map((job) => (
+            <text style={sectionLabel}>{`Queue · ${pending.length}`}</text>
+            <UI.PushButton
+              id="export.queue.render"
+              label="Render Pending"
+              title="Render pending jobs"
+              disabled={
+                !pending.some((j) => j.status === "Pending") ||
+                pending.some((j) => j.status === "Rendering")
+              }
+              style={{
+                fontSize: t("typography.minimum"),
+                height: t("metrics.hit"),
+              }}
+              onClick={() => watch(model.command("export.queue.render"))}
+            />
+          </div>
+          {pending.map((job) => (
             <JobRow key={job.id} job={job} model={model} watch={watch} />
-          ))
-        ) : (
-          <UI.EmptyState
-            label="No export history"
-            explanation="Finished exports appear here."
-            symbol="clock"
-          />
-        )}
-      </div>
+          ))}
+        </div>
+      ) : null}
+      {history.length ? (
+        <div role="group" label="History" style={stack}>
+          <div
+            style={{
+              ...row,
+              justifyContent: "space-between",
+              height: t("metrics.hit"),
+              marginBottom: t("space.xs"),
+            }}
+          >
+            <text style={sectionLabel}>History</text>
+            <UI.ToolbarItem
+              id="export.queue.clear"
+              label="Clear"
+              title="Clear finished jobs"
+              disabled={!history.length}
+              style={{ fontSize: t("typography.minimum") }}
+              onClick={() => watch(model.queueAction(0, "clear"))}
+            >
+              Clear
+            </UI.ToolbarItem>
+          </div>
+          {history.map((job) => (
+            <JobRow key={job.id} job={job} model={model} watch={watch} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -12,8 +12,8 @@ export function ExportButton({ model }: { model: ExportModel }) {
     <ToolbarItem
       id="export.toolbar"
       label="Export"
-      title={running ? "Export already running" : "Export (⌘E)"}
-      disabled={!state.project || running}
+      title={running ? "View export progress" : "Export (⌘E)"}
+      disabled={!state.project}
       onClick={() => {
         void model.show().catch(() => update(null));
       }}

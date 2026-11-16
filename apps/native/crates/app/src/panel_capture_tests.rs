@@ -15,6 +15,10 @@ fn capture_builtin_panels() {
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
     let only = std::env::var("PM_PANEL_CAPTURE_ONLY").ok();
+    let export_view = std::env::var("PM_PANEL_CAPTURE_EXPORT_VIEW").ok();
+    if let Some(view) = &export_view {
+        assert!(["settings", "rendering", "queue", "empty"].contains(&view.as_str()), "unknown export capture view");
+    }
     for (panel, w, h) in [
         ("timeline", 1100., 360.),
         ("inspector", 320., 600.),
@@ -107,7 +111,7 @@ fn capture_builtin_panels() {
                     )
                     .unwrap();
                 }
-                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                if panel == "export" && (std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() || export_view.as_deref().is_some_and(|v|v != "empty")) {
                     let ticket = r.runtime.observe_render_queue(serde_json::json!([
                         {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
                         {"id":2,"name":"Logo","format":"prores","profile":"422","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
@@ -118,12 +122,33 @@ fn capture_builtin_panels() {
                     while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
                 }
                 if panel == "export" {
-                    if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
-                        let ticket = r.runtime.observe_export(serde_json::json!({"phase":"rendering","frame":126,"total":300,"elapsed":12.,"eta":17.})).unwrap();
-                        while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                        loop {
+                            if let Some(result) = ticket.try_take() { result.unwrap(); break; }
+                            assert!(std::time::Instant::now() < deadline, "export capture did not settle");
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    };
+                    if export_view.as_deref() == Some("settings") {
+                        // A finished history entry must not occupy the settings page.
+                        wait(r.runtime.observe_render_queue(serde_json::json!([
+                            {"id":3,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Done","progress":1.,"error":"","finishedAt":1794686520}
+                        ])).unwrap());
+                    } else if export_view.as_deref() == Some("empty") {
+                        wait(r.runtime.observe_render_queue(serde_json::json!([])).unwrap());
                     }
-                    let ticket = r.runtime.show("export").unwrap();
-                    while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                    wait(r.runtime.observe_export_destination(serde_json::json!({"path":"/Exports/Launch Film.mp4","format":"mp4"})).unwrap());
+                    if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some()
+                        || export_view.as_deref().is_some_and(|v|v == "rendering" || v == "queue") {
+                        wait(r.runtime.observe_export(serde_json::json!({"phase":"rendering","frame":126,"total":300,"elapsed":12.,"eta":17.})).unwrap());
+                    }
+                    if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some()
+                        || export_view.as_deref().is_some_and(|v|v == "queue" || v == "empty") {
+                        wait(r.runtime.show_section("export", "queue").unwrap());
+                    } else {
+                        wait(r.runtime.show("export").unwrap());
+                    }
                 }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
                     .ok()
@@ -153,7 +178,7 @@ fn capture_builtin_panels() {
                     }
                 }
                 let mut first = publication(&r);
-                if panel == "export" && std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() {
+                if panel == "export" && (std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() || export_view.as_deref() == Some("queue")) {
                     let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("queue.job.4")).unwrap().id;
                     let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "pointerenter", Default::default()).unwrap();
                     while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
@@ -199,7 +224,10 @@ fn capture_builtin_panels() {
                     cx.run_until_parked();
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
-                image.save(format!("{dir}/{panel}-{name}.png")).unwrap();
+                let picture = if panel == "export" {
+                    export_view.as_deref().unwrap_or(panel)
+                } else { panel };
+                image.save(format!("{dir}/{picture}-{name}.png")).unwrap();
                 drop(r);
             });
         }

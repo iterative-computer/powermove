@@ -986,6 +986,8 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     let run = json!({"phase":"rendering","frame":2,"total":300,"elapsed":1});
     backend.native.export["run"] = run.clone();
     for command in [
+        "export.destination.choose",
+        "export.queue.add",
         "export.begin",
         "export.retry",
         "export.without",
@@ -1108,8 +1110,12 @@ fn an_export_waiting_to_start_is_cancelled_from_its_panel() {
         seen.borrow(),
         panels.take_errors()
     );
-    // Choosing the destination: the form's Cancel is off.
-    assert!(!press(&panels, "export.cancel"), "Cancel while choosing");
+    // Choosing the destination: the slim progress row and its Cancel are
+    // absent until work can be cancelled. The save panel owns this choice.
+    finish(panels.observe_export(json!({"phase":"choosingDestination"})).unwrap());
+    let choosing = panels.take_publications().into_iter().rfind(|p| p.panel == "export").unwrap();
+    assert!(!choosing.surface.nodes().values().any(|n| n.props.get("id").and_then(Value::as_str) == Some("export.cancel")));
+    *shown.borrow_mut() = Some(choosing);
     assert!(!asked(&panels, "export.cancel", Duration::from_millis(300)));
     // The destination is chosen and the export waits: the coordinator says
     // so before it waits, and Cancel reaches it.
@@ -6363,5 +6369,95 @@ fn properties_effects_stack_add_edit_and_multiselection_undo() {
             .value
             .as_f64(),
         Some(17.)
+    );
+}
+
+#[test]
+fn export_destination_choice_does_not_start_or_change_the_draft_and_blocks_duplicate_pickers() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "export-destination".into(), generation: 1, project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "export", false).unwrap();
+    let before = backend.export_snapshot().unwrap();
+    assert!(backend.native_command("export.destination.choose", &json!({"options":{"format":"invalid"}})).is_err());
+    backend.native_command("export.destination.choose", &json!({"options":before["options"]})).unwrap();
+    assert_eq!(backend.native.export["run"], before["run"]);
+    assert_eq!(backend.native.export["options"], before["options"]);
+    assert_eq!(backend.native.export["destinationChoosing"], true);
+    assert_eq!(backend.native.platform.len(), 1);
+    assert_eq!(backend.native.platform[0].0, "export.destination.choose");
+    assert_eq!(backend.native.platform[0].1, before["options"]);
+    for command in ["export.destination.choose", "export.begin", "export.queue.add"] {
+        assert!(backend.native_command(command, &json!({"options":before["options"]})).is_err());
+    }
+    assert_eq!(backend.native.platform.len(), 1);
+}
+
+/// PM-376: the Export sheet's subscription, published on every document
+/// change, plans the export and checks the encoders only while the sheet is
+/// open; closed, the project's own facts stay current and the last plan's
+/// figures are kept, so an edit or an undo no longer waits for a plan.
+#[test]
+fn the_export_subscription_plans_only_while_the_sheet_is_open() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-closed".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["capabilities"]["mp4"]["reason"], "Checking…");
+    assert_eq!(closed["project"]["summary"], "");
+    assert!(closed["project"]["id"].is_string());
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    let open = sheet.export_publication().unwrap();
+    assert_eq!(open["project"]["summary"], "300 frames · 10 s · 640×360");
+    assert_ne!(open["capabilities"]["mp4"]["reason"], "Checking…");
+    sheet.native_command("export.dismiss", &json!({})).unwrap();
+    let p = kernel.published("synthetic").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Composition Settings".into()),
+                    expected_revision: Some(p.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                width: Some(1280.0),
+                                height: Some(720.0),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["project"]["width"], 1280);
+    assert_eq!(closed["project"]["summary"], "300 frames · 10 s · 640×360");
+    // Opened again, it plans the project as it is now.
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    assert_eq!(
+        sheet.export_publication().unwrap()["project"]["summary"],
+        "300 frames · 10 s · 1280×720"
     );
 }

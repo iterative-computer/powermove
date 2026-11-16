@@ -18,6 +18,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+/// A draft destination belongs to one document and format. NSSavePanel's
+/// replacement consent is consumed by the next delivery, never reused.
+#[derive(Clone)]
+pub struct Destination {
+    document: u64,
+    format: Format,
+    path: PathBuf,
+    replace_confirmed: bool,
+}
 #[derive(Clone)]
 pub struct Frozen {
     publication: Arc<pm_kernel::Published>,
@@ -135,6 +144,37 @@ impl AgentExport {
     }
 }
 impl Controller {
+    pub fn choose_builtin_export_destination(&mut self, options: Value, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else { return; };
+        let Some(p) = self.published.clone() else { return; };
+        let typed = match pm_builtins::delivery::options(&options) {
+            Ok(options) if self.builtins.export_job.is_none() => options,
+            _ => { let _ = runtime.observe_export_destination(Value::Null); return; }
+        };
+        let document = p.snapshot.doc_id;
+        let filename = format!("{}.{}", p.snapshot.root().and_then(|r| r.get("name"))
+            .and_then(crate::node_string).unwrap_or("Untitled"), typed.format.extension());
+        let picker = crate::platform::export_destination(&self.host.borrow().window,
+            typed.format == Format::Png, &filename);
+        cx.spawn(async move |this, cx| {
+            let path = picker.recv().await.ok().flatten();
+            let _ = this.update(cx, |v, cx| {
+                if !v.published.as_ref().is_some_and(|p| p.snapshot.doc_id == document)
+                    || !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) { return; }
+                let selection = path.map(|path| {
+                    let replace_confirmed = typed.format != Format::Png
+                        && !crate::platform::reviewing_saves() && path.exists();
+                    let selection = json!({"path":path.to_string_lossy(),"format":typed.format});
+                    v.builtins.export_destination = Some(Destination {
+                        document, format: typed.format, path, replace_confirmed,
+                    });
+                    selection
+                }).unwrap_or(Value::Null);
+                let _ = runtime.observe_export_destination(selection);
+                cx.notify();
+            });
+        }).detach();
+    }
     /// `without`: the person chose Export Without Them after a refusal naming
     /// offline clips; the same frozen export runs again, leaving them out.
     pub fn begin_builtin_export(
@@ -162,6 +202,7 @@ impl Controller {
         } else {
             None
         };
+        let remember_destination = saved.is_none();
         let queue_id = saved.as_ref().and_then(|f| f.queue);
         let queue_store = crate::render_queue::store(&self.profile);
         let without_offline = saved.as_ref().is_some_and(|f| f.without_offline);
@@ -202,18 +243,19 @@ impl Controller {
                 .unwrap_or("Untitled"),
             typed.format.extension()
         );
-        // NSSavePanel asks before choosing a file that exists; the folder
-        // panel (and a development review folder) never does.
-        let panel_asks = typed.format != Format::Png && !crate::platform::reviewing_saves();
-        let picker = if saved.is_none() {
-            Some(crate::platform::export_destination(
-                &self.host.borrow().window,
-                typed.format == Format::Png,
-                &filename,
-            ))
-        } else {
-            None
-        };
+        let chosen = if saved.is_none() {
+            self.builtins.export_destination.as_mut()
+                .filter(|d| d.document == p.snapshot.doc_id && d.format == typed.format)
+                .map(|d| { let consent = d.replace_confirmed; d.replace_confirmed = false; (d.path.clone(), consent) })
+        } else { None };
+        // A cached path only carries replacement consent once. If a file
+        // appeared since Choose, ask before replacing it.
+        let panel_asks = chosen.as_ref().map_or(
+            typed.format != Format::Png && !crate::platform::reviewing_saves(), |d| d.1);
+        let picker = if saved.is_none() && chosen.is_none() {
+            Some(crate::platform::export_destination(&self.host.borrow().window,
+                typed.format == Format::Png, &filename))
+        } else { None };
         let job = Arc::new(Run {
             handle: Mutex::new(None),
             cancel: AtomicBool::new(false),
@@ -225,9 +267,10 @@ impl Controller {
         cx.spawn(async move |this, cx| {
             let destination = if let Some(frozen) = saved {
                 Some((frozen.destination, frozen.replace))
-            } else if let Some(picker) = picker
-                && let Some(destination) = picker.recv().await.ok().flatten()
-            {
+            } else if let Some(destination) = match chosen {
+                Some((path, _)) => Some(path),
+                None => match picker { Some(picker) => picker.recv().await.ok().flatten(), None => None },
+            } {
                 // What the export would replace is one decision: the save
                 // panel's Replace answers for the video alone; caption files
                 // (or no panel) take one question listing every file.
@@ -265,6 +308,18 @@ impl Controller {
                 });
                 return;
             };
+            if remember_destination {
+                let _ = this.update(cx, |v, _| {
+                    if v.published.as_ref().is_some_and(|now| now.snapshot.doc_id == p.snapshot.doc_id)
+                        && v.builtins.runtime.as_ref().is_some_and(|now| Arc::ptr_eq(now, &runtime)) {
+                        v.builtins.export_destination = Some(Destination {
+                            document: p.snapshot.doc_id, format: typed.format,
+                            path: destination.clone(), replace_confirmed: false,
+                        });
+                        let _ = runtime.observe_export_destination(json!({"path":destination.to_string_lossy(),"format":typed.format}));
+                    }
+                });
+            }
             // A delivery started while the window's extensions load waits for
             // them: an effect still loading is never refused as not installed.
             // The status line says who it waits for; Cancel still cancels.

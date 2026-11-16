@@ -104,6 +104,14 @@ export function fixture(seed = initial()) {
                   ? "1920×1080 · frame at 00:00:00:00"
                   : "300 frames · 10 s · 1920×1080";
             break;
+          case "export.destination.choose":
+            if (!destinationCancelled)
+              state.destination = {
+                path: "/Exports/Chosen.mp4",
+                format: args.options.format,
+              };
+            state.destinationChoosing = false;
+            break;
           case "export.begin":
             state.options = args.options;
             state.run = { phase: destinationCancelled ? "idle" : "preparing" };

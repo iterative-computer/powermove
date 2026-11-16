@@ -35,8 +35,10 @@ export async function mountExportPanel(config: {
   return {
     model,
     root,
-    async show() {
+    async show(section?: string) {
       await model.show();
+      if (section === "queue") model.showQueue();
+      else model.backToSettings();
       await root.render(<ExportSheet model={model} anchor={config.anchor} />);
     },
     /** Call after shell registry/field arbitration; both shipped bindings pass. */
