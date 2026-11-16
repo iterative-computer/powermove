@@ -3318,7 +3318,7 @@ fn gradient_gesture_keeps_its_id_between_pointer_steps_and_cancels_cleanly(
 ) {
     let mut s = stage_on(cx, &gradient_handle_project(false));
     let points = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
-    assert_eq!(points, vec![[220., 170.], [280., 230.]]);
+    assert_eq!(points, vec![[170., 120.], [230., 180.]]);
     let from = s.point_of(points[0]);
     let to = from + point(px(10.), px(5.));
     s.vcx
@@ -3332,7 +3332,7 @@ fn gradient_gesture_keeps_its_id_between_pointer_steps_and_cancels_cleanly(
     s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
     assert_eq!(
         s.surface.read_with(&s.vcx, |g, _| g.effect_points())[0],
-        [230., 175.]
+        [180., 125.]
     );
     s.surface.update(&mut s.vcx, |g, cx| assert!(g.cancel(cx)));
     let surface = s.surface.clone();
@@ -3363,11 +3363,11 @@ fn gradient_handles_read_stops_before_editing_and_map_drag_through_comp_zoom(
         s.recorder.scale.set(Some(scale));
         s.refresh(cx);
         let points = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
-        assert_eq!(points, vec![[220., 170.], [280., 230.]]);
+        assert_eq!(points, vec![[170., 120.], [230., 180.]]);
         let from = s.point_of(points[0]);
         s.drag(cx, from, point(px(12.), px(6.)), Modifiers::none());
         let moved = s.surface.read_with(&s.vcx, |g, _| g.effect_points());
-        assert_eq!(moved[0], [220. + 12. / scale, 170. + 6. / scale]);
+        assert_eq!(moved[0], [170. + 12. / scale, 120. + 6. / scale]);
         s.undo(cx);
         assert_eq!(
             s.surface.read_with(&s.vcx, |g, _| g.effect_points()),
