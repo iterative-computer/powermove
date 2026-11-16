@@ -1431,7 +1431,11 @@ impl EngineService {
             project_releases: Default::default(),
             wake,
             superseded: Default::default(),
-            interactive: jobs::Activity::default(),
+            interactive: {
+                let interactive = jobs::Activity::default();
+                jobs::watch_activity(&interactive);
+                interactive
+            },
             device: Mutex::new(device),
             scopes: Mutex::new(None),
             disk: render_cache::DiskFrames::default(),

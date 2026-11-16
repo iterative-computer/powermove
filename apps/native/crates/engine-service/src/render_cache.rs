@@ -100,6 +100,12 @@ const FLOOR_EVERY: Duration = Duration::from_secs(3);
 /// A background fill that failed is not tried again on the same state
 /// sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// A background render starts only once the composition's identity (its
+/// definitions, media, fonts, renderer) has held this many idle delays
+/// ([`Background::delay`], so 10 s): a project still loading its extensions
+/// or reading its media changes it, and every frame rendered before was
+/// thrown away (391 MB of a real project's frames, in its first minute).
+const SETTLED_DELAYS: u32 = 2;
 /// The cost a frame playback dropped stands for: more than any budget.
 const DROPPED_US: f64 = 1e9;
 /// Measured costs and refusals kept, by frame key, at most.
@@ -1487,6 +1493,23 @@ impl DiskFrames {
                     )
                 })
         };
+        // Not before the composition has settled ([`SETTLED_DELAYS`]).
+        let fingerprint = {
+            let state = self.inner.state.lock().unwrap();
+            state.frames.as_ref().and_then(|f| f.fingerprint)
+        };
+        match (&mut watch.identity, fingerprint) {
+            (Some((seen, since)), Some(now)) if *seen == now => {
+                if since.elapsed() < config.delay * SETTLED_DELAYS {
+                    return;
+                }
+            }
+            (identity, Some(now)) => {
+                *identity = Some((now, Instant::now()));
+                return;
+            }
+            (_, None) => return,
+        }
         let Some((frames, budget, doc_id)) = planned.filter(|p| !p.0.is_empty()) else {
             return;
         };
@@ -1942,6 +1965,8 @@ struct Watch {
     /// When the volume's free space was last looked at, and whether it
     /// was under [`BACKGROUND_FLOOR`].
     floor: Option<(Instant, bool)>,
+    /// The composition's fingerprint last seen, and since when ([`SETTLED_DELAYS`]).
+    identity: Option<([u8; 32], Instant)>,
 }
 
 /// The background scheduler: looks ten times a second while the cache lives.
@@ -1951,6 +1976,7 @@ fn schedule(inner: Weak<Inner>) {
         active_at: Instant::now(),
         active_since: None,
         floor: None,
+        identity: None,
     };
     loop {
         std::thread::sleep(Duration::from_millis(100));

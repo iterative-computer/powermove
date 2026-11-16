@@ -2147,6 +2147,7 @@ impl Render for Editor {
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                crate::input::noted();
                 // A drag still in flight (its release never came) ends where
                 // it showed before this press is handled, never on it.
                 if this.gesture.is_some() {
