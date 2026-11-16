@@ -4154,16 +4154,6 @@ mod tests {
             json!(["/a b/clip.mov", "/c.png"])
         );
     }
-}
-
-/// Whether the left button is down as the hardware has it (macOS); tests
-/// have no hardware button and follow their events alone.
-fn button_held() -> bool {
-    if cfg!(test) {
-        true
-    } else {
-        pm_shell::left_button_held()
-    }
 /// The shared picker uses the same keyframe-aware binding as the Properties row.
 #[gpui::test]
 fn colour_picker_live_preview_commits_one_undo_and_keys_animated_color(cx: &mut gpui::TestAppContext) {
@@ -4198,6 +4188,17 @@ fn colour_picker_live_preview_commits_one_undo_and_keys_animated_color(cx: &mut 
     rig.kernel.call(PROJECT,pm_kernel::Request::new(pm_kernel::Caller::native(),pm_kernel::Call::History(pm_kernel::HistoryCall::Undo))).wait().unwrap().unwrap();
     assert_eq!(rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value(),original);
 }
+}
+
+/// Whether the left button is down as the hardware has it (macOS); tests
+/// have no hardware button and follow their events alone.
+fn button_held() -> bool {
+    if cfg!(test) {
+        true
+    } else {
+        pm_shell::left_button_held()
+    }
+
 
 }
 
