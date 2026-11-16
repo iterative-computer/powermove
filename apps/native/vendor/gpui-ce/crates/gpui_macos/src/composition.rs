@@ -309,21 +309,14 @@ pub const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_micr
 /// paints (live resize `displayLayer:`, tab activation) that must match the window;
 /// `continuous` when the previous frame was drawn within [`CONTINUOUS_FRAME`].
 /// `compositor_paced` permits continuous updates without a scheduling wait.
-/// `lingering`: a frame moved a hosted view within [`DIRECT_LINGER`]. Its
-/// frames stay with the transaction even when they move nothing (a scene
-/// shown again, a spinner's frame): an asynchronous present reaches the
-/// screen on its own time and could land after the next frame's transaction
-/// had moved the views, showing an older picture under them (PM-389).
 /// Windows without composition hosts keep upstream behaviour (async unless forced).
 pub(crate) fn presents_with_transaction(
     forced: bool,
     frame: Option<&Transaction>,
     continuous: bool,
     compositor_paced: bool,
-    lingering: bool,
 ) -> bool {
-    forced
-        || frame.is_some_and(|t| t.moved() || lingering || (continuous && !compositor_paced))
+    forced || frame.is_some_and(|t| t.moved() || (continuous && !compositor_paced))
 }
 /// Admit a display-linked update only while its CPU budget fits before the
 /// presentation-submission deadline. Rejected updates leave GPUI demand queued.
@@ -410,7 +403,6 @@ pub mod probe {
             transaction.as_ref(),
             continuous,
             false,
-            false,
         ))
     }
     /// Compositor-paced frames can use async even during continuous animation.
@@ -422,20 +414,6 @@ pub mod probe {
             transaction.as_ref(),
             true,
             true,
-            false,
-        ))
-    }
-    /// A compositor-paced frame that moves nothing, `lingering` after one that
-    /// moved a hosted view.
-    pub fn paced_frame_lingering(key: usize, lingering: bool) -> Option<bool> {
-        let transaction = present(key, true);
-        transaction.as_ref()?;
-        Some(presents_with_transaction(
-            false,
-            transaction.as_ref(),
-            true,
-            true,
-            lingering,
         ))
     }
     pub fn has_frame_budget(now: f64, deadline: f64, budget: f64) -> bool {
@@ -458,6 +436,6 @@ pub mod probe {
         super::forget_paints(view as *const NSView as usize);
     }
     pub fn unregistered_frame(forced: bool) -> bool {
-        presents_with_transaction(forced, None, true, false, false)
+        presents_with_transaction(forced, None, true, false)
     }
 }

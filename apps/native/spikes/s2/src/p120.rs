@@ -103,18 +103,6 @@ mod tests {
         assert_eq!(probe::paced_frame(0x70, false), Some(false), "resets");
     }
 
-    /// PM-389: after a frame that moved a hosted view, frames that move
-    /// nothing (a scene shown again, a spinner) still present with the
-    /// transaction while the window lingers, so none lands after the next
-    /// frame's moved views; once it has rested they are asynchronous again.
-    #[test]
-    fn frames_after_a_move_stay_with_the_transaction_while_it_lingers() {
-        let (_reg, _next, _) = host(0x90);
-        assert_eq!(probe::paced_frame_lingering(0x90, false), Some(true), "fresh slots");
-        assert_eq!(probe::paced_frame_lingering(0x90, true), Some(true));
-        assert_eq!(probe::paced_frame_lingering(0x90, false), Some(false));
-    }
-
     #[test]
     fn compositor_pacing_does_not_make_untracked_geometry_async() {
         let _reg = probe::register_untracked(0x80, Rc::new(|| {}));
