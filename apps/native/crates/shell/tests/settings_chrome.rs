@@ -139,6 +139,16 @@ fn main() {
     for (got, want) in rgb.iter().zip(want) {
         assert!((got - want).abs() < 0.01, "ground {rgb:?}");
     }
+    // The report a release bundle writes (PM_NATIVE_SETTINGS_PROBE) says the same.
+    let report = chrome.report();
+    assert_eq!(report["opaque"], false, "{report}");
+    assert!(report["backgroundAlpha"].as_f64().unwrap() < 0.01, "{report}");
+    assert_eq!(report["detailPainted"], false, "{report}");
+    assert!(report["groundX"].as_f64().unwrap() >= pm_shell::settings_window::SIDEBAR_WIDTH - 1., "{report}");
+    if report["glassAvailable"] == true {
+        assert_eq!(report["sidebarInGlass"], true, "{report}");
+    }
+    println!("settings_chrome report: {report}");
     drop(chrome);
     window.close();
     println!("settings_chrome: ok");

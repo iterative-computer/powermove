@@ -534,6 +534,46 @@ impl SettingsChrome {
 
     /// The window's appearance (live): the rows' icon set, and the ground
     /// the detail shows under the toolbar, as the page's own.
+    /// What the window is made of, for a check against any build (the test,
+    /// and `PM_NATIVE_SETTINGS_PROBE=<file>` in a release bundle): whether
+    /// the window is clear, whether the sidebar is inside the system's glass,
+    /// and whether anything under the sidebar is painted.
+    pub fn report(&self) -> serde_json::Value {
+        let alpha = |c: &NSColor| {
+            c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .map_or(1., |c| c.alphaComponent())
+        };
+        let painted = |v: &NSView| {
+            v.layer()
+                .and_then(|l| l.backgroundColor())
+                .and_then(|c| NSColor::colorWithCGColor(&c))
+                .is_some_and(|c| alpha(&c) > 0.01)
+        };
+        let mut glass = false;
+        let mut detail_painted = false;
+        if let Some(outline) = self.chrome.ivars().outline.borrow().as_ref()
+            && let Some(class) = objc2::runtime::AnyClass::get(c"NSGlassEffectView")
+        {
+            let mut up = unsafe { outline.superview() };
+            while let Some(v) = up {
+                glass |= v.isKindOfClass(class);
+                up = unsafe { v.superview() };
+            }
+        }
+        if let Some(detail) = unsafe { self.ground.superview() } {
+            detail_painted = painted(&detail);
+        }
+        let ground = self.ground.convertRect_toView(self.ground.bounds(), None);
+        serde_json::json!({
+            "opaque": self.window.isOpaque(),
+            "backgroundAlpha": alpha(&self.window.backgroundColor()),
+            "sidebarInGlass": glass,
+            "glassAvailable": objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some(),
+            "detailPainted": detail_painted,
+            "groundX": ground.origin.x,
+            "sidebarWidth": SIDEBAR_WIDTH,
+        })
+    }
     pub fn set_scheme(&self, dark: bool, ground: u32) {
         let state = self.chrome.ivars();
         if state.ground.replace(Some(ground)) != Some(ground) {
