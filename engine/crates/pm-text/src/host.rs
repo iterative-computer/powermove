@@ -30,9 +30,13 @@ use std::time::Duration;
 use crate::answers::{Answers, Query, ReplayResolver};
 use crate::font::{FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
 
-/// How long a render thread waits for the main thread's answer. The first
-/// fallback manifest takes about 0.6 s on that thread.
-pub const ASK_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a question may wait for the service's thread to take it up. Once
+/// taken it is waited for while it is being answered (a loaded machine makes
+/// the first fallback manifest, about 0.6 s, take much longer): only a
+/// service whose thread never reaches the question fails it.
+pub const ASK_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a question being answered is waited for.
+const ANSWER_LIMIT: Duration = Duration::from_secs(600);
 
 /// Questions a rendering thread has for the registry.
 pub struct FontAsk {
@@ -72,6 +76,8 @@ struct Shared {
     asked: AtomicU64,
     answered: AtomicU64,
     failed: AtomicU64,
+    /// The service's turns: each takes every question queued before it.
+    turns: AtomicU64,
 }
 
 /// The rendezvous between rendering threads and the font service.
@@ -103,6 +109,7 @@ impl FontBroker {
             asked: AtomicU64::new(0),
             answered: AtomicU64::new(0),
             failed: AtomicU64::new(0),
+            turns: AtomicU64::new(0),
         }))
     }
 
@@ -136,7 +143,8 @@ impl FontBroker {
         )
     }
 
-    /// Asks the registry and waits (at most `timeout`) for its answer. Called
+    /// Asks the registry and waits for its answer: at most `timeout` for the
+    /// service to take the question up, then while it answers it. Called
     /// on a rendering thread, never on the service's own thread.
     pub fn ask(
         &self,
@@ -148,6 +156,9 @@ impl FontBroker {
             return Err("the engine's font service has stopped".into());
         }
         let (reply, rx) = sync_channel(1);
+        // Any turn after this one has taken the question (each takes all
+        // queued); read before queuing, so a turn is never missed.
+        let queued_at = self.0.turns.load(Ordering::Acquire);
         self.0.asked.fetch_add(1, Ordering::Relaxed);
         self.0
             .asks
@@ -171,33 +182,55 @@ impl FontBroker {
                 return Err("the engine has no font service".into());
             }
         }
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(reply)) => {
+        let asked = std::time::Instant::now();
+        let outcome = loop {
+            match rx.recv_timeout(Duration::from_millis(100).min(timeout)) {
+                Ok(answer) => break answer,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err("the engine's font service stopped before it answered".into());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let taken = self.0.turns.load(Ordering::Acquire) != queued_at;
+            if !taken && asked.elapsed() >= timeout {
+                break Err(format!(
+                    "the engine's font service did not take the question within {} s \
+                     (the thread that answers fonts was busy)",
+                    timeout.as_secs()
+                ));
+            }
+            if taken && asked.elapsed() >= ANSWER_LIMIT {
+                break Err(format!(
+                    "the engine's font service was still answering after {} s",
+                    ANSWER_LIMIT.as_secs()
+                ));
+            }
+        };
+        match outcome {
+            Ok(reply) => {
                 self.0.answered.fetch_add(1, Ordering::Relaxed);
                 Ok(reply)
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 self.0.failed.fetch_add(1, Ordering::Relaxed);
                 Err(error)
-            }
-            Err(_) => {
-                self.0.failed.fetch_add(1, Ordering::Relaxed);
-                Err(format!(
-                    "the engine's font service did not answer within {} ms",
-                    timeout.as_millis()
-                ))
             }
         }
     }
 
     /// The queued asks (the service's thread answers them).
     pub fn take_asks(&self) -> Vec<FontAsk> {
-        self.0
+        let asks: Vec<FontAsk> = self
+            .0
             .asks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .drain(..)
-            .collect()
+            .collect();
+        if !asks.is_empty() {
+            self.0.turns.fetch_add(1, Ordering::AcqRel);
+        }
+        asks
     }
 
     /// Stops the broker: queued and later asks fail at once (a closing
@@ -494,5 +527,55 @@ impl FontSource for FontService {
 
     fn blob(&self, _key: &str) -> Option<FontBytes> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply() -> FontReply {
+        FontReply {
+            generation: 0,
+            answers: Answers::default(),
+            fonts: Vec::new(),
+        }
+    }
+
+    /// A question the service has taken up is waited for while it is being
+    /// answered, however long that takes on a loaded machine; one the
+    /// service never takes up fails, saying so.
+    #[test]
+    fn a_question_being_answered_is_waited_for_and_one_never_taken_fails() {
+        let broker = FontBroker::new();
+        let service = broker.clone();
+        broker.set_wake(Arc::new(|| {}));
+        let answering = std::thread::spawn(move || {
+            loop {
+                let asks = service.take_asks();
+                if let Some(ask) = asks.into_iter().next() {
+                    // Taken at once, answered after four times the window.
+                    std::thread::sleep(Duration::from_millis(800));
+                    let _ = ask.reply.send(Ok(reply()));
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        assert!(
+            broker
+                .ask(Vec::new(), Vec::new(), Duration::from_millis(200))
+                .is_ok()
+        );
+        answering.join().unwrap();
+
+        let idle = FontBroker::new();
+        idle.set_wake(Arc::new(|| {}));
+        let started = std::time::Instant::now();
+        let error = idle
+            .ask(Vec::new(), Vec::new(), Duration::from_millis(200))
+            .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(error.contains("did not take the question"), "{error}");
     }
 }

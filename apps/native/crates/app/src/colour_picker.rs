@@ -788,7 +788,7 @@ impl Picker {
                             size(px(w), px(h)),
                         );
                         window.paint_quad(
-                            outline(b, rgb(t.colors.text), BorderStyle::Solid)
+                            outline(b, rgb(t.graph_handle_selected()), BorderStyle::Solid)
                                 .border_widths(px(t.metrics.border))
                                 .corner_radii(Corners::all(px(if matches!(kind, Track::Plane) {
                                     w / 2.

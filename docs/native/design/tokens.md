@@ -167,6 +167,8 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.segment_radius` | Segment and tab corner inside a pill (concentric) | 6 | 6 | 6 | 6 |
 | `metrics.settings_column` | Settings form column's greatest width, insets included | 680 | 680 | 680 | 680 |
 | `metrics.settings_height` | Settings window height | 520 | 520 | 520 | 520 |
+| `metrics.settings_poster_height` | Settings project header poster height | 54 | 54 | 54 | 54 |
+| `metrics.settings_poster_width` | Settings project header poster width | 96 | 96 | 96 | 96 |
 | `metrics.settings_sidebar` | Settings sidebar width | 200 | 200 | 200 | 200 |
 | `metrics.settings_width` | Settings window width | 760 | 760 | 760 | 760 |
 | `metrics.sheet_body_max` | Tallest sheet option body before it scrolls | 440 | 440 | 440 | 440 |

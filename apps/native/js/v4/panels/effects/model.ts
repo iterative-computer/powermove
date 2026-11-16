@@ -105,6 +105,14 @@ export function labelParts(label: string, query: string) {
   };
 }
 export class EffectsModel {
+  presetMenu?: (id: string) => Promise<void>;
+  deletedPresetName: string | null = null;
+  renamingPreset: string | null = null;
+  notifyPresetChange() {
+    this.changed();
+  }
+  presetRenameBinding = "presets.rename";
+  presetAction?: (id: string, action: string, name?: string) => Promise<void>;
   private items: readonly EffectItem[] = [];
   private byId = new Map<string, EffectItem>();
   private groups: readonly string[] = [];
@@ -194,7 +202,8 @@ export class EffectsModel {
       };
       if (recent.length) section("Recent", recent, "recent");
       for (const name of this.groups)
-        section(name, this.grouped.get(name) ?? [], groupKey(name));
+        if (name !== "My Presets" || this.grouped.get(name)?.length)
+          section(name, this.grouped.get(name) ?? [], groupKey(name));
     }
     this.cachedRows = Object.freeze(rows.map((row) => Object.freeze(row)));
     const anchored = anchor ? rows.findIndex((row) => row.key === anchor) : -1;
@@ -446,7 +455,7 @@ export class EffectsModel {
   drag(id: string) {
     const item = this.byId.get(id);
     return item && !item.failed
-      ? { kind: "effect" as const, id: item.id, label: item.label }
+      ? { kind: item.kind, id: item.id, label: item.label }
       : null;
   }
   context(id: string) {

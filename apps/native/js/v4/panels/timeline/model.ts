@@ -42,7 +42,7 @@ export interface TextLease {
   value: string;
 }
 export interface NumericLease {
-  binding: string;
+  binding: string | { handle: string; channels: string[] };
   value: number;
   unit?: string;
   step: number;
@@ -98,7 +98,12 @@ export interface PropertyRow extends RowBase {
   next: boolean;
   /** A compound Scale readout stays one semantic row, with real axis keys. */
   readout: string;
-  axes?: Array<{ path: string; readout: string; editor?: TextLease }>;
+  axes?: Array<{
+    path: string;
+    readout: string;
+    numeric?: NumericLease;
+    editor?: TextLease;
+  }>;
   numeric?: NumericLease;
   scaleLinked?: boolean;
 }

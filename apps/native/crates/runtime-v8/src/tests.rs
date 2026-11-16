@@ -1113,6 +1113,36 @@ fn heaps_grow_from_their_slice_while_the_account_has_room_and_trim_when_idle() {
     assert_eq!(f.admission.used(), 0);
     assert_eq!(f.admission.isolates(), 0);
 }
+/// A heap that lives near its limit collects in full every few megabytes: the
+/// same 40 MiB that stays alive, with 400 MiB of garbage made beside it, in a
+/// realm that starts at 32 MiB and one that starts at 256 MiB.
+#[test]
+fn a_heap_given_room_to_start_with_does_not_collect_in_full_over_and_over() {
+    let collections = |initial_mib: usize| {
+        let f = fixture_with(|c| {
+            c.limits.heap_bytes = 1024 * 1024 * 1024;
+            c.limits.initial_heap_bytes = initial_mib * 1024 * 1024;
+            c.admission = Admission::new(2 * 1024 * 1024 * 1024);
+        });
+        let r = f.pool.realm(RealmKind::V4Extension("room".into())).unwrap();
+        eval(
+            &r,
+            "globalThis.kept=[];for(let i=0;i<40;i++)kept.push(new Array(131072).fill(i));\
+             let n=0;for(let i=0;i<400;i++){const g=new Array(131072).fill(i);n+=g.length}n",
+        );
+        let n = wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .major_collections;
+        close(&r);
+        n
+    };
+    let (tight, roomy) = (collections(32), collections(256));
+    eprintln!("major collections: 32 MiB start {tight}, 256 MiB start {roomy}");
+    assert!(
+        roomy * 3 <= tight,
+        "32 MiB start {tight}, 256 MiB start {roomy}"
+    );
+}
 const IDLE_WAIT: Duration = Duration::from_secs(20);
 #[test]
 fn full_account_child() {

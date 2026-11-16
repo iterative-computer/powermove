@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
+import { nativeWire } from "../../eval/native-wire";
 import { HostClient, type HostRequest, type HostAck } from "../../src/host-api";
 import type { Json } from "../../src/protocol";
 import { EffectsHost, type EffectsHostAdapter } from "./host";
@@ -6,6 +7,9 @@ import { createEffectsExtension, EffectsMountError } from "./index";
 import { EffectsModel, workerSearch } from "./model";
 import { OwnerHost } from "../../eval/host-fixture";
 import { deferred, fixture, items } from "./fixtures";
+
+// Build the native host in setup, outside the five-second interaction test.
+beforeAll(() => { nativeWire(); }, 120_000);
 
 const identity = {
   realm: "synthetic-effects",

@@ -1,3 +1,5 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 // Rust allocations use the system allocator. The bundle launches with
 // `MallocLargeCache=0` (Info.plist LSEnvironment, `packaging/package.py`), so
 // freed large blocks go back to macOS at once; small blocks return per 16 KiB
@@ -12,7 +14,9 @@ mod access;
 mod after_open;
 mod agent_clients;
 mod alert;
+mod appearance;
 mod builtins;
+mod tabs;
 #[cfg(test)]
 mod builtins_tests;
 mod cloud;
@@ -102,6 +106,7 @@ mod render_frames;
 mod recent_work;
 mod rows;
 mod session;
+mod settings_window;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
@@ -130,6 +135,7 @@ mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
+mod v4_quote;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
@@ -393,6 +399,9 @@ fn main() -> Result<()> {
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
     let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // Projects open as tabs or in windows of their own, by the setting,
+    // before any window is restored.
+    pm_shell::set_tabs_mode(tabs::setting(&handle));
     // The command-line project opens in the first window only.
     let launch = Cell::new(launch);
     let result = pm_shell::run_gated(

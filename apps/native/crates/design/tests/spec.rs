@@ -217,6 +217,8 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.settings_height", "Settings window height"),
     ("metrics.settings_sidebar", "Settings sidebar width"),
     ("metrics.settings_column", "Settings form column's greatest width, insets included"),
+    ("metrics.settings_poster_width", "Settings project header poster width"),
+    ("metrics.settings_poster_height", "Settings project header poster height"),
     ("metrics.store_column", "Store content column's greatest width"),
     ("metrics.menu_inset", "Menu and palette row inset"),
     ("metrics.menu_row", "Palette row height"),

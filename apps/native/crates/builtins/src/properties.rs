@@ -80,7 +80,12 @@ impl Properties {
             json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
         ))
     }
-    fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
+    pub(crate) fn lease(
+        &mut self,
+        model: &Inspector,
+        id: &str,
+        binding: Binding,
+    ) -> Result<Value, String> {
         let handle = if let Some(handle) = self.handles.get(id) {
             handle.clone()
         } else {
@@ -2694,7 +2699,18 @@ impl Properties {
                 _ => return Err("Unknown property action".into()),
             }
         };
+        // v1's ChannelRow focused the Timeline's graph on a property pressed
+        // in Properties: keyed from its diamond, the graph plots it (it fell
+        // back to the layer's first animated property, often Opacity).
+        let keyed = matches!(action, V4Action::Diamond | V4Action::AddKey);
         let result = self.adapter.action(model, caller, handle, action, time);
+        if keyed
+            && result.is_ok()
+            && let Some(layer) = model.primary()
+        {
+            self.commands
+                .push(("timeline.focusGraph".into(), vec![json!(layer), json!(path)]));
+        }
         if matches!(row, "position" | "scale" | "anchor") {
             self.adapter.dispose(handle);
         }

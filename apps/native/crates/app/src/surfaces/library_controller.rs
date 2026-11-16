@@ -483,8 +483,16 @@ impl<P: LibraryPort> LibraryController<P> {
                                 Command::Open(id) => self.rows.iter().find(|r| &r.id == id),
                                 _ => None,
                             };
+                            // A new project opens under the name typed in
+                            // its sheet (PM-380).
+                            let typed = match &request.command {
+                                Command::Create(values) if !values.name.trim().is_empty() => {
+                                    Some(values.name.trim().to_owned())
+                                }
+                                _ => None,
+                            };
                             let (name, file) = row.map_or_else(
-                                || ("Untitled".into(), None),
+                                || (typed.unwrap_or_else(|| "Untitled".into()), None),
                                 |r| (r.name.clone(), r.file.clone()),
                             );
                             self.effects.push_back(HostEffect::OpenEditor {
@@ -518,6 +526,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         Command::Load(_) => String::new(),
                     };
+                    let refused = rename_refused_alert(&failure, &name);
                     let code = match failure {
                         Failure::Service(code) => code,
                         Failure::Kernel { code, detail } => {
@@ -526,7 +535,7 @@ impl<P: LibraryPort> LibraryController<P> {
                         }
                         _ => ServiceErrorCode::Unavailable,
                     };
-                    let alert = error_alert(code, &name);
+                    let alert = refused.unwrap_or_else(|| error_alert(code, &name));
                     self.effects
                         .push_back(HostEffect::Announce(alert.message.clone()));
                     self.prompt(alert, PromptAction::Error);

@@ -185,6 +185,14 @@ impl Controller {
             };
             (p, typed, self.media.clone(), self.time())
         };
+        // Export Without Them is asked once per project in a session.
+        if without {
+            self.builtins
+                .export_without_offline
+                .insert(p.project.clone());
+        }
+        let without_offline = saved.as_ref().is_some_and(|f| f.without_offline)
+            || self.builtins.export_without_offline.contains(&p.project);
         let filename = format!(
             "{}.{}",
             p.snapshot
@@ -774,6 +782,18 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    // Going without offline clips is said only while there are some (a
+    // remembered answer outlives a relink).
+    let without_offline = frozen.without_offline
+        && planned.settings.as_ref().is_some_and(|settings| {
+            !pm_export::render::offline_media_with_audio(
+                &frozen.publication.snapshot.document,
+                frozen.publication.snapshot.render_comp().as_str(),
+                &frozen.media.export_paths(settings.draft_from_proxies),
+                settings.audio,
+            )
+            .is_empty()
+        });
     request.replace = frozen.replace;
     // The sheet's per-export 3D quality; the composition's saved one otherwise.
     request.studio_quality = frozen
@@ -886,13 +906,18 @@ async fn execute_inner(
             let elapsed = started.elapsed().as_secs_f64();
             let mut run =
                 json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
-            if let Some(note) = waiting.as_ref().and_then(|w| w.lock().unwrap().clone()) {
-                let mut note = note.chars();
-                run["extra"] = json!(
-                    note.next()
-                        .map(|c| c.to_uppercase().chain(note).collect::<String>())
-                        .unwrap_or_default()
-                );
+            // What the person chose is said for the whole export: it goes
+            // without the offline clips (the file's notes name them).
+            let without = without_offline.then_some("without the offline clips");
+            let waiting = waiting.as_ref().and_then(|w| w.lock().unwrap().clone());
+            let extra = [waiting.as_deref(), without]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let mut extra = extra.chars();
+            if let Some(first) = extra.next() {
+                run["extra"] = json!(first.to_uppercase().chain(extra).collect::<String>());
             }
             // The sheet says "About N min left" from the measured pace.
             if let Some(eta) = pace.left(frame, planned.frames, std::time::Instant::now()) {

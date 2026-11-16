@@ -39,6 +39,8 @@ pub struct EffectStep {
     /// (exports and captures at any size). Viewer frames clear it, and
     /// built-ins never set it: their pixels are composition pixels.
     pub raster_space: bool,
+    /// Modern kernels apply u_effectScale explicitly; their texel is a raster pixel.
+    pub raster_texel: bool,
     pub owner: Option<std::sync::Arc<Owner>>,
     pub source_domain: Option<(pm_fx_defs::spatial::Extent, pm_fx_defs::spatial::Extent)>,
     pub spatial: Option<Spatial>,
@@ -220,6 +222,10 @@ pub fn effect_step(
         .sum();
     EffectStep {
         raster_space: def.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn,
+        raster_texel: def
+            .glsl
+            .as_ref()
+            .is_some_and(|g| g.source.matches("u_effectScale").count() > 1),
         owner: None,
         source_domain: None,
         spatial: None,

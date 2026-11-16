@@ -121,6 +121,10 @@ impl PageFace {
 }
 #[derive(Clone, Debug)]
 pub enum HostEvent {
+    DockContent {
+        id: String,
+        height: f64,
+    },
     DockScroll {
         id: String,
         delta: f64,

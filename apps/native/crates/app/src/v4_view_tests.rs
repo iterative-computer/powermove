@@ -456,6 +456,162 @@ fn cached_panel_does_not_rerender_for_a_parent_frame(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(child.read_with(&vcx, |v, _| v.renders), first + 1);
 }
+/// A wheel step on a panel's scroller (PM-311) moves its rows without the
+/// panel rendering again: the pointer lands on the row drawn under it, a step
+/// past what was recorded renders, and the panel renders once the steps stop.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_without_rendering_the_panel(cx: &mut TestAppContext) {
+    wheel_steps(cx, pm_builtins::PROJECT_PANEL, true);
+}
+/// Elsewhere a step draws the panel again (its hover and controls follow
+/// the content at once: PM-389, PM-390).
+#[gpui::test]
+fn outside_the_project_panel_a_wheel_step_draws_the_panel_again(cx: &mut TestAppContext) {
+    wheel_steps(cx, "fxbrowser", false);
+}
+fn wheel_steps(cx: &mut TestAppContext, panel: &str, layer: bool) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"style":{"width":100,"height":100}}),
+        &[],
+    );
+    for i in 0..20u64 {
+        ops.extend(node_ops(
+            2 + i,
+            1,
+            "div",
+            json!({"id": format!("row-{i}"), "style":{"width":100,"height":20,"flexShrink":0}}),
+            &["pointerdown"],
+        ));
+    }
+    let mut surface = synthetic(&rig, ops);
+    surface.panel = panel.into();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        Slot { child }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let row = |vcx: &mut VisualTestContext, i: u64| bounds(vcx, &format!("row-{i}")).origin.y;
+    let top = row(&mut vcx, 0);
+    let at = point(px(50.), top + px(55.));
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.run_until_parked();
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    let wheel = |vcx: &mut VisualTestContext, dy: f32| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    wheel(&mut vcx, -30.);
+    if !layer {
+        assert!(view.read_with(&vcx, |v, _| v.renders) > rendered);
+        assert_eq!(row(&mut vcx, 4), top + px(50.));
+        return;
+    }
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
+    // 55 + 30 lands in row 4 (80..100) now.
+    events(&view, &mut vcx);
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(events(&view, &mut vcx), vec![(6, "pointerdown".to_owned())]);
+    // Another step, then the steps stop: the panel renders once, its rows
+    // where they were shown.
+    vcx.executor().advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    wheel(&mut vcx, -20.);
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered);
+    vcx.executor().advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered + 1);
+    assert_eq!(row(&mut vcx, 4), top + px(30.));
+    // A step past what was recorded (one height each way) renders at once.
+    let rendered = view.read_with(&vcx, |v, _| v.renders);
+    wheel(&mut vcx, -150.);
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), rendered + 1);
+    assert_eq!(row(&mut vcx, 10), top + px(200. - 200.));
+}
+/// A panel in a 100 pt slot, as a dock gives one.
+/// PM-387: a list built while its slot was short asks for the rows that show
+/// once the slot grows (its page held only the rows of the short slot).
+#[gpui::test]
+fn a_list_that_grows_taller_asks_for_the_rows_that_now_show(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let ops = node_ops(
+        1,
+        0,
+        "virtual-list",
+        json!({"count": 100, "range": [0, 2], "itemSize": 20, "style": {"width": 100}}),
+        &["rangechange"],
+    );
+    let surface = synthetic(&rig, ops);
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        Tall { child, height: 40. }
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    let last_range = |vcx: &mut VisualTestContext| {
+        view.update(vcx, |v, _| {
+            v.log
+                .iter()
+                .rev()
+                .find(|(_, e, _)| e == "rangechange")
+                .and_then(|(_, _, d)| d.range)
+        })
+    };
+    assert_eq!(last_range(&mut vcx), Some((0, 2)));
+    root.update(&mut vcx, |r, cx| {
+        r.height = 200.;
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(last_range(&mut vcx), Some((0, 10)));
+}
+/// A slot whose height the test sets.
+struct Tall {
+    child: Entity<SurfaceView>,
+    height: f32,
+}
+impl Render for Tall {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(100.)).h(px(self.height)).flex().flex_col().child(
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().w(px(100.)).h(px(self.height))),
+        )
+    }
+}
+struct Slot {
+    child: Entity<SurfaceView>,
+}
+impl Render for Slot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(100.)).child(
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().size(px(100.))),
+        )
+    }
+}
 struct Host {
     child: Entity<SurfaceView>,
 }
@@ -574,6 +730,199 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     let p = rig.kernel.published(PROJECT).unwrap();
     assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
     assert!(!p.history.can_undo, "the whole scrub was one undo step");
+}
+/// Headless input: panel handoff, phase filtering and one kernel undo.
+#[gpui::test]
+fn horizontal_wheel_scrub_is_one_undo_and_ignores_momentum(cx: &mut TestAppContext) {
+    wheel_scrub_scenario(cx, false);
+}
+#[gpui::test]
+fn horizontal_wheel_scrub_adds_an_animated_key(cx: &mut TestAppContext) {
+    wheel_scrub_scenario(cx, true);
+}
+fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    if animated {
+        project["layers"][0]["p"]["opacity"]["kf"] = json!([{"i":"existing","t":1,"v":100}]);
+    }
+    let rig = rig_project("inspector", &project.to_string());
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.number_containing("opacity"))
+        .unwrap();
+    let n = view.read_with(&vcx, |v, _| v.numeric_facts(&name));
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    let wheel = |vcx: &mut VisualTestContext, x: f32, y: f32, phase| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(x), px(y))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+    };
+    wheel(&mut vcx, 0., 24., gpui::TouchPhase::Started);
+    assert!(!rig.kernel.published(PROJECT).unwrap().history.can_undo);
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Started);
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Moved);
+    wheel(&mut vcx, 0., 0., gpui::TouchPhase::Ended);
+    wheel(&mut vcx, 500., 0., gpui::TouchPhase::Moved);
+    let expected = (n.value - 48. * 0.25 * n.step * n.speed).clamp(n.min, n.max);
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.wheel_reading()),
+        Some((expected * 10_000.).round() / 10_000.)
+    );
+    vcx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(301));
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
+    assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
+    if animated {
+        let p = rig.kernel.published(PROJECT).unwrap();
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, "l0").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+        let keys = layer
+            .get("p")
+            .and_then(|p| p.get("opacity"))
+            .and_then(|p| p.get("kf"))
+            .and_then(pm_model::Value::as_array)
+            .unwrap();
+        assert_eq!(keys.len(), 2, "scrubbing adds a key at the playhead");
+        assert!(
+            keys.iter()
+                .any(|k| k.get("t").and_then(pm_model::Value::as_f64) == Some(0.)
+                    && k.get("v").and_then(pm_model::Value::as_f64) == Some(expected))
+        );
+    }
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let after = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.snapshot.root().unwrap().to_value(), before);
+    assert!(!after.history.can_undo);
+}
+/// Timeline's expanded rows mount exactly the same field, with a real lease.
+#[gpui::test]
+fn timeline_value_drag_is_one_undo_and_click_opens_text(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["p"]["opacity"]["kf"] =
+        serde_json::json!([{"i":"opacity0","t":0,"v":100}]);
+    let rig = rig_project("timeline", &project.to_string());
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let disclosure = view
+        .read_with(&vcx, |v, _| v.semantic_id_starting("timeline:disclosure:"))
+        .unwrap();
+    view.update(&mut vcx, |v, cx| v.click_semantic(&disclosure, cx));
+    settle(cx, |_| {
+        let mut context = vcx.clone();
+        for p in rig.runtime.take_publications() {
+            view.update(&mut context, |v, cx| v.publish(p, cx));
+        }
+        view.read_with(&context, |v, _| v.first_number().is_some())
+    });
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.first_number())
+        .expect("timeline uses shared numeric field");
+    let at = bounds(&mut vcx, &name).center();
+    let before = rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in 1..=4 {
+        vcx.simulate_mouse_move(
+            at + point(px(-8. * step as f32), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+    }
+    vcx.simulate_mouse_up(
+        at + point(px(-32.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
+    assert_ne!(
+        rig.kernel
+            .published(PROJECT)
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
+    assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let p = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.snapshot.root().unwrap().to_value(), before);
+    assert!(!p.history.can_undo);
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        view.read_with(&vcx, |v, _| v.number_edit_requested(&name)),
+        "a click opens the native text editor"
+    );
 }
 /// A scrub whose release never reaches the window (AppKit delivered it
 /// elsewhere, owner feedback W4/W5) ends at the next move with the button
@@ -1421,6 +1770,39 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         [None, Some("Reset Effect".into()), None, Some("More".into())],
         "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
     );
+}
+/// A tooltip shown before a press that changes its words (a disclosure's
+/// Expand becomes Collapse when the panel republishes) says the new words
+/// while the pointer stays.
+#[gpui::test]
+fn a_shown_tooltip_follows_its_nodes_title(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |title: &str| {
+        let mut ops = node_ops(1, 0, "div", json!({"style":{"width":200,"height":200}}), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "button",
+            json!({"title":title,"data-pm-component":"toolbar-item","label":title,
+                "metadata":{"symbol":"chevron.right"}}),
+            &["click"],
+        ));
+        ops
+    };
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, tree("Expand Layer")), Default::default());
+    vcx.run_until_parked();
+    let tokens = view.read_with(&vcx, |v, _| v.tokens().clone());
+    let tip = vcx.update(|_, cx| {
+        cx.new(|_| {
+            crate::v4_view::Tooltip::following(view.downgrade(), 2, "Expand Layer".into(), tokens)
+        })
+    });
+    view.update(&mut vcx, |v, cx| v.publish(synthetic(&rig, tree("Collapse Layer")), cx));
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    let shown = vcx.update(|_, cx| tip.update(cx, |t, cx| t.current_title(cx)));
+    assert_eq!(shown.as_ref(), "Collapse Layer");
 }
 /// A section heading pressed closes its group in the next frame, before the
 /// panel's script has answered; the publication that agrees takes over, and

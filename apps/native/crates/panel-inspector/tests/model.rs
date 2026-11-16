@@ -1473,3 +1473,54 @@ fn imported_matching_source_applies_to_captured_layer_and_undo() {
             .is_none()
     );
 }
+
+#[test]
+fn animation_preset_capture_apply_round_trip_and_undo() {
+    let mut f=Fixture::new(); f.select(&["a"]);
+    let saved=f.model.capture_preset("a","Soft",&["f1".into()],&["opacity".into()],true,2.).unwrap();
+    assert_eq!(saved.get("schemaVersion").and_then(Value::as_f64),Some(1.));
+    let request=f.model.apply_preset(Caller::native(),&saved,&["b".into()],4.).unwrap();f.run(request);
+    assert_eq!(f.model.effect_ids("b").unwrap().len(),2);
+    f.undo(); assert_eq!(f.model.effect_ids("b").unwrap().len(),1);
+}
+#[test]
+fn animation_preset_relative_keys_and_missing_effect() {
+    let mut f=Fixture::new();f.select(&["a"]);
+    let saved=parse(r#"{"schemaVersion":1,"id":"p","name":"Move","effects":[{"type":"unavailable","parameters":{},"enabled":true}],"properties":[{"path":"opacity","channel":{"v":50,"kf":[{"t":-0.5,"v":25},{"t":0.5,"v":75}]}}]}"#).unwrap();
+    let request=f.model.apply_preset(Caller::native(),&saved,&["a".into()],3.).unwrap(); f.run(request);
+    let layer=f.model.layer("a").unwrap();let keys=layer.get("p").unwrap().get("opacity").unwrap().get("kf").unwrap().as_array().unwrap();
+    assert_eq!(keys[0].get("t").and_then(Value::as_f64),Some(1.5));
+    assert_eq!(keys[1].get("t").and_then(Value::as_f64),Some(2.5));
+    assert_eq!(f.model.effect_ids("a").unwrap().len(),3);
+}
+
+#[test]
+fn animation_preset_selected_parameters_round_trip_keeps_other_defaults() {
+    let mut f = Fixture::new();
+    f.select(&["a"]);
+    let mut def = definition("blur");
+    def.params.push(ParamDefinition {
+        key: "radius".into(), kind: "number".into(), default: 12.into(),
+        min: None, max: None, reference: false,
+    });
+    f.model.register_effect(def);
+    let saved = f.model.capture_preset_parameters(
+        "a", "Amount only", &["f1".into()], &[],
+        Some(&["f1.amount".into()]), true, 2.,
+    ).unwrap();
+    let without = f.model.capture_preset_parameters("a", "No parameters", &["f1".into()], &[], Some(&[]), true, 2.).unwrap();
+    assert!(without.get("effects").unwrap().as_array().unwrap()[0].get("parameters").unwrap().as_object().unwrap().is_empty());
+    let params = saved.get("effects").unwrap().as_array().unwrap()[0].get("parameters").unwrap();
+    assert_eq!(params.as_object().unwrap().len(), 1);
+    assert!(params.get("amount").is_some());
+    assert!(params.get("radius").is_none());
+    let request = f.model.apply_preset(Caller::native(), &saved, &["b".into()], 4.).unwrap();
+    f.run(request);
+    let layer = f.model.layer("b").unwrap();
+    let effects = layer.get("fx").unwrap().as_array().unwrap();
+    let applied = effects.last().unwrap().get("p").unwrap();
+    assert_eq!(applied.get("amount").unwrap().get("v").and_then(Value::as_f64), Some(5.));
+    assert_eq!(applied.get("radius").unwrap().get("v").and_then(Value::as_f64), Some(12.));
+    f.undo();
+    assert_eq!(f.model.effect_ids("b").unwrap().len(), 1);
+}
