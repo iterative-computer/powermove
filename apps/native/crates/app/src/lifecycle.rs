@@ -902,8 +902,14 @@ impl Controller {
             return;
         }
         if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
-            // Close saves the project and completes its durability barrier.
-            // No unattended Save/Dont Save sheet may hold SIGTERM open.
+            // SIGTERM (logout, shutdown, a script): nobody can answer a Save
+            // question, and the file is never written without the person's
+            // choice. The window lets go of its project without closing it:
+            // the quit then leaves its unsaved work in the journal and the
+            // file as saved (`ShellCall::PrepareQuit` defers it), and the
+            // next open offers the work, as after a crash.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
             self.complete_close(intent, cx);
             return;
         }
@@ -1357,24 +1363,43 @@ mod tests {
         actor.shutdown();
     }
 
+    /// SIGTERM never writes over the person's file: the window lets go of
+    /// its project unclosed, the quit defers it, the file is as saved and
+    /// the next launch's open of it offers the unsaved work.
     #[test]
-    fn unattended_quit_saves_open_dirty_project_before_releasing_library() {
+    fn an_unattended_quit_leaves_the_file_and_the_next_launch_offers_the_work() {
         let (dir, actor, session) = fixture();
         let k = actor.handle();
         let file = dir.path().join("unattended.pmv");
-        answer(&k, ShellCall::SaveAs {
-            session: session.clone(), path: file.clone(), replace: false,
-        });
-        let before = std::fs::read(&file).unwrap();
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
         edit(&k);
         assert!(k.published("test").unwrap().dirty);
-        // The unattended controller uses Close, which saves and fsyncs,
-        // instead of archiving a rejected edit or waiting for a sheet.
-        expect_closed(k.shell(ShellCall::Close(session)).wait()).unwrap();
-        assert_ne!(std::fs::read(&file).unwrap(), before);
-        assert!(matches!(answer(&k, ShellCall::PrepareQuit), ShellReply::Compacted { .. }));
+        // The quit's steps once the window let go without a Close.
+        assert!(matches!(
+            answer(&k, ShellCall::PrepareQuit),
+            ShellReply::Compacted { .. }
+        ));
         answer(&k, ShellCall::ReleaseLibrary);
         actor.shutdown();
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        // The next launch: the work is there to offer.
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
     }
 
     fn edit(k: &KernelHandle) {
