@@ -2832,3 +2832,21 @@ fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppCon
         assert!(t.model().index.work[1] < end);
     });
 }
+
+/// PM-367: the shell's first word on the timeline's focus (unfocused, at the
+/// first layout) is a change, so the scene and the panel's rows both take
+/// the neutral selection; the accent comes back with the keyboard.
+#[gpui::test]
+fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let focused = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().map(|scene| scene.focused))
+    };
+    assert_eq!(focused(&s), Some(true));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert_eq!(focused(&s), Some(false));
+    assert!(!s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
+    assert_eq!(focused(&s), Some(true));
+}

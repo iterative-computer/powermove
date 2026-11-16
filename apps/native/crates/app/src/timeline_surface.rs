@@ -539,7 +539,10 @@ impl TimelineSurface {
             pointer: None,
             skim_playhead: None,
             hover_clip: None,
-            focused: false,
+            // As the scene and the panel's model start: the shell's first
+            // word (unfocused, at the first layout) is then a change, and
+            // both hear it.
+            focused: true,
             activation: None,
             media_over: None,
             effect_over: None,
