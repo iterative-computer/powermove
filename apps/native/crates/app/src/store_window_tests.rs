@@ -909,6 +909,52 @@ fn library_shows_an_update_notice_and_updates_then_uninstall_archives() {
     );
 }
 
+/// PM-435: a Library card that just runs has its switch in the corner and
+/// turns the extension off and on without uninstalling it; its "…" menu has
+/// v1.2.0's rest (Check for Updates, Show in Finder, Uninstall…).
+#[::core::prelude::v1::test]
+fn a_library_card_turns_its_extension_off_and_on_and_has_a_menu() {
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &profile,
+        "native",
+        &store_install::Request {
+            release: GLOW_NEW,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.1.0",
+        },
+    )
+    .unwrap();
+    let running = |f: &Fixture| {
+        pm_compat_runner::StoreAuthority::state(f.kernel.as_ref())
+            .extensions
+            .get("soft-glow")
+            .is_some_and(|e| e.enabled && !e.stopped_this_run())
+    };
+    assert!(running(&f));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
+    settle(&view, cx, "library", |v| {
+        matches!(&v.library, crate::store_window::Load::Ready(items) if items.len() == 1)
+    });
+    click(cx, "store-switch-soft-glow");
+    assert!(!running(&f), "off without uninstalling");
+    assert!(profile.join("extensions/soft-glow").exists());
+    click(cx, "store-switch-soft-glow");
+    assert!(running(&f), "on again");
+    click(cx, "store-more-soft-glow");
+    let rows = view.read_with(cx, |v, _| v.card_menu_rows());
+    assert_eq!(rows[0], "Check for Updates", "{rows:?}");
+    assert_eq!(rows.last().map(String::as_str), Some("Uninstall…"), "{rows:?}");
+    assert!(!rows.iter().any(|r| r.starts_with("Turn")), "the switch is the corner: {rows:?}");
+}
+
 #[::core::prelude::v1::test]
 fn an_update_answered_with_an_older_signed_release_is_refused_and_keeps_the_install() {
     let account = Arc::new(Mutex::new(Account::default()));

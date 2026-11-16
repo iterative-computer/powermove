@@ -24,6 +24,8 @@ export interface Extension {
   // Opaque resource, never a filesystem path or web URL.
   icon?: string;
   canArchive: boolean;
+  /** The host's lease for the row's on/off switch. */
+  binding?: string;
 }
 export interface SpeechModel {
   id: string;
