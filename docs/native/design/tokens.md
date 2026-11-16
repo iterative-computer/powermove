@@ -104,8 +104,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
-| `metrics.grade_field` | A colour wheel's master field under the wheel | 72 | 72 | 72 | 72 |
+| `metrics.grade_field` | Room for a colour wheel master's number beside its strip | 72 | 72 | 72 | 72 |
 | `metrics.grade_pair` | Least width of two colour wheels side by side on their plates | 254 | 254 | 254 | 254 |
+| `metrics.grade_pair_max` | Most width of two colour wheel plates side by side | 446 | 446 | 446 | 446 |
 | `metrics.grade_wheel` | A colour wheel's least diameter | 112 | 112 | 112 | 112 |
 | `metrics.grade_wheel_max` | A colour wheel's greatest diameter in a wide panel | 220 | 220 | 220 | 220 |
 | `metrics.group_radius` | Settings grouped-form card corner | 12 | 12 | 12 | 12 |

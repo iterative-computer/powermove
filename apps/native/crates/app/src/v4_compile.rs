@@ -156,6 +156,9 @@ pub enum Kit {
         /// Its master's push from neutral, -1 to 1 of the master's range
         /// (shown on the wheel's bezel).
         master: Option<f64>,
+        /// The master as its strip under the wheel sets it: its value and
+        /// range, and the binding a drag there writes.
+        master_strip: Option<(f64, [f64; 2], SharedString)>,
     },
     /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
     Curve {
@@ -1101,11 +1104,29 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 };
                 ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
             });
+            let master_strip = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("masterBinding"))
+                .and_then(Value::as_str)
+                .zip(option("master"))
+                .map(|(binding, value)| {
+                    (
+                        value,
+                        [
+                            option("masterMin").unwrap_or(neutral - 1.),
+                            option("masterMax").unwrap_or(neutral + 1.),
+                        ],
+                        SharedString::from(binding.to_owned()),
+                    )
+                });
             Kit::Wheel {
                 rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
                 neutral,
                 range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
                 master,
+                master_strip,
             }
         }
         Some(Component::CurveEditor) => Kit::Curve {
