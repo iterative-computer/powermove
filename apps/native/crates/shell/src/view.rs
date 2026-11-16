@@ -50,6 +50,10 @@ pub struct Editor {
     /// Parked panels: where each goes back, and the tab that was showing in
     /// its stack if it wasn't that panel, which shows again when it returns.
     parked: HashMap<String, (DropTarget, Option<String>)>,
+    /// The app's extension panels are still coming in (launch, a project
+    /// opening): a tab whose panel has not registered yet keeps its place
+    /// with a quiet body, not "Panel Unavailable" (`panels:waiting/ready`).
+    awaiting_panels: bool,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -128,6 +132,7 @@ impl Editor {
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
+            awaiting_panels: true,
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -499,7 +504,8 @@ impl Editor {
         let (Some(path), Some(state)) = (self.session_path.clone(), self.window_state()) else {
             return;
         };
-        let key = self.host.as_ref().is_some_and(|h| h.borrow().is_key());
+        let key = !crate::session::quitting()
+            && self.host.as_ref().is_some_and(|h| h.borrow().is_key());
         crate::session::write(&path, crate::session::Change::Upsert { state, key });
     }
     /// Removes this window from the session (the user closed it).
@@ -523,6 +529,10 @@ impl Editor {
             let _ = this.update(cx, |v, _| {
                 v.session_pending = false;
                 v.persist_session();
+                // A group moves as one: its other tabs take the new frame.
+                if let Some(h) = &v.host {
+                    h.borrow().persist_other_tabs();
+                }
             });
         })
         .detach();
@@ -605,6 +615,11 @@ impl Editor {
             return false;
         };
         let rest = parts.next().unwrap_or("");
+        if kind == "panels" && matches!(verb, "waiting" | "ready") {
+            self.awaiting_panels = verb == "waiting";
+            cx.notify();
+            return true;
+        }
         let panels = self.panels(cx);
         let result = match (kind, verb) {
             ("panel", "toggle") => {
@@ -1925,11 +1940,16 @@ impl Render for Editor {
                 let tiles =
                     crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
                 let first = tiles[0];
+                // The first pane is top-left: it has the body's bottom-left
+                // corner when it reaches the bottom, never the bottom-right.
+                let bottom = (first.y + first.h - (r.y + r.h)).abs() < 0.5;
+                h.borrow().viewer_corners.set([bottom, false]);
                 *h.borrow().viewer_tiles.borrow_mut() = tiles;
                 Some(first)
             }
             (Some(h), _) => {
                 h.borrow().viewer_tiles.borrow_mut().clear();
+                h.borrow().viewer_corners.set([true, true]);
                 viewer
             }
             _ => viewer,
@@ -1952,7 +1972,12 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
+        let viewer_corners = self.host.as_ref().map_or([true, true], |h| h.borrow().viewer_corners.get());
         let (ground, ground_alpha) = t.ground();
+        // The native layers in the holes round their bottom corners (the
+        // viewer a border inside its panel, an extension body its inset).
+        let viewer_radius = (m.panel_radius - m.border).max(0.);
+        let body_radius = (m.panel_radius - m.border.max(m.splitter_reach)).max(0.);
         let (line, line_alpha) = t.line();
         // Extension pages sit below GPUI too; their bodies are read at paint
         // time, after this frame's layout has recorded them.
@@ -2008,6 +2033,16 @@ impl Render for Editor {
                                 ))
                                 .background(tint(ground, ground_alpha)),
                             );
+                        }
+                        // The ground also fills what those layers round off.
+                        let fill = tint(ground, ground_alpha);
+                        if let Some(r) = canvas_viewer.filter(|_| native) {
+                            fill_rounded_off(window, r, viewer_radius, viewer_corners, fill);
+                        }
+                        if let Some(bodies) = &native_bodies {
+                            for (_, r) in bodies.borrow().iter() {
+                                fill_rounded_off(window, *r, body_radius, [true, true], fill);
+                            }
                         }
                     },
                 )
@@ -2192,15 +2227,37 @@ impl Render for Editor {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
-                native_bodies.push((
-                    id.to_string(),
-                    Rect {
-                        x: p.rect.x + edge,
-                        y: p.rect.y + m.header,
-                        w: (p.rect.w - edge * 2.).max(0.),
-                        h: (p.rect.h - m.header - edge).max(0.),
-                    },
-                ));
+                let body = Rect {
+                    x: p.rect.x + edge,
+                    y: p.rect.y + m.header,
+                    w: (p.rect.w - edge * 2.).max(0.),
+                    h: (p.rect.h - m.header - edge).max(0.),
+                };
+                native_bodies.push((id.to_string(), body));
+                // The panel's material everywhere around the page (its header
+                // and the edge it leaves the dividers), and in the corners the
+                // page rounds off: one surface, as every other panel.
+                let (whole, fill) = (p.rect, tint(c.panel, t.translucency.panel));
+                let radius = (m.panel_radius - edge).max(0.);
+                panel = panel.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            for r in layout::outside(whole, &[body]) {
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        point(px(r.x), px(r.y)),
+                                        gpui::size(px(r.w), px(r.h)),
+                                    ))
+                                    .background(fill),
+                                );
+                            }
+                            fill_rounded_off(window, body, radius, [true, true], fill);
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                );
             } else if self
                 .integration
                 .as_ref()
@@ -2564,8 +2621,11 @@ impl Render for Editor {
                 panel = panel.child(content);
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
+                let coming = !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
                 let (heading, line, action) = if panels.contains(&id) {
                     layout::empty_state(&id)
+                } else if coming {
+                    ("", "", None)
                 } else {
                     ("Panel Unavailable", unknown.as_str(), None)
                 };
@@ -2995,6 +3055,38 @@ impl Render for Editor {
             ),
         )
         .into_any_element()
+    }
+}
+
+/// Paints `color` in what a native layer filling `r` rounds off its bottom
+/// corners (`[left, right]`): continuous corners of `radius`, as the layer's.
+fn fill_rounded_off(window: &mut Window, r: Rect, radius: f32, [left, right]: [bool; 2], color: impl Into<Background> + Copy) {
+    use pm_design::corner::{continuous_corner, fit};
+    let radius = fit(radius as f64, r.w as f64, r.h as f64);
+    if radius <= 0. {
+        return;
+    }
+    let bottom = (r.y + r.h) as f64;
+    let at = |(x, y): (f64, f64)| point(px(x as f32), px(y as f32));
+    for (on, corner, along) in [
+        (left, (r.x as f64, bottom), (1., 0.)),
+        (right, ((r.x + r.w) as f64, bottom), (-1., 0.)),
+    ] {
+        if !on {
+            continue;
+        }
+        let (start, curves) = continuous_corner(corner, along, (0., -1.), radius);
+        let mut path = PathBuilder::fill();
+        path.move_to(at(curves[2][2]));
+        path.line_to(at(corner));
+        path.line_to(at(start));
+        for [a, b, to] in curves {
+            path.cubic_bezier_to(at(to), at(a), at(b));
+        }
+        path.close();
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
     }
 }
 

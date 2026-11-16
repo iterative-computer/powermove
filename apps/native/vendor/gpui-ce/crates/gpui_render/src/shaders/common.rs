@@ -143,6 +143,12 @@ mod source {
     pub struct ContentMask {
         pub bounds: Bounds,
         pub fade_out: Edges,
+        pub shape: Bounds,
+        pub corner_radii: Corners,
+        pub corner_smoothing: f32,
+        pub padding0: f32,
+        pub padding1: f32,
+        pub padding2: f32,
     }
 
     impl ContentMask {
