@@ -1030,7 +1030,14 @@ impl Controller {
         }
         if self.close_pending {
             if intent == Intent::Quit {
+                // This window's close is asking (Save, Don't Save) or still
+                // finishing: the quit stops, and says so where it stopped.
+                let asking = self.host.borrow().window.attachedSheet().is_some();
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":"Quit", "asking":asking, "closing":true}));
+                self.bring_forward();
                 cancel_quit(cx);
+                cx.notify();
             }
             return;
         }
