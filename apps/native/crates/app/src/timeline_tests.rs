@@ -2227,6 +2227,41 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
     );
     assert_eq!(selected(&s), ["l1".to_string()]);
 }
+/// As the app holds the panel (a cached view in its dock, the outline's rows
+/// in their scroll layer): a double-click on a layer's name opens its field.
+#[gpui::test]
+fn a_docked_panel_opens_a_layers_name_field_on_double_click(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(2), true);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+}
 /// A double-click on an unselected layer's name, as a person makes it: the
 /// second click lands before the first one's selection has re-rendered the
 /// row, and still opens the name field, whose name typed is the layer's.
