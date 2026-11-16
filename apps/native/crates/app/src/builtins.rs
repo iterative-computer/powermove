@@ -158,6 +158,9 @@ pub struct Host {
     /// The media inputs behind `media_runtime`, and the worker observing them.
     media_probed: Option<MediaProbeInputs>,
     media_probe_serial: u64,
+    /// Bumped whenever `media_runtime` is replaced: what the status line's
+    /// offline count is kept by (`FrameFacts::offline`).
+    pub media_observed: u64,
     updating: bool,
     again: bool,
     /// The status line asked for the missing files; the next update hands it
@@ -492,6 +495,7 @@ impl Controller {
             .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
         {
             self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+            self.builtins.media_observed += 1;
             return;
         }
         self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
@@ -521,6 +525,7 @@ impl Controller {
                             Some(p) => observed.rebound(media_stamp(p)),
                             None => observed,
                         };
+                        v.builtins.media_observed += 1;
                         v.update_builtins(cx);
                     }
                     Err(error) => {
@@ -963,6 +968,15 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
+        // The Export sheet's checks finished on their worker: its new state
+        // is published, then drained as any other publication.
+        if let Some(Ok(ticket)) = runtime.publish_finished_checks() {
+            cx.spawn(async move |this, cx| {
+                let _ = ticket.await;
+                let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+            })
+            .detach();
+        }
         let mut mounted = false;
         for id in runtime.take_cleared_overlays() {
             if let Some(overlays) = &self.builtins.overlays {
@@ -1960,6 +1974,43 @@ impl Controller {
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }
+                // Select part of the screen (v1's): the popover gives way to a
+                // crosshair over the editor; what is selected is attached, and
+                // the popover comes back either way.
+                "agent.pickRegion" => {
+                    let editor = self.host.borrow().window.clone();
+                    // The answer goes to the editor's window: the popover that
+                    // asked closes now, and its handle with it.
+                    let handle = cx
+                        .windows()
+                        .into_iter()
+                        .find(|h| {
+                            h.update(cx, |_, w, _| {
+                                crate::platform::ns_window(w)
+                                    .is_some_and(|n| {
+                                        objc2::rc::Retained::as_ptr(&n)
+                                            == objc2::rc::Retained::as_ptr(&editor)
+                                    })
+                            })
+                            .unwrap_or(false)
+                        })
+                        .unwrap_or_else(|| window.window_handle());
+                    self.close_agent(cx);
+                    let picked = pm_shell::region_pick::pick(&editor);
+                    cx.spawn(async move |this, cx| {
+                        let picked = picked.recv().await.ok().flatten();
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = this.update(cx, |v, cx| {
+                                if let Some(rect) = picked {
+                                    v.attach_region(rect, window, cx);
+                                }
+                                v.show_builtin("agent", window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
                 "agent.attach" => {
                     let target = crate::platform::ns_window(window)
                         .unwrap_or_else(|| self.host.borrow().window.clone());
@@ -2570,19 +2621,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         self.0.upgrade().is_some_and(|c| c.read(cx).playing())
     }
     fn frame(&self, _: Bounds<Pixels>, cx: &App) -> Option<crate::gizmo::ViewFrame> {
-        let controller = self.0.upgrade()?;
-        let v = controller.read(cx);
-        let slot = v.host.borrow().viewer_rect.get()?;
-        let scale = v.view.scale.get();
-        let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
-        Some(crate::gizmo::ViewFrame {
-            origin: point(
-                px(slot.x + (slot.w - w as f32) / 2. + v.view.shown_pan()[0] as f32),
-                px(slot.y + (slot.h - h as f32) / 2. + v.view.shown_pan()[1] as f32),
-            ),
-            scale,
-            size: v.dimensions,
-        })
+        self.0.upgrade()?.read(cx).composition_frame()
     }
     fn tool(&self, cx: &App) -> crate::gizmo::Tool {
         use crate::gizmo::Tool;

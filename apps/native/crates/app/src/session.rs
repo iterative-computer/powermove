@@ -71,10 +71,16 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
-    /// The project's Home poster, shown in the opening viewer's frame until
-    /// the viewer draws: the first picture waits for the open and for the
-    /// extensions the project draws with (PM-384).
+    /// The picture the viewer last showed for the opening project (or its
+    /// Home poster), in the opening viewer's frame until the viewer is
+    /// bound, then over the viewer until its first frame (`viewer_poster`):
+    /// the first picture waits for the open and for the extensions the
+    /// project draws with (PM-384).
     pub(crate) ghost_poster: Option<std::path::PathBuf>,
+    /// The picture the opening project's viewer stands in with until its
+    /// first real frame (`playback::Placeholder`); taken when its viewer is
+    /// bound.
+    pub(crate) viewer_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -156,6 +162,9 @@ pub struct Controller {
     pub message: String,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
+    /// What the shell reads from the project on every frame, kept per
+    /// revision (`crate::frame_facts`).
+    pub(crate) frame_facts: crate::frame_facts::FrameFacts,
     pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
     /// Home is asked for over this window's project (toolbar, File ▸ Projects…).
     pub home: bool,
@@ -381,16 +390,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
-    fn palette_effects(&self, cx: &App) -> Vec<(String, String)> {
-        crate::layer_commands::palette_effects(&self.0.read(cx).kernel.state())
+    fn palette_effects(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_effects(&c.kernel.state())
     }
-    fn palette_layers(&self, cx: &App) -> Vec<(String, String)> {
-        self.0
-            .read(cx)
-            .published
-            .as_deref()
-            .map(crate::layer_commands::palette_layers)
-            .unwrap_or_default()
+    fn palette_layers(&self, cx: &App) -> pm_shell::integration::Names {
+        let c = self.0.read(cx);
+        c.frame_facts.palette_layers(c.published.as_ref())
     }
     fn recent(&self, cx: &App) -> Vec<(String, String)> {
         self.0.read(cx).recent.clone()
@@ -519,6 +525,9 @@ impl pm_shell::integration::Integration for Bridge {
         );
         panels
     }
+    fn remembered_panel_titles(&self, cx: &App) -> Vec<(String, String)> {
+        crate::extensions::remembered_titles(&self.0.read(cx).profile)
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
@@ -629,7 +638,12 @@ impl pm_shell::integration::Integration for Bridge {
         panels::format_facts(c.dimensions, c.rate.to_f64())
     }
     fn status_alert(&self, cx: &App) -> String {
-        panels::offline_summary(self.0.read(cx).offline_count())
+        let c = self.0.read(cx);
+        panels::offline_summary(c.frame_facts.offline(
+            c.published.as_ref(),
+            c.builtins.media_observed,
+            || c.offline_count(),
+        ))
     }
     fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
         self.0.update(cx, |v, cx| v.show_offline_media(cx));
@@ -919,6 +933,7 @@ impl Controller {
             opening_name: None,
             ghost_aspect: None,
             ghost_poster: None,
+            viewer_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -969,6 +984,7 @@ impl Controller {
             message: "No project".into(),
             path: None,
             recent: vec![],
+            frame_facts: Default::default(),
             library: None,
             home: false,
             home_visible: false,
@@ -1385,16 +1401,12 @@ impl Controller {
             p.dirty,
             self.path.as_deref(),
         );
-        platform::history_labels(
-            p.history
-                .undo_label
-                .as_deref()
-                .filter(|_| p.history.can_undo),
-            p.history
-                .redo_label
-                .as_deref()
-                .filter(|_| p.history.can_redo),
-        );
+        // The menu bar is the app's: only the editor last in front names
+        // its Undo and Redo (a tab behind publishing its own history left
+        // a bare "Undo" over the front project's, PM-396).
+        if menu_editor_is(cx.entity_id()) {
+            history_menu(&p.history);
+        }
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
@@ -1903,10 +1915,16 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        // Its Home poster stands in the opening viewer, where one was kept.
-        self.ghost_poster =
-            Some(crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0)
-                .filter(|poster| poster.is_file());
+        // The picture the viewer last showed stands in the opening viewer
+        // until the project's first real frame; Home's poster where none
+        // was kept.
+        self.ghost_poster = [
+            crate::poster::last_frame_files(&self.profile, &open_id).0,
+            crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
+        ]
+        .into_iter()
+        .find(|poster| poster.is_file());
+        self.viewer_poster = self.ghost_poster.clone();
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -2911,6 +2929,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
+                        v.store_last_frame(None, cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
@@ -4511,5 +4530,44 @@ mod open_failure_tests {
                 alert.message
             );
         }
+    }
+}
+
+thread_local! {
+    /// The editor whose window was last in front: the Edit menu's Undo and
+    /// Redo name its history.
+    static MENU_EDITOR: std::cell::Cell<Option<gpui::EntityId>> = const { std::cell::Cell::new(None) };
+}
+/// Whether `editor` names the Edit menu's Undo and Redo (none chosen yet:
+/// any, so the first window's do).
+pub(crate) fn menu_editor_is(editor: gpui::EntityId) -> bool {
+    MENU_EDITOR.with(|m| m.get().is_none_or(|e| e == editor))
+}
+/// `editor`'s window came to the front: its history names the menu.
+pub(crate) fn set_menu_editor(editor: gpui::EntityId) {
+    MENU_EDITOR.with(|m| m.set(Some(editor)));
+}
+/// Undo and Redo named by `history` (each disabled when there is none).
+pub(crate) fn history_menu(history: &pm_kernel::actor::HistorySummary) {
+    platform::history_labels(
+        history.undo_label.as_deref().filter(|_| history.can_undo),
+        history.redo_label.as_deref().filter(|_| history.can_redo),
+    );
+}
+
+#[cfg(test)]
+mod menu_editor_tests {
+    /// PM-396: Undo and Redo name the history of the editor last in front;
+    /// another tab's publication leaves them as they are.
+    #[test]
+    fn only_the_editor_last_in_front_names_undo_and_redo() {
+        let (front, behind) = (gpui::EntityId::from(1u64), gpui::EntityId::from(2u64));
+        // Before any window comes to the front, the first editor's do.
+        assert!(super::menu_editor_is(behind));
+        super::set_menu_editor(front);
+        assert!(super::menu_editor_is(front));
+        assert!(!super::menu_editor_is(behind));
+        super::set_menu_editor(behind);
+        assert!(!super::menu_editor_is(front));
     }
 }

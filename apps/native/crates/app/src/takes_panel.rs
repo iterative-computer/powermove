@@ -312,10 +312,7 @@ impl Controller {
             let result = work.await;
             let _ = this.update(cx, |v, cx| {
                 v.takes.busy = false;
-                v.takes.status = match result {
-                    Ok(label) => done(label),
-                    Err(e) => e,
-                };
+                take_write_feedback(&mut v.takes.status, &mut v.message, result, done);
                 v.load_takes(cx);
                 cx.notify();
             });
@@ -492,4 +489,36 @@ fn render(
         );
     }
     body.into_any_element()
+}
+
+fn take_write_feedback(
+    panel: &mut String,
+    window: &mut String,
+    result: Result<String, String>,
+    done: impl FnOnce(String) -> String,
+) {
+    let message = match result {
+        Ok(label) => done(label),
+        Err(error) => error,
+    };
+    *panel = message.clone();
+    *window = message;
+}
+#[cfg(test)]
+mod take_feedback_tests {
+    use super::take_write_feedback;
+    #[test]
+    fn completed_take_writes_report_success_and_failure_in_the_window() {
+        for (result, expected) in [
+            (Ok("Opening shot".into()), "Saved Opening shot"),
+            (Err("The disk is full".into()), "The disk is full"),
+        ] {
+            let (mut panel, mut window) = (String::new(), String::new());
+            take_write_feedback(&mut panel, &mut window, result, |label| {
+                format!("Saved {label}")
+            });
+            assert_eq!(window, expected);
+            assert_eq!(panel, expected);
+        }
+    }
 }

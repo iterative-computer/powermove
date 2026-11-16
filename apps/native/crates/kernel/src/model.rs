@@ -328,21 +328,84 @@ pub struct LayerInfo {
     pub index: usize,
 }
 
+thread_local! {
+    static LAYER_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// How many walks of a composition's layers ([`list_layers`],
+/// [`layer_names`]) this thread has made: a hot path (a frame) can be shown
+/// to make none.
+pub fn layer_walks() -> u64 {
+    LAYER_WALKS.with(std::cell::Cell::get)
+}
+fn walked() {
+    LAYER_WALKS.with(|w| w.set(w.get() + 1));
+}
+/// Each layer's id and name in the composition `comp_id` (`None`: the open
+/// one), top of the stack first, named as [`list_layers`] names them: what a
+/// list of names needs (the command palette asks on every frame), nothing
+/// else read.
+pub fn layer_names(root: &Node, comp_id: Option<&str>) -> Vec<(String, String)> {
+    walked();
+    let open = open_comp_id(root);
+    let Some(comp) = comp_node(root, comp_id.or(open.as_deref())) else {
+        return Vec::new();
+    };
+    layers_of(comp)
+        .filter_map(|layer| {
+            let id = layer.get("id").and_then(str_of)?.to_owned();
+            let name = layer
+                .get("name")
+                .and_then(string_of)
+                .map(JsString::to_string_lossy)
+                .unwrap_or_default();
+            Some((id, name))
+        })
+        .collect()
+}
+
 /// The layers of the composition `comp_id` (`None`: the open one).
 pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
+    walked();
     let open = open_comp_id(root);
     let comp_id = comp_id.map(str::to_owned).or(open);
     let Some(comp) = comp_node(root, comp_id.as_deref()) else {
         return Vec::new();
     };
+    // Group layers by id, once: each layer's lock walks its group chain
+    // through this map (`is_locked` searches the stack per group, which over
+    // every layer of a large composition was quadratic: 41 ms for 867).
+    // The first group layer with an id wins, as `group_ancestors` finds it.
+    let mut groups: std::collections::HashMap<&str, &Node> = Default::default();
+    for l in layers_of(comp).filter(|l| l.get("type").and_then(str_of) == Some("group")) {
+        if let Some(id) = l.get("id").and_then(str_of) {
+            groups.entry(id).or_insert(l);
+        }
+    }
+    let locked = |layer: &Node| {
+        if layer.get("lock").and_then(bool_of) == Some(true) {
+            return true;
+        }
+        let mut seen: Vec<&str> = layer.get("id").and_then(str_of).into_iter().collect();
+        let mut next = layer.get("group").and_then(str_of).filter(|s| !s.is_empty());
+        while let Some(id) = next {
+            if seen.contains(&id) {
+                break;
+            }
+            seen.push(id);
+            let Some(group) = groups.get(id) else {
+                break;
+            };
+            if group.get("lock").and_then(bool_of) == Some(true) {
+                return true;
+            }
+            next = group.get("group").and_then(str_of).filter(|s| !s.is_empty());
+        }
+        false
+    };
     layers_of(comp)
         .enumerate()
         .filter_map(|(index, layer)| {
             let id = layer.get("id").and_then(str_of)?.to_owned();
-            let loc = LayerLoc {
-                comp_id: comp_id.clone(),
-                index,
-            };
             let from = layer.get("from").and_then(number_of).unwrap_or(0.0);
             let dur = layer.get("dur").and_then(number_of).unwrap_or(0.0);
             let on = layer.get("on");
@@ -370,7 +433,7 @@ pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
                 in_time: from,
                 out_time: from + dur,
                 locked: layer.get("lock").and_then(bool_of) == Some(true),
-                effectively_locked: is_locked(root, &loc),
+                effectively_locked: locked(layer),
                 visible,
                 solo: layer.get("solo").and_then(bool_of) == Some(true),
                 shy: layer.get("shy").and_then(bool_of) == Some(true),
