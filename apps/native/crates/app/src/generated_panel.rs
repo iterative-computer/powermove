@@ -1563,7 +1563,7 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     let tokens = v.host.borrow().tokens.clone();
     let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
     let root_alpha=if state.stage==panel_build::Stage::Erase {1.-panel_build::fade(state.changed.elapsed().as_secs_f32(),0.36)}else{1.};
-    let mut body=div().relative().size_full().overflow_hidden().opacity(root_alpha).bg(rgb(tokens.colors.panel)).child(overlay);
+    let mut body=div().relative().size_full().overflow_hidden().opacity(root_alpha).child(ground(&tokens,Some(&state))).child(overlay);
     if let Some((source,image))=web_capture {
         body=body.child(div().absolute().inset_0().overflow_hidden().filter(dot_filter(Some(&state),None,&tokens))
             .child(img(image).w(px(source.w as f32)).h(px(source.h as f32))));

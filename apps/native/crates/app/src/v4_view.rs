@@ -2350,6 +2350,7 @@ impl SurfaceView {
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
         if let Some(build)=&self.panel_build {
+            if id==0 || node.parent==Some(0) {element.style().background=None;}
             if node.component==Some(Component::InspectorRow) {
                 let index=self.build_rows().iter().position(|row|*row==id).unwrap_or(0);
                 element=element.filter(crate::generated_panel::dot_filter(Some(build),Some(index),&self.table.tokens))
