@@ -85,6 +85,10 @@ pub struct Session {
     last_run: Option<String>,
     settings_dirty: bool,
     access_dirty: bool,
+    /// The person accepted Full access for this thread in this session (its
+    /// consent card). Never saved: a restored or new thread asks again. A
+    /// run gets computer authority only with it (`launch`'s `Authority`).
+    pub computer_consent: bool,
     pub settings: Settings,
     pub catalog: Catalog,
     pub slash: crate::input::SlashMenu,
@@ -157,6 +161,7 @@ impl Session {
             last_run: v["lastRunId"].as_str().map(str::to_owned),
             settings_dirty: false,
             access_dirty: false,
+            computer_consent: false,
             settings: Settings::from_record(v),
             catalog: Catalog::default(),
             slash: crate::input::SlashMenu::default(),
@@ -339,6 +344,8 @@ pub enum EffectKind {
 pub enum ShellAction {
     Open,
     Close,
+    /// The docked composer gives the keyboard back to the editor (Escape).
+    Blur,
     Pin,
     BeginDrag,
     CancelDrag,
@@ -834,6 +841,14 @@ impl Panel {
     }
     pub fn submit(&mut self, id: &str, run_id: &str, request_id: &str, now: u64) -> Result<Effect> {
         let target = self.target(id)?;
+        // Full access without the person's consent never starts a run that
+        // would fail: the consent card asks again, the draft kept for Send.
+        let s = self.session(id)?;
+        if s.run.is_none() && s.settings.access == Access::Computer && !s.computer_consent {
+            if let Some(effect) = self.set_access(id, "full")? {
+                return Ok(effect);
+            }
+        }
         if target.run.is_none()
             && self
                 .sessions
@@ -1306,6 +1321,7 @@ impl Panel {
             })?,
             Pending::Consent(_) if accepted => {
                 s.settings.access = Access::Computer;
+                s.computer_consent = true;
                 s.settings_dirty = true;
                 s.access_dirty = true;
             }
@@ -1419,7 +1435,10 @@ impl Panel {
     pub fn set_access(&mut self, id: &str, permission: &str) -> Result<Option<Effect>> {
         let target = self.target(id)?;
         if permission == "full" {
-            if self.session(id)?.settings.access == Access::Computer {
+            // Full access with the person's consent stays; without it (a
+            // thread that reached it otherwise) the card asks again.
+            let s = self.session(id)?;
+            if s.settings.access == Access::Computer && s.computer_consent {
                 return Ok(None);
             }
             if self
@@ -1435,6 +1454,7 @@ impl Panel {
         }
         let s = self.sessions.get_mut(id).expect("validated");
         let revoke = s.settings.access == Access::Computer;
+        s.computer_consent = false;
         match permission {
             "editor" => s.settings.access = Access::Editor,
             "supervised" | "auto" | "project" => {
@@ -1828,5 +1848,59 @@ impl Panel {
         self.archive = archive;
         self.sessions.insert(id.into(), session);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+    use std::{collections::BTreeMap, io};
+    #[derive(Default)]
+    struct Memory(BTreeMap<String, Value>);
+    impl Store for Memory {
+        fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+            Ok(self.0.get(key).cloned())
+        }
+        fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+            self.0.insert(key.into(), value.clone());
+            Ok(())
+        }
+    }
+    #[test]
+    fn full_access_without_the_persons_consent_asks_again_instead_of_failing() {
+        let mut p = Panel::load(&mut Memory::default(), "p", "t", 0).unwrap();
+        // Accepted on its card: the thread runs with consent.
+        let ask = p.set_access("t", "full").unwrap().unwrap();
+        p.acknowledge(ask.id, true).unwrap();
+        assert!(p.session("t").unwrap().computer_consent);
+        // Full access reached without it (any path but the card): Send
+        // shows the card again and keeps the draft, no run, no error.
+        p.sessions.get_mut("t").unwrap().computer_consent = false;
+        p.draft_mut("t").unwrap().insert_text("go", 1, false);
+        let effect = p.submit("t", "run1", "request1", 2).unwrap();
+        assert!(matches!(effect.kind, EffectKind::ComputerConsent));
+        let s = p.session("t").unwrap();
+        assert!(s.run.is_none());
+        assert_eq!(s.draft.legacy().0, "go");
+        // Accepted again: Send starts the run.
+        p.acknowledge(effect.id, true).unwrap();
+        let send = p.submit("t", "run1", "request1", 3).unwrap();
+        assert!(matches!(send.kind, EffectKind::Send { .. }));
+    }
+    #[test]
+    fn a_restored_full_access_thread_asks_again() {
+        let mut store = Memory::default();
+        let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let ask = p.set_access("t", "full").unwrap().unwrap();
+        p.acknowledge(ask.id, true).unwrap();
+        p.save(&mut store, 1).unwrap();
+        let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+        let s = restored.session("t").unwrap();
+        assert!(!s.computer_consent, "consent is never saved");
+        assert_ne!(s.settings.access, Access::Computer);
+        assert!(matches!(
+            restored.set_access("t", "full").unwrap().map(|e| e.kind),
+            Some(EffectKind::ComputerConsent)
+        ));
     }
 }

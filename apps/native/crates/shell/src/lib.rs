@@ -14,6 +14,8 @@ pub fn set_tabs_mode(tabs: bool) {
 }
 pub mod agent_menu;
 #[cfg(target_os = "macos")]
+pub mod ease;
+#[cfg(target_os = "macos")]
 pub mod grade;
 #[cfg(target_os = "macos")]
 pub mod integration;
@@ -60,7 +62,8 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    apply_tabs_mode, editor_window_tabbing, live_window_ids, opens_in_place, project_menu_entries,
+    viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, live_window_ids,
+    opens_in_place, project_menu_entries,
     ADD, AgentStatus, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
     check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,
     send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
@@ -76,3 +79,5 @@ mod regression_models;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "../tests/dock_scroll.rs"]
 mod regression_dock_scroll;
+#[cfg(all(test, target_os = "macos"))]
+mod utility_capture_tests;

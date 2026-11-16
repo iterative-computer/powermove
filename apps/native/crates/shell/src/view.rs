@@ -576,6 +576,16 @@ impl Editor {
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
         MenuState {
+            palette_effects: self
+                .integration
+                .as_ref()
+                .map(|i| i.palette_effects(cx))
+                .unwrap_or_default(),
+            palette_layers: self
+                .integration
+                .as_ref()
+                .map(|i| i.palette_layers(cx))
+                .unwrap_or_default(),
             panels: panels
                 .ids()
                 .into_iter()
@@ -909,6 +919,34 @@ impl Editor {
             return;
         }
 
+        // Resolve a review drag from the actual divider, never screen constants.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = cmd.name.strip_prefix("reviewSplitter:") {
+            let parts: Vec<_> = rest.split(':').collect();
+            if let [panel, action, offset] = parts.as_slice()
+                && let Ok(offset) = offset.parse::<f32>()
+                && let Some(placed) = self
+                    .geometry
+                    .panels
+                    .iter()
+                    .find(|p| self.layout.docks[p.dock].groups[p.group].active() == *panel)
+                && let Some(divider) = self
+                    .geometry
+                    .dividers
+                    .iter()
+                    .find(|d| d.dock == placed.dock && d.group == Some(placed.group))
+            {
+                let (x, y) = (
+                    divider.rect.x + divider.rect.w / 2.,
+                    divider.rect.y + divider.rect.h / 2.,
+                );
+                let action = action.to_string();
+                window.defer(cx, move |window, cx| {
+                    crate::macos::review_splitter(&action, x, y, offset, window, cx);
+                });
+            }
+            return;
+        }
         self.slides.armed = true;
         // Development builds: `--open reviewViews` with `--save-dir` writes
         // the window's AppKit view tree there.
@@ -1243,6 +1281,80 @@ impl Editor {
             moved: true,
             preview,
         }));
+    }
+    /// A panel that is not in the workspace (the Agent popover, a window of
+    /// its own) dragged over it to `at` (this window's points): the same drop
+    /// preview a tab drag shows, for the panel as Pin would first place it.
+    /// True when a drop there would dock it.
+    pub fn drag_from_outside(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
+        let preview = self.outside_target(id, at, cx);
+        let original = match self.gesture.take() {
+            Some(Gesture::Panel(d)) => d.original,
+            _ => self.layout.clone(),
+        };
+        let pointer = point(px(at.0), px(at.1));
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            stack: false,
+            start: pointer,
+            original,
+            at: pointer,
+            moved: true,
+            preview,
+        }));
+        cx.notify();
+        preview.is_some()
+    }
+    /// Ends an outside drag as a drop: the panel docks where its preview
+    /// showed (the workspace changes as a Pin there would). False, with the
+    /// workspace untouched, when no target was lit.
+    pub fn drop_from_outside(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(Gesture::Panel(drag)) = self.gesture.take() else {
+            return false;
+        };
+        let Some(preview) = drag.preview.filter(|_| drag.id == id) else {
+            cx.notify();
+            return false;
+        };
+        let panels = self.panels(cx);
+        let mut next = self.layout.clone();
+        let docked = next
+            .show_panel(id, &panels)
+            .and_then(|_| next.move_panel_to(id, preview.target).or(Ok(())));
+        if let Err(error) = docked {
+            self.status = error.to_string();
+            cx.notify();
+            return false;
+        }
+        self.layout = next;
+        self.slides.armed = true;
+        self.save();
+        cx.notify();
+        true
+    }
+    /// An outside drag let go off any target, or cancelled: no preview, the
+    /// workspace as it was.
+    pub fn cancel_from_outside(&mut self, cx: &mut Context<Self>) {
+        if let Some(Gesture::Panel(drag)) = self.gesture.take() {
+            self.layout = drag.original;
+            cx.notify();
+        }
+    }
+    /// Where a panel from outside would dock at `at`: the layout with it
+    /// shown (as Pin shows it) asked as for a tab drag; over the group Pin
+    /// puts it in, that group itself.
+    fn outside_target(&self, id: &str, at: (f32, f32), cx: &App) -> Option<DropPreview> {
+        let panels = self.panels(cx);
+        let mut with = self.layout.clone();
+        with.show_panel(id, &panels).ok()?;
+        // A floating panel's own drag docks as the original app's did: near
+        // a side column's edge or between its panels; over the middle of
+        // the workspace it stays floating (`Layout::floating_drop_target`).
+        let preview =
+            with.floating_drop_target(&self.geometry, self.dock_bounds, at.0, at.1, &self.tokens)?;
+        let mut next = with.clone();
+        next.move_panel_to(id, preview.target).ok()?;
+        Some(preview)
     }
     /// Completes a simulated drag like a mouse-up; returns the applied target.
     #[doc(hidden)]
@@ -1727,30 +1839,12 @@ fn positioned(r: Rect) -> Div {
 /// Centred empty state (language §9/§14): `heading` + one `reading` line.
 /// Callers may append one action.
 pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
-    let (c, ty) = (&t.colors, t.typography);
-    div()
+    crate::kit::empty_state(t, "tray", heading, line)
         .w_full()
-        .flex()
-        .flex_col()
-        .items_center()
         .justify_center()
-        .gap(px(t.metrics.border * 2.))
-        .px(px(t.metrics.inset))
-        .child(
-            div()
-                .text_size(px(ty.heading))
-                .font_weight(FontWeight(ty.semibold_weight))
-                .text_color(rgb(c.secondary))
-                .child(heading.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(ty.reading))
-                .text_color(rgb(c.muted))
-                .text_center()
-                .child(line.to_string()),
-        )
+        .px(px(t.space.xxl))
 }
+
 pub use crate::kit::tooltip;
 impl Editor {
     /// Home fills the window below the toolbar: no docks, no viewer slot,
@@ -2001,7 +2095,8 @@ impl Render for Editor {
         // the main viewer, the host draws the others (3d-studio.md §2).
         let viewer = match (&self.host, viewer) {
             (Some(h), Some(r)) if h.borrow().viewer_split.get() > 1 => {
-                let tiles = crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
+                let tiles =
+                    crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
                 let first = tiles[0];
                 *h.borrow().viewer_tiles.borrow_mut() = tiles;
                 Some(first)
@@ -2184,8 +2279,7 @@ impl Render for Editor {
                 }
             })
             .on_mouse_up_all({
-                let listener =
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
+                let listener = cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
                 move |e: &MouseUpEvent, phase, _, w, cx| {
                     if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
                         listener(e, w, cx);
@@ -2519,7 +2613,7 @@ impl Render for Editor {
                                 cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
                                 this.begin_panel_drag(&tabid, e.position, false);
-                        this.watch_release(cx);
+                                this.watch_release(cx);
                                 window.focus(&this.focus, cx);
                                 cx.notify();
                             }),
@@ -2668,6 +2762,10 @@ impl Render for Editor {
                 }
                 continue;
             }
+            if let (Some(i), Some(f)) = (self.integration.clone(), self.panel_focus.get(&id)) {
+                let focused = f.contains_focused(w, cx);
+                i.panel_focused(&id, focused, cx);
+            }
             let content = self
                 .integration
                 .as_ref()
@@ -2775,13 +2873,11 @@ impl Render for Editor {
                     let half = |first: bool| {
                         let (from, to) = if first { (0., 1.) } else { (1., 0.) };
                         let angle = if d.horizontal { 90. } else { 180. };
-                        div()
-                            .flex_1()
-                            .bg(linear_gradient(
-                                angle,
-                                linear_color_stop(crate::kit::ink(c.accent, from), 0.),
-                                linear_color_stop(crate::kit::ink(c.accent, to), 1.),
-                            ))
+                        div().flex_1().bg(linear_gradient(
+                            angle,
+                            linear_color_stop(crate::kit::ink(c.accent, from), 0.),
+                            linear_color_stop(crate::kit::ink(c.accent, to), 1.),
+                        ))
                     };
                     let bar = div()
                         .absolute()
@@ -2934,7 +3030,9 @@ impl Render for Editor {
             if let Some(p) = drag.preview {
                 // The original app outlines the panel it lands on or beside.
                 let target = match p.near {
-                    layout::Near::Tab(d, g) | layout::Near::Above(d, g) | layout::Near::Below(d, g) => self
+                    layout::Near::Tab(d, g)
+                    | layout::Near::Above(d, g)
+                    | layout::Near::Below(d, g) => self
                         .geometry
                         .panels
                         .iter()
@@ -2968,7 +3066,11 @@ impl Render for Editor {
                     let spans = self.geometry.tabs.get(&(d, g));
                     let x = spans
                         .and_then(|s| s.iter().find(|(i, ..)| *i == index).map(|(_, l, _)| *l))
-                        .or_else(|| spans.and_then(|s| s.last()).map(|(_, _, r)| r + TAB_SPACING))
+                        .or_else(|| {
+                            spans
+                                .and_then(|s| s.last())
+                                .map(|(_, _, r)| r + TAB_SPACING)
+                        })
                         .unwrap_or(r.x + m.inset);
                     let x = x.min(r.x + r.w - m.hit * 2.).max(r.x);
                     root = root.child(
@@ -3535,6 +3637,77 @@ mod tests {
             .unwrap();
     }
 
+    /// The Agent popover dragged over the workspace by its own header: as
+    /// the original app's floating panel, it docks only near a side column
+    /// (its edge, between its panels) with the same drop preview a tab drag
+    /// shows; over the middle it stays floating; a cancel changes nothing.
+    #[gpui::test]
+    fn a_panel_dragged_in_from_outside_docks_where_its_preview_shows(cx: &mut TestAppContext) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            if v.layout.find("agent").is_some() {
+                v.layout.close_panel("agent").unwrap();
+            }
+        });
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        // 1. Over the middle of the viewer: nothing lit, it stays floating.
+        let viewer = view.read_with(cx, |v, _| {
+            let (d, g, _) = v.layout.find("viewer").unwrap();
+            v.geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect
+        });
+        let middle = (viewer.x + viewer.w / 2., viewer.y + viewer.h / 2.);
+        assert!(!view.update(cx, |v, cx| v.drag_from_outside("agent", middle, cx)));
+        assert!(!view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+        // 2. Somewhere along a side column: lit, and it docks in that column.
+        let bounds = view.read_with(cx, |v, _| v.dock_bounds);
+        let mut lit = None;
+        'find: for i in 0..=96 {
+            for j in 0..=48 {
+                let at = (
+                    bounds.x + bounds.w * i as f32 / 96.,
+                    bounds.y + bounds.h * j as f32 / 48.,
+                );
+                if view.update(cx, |v, cx| v.drag_from_outside("agent", at, cx)) {
+                    lit = Some(at);
+                    break 'find;
+                }
+            }
+        }
+        assert!(lit.is_some(), "a side column takes the floating panel");
+        assert!(view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            let (dock, _, _) = v.layout.find("agent").expect("docked");
+            assert!(
+                matches!(v.layout.docks[dock].id.as_str(), "left" | "right"),
+                "in a side column, as the original app docks a floating panel"
+            );
+        });
+        // 3. A cancelled drag leaves the workspace as it was.
+        view.update(cx, |v, cx| {
+            v.layout = before.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            v.drag_from_outside("agent", lit.unwrap(), cx);
+            v.cancel_from_outside(cx);
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before, "a cancelled drag leaves the workspace");
+        });
+    }
+
     /// A drag whose release never reaches the window (AppKit delivered it
     /// elsewhere, owner feedback W4) ends at the next sign the button is up:
     /// a move with no button lands the panel where its preview showed, and a
@@ -3843,10 +4016,7 @@ mod tests {
         // Inside a panel, away from every gap, the cursor is the arrow.
         let panel = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
         cx.simulate_mouse_move(
-            point(
-                px(panel.x + panel.w / 2.),
-                px(panel.y + panel.h / 2.),
-            ),
+            point(px(panel.x + panel.w / 2.), px(panel.y + panel.h / 2.)),
             None,
             none,
         );

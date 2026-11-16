@@ -237,6 +237,7 @@ impl Owner {
                     HostEvent::DockContent { .. }
                     | HostEvent::DockScroll { .. }
                     | HostEvent::DockReveal { .. } => (),
+                    HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),

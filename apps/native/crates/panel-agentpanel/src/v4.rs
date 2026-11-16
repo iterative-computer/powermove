@@ -663,6 +663,35 @@ mod tests {
         assert!(act(&mut p, json!({"type":"shell","action":"invented"})).is_err());
     }
     #[test]
+    fn escape_in_the_docked_composer_gives_the_keyboard_back_and_never_closes_the_panel() {
+        // Chike: the docked composer kept the keyboard, so Space typed into
+        // it instead of playing. Escape there hands the keyboard back.
+        let mut p = panel();
+        let docked = |p: &mut Panel, v: Value| {
+            dispatch(
+                p,
+                "thread",
+                &v,
+                Context {
+                    run: "run",
+                    request: "request",
+                    new_thread: "new",
+                    now: 10,
+                    popover_open: false,
+                    catalogs: &|_| Default::default(),
+                },
+            )
+        };
+        let e = docked(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Blur)));
+        // A run's reply, a new thread or a model pick asks nothing of the
+        // keyboard: no effect takes it for the composer.
+        let e = act(&mut p, json!({"type":"newThread"})).unwrap();
+        assert!(!e.is_some_and(|e| matches!(e.kind, EffectKind::Shell(_))));
+    }
+    #[test]
     fn escape_in_the_popover_composer_closes_it_unless_the_shortcuts_menu_takes_it() {
         // The reported bug: Escape in the composer never closed the popover.
         let mut p = panel();

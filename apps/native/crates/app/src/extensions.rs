@@ -18,7 +18,7 @@ use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, tr
 use pm_text::host::BrokerResolver;
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     rc::Rc,
@@ -928,11 +928,30 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu_with_tail(locations, entries, vec![], at, cx)
+    }
+    /// As `extension_menu`, with `tail` after what extensions add (the
+    /// viewer's composition rows close its canvas menu, as viewer.ts).
+    pub fn extension_menu_with_tail(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        tail: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        let with_tail = |mut entries: Vec<MenuEntry>| {
+            if !tail.is_empty() {
+                entries.push(MenuEntry::separator());
+                entries.extend(tail);
+            }
+            entries
+        };
         let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
         let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
         if !compat && runtime.is_none() {
-            return Some(entries);
+            return Some(with_tail(entries));
         }
         cx.spawn(async move |this, cx| {
             let (extra, locations) = match runtime {
@@ -955,7 +974,7 @@ impl Controller {
                     entries.push(MenuEntry::separator());
                     entries.extend(extra);
                 }
-                v.open_compat_menu(locations, entries, at, cx);
+                v.open_compat_menu(locations, with_tail(entries), at, cx);
             });
         })
         .detach();
@@ -1764,7 +1783,9 @@ impl Controller {
         if !self.extensions.settle_pending && self.extensions.sent.borrow().moving() {
             self.extensions.settle_pending = true;
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(PLACEMENT_LAG + PLACEMENT_LAG / 4).await;
+                cx.background_executor()
+                    .timer(PLACEMENT_LAG + PLACEMENT_LAG / 4)
+                    .await;
                 let _ = this.update(cx, |v, cx| {
                     v.extensions.settle_pending = false;
                     cx.notify();
@@ -1936,6 +1957,9 @@ impl Controller {
                 return;
             }
         };
+        let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+        let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+        let _ = host.update_native_style(&light, &dark, tokens.scheme);
         let spec = PanelSpec {
             id: PAGE_PANEL,
             label: "Extension panels".into(),
@@ -1948,8 +1972,12 @@ impl Controller {
         // its own, whatever the editor's window does. In the editor's, a window
         // behind others or hidden held the page back (its answers came 3 to 7
         // times slower and the export took 2 to 4 times as long as in front).
+        // An explicit background review launch keeps WebKit working while the
+        // editor is occluded, in the editor's window.
         let exporting = key.starts_with(EXPORT_PAGE);
-        if exporting && host.begin_background_job(true).is_err() {
+        let background_review = cfg!(debug_assertions)
+            && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
+        if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
         if !exporting {
@@ -1969,14 +1997,19 @@ impl Controller {
         let clips = shell.native_panel_clips.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
-        // The panels' ground under the page (`translucency.panel` over the
-        // window's material, as the shell paints a panel).
-        let fill = {
-            let t = &shell.tokens;
-            let c = t.colors.panel;
-            let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
-            [channel(16), channel(8), channel(0), f64::from(t.translucency.panel)]
-        };
+        // Native panel over native window tint, over the shared material.
+        let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(&shell.tokens)));
+        let themed_fill = fill.clone();
+        let themed_views = self.extensions.views.clone();
+        shell.native_style = Some(Rc::new(move |tokens| {
+            themed_fill.set(pm_compat_host::native_style::panel_backing(tokens));
+            let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
+            let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
+            let css = pm_compat_host::native_style::stylesheet(&light, &dark);
+            for page in themed_views.borrow().values() {
+                let _ = page.borrow().set_native_style(&css, tokens.scheme);
+            }
+        }));
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -1987,7 +2020,8 @@ impl Controller {
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
                 let stage = stage.get().filter(|_| key.is_empty());
-                let to_rect = |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+                let to_rect =
+                    |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
                 let mine: Vec<(&String, Rect)> = bodies
                     .iter()
                     .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
@@ -2013,7 +2047,7 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            let mask = sent.mask(id, *r);
+                            let mask = if host.panel_layout_applied(id, *r) { *r } else { sent.mask(id, *r) };
                             let clip = clipped(id, *r);
                             Rect::new(
                                 mask.x.max(clip.x),
@@ -2027,13 +2061,17 @@ impl Controller {
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
                 });
-                let _ = host.set_regions(panel_regions.into_iter().chain(overlay_regions).collect());
+                if !(cfg!(debug_assertions)
+                    && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
+                {
+                    let _ = host.place_panels(
+                        mine.iter().map(|(id, rect)| ((*id).clone(), *rect)).collect(),
+                    );
+                }
+                let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
-                host.set_fill(Some(fill));
-                // The ground is the panels': the viewer's stage shows the
-                // viewer through the page, never under a panel's tint.
-                let _ = host.set_fill_regions(Some(mine.iter().map(|(_, r)| *r).collect()));
+                host.set_fill(Some(fill.get()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,
@@ -2241,6 +2279,7 @@ impl Controller {
                         .host
                         .borrow()
                         .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
+                    HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),
@@ -2334,12 +2373,18 @@ mod tests {
         let t0 = Instant::now();
         let mut sent = Placements::default();
         // Upper and lower panels, the splitter between them at y = 400.
-        let (upper, lower) = (Rect::new(0., 100., 300., 300.), Rect::new(0., 408., 300., 300.));
+        let (upper, lower) = (
+            Rect::new(0., 100., 300., 300.),
+            Rect::new(0., 408., 300., 300.),
+        );
         sent.record("upper", upper, t0);
         sent.record("lower", lower, t0);
         // Dragged down 120 pt: the upper grows, the lower shrinks from its top.
         let t1 = t0 + Duration::from_millis(16);
-        let (upper2, lower2) = (Rect::new(0., 100., 300., 420.), Rect::new(0., 528., 300., 180.));
+        let (upper2, lower2) = (
+            Rect::new(0., 100., 300., 420.),
+            Rect::new(0., 528., 300., 180.),
+        );
         sent.record("upper", upper2, t1);
         sent.record("lower", lower2, t1);
         let (mu, ml) = (sent.mask("upper", upper2), sent.mask("lower", lower2));

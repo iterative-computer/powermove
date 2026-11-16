@@ -1839,6 +1839,11 @@ pub fn empty_state(
             None,
         ),
         "color" => ("No Selection", "Select a layer to grade it.", None),
+        "easing" => (
+            "No Keyframes",
+            "Select keyframes in the timeline to ease them.",
+            None,
+        ),
         "scopes" => ("No Picture", "Open a composition to see its scopes.", None),
         "mixer" => ("No Audio", "No audio in this composition.", None),
         "captions" => ("No Captions", "Open a project to see its captions.", None),
@@ -1892,6 +1897,7 @@ fn builtin_title(id: &str) -> &str {
         "perf" => "Performance",
         "notes" => "Notes",
         "color" => "Color",
+        "easing" => "Easing",
         "scopes" => "Scopes",
         "mixer" => "Mixer",
         "captions" => "Captions",
@@ -1910,7 +1916,7 @@ pub fn stacks(id: &str) -> bool {
     id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 17] = [
+pub const PANELS: [&str; 18] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1923,6 +1929,7 @@ pub const PANELS: [&str; 17] = [
     "perf",
     "notes",
     "color",
+    "easing",
     "scopes",
     "mixer",
     "captions",

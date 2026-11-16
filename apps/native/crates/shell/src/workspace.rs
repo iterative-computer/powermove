@@ -91,6 +91,8 @@ pub fn preset(id: &str) -> Option<Value> {
                     vec![
                         panel("inspector", None),
                         panel("fxbrowser", Some(DEFAULT_EFFECTS)),
+                        // Easing tabs with Effects, under Properties.
+                        tab("easing"),
                     ],
                 ),
             ],
@@ -130,7 +132,14 @@ pub fn preset(id: &str) -> Option<Value> {
                     None,
                     vec![panel(VIEWER, Some(300.)), panel("timeline", None)],
                 ),
-                dock("right", Some(320.), vec![panel("inspector", None)]),
+                dock(
+                    "right",
+                    Some(320.),
+                    vec![
+                        panel("inspector", None),
+                        panel("easing", Some(DEFAULT_EFFECTS)),
+                    ],
+                ),
             ],
         ),
         "shaderlab" => record(

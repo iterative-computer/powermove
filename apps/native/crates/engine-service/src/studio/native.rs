@@ -633,7 +633,13 @@ impl SceneSource for DocumentSource {
                 position: eye,
                 target,
                 fov: fov.to_degrees(),
-                f_stop: if matches!(choice, super::ViewCamera::Orthographic { .. }) {
+                f_stop: if matches!(
+                    choice,
+                    super::ViewCamera::Orthographic { .. }
+                        | super::ViewCamera::Custom {
+                            view: FreeView { ortho: true, .. }
+                        }
+                ) {
                     0.
                 } else {
                     n(cp, "fStop", 0.)
@@ -1104,7 +1110,8 @@ impl SceneSource for DocumentSource {
         }
         let basis = if view.is_some() {
             let (forward, right, up) = scene.camera.basis();
-            Some([forward, right, up])
+            let (s, c) = (view.unwrap().roll as f32).to_radians().sin_cos();
+            Some([forward, right * c + up * s, up * c - right * s])
         } else {
             r.camera_up.map(|up| {
                 let f = (target - eye).normalize();
@@ -1182,6 +1189,11 @@ impl SceneSource for DocumentSource {
                 ambient,
                 orthographic_span: match choice {
                     super::ViewCamera::Orthographic { span, .. } => Some(*span as f32 * 0.5),
+                    super::ViewCamera::Custom { view } if view.ortho => Some(
+                        (target - eye).length() * (n(cp, "fov", 45.).to_radians() / 2.).tan()
+                            / zoom,
+                    ),
+                    super::ViewCamera::Custom { .. } => None,
                     _ => (c["projection"] == "orthographic").then(|| 3. / zoom),
                 },
                 clip_planes: Some(match choice {

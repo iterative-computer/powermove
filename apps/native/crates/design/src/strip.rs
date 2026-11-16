@@ -385,6 +385,15 @@ impl Tokens {
             oklch(0.56, 0.14, hue)
         }
     }
+    /// A selected key's ring in the graph: v1's green, in this appearance.
+    pub fn graph_key_selected(&self) -> u32 {
+        let (_, _, hue) = to_oklch(self.colors.labels.green);
+        if self.scheme == Scheme::Dark {
+            oklch(0.83, 0.15, hue)
+        } else {
+            oklch(0.6, 0.15, hue)
+        }
+    }
     /// The graph's selected direction handles: v1's yellow, in this appearance.
     pub fn graph_handle_selected(&self) -> u32 {
         let (_, _, hue) = to_oklch(self.colors.labels.yellow);

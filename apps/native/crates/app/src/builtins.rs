@@ -14,6 +14,19 @@ type MediaProbeInputs = (
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
 );
+/// The viewer overlays a native Metal layer and must join each shell repaint,
+/// including the loading reveal, even when its panel publication is unchanged.
+/// The timeline's body can reuse its retained paint.
+pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElement {
+    if id == "viewer" {
+        view.clone().into_any_element()
+    } else {
+        view.clone()
+            .cached(StyleRefinement::default().size_full())
+            .into_any_element()
+    }
+}
+
 /// How long a panel's scroll thumb stays after the last scroll.
 const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
@@ -63,6 +76,9 @@ pub struct Host {
     /// toolbar item has parked it (hidden, its place kept).
     pub agent_docked: bool,
     pub agent_parked: bool,
+    /// Where the Agent popover was last put down, from its editor's
+    /// top-left corner (GPUI points): it reopens there in this window.
+    pub agent_place: Option<(f32, f32)>,
     project: Option<String>,
     document: Option<u64>,
     application: bool,
@@ -285,6 +301,7 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        self.poll_linked_sync(cx);
         self.wire_effect_desk();
         let check = runtime.clone();
         let mounting = project.clone();
@@ -351,6 +368,7 @@ impl Controller {
                             .as_ref()
                             .is_some_and(|r| std::ptr::eq(Arc::as_ptr(r), runtime.as_ptr()))
                         {
+                            v.poll_linked_sync(cx);
                             v.drain_builtins(cx);
                         }
                     })
@@ -761,10 +779,21 @@ impl Controller {
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
                 }
-                c
+                // A provider row keeps the menu open: its models follow.
+                c.stays(o["stays"] == true)
             })
             .collect();
         let values = options.iter().map(|o| o["value"].clone()).collect();
+        // The rows of a menu still open after a row that stays was chosen:
+        // they replace the open menu's in place, no closing and reopening.
+        if request.input["update"] == true {
+            if self.host.borrow_mut().update_menu(choices) {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values));
+            } else {
+                runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            return;
+        }
         self.builtins.agent_pick = Some((runtime.clone(), request.id, values));
         self.host.borrow_mut().open_menu(
             owner,
@@ -1127,7 +1156,7 @@ impl Controller {
                     .w_full()
                     .h(px(body))
                     .overflow_hidden()
-                    .child(view.clone().cached(StyleRefinement::default().size_full()))
+                    .child(fixed_body_view(id, &view))
                     .child(keep)
                     .into_any_element(),
             );
@@ -1303,6 +1332,16 @@ impl Controller {
     /// The Agent popover goes away (Escape, a press outside it, the toolbar
     /// item, the panel's own close). Its conversation, draft and runs stay
     /// with the panel's model, so reopening shows them as they were.
+    /// The popover was dragged onto a dock target and the workspace docked
+    /// the panel there: the popover window goes, as Pin's does.
+    pub fn agent_dropped_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.builtins.windows.remove("agent") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+        self.builtins.agent_parked = false;
+        self.update_builtins(cx);
+        cx.notify();
+    }
     pub fn close_agent(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.builtins.windows.remove("agent") else {
             return;
@@ -1409,10 +1448,15 @@ impl Controller {
         // other panel windows cascade from the editor's top-left corner.
         let editor = window.bounds();
         let origin = if id == "agent" {
-            point(
-                editor.right() - px(width + m.gap),
-                editor.top() + px(m.toolbar + m.gap),
-            )
+            // Where it was last put down, still inside this window below
+            // its toolbar; else under the toolbar's Agent item.
+            let (x, y) = self.builtins.agent_place.unwrap_or((
+                f32::from(editor.size.width) - width - m.gap,
+                m.toolbar + m.gap,
+            ));
+            let x = x.min(f32::from(editor.size.width) - width).max(0.);
+            let y = y.min(f32::from(editor.size.height) - height).max(m.toolbar);
+            editor.origin + point(px(x), px(y))
         } else {
             editor.origin + point(px(m.toolbar), px(m.toolbar))
         };
@@ -1482,6 +1526,10 @@ impl Controller {
             let mut options = WindowOptions::new().kind(kind);
             options.parent = parent;
             if popover.is_some() {
+                // AppKit never drags the popover: the app moves it by its
+                // header (`popover_drag`), held in the editor, no event
+                // reaching what is under it.
+                options.is_movable = false;
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
@@ -1554,7 +1602,14 @@ impl Controller {
                             })
                             .detach();
                         }
-                        SurfaceWindow { owner, panel, keys, chrome: None }
+                        SurfaceWindow {
+                            owner,
+                            panel,
+                            keys,
+                            drag: None,
+                            editor: parent,
+                            chrome: None,
+                        }
                     })
                 },
             );
@@ -1562,6 +1617,16 @@ impl Controller {
                 v.builtins.opening_windows.remove(&id);
                 match result {
                     Ok(handle) => {
+                        // The popover opens ready to type: its composer
+                        // takes the keys once mounted, those typed before it
+                        // included (`SurfaceView::focus_when_ready`).
+                        if id == "agent"
+                            && let Some(view) = v.builtins.views.get("agent").cloned()
+                        {
+                            view.update(cx, |view, cx| {
+                                view.focus_when_ready("agent-composer-text", cx)
+                            });
+                        }
                         // Settings' AppKit frame goes on once GPUI hears its
                         // view's size changes (after the window is built).
                         if settings {
@@ -1640,16 +1705,13 @@ impl Controller {
         if pm_kernel::model::comp_node(root, Some(id)).is_none() {
             return;
         }
-        let mut value = root.to_value();
-        if let Some(object) = value.as_object_mut() {
-            object.insert("compId", pm_model::Value::from(id));
+        if let Some(viewer) = &self.viewer {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
         }
         self.call(
-            pm_kernel::Call::Restore {
-                project: value,
-                label: "Open Composition".into(),
-                expected_revision: p.revision(),
-                expected_document: p.snapshot.doc_id,
+            pm_kernel::Call::OpenComposition {
+                comp_id: id.into(),
+                document: p.snapshot.doc_id,
             },
             cx,
         );
@@ -1691,6 +1753,9 @@ impl Controller {
                                 .cloned()
                                 .unwrap_or_default();
                             self.host.borrow().send_command(name, args);
+                        }
+                        Some("compositionSettings") => {
+                            self.composition_sheet(true, request.input["id"].as_str().map(str::to_owned), cx);
                         }
                         Some("openComposition") => {
                             self.open_builtin_composition(
@@ -1997,9 +2062,17 @@ impl Controller {
                     }
                     Ok(Value::Null)
                 }
+                // Escape in the docked composer: it lets go of the keyboard
+                // and the editor has it again (Space plays).
+                "agent.blur" => {
+                    if let Some(view) = self.builtins.views.get("agent").cloned() {
+                        view.update(cx, |v, cx| v.blur_semantic("agent-composer-text", cx));
+                    }
+                    Ok(Value::Null)
+                }
                 "agent.close" => {
-                    // Docked, Close takes it out of the workspace: the Agent
-                    // item opens the popover again (agent-panel.md §1).
+                    // Docked, Close takes it out of the workspace and the
+                    // popover opens again (`returns_to_popover`, agent-panel.md §1).
                     if self.builtins.agent_docked {
                         self.host.borrow().send_command("panel:close:agent", vec![]);
                     }
@@ -2589,17 +2662,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
                 let entries = vec![
-                    pm_shell::MenuEntry::submenu(
-                        "New",
-                        vec![
-                            pm_shell::MenuEntry::item("Solid", "newSolid"),
-                            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
-                            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
-                            pm_shell::MenuEntry::item("Null Object", "newNull"),
-                            pm_shell::MenuEntry::separator(),
-                            pm_shell::MenuEntry::item("Composition…", "newComposition"),
-                        ],
-                    ),
+                    viewer_new_menu(),
                     // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
                     pm_shell::MenuEntry::submenu(
                         "Add 3D Layer",
@@ -2614,8 +2677,11 @@ impl crate::gizmo::Host for ControllerDelegate {
                             .collect(),
                     ),
                 ];
+                // Then the whole composition, then the view (viewer.ts).
+                let tail = canvas_menu_tail(!v.layers().is_empty());
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
-                if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
+                if let Some(entries) = v.extension_menu_with_tail(locations, entries, tail, at, cx)
+                {
                     v.host.borrow().context_menu(&entries, at.0, at.1);
                 }
             });
@@ -2706,8 +2772,152 @@ struct SurfaceWindow {
     owner: Entity<Controller>,
     panel: String,
     keys: PopoverKeys,
+    /// The Agent popover's header drag in progress.
+    drag: Option<crate::popover_drag::HeaderDrag>,
+    /// The editor window it belongs to (its drop targets, its bounds).
+    editor: Option<AnyWindowHandle>,
     /// Settings' AppKit chrome (the owner holds it too, to update it).
     chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
+}
+impl SurfaceWindow {
+    /// A press on the popover's header: a drag begins once the pointer
+    /// leaves the threshold (before that it is the header's own press).
+    fn begin_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::{Area, HeaderDrag, native};
+        let (Some(me), Some(editor)) = (crate::platform::ns_window(window), self.editor) else {
+            return;
+        };
+        let toolbar = f64::from(self.owner.read(cx).host.borrow().tokens.metrics.toolbar);
+        let Ok(Some(content)) = cx.update_window(editor, |_, w, _| -> Option<crate::popover_drag::Area> {
+            crate::platform::ns_window(w).map(|n| native::content(&n))
+        }) else {
+            return;
+        };
+        let area = Area {
+            h: content.h - toolbar,
+            ..content
+        };
+        self.drag = Some(HeaderDrag::new(native::pointer(), native::frame(&me), area));
+        cx.notify();
+    }
+    /// The pointer moved with the button down: the popover follows it one
+    /// to one, and the editor shows where a release would dock it.
+    fn drag_to(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use crate::popover_drag::native;
+        if self.drag.is_none() {
+            return false;
+        }
+        // A release AppKit delivered elsewhere still ends the drag here.
+        if !pm_shell::left_button_held() {
+            self.end_drag(window, cx);
+            return true;
+        }
+        let Some(origin) = self
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.follow(native::pointer()))
+        else {
+            return false;
+        };
+        let Some(me) = crate::platform::ns_window(window) else {
+            return true;
+        };
+        native::move_to(&me, origin);
+        let docking = self.preview_dock(cx);
+        if let Some(drag) = self.drag.as_mut()
+            && drag.docking != docking
+        {
+            drag.docking = docking;
+            native::see_through(&me, docking);
+        }
+        true
+    }
+    /// The editor's drop preview for the pointer; true over a dock target.
+    fn preview_dock(&self, cx: &mut Context<Self>) -> bool {
+        use crate::popover_drag::{in_editor, native};
+        let Some(editor) = self.editor else {
+            return false;
+        };
+        let panel = self.panel.clone();
+        cx.update_window(editor, |root, w, cx| -> Option<bool> {
+            let native_window = crate::platform::ns_window(w)?;
+            let content = native::content(&native_window);
+            let at = in_editor(native::pointer(), content);
+            let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
+            Some(shell.update(cx, |e, cx| e.drag_from_outside(&panel, at, cx)))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    }
+    /// The release: over a dock target the panel docks there (as Pin
+    /// does, at that place); elsewhere the popover stays where it was put
+    /// and reopens there. A press that never moved is the header's own.
+    fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::{native, remembered};
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if !drag.moved {
+            return;
+        }
+        let Some(editor) = self.editor else {
+            return;
+        };
+        let panel = self.panel.clone();
+        let docked = drag.docking
+            && cx
+                .update_window(editor, |root, _, cx| -> Option<bool> {
+                    let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
+                    Some(shell.update(cx, |e, cx| e.drop_from_outside(&panel, cx)))
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+        if docked {
+            // This window goes; not from inside its own event.
+            let owner = self.owner.clone();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |v, cx| v.agent_dropped_in(cx));
+            });
+            return;
+        }
+        let _ = cx.update_window(editor, |root, _, cx| {
+            if let Ok(shell) = root.downcast::<pm_shell::view::Editor>() {
+                shell.update(cx, |e, cx| e.cancel_from_outside(cx));
+            }
+        });
+        if let Some(me) = crate::platform::ns_window(window) {
+            native::see_through(&me, false);
+        }
+        let popover = window.bounds().origin;
+        if let Ok(corner) = cx.update_window(editor, |_, w, _| w.bounds().origin) {
+            let place = remembered(
+                (f32::from(popover.x), f32::from(popover.y)),
+                (f32::from(corner.x), f32::from(corner.y)),
+            );
+            self.owner
+                .update(cx, |v, _| v.builtins.agent_place = Some(place));
+        }
+    }
+    /// Escape mid-drag: back where it started, nothing docked.
+    fn cancel_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::popover_drag::native;
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if let Some(me) = crate::platform::ns_window(window) {
+            native::move_to(&me, drag.start());
+            native::see_through(&me, false);
+        }
+        if let Some(editor) = self.editor {
+            let _ = cx.update_window(editor, |root, _, cx| {
+                if let Ok(shell) = root.downcast::<pm_shell::view::Editor>() {
+                    shell.update(cx, |e, cx| e.cancel_from_outside(cx));
+                }
+            });
+        }
+    }
 }
 /// A popover's own keys. With nothing focused GPUI delivers a key to the
 /// window's root only, so the popover's root holds focus whenever nothing
@@ -2795,16 +3005,36 @@ impl Render for SurfaceWindow {
                 // Escape closes the popover from anywhere in it; a control
                 // that uses Escape itself (a menu, the composer's shortcuts)
                 // handles it first. Deferred: this window is the one going.
-                d.track_focus(&self.keys.focus)
-                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                    if PopoverKeys::dismisses(e) {
-                        cx.stop_propagation();
-                        let owner = this.owner.clone();
-                        cx.defer(move |cx| {
-                            let _ = owner.update(cx, |v, cx| v.close_agent(cx));
-                        });
-                    }
-                }))
+                d.track_focus(&self.keys.focus).on_key_down(cx.listener(
+                    |this, e: &KeyDownEvent, window, cx| {
+                        // Escape mid-drag puts the popover back; the next closes it.
+                        if PopoverKeys::dismisses(e) && this.drag.is_some_and(|d| d.moved) {
+                            cx.stop_propagation();
+                            this.cancel_drag(window, cx);
+                            return;
+                        }
+                        // Typed before the composer was there to take it:
+                        // kept for it (nothing inside has focus yet).
+                        let m = e.keystroke.modifiers;
+                        if !(m.platform || m.control || m.function)
+                            && let Some(text) = e.keystroke.key_char.clone()
+                            && !text.chars().any(char::is_control)
+                            && let Some(view) =
+                                this.owner.read(cx).builtins.views.get("agent").cloned()
+                            && view.update(cx, |v, _| v.type_early(&text))
+                        {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_agent(cx));
+                            });
+                        }
+                    },
+                ))
             })
             .when(sheet, |d| {
                 // Nothing inside focused: the sheet's keys go to its panel
@@ -2826,8 +3056,59 @@ impl Render for SurfaceWindow {
             .overflow_hidden()
             .pt(px(band))
             .bg(rgb(fill))
-            .children(head)
+            // The popover's header is its handle (popover_drag).
+            .children(head.map(|head| {
+                div()
+                    .id("agent-popover-handle")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.begin_drag(window, cx)
+                        }),
+                    )
+                    .child(head)
+            }))
             .children(body)
+            // While a drag is held: every move and the release are the
+            // popover's, never the header's controls' or anything else's.
+            .when(self.drag.is_some(), |d| {
+                let this = cx.entity().downgrade();
+                d.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            let moved = this.clone();
+                            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                if moved
+                                    .update(cx, |v, cx| v.drag_to(window, cx))
+                                    .unwrap_or(false)
+                                {
+                                    cx.stop_propagation();
+                                }
+                            });
+                            let released = this.clone();
+                            window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture || e.button != MouseButton::Left
+                                {
+                                    return;
+                                }
+                                let moved = released
+                                    .update(cx, |v, _| v.drag.is_some_and(|d| d.moved))
+                                    .unwrap_or(false);
+                                let _ = released.update(cx, |v, cx| v.end_drag(window, cx));
+                                if moved {
+                                    cx.stop_propagation();
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
     }
 }
 
@@ -2848,6 +3129,11 @@ fn agent_toggle(open: bool, since_dismissed: Option<std::time::Duration>) -> Age
     } else {
         AgentToggle::Open
     }
+}
+/// The docked Agent left the workspace without being parked (closed, not
+/// hidden by its toolbar item): it comes back as the popover.
+pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -> bool {
+    was_docked && !docked && !parked
 }
 /// The popover gave up key: it closes when its own editor took it (a press
 /// outside the popover), never for another window or app.
@@ -2907,6 +3193,13 @@ mod popover_keys_tests {
 mod agent_close_tests {
     use super::*;
     use std::time::Duration;
+    #[::core::prelude::v1::test]
+    fn closing_the_docked_agent_returns_it_to_its_popover_and_parking_does_not() {
+        assert!(returns_to_popover(true, false, false), "closed: the popover");
+        assert!(!returns_to_popover(true, false, true), "parked: hidden in place");
+        assert!(!returns_to_popover(false, true, false), "docking is no return");
+        assert!(!returns_to_popover(false, false, false));
+    }
     #[::core::prelude::v1::test]
     fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
         // The reported bug: the item only ever opened (activated) it.
@@ -3162,6 +3455,57 @@ mod follow_selection_tests {
     }
 }
 
+/// The viewer canvas menu's closing rows (viewer.ts): the composition's
+/// Paste and Select All Layers, then its view and settings.
+pub(crate) fn canvas_menu_tail(has_layers: bool) -> Vec<pm_shell::MenuEntry> {
+    let mut select = pm_shell::MenuEntry::item("Select All Layers", "selectAll");
+    select.enabled = has_layers;
+    vec![
+        pm_shell::MenuEntry::item("Paste", "pasteLayers"),
+        select,
+        pm_shell::MenuEntry::separator(),
+        pm_shell::MenuEntry::item("Fit Composition in View", "fitComposition"),
+        pm_shell::MenuEntry::item("Composition Settings…", "compositionSettings"),
+    ]
+}
+
+#[cfg(test)]
+mod canvas_menu_tests {
+    /// Right-clicking empty canvas ends as viewer.ts does: Paste, Select All
+    /// Layers (off in an empty composition), then Fit Composition in View
+    /// and Composition Settings…, each a command the app routes.
+    #[test]
+    fn the_canvas_menu_closes_with_the_composition_rows_in_electrons_order() {
+        let rows = super::canvas_menu_tail(true);
+        let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Paste",
+                "Select All Layers",
+                "",
+                "Fit Composition in View",
+                "Composition Settings…"
+            ]
+        );
+        let commands: Vec<_> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            [
+                "pasteLayers",
+                "selectAll",
+                "",
+                "fitComposition",
+                "compositionSettings"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.enabled || r.label.is_empty()));
+        let empty = super::canvas_menu_tail(false);
+        assert!(!empty[1].enabled, "nothing to select");
+        assert!(empty[0].enabled && empty[3].enabled && empty[4].enabled);
+    }
+}
+
 /// Requests answered while their panel is still mounting: they only read
 /// or measure, never edit. The Export sheet asks for its 3D estimate from its
 /// first snapshot; the Project panel asks for its list/grid choice before
@@ -3313,6 +3657,20 @@ mod quick_look_tests {
     }
 }
 
+pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
+    pm_shell::MenuEntry::submenu(
+        "New",
+        vec![
+            pm_shell::MenuEntry::item("Solid", "newSolid"),
+            pm_shell::MenuEntry::item("Camera", "newCamera"),
+            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+            pm_shell::MenuEntry::item("Null Object", "newNull"),
+            pm_shell::MenuEntry::separator(),
+            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+        ],
+    )
+}
 /// A side panel's body: the scroller, a scroll layer, around the panel. A
 /// view of its own, cached, so a wheel step that only moves the offset
 /// replays its drawing instead of the window laying the panel out again.

@@ -1,11 +1,13 @@
 //! P-CHILD through GPUI's own window code (its own process: GPUI needs its
 //! NSApplication subclass, and AppKit makes one application per process).
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn main() {
     gpui_open_path();
 }
-#[cfg(not(target_os = "macos"))]
-fn main() {}
+#[cfg(not(all(target_os = "macos", debug_assertions)))]
+fn main() {
+    println!("child_windows_gpui: skipped; development-lane sheet controls require debug assertions");
+}
 
 /// GPUI's real open path, as the app opens the Agent popover: a PopUp asked to
 /// show and take focus while the app is inactive stays off screen, attached to
@@ -16,7 +18,7 @@ fn main() {}
 /// activation and is cancelled once its window closed. Activation is
 /// prohibited, as in the shell's smoke mode; the parent is never shown.
 /// Exits the process when done.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn gpui_open_path() {
     use gpui::PromptLevel;
     use gpui::{

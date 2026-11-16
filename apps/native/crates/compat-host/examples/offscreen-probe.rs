@@ -103,6 +103,202 @@ fn host(
     until(|| handler.ready.get() == 1);
     (host, window)
 }
+fn verify_native_style(host: &MacDomHost) {
+    use pm_design::{Accessibility, Scheme, Tokens};
+    let light = Tokens::new(Scheme::Light, Accessibility::default());
+    let dark = Tokens::new(Scheme::Dark, Accessibility::default());
+    let rgb = |c: u32| format!("rgb({}, {}, {})", (c >> 16) & 255, (c >> 8) & 255, c & 255);
+    for t in [&light, &dark] {
+        host.update_native_style(&light, &dark, t.scheme).unwrap();
+        let scheme = if t.scheme == Scheme::Dark {
+            "dark"
+        } else {
+            "light"
+        };
+        until(|| {
+            eval(
+                host.web_view(),
+                "return document.documentElement.dataset.pmScheme;",
+            ) == scheme
+        });
+        let value = eval(
+            host.web_view(),
+            "const s=getComputedStyle(document.body);return [s.fontSize,s.fontFamily,s.backgroundColor,s.color,getComputedStyle(document.documentElement).colorScheme];",
+        );
+        assert_eq!(value[0], format!("{}px", t.typography.body));
+        assert!(value[1].as_str().unwrap().contains("-apple-system"));
+        assert_eq!(value[2], "rgba(0, 0, 0, 0)");
+        assert_eq!(value[3], rgb(t.colors.text));
+        assert_eq!(value[4], scheme);
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "document.body.innerHTML='<button id=plain class=pm-button>Plain</button><div class=pm-segmented><button aria-pressed=true>Selected</button></div>';const s=getComputedStyle(document.querySelector('#plain'));return [s.borderTopWidth,s.backgroundColor,s.minHeight];"
+            ),
+            serde_json::json!([
+                "0px",
+                rgb(t.colors.fill),
+                format!("{}px", t.metrics.control)
+            ])
+        );
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "return getComputedStyle(document.querySelector('[aria-pressed]')).backgroundColor;"
+            ),
+            rgb(t.colors.fill_strong)
+        );
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "const style=document.createElement('style');style.id='author';style.textContent='button{background:rgb(1,2,3);font-size:19px;border:3px solid red;border-radius:17px}';document.head.append(style);const s=getComputedStyle(document.querySelector('#plain'));return [s.backgroundColor,s.fontSize,s.borderTopWidth,s.borderRadius];"
+            ),
+            serde_json::json!(["rgb(1, 2, 3)", "19px", "3px", "17px"])
+        );
+        eval(
+            host.web_view(),
+            "document.getElementById('author').remove();document.documentElement.dataset.pmStyle='tokens-only';return true;",
+        );
+        until(|| {
+            eval(
+                host.web_view(),
+                "return !document.getElementById('pm-native').textContent.includes('@layer pm-base');",
+            ) == true
+        });
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "return getComputedStyle(document.documentElement).getPropertyValue('--pm-ground').trim();"
+            ),
+            format!("#{:06x}", t.colors.panel)
+        );
+        eval(
+            host.web_view(),
+            "document.documentElement.dataset.pmStyle='none';return true;",
+        );
+        until(|| {
+            eval(
+                host.web_view(),
+                "return document.getElementById('pm-native').textContent.length;",
+            ) == 0
+        });
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "return getComputedStyle(document.documentElement).getPropertyValue('--pm-ground').trim();"
+            ),
+            ""
+        );
+        eval(
+            host.web_view(),
+            "delete document.documentElement.dataset.pmStyle;return true;",
+        );
+        until(|| {
+            eval(
+                host.web_view(),
+                "return document.getElementById('pm-native').textContent.includes('@layer pm-base');",
+            ) == true
+        });
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "document.body.innerHTML='<section data-pm-style=none><button>None</button></section><section data-pm-style=tokens-only><button>Tokens</button></section><button id=full>Full</button>';return [...document.querySelectorAll('button')].map(x=>getComputedStyle(x).borderTopWidth);"
+            ),
+            serde_json::json!(["2px", "2px", "0px"])
+        );
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "return getComputedStyle(document.querySelector('[data-pm-style=none]')).getPropertyValue('--pm-ground').trim();"
+            ),
+            ""
+        );
+        let metrics = eval(
+            host.web_view(),
+            "document.body.innerHTML='<div class=pm-toolbar><input type=search class=pm-search placeholder=Search></div><div class=pm-grid><button class=pm-card><div class=pm-card-media>Image</div><span class=pm-card-title>Title</span><span class=pm-card-meta>Meta</span></button></div><button id=focus>Focus</button>';const style=x=>getComputedStyle(document.querySelector(x));return [style('.pm-grid').gap,style('.pm-card-media').borderRadius,style('.pm-card-title').fontSize,style('.pm-card-meta').fontSize,getComputedStyle(document.body,'::-webkit-scrollbar').width,String(document.querySelector('.pm-toolbar').getBoundingClientRect().height)+'px'];",
+        );
+        assert_eq!(
+            metrics,
+            serde_json::json!([
+                format!("{}px", t.metrics.gap),
+                format!("{}px", t.radius.md),
+                format!("{}px", t.typography.body),
+                format!("{}px", t.typography.minimum),
+                "10px",
+                format!("{}px", t.metrics.header)
+            ])
+        );
+        if let Some(dir) = std::env::var_os("PM_NATIVE_STYLE_CAPTURE") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let ticket = host.capture_png(host.generation()).unwrap();
+            let mut captured = None;
+            until(|| {
+                captured = ticket.try_take();
+                captured.is_some()
+            });
+            std::fs::write(
+                dir.join(format!("kit-controls-{scheme}.png")),
+                captured.unwrap().unwrap(),
+            )
+            .unwrap();
+        }
+        // This unordered, activation-prohibited AppKit window cannot own DOM
+        // focus. Real Tab navigation and focus-visible are checked without a
+        // desktop window by tests/native-style-keyboard.mjs.
+        assert_eq!(
+            eval(
+                host.web_view(),
+                "document.documentElement.classList.add('pm-scrolling');return getComputedStyle(document.body,'::-webkit-scrollbar-thumb').backgroundColor !== 'rgba(0, 0, 0, 0)';"
+            ),
+            true
+        );
+        println!(
+            "OFFSCREEN STYLE PASS {scheme}: defaults, native controls, neutral selection, author cascade, document and scoped opt-outs, live scheme"
+        );
+    }
+    let mut patched = dark.clone();
+    patched
+        .apply_patch([("colors.panel", 0x123456 as f64)])
+        .unwrap();
+    host.update_native_style(&light, &patched, Scheme::Dark)
+        .unwrap();
+    eval(
+        host.web_view(),
+        "document.body.innerHTML='<div id=ground style=background:var(--pm-ground)>Ground</div>';return true;",
+    );
+    until(|| {
+        eval(
+            host.web_view(),
+            "return getComputedStyle(document.getElementById('ground')).backgroundColor;",
+        ) == "rgb(18, 52, 86)"
+    });
+    let accessible = Tokens::new(
+        Scheme::Dark,
+        Accessibility {
+            increase_contrast: true,
+            reduce_motion: true,
+            ..Default::default()
+        },
+    );
+    host.update_native_style(&light, &accessible, Scheme::Dark)
+        .unwrap();
+    until(|| {
+        eval(
+            host.web_view(),
+            "return getComputedStyle(document.documentElement).getPropertyValue('--pm-dur').trim();",
+        ) == "0ms"
+    });
+    assert_eq!(
+        eval(
+            host.web_view(),
+            "return getComputedStyle(document.documentElement).getPropertyValue('--pm-separator').trim();"
+        ),
+        format!("#{:06x}", accessible.colors.separator)
+    );
+    println!("OFFSCREEN STYLE PASS theme patch, Increase Contrast, Reduce Motion without reload");
+}
+
 fn main() {
     objc2::rc::autoreleasepool(|_| run());
 }
@@ -119,6 +315,7 @@ fn run() {
     };
     let (mut a, wa) = host(mtm, trust("fixture-a"), &mut stores, &bundle);
     let (b, wb) = host(mtm, trust("fixture-b"), &mut stores, &bundle);
+    verify_native_style(&a);
     let ds_a = unsafe { a.web_view().configuration().websiteDataStore() };
     let ds_b = unsafe { b.web_view().configuration().websiteDataStore() };
     assert!(!std::ptr::eq(&*ds_a, &*ds_b));
