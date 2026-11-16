@@ -1060,6 +1060,7 @@ fn render(
                                 let mut s = NativeControl::new(
                                     ControlSpec {
                                         kind: Kind::Segmented,
+                                        pull: false,
                                         label: &label,
                                         identifier: &eid,
                                         value: &selected,
