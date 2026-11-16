@@ -2244,7 +2244,7 @@ impl SurfaceView {
                 .scrolls
                 .get(&id)
                 .is_some_and(|s| s.max_offset().y <= px(0.));
-            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+            if self.layered()
                 && !self.holds_native(id)
                 && !(fits && self.culls_in(id))
             {
