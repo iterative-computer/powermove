@@ -803,11 +803,26 @@ impl Backend {
                 } else {
                     text("about").unwrap_or_default()
                 };
-                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
+                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
                     "enabled":e.enabled && !stopped,"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
+        // Like kinds together, in the order the page lists them, then by name.
+        // Each row's switch is a local control: its lease only names it.
+        let mut extensions = extensions;
+        for e in &mut extensions {
+            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
+            let lease = self.fields(&json!([name]))?;
+            e["binding"] = lease[&name].clone();
+        }
+        extensions.sort_by_cached_key(|e| {
+            let kind = e["type"].as_str().unwrap_or("Other");
+            (
+                EXTENSION_KINDS.iter().position(|k| *k == kind),
+                e["name"].as_str().unwrap_or("").to_lowercase(),
+            )
+        });
         let accounts = self.account_rows();
         let speech = crate::speech::status();
         let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
@@ -2346,6 +2361,46 @@ pub(crate) fn mod_records(
     pm_services::surface_backing::Records {
         revision: state.revision,
         entries,
+    }
+}
+/// The kinds Settings › Extensions sorts by, in the order it lists them
+/// (v1.3.2 `EXTENSION_GROUPS`).
+pub(crate) const EXTENSION_KINDS: [&str; 7] = [
+    "Effects",
+    "Panels",
+    "Appearance",
+    "Layer Types",
+    "Media",
+    "Editor Tools",
+    "Other",
+];
+/// What an extension is, from what it contributes, as v1 placed it: its
+/// content before a companion panel, command or property control (an effect
+/// with a panel is an effect), and Other when it names nothing known.
+pub(crate) fn extension_kind(contributes: &[String]) -> &'static str {
+    let has = |kinds: &[&str]| contributes.iter().any(|c| kinds.contains(&c.as_str()));
+    if has(&["effects", "transitions"]) {
+        "Effects"
+    } else if has(&["themes"]) {
+        "Appearance"
+    } else if has(&["layers"]) {
+        "Layer Types"
+    } else if has(&["media"]) {
+        "Media"
+    } else if has(&["panels"]) {
+        "Panels"
+    } else if has(&[
+        "commands",
+        "inspector",
+        "keybindings",
+        "palette",
+        "menus",
+        "status",
+        "hooks",
+    ]) {
+        "Editor Tools"
+    } else {
+        "Other"
     }
 }
 /// Deleted from Settings: the folder is in the archive, its values are kept.

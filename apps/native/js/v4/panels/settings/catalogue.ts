@@ -428,12 +428,15 @@ export function accountRows(): Row[] {
     },
   ];
 }
+// What an extension is, in the order the list shows them (v1.3.2's groups).
 export const extensionTypes = [
   "All Types",
   "Effects",
+  "Panels",
+  "Appearance",
   "Layer Types",
+  "Media",
   "Editor Tools",
-  "Themes",
-  "Commands",
+  "Other",
 ] as const;
 export type ExtensionType = (typeof extensionTypes)[number];

@@ -697,6 +697,27 @@ fn settings_show_a_duration_to_two_places() {
     assert_eq!(row["unit"], json!("s"), "{row}");
 }
 
+/// Settings › Extensions places an extension as v1 did, by what it
+/// contributes: its content before a companion panel, command or hook.
+#[test]
+fn an_extension_is_placed_by_what_it_contributes() {
+    let kind = |c: &[&str]| {
+        models::extension_kind(&c.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    };
+    assert_eq!(kind(&["effects"]), "Effects");
+    assert_eq!(kind(&["effects", "hooks"]), "Effects");
+    assert_eq!(kind(&["panels", "commands"]), "Panels");
+    assert_eq!(kind(&["themes", "panels", "commands"]), "Appearance");
+    assert_eq!(kind(&["layers", "commands"]), "Layer Types");
+    assert_eq!(kind(&["panels", "hooks"]), "Panels");
+    assert_eq!(kind(&["hooks"]), "Editor Tools");
+    assert_eq!(kind(&[]), "Other");
+    // Every kind it can give is one the page lists.
+    for c in [&["media"][..], &["inspector"], &["transitions"]] {
+        assert!(models::EXTENSION_KINDS.contains(&kind(c)));
+    }
+}
+
 #[test]
 fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
     let actor = actor();
