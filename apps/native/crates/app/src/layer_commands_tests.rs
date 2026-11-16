@@ -353,6 +353,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     // Transform (whose defaults are an identity too).
     assert_eq!(seeded.len(), 46);
     let mut changed = Vec::new();
+    let mut failed = Vec::new();
     for entry in seeded {
         let p = kernel.published("synthetic").unwrap();
         let version = entry.definition.get("version").cloned();
@@ -391,6 +392,8 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         );
         if draw(&mut headless, &kernel) != plain {
             changed.push(entry.id.clone());
+        } else if let Some(failure) = headless.definition_failure() {
+            failed.push(format!("{}: {failure}", entry.id));
         }
         send(&kernel, HistoryCall::Undo.into());
     }
@@ -417,7 +420,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     ] {
         assert!(
             changed.iter().any(|c| c == id),
-            "{id} drew nothing: {changed:?}"
+            "{id} drew nothing: {changed:?}; failures: {failed:?}"
         );
     }
     // A neutral grade is an identity: the grading tools at their defaults

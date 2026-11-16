@@ -212,12 +212,19 @@ struct DiskEntry {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // One temporary file per write, not per process: two engines of one
+    // process (tests run them side by side; the app's viewer and an export)
+    // storing the same entry at once each wrote into the same temporary
+    // file, one truncating the other's, and a reader could take the torn
+    // entry.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("entry"),
-        std::process::id()
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)

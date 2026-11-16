@@ -4159,6 +4159,11 @@ pub struct Headless {
     engine: render::Engine,
 }
 impl Headless {
+    /// Why the last frame drew some effect as nothing (its definition could
+    /// not be built), if it did.
+    pub fn definition_failure(&self) -> Option<&str> {
+        self.engine.definition_failure.as_deref()
+    }
     pub fn memory_usage(&self) -> memory::CacheUsage {
         self.engine.memory_usage()
     }
