@@ -39,6 +39,9 @@ thread_local! {
     static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
     /// AppKit window number → session window id.
     static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
+    /// A restored window's place in its group's strip (`WindowState::tab_index`), by window number: a tab that
+    /// joins its group after a later one takes its own place (`add_tab`).
+    static RESTORE_TAB_INDEX:RefCell<HashMap<isize,usize>>=RefCell::new(HashMap::new());
     /// Each editor window's open pages (Settings, the Store): a tab strip
     /// shows the pages of every window in its group.
     static PAGES:RefCell<HashMap<isize,Vec<(String,String)>>>=RefCell::new(HashMap::new());
@@ -878,10 +881,30 @@ fn add_tab(into: &NSWindow, window: &NSWindow) {
         .map(|t| t.windowNumber())
         .filter(|n| *n != window.windowNumber())
         .collect();
-    let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
-        Retained::retain(into as *const _ as *mut NSWindow).unwrap()
+    // A restored tab takes its own place among the restored tabs already
+    // there (the front one opens early); any other joins at the end.
+    let places = RESTORE_TAB_INDEX.with(|m| {
+        let m = m.borrow();
+        let existing: Vec<Option<usize>> = tab_windows(into)
+            .iter()
+            .map(|t| m.get(&t.windowNumber()).copied())
+            .collect();
+        m.get(&window.windowNumber())
+            .and_then(|index| tab_insert_index(&existing, *index))
+            .filter(|at| *at < existing.len())
     });
-    last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    match places {
+        Some(at) => unsafe {
+            let group: *mut AnyObject = msg_send![into, tabGroup];
+            let _: () = msg_send![group, insertWindow: window, atIndex: at as isize];
+        },
+        None => {
+            let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
+                Retained::retain(into as *const _ as *mut NSWindow).unwrap()
+            });
+            last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+        }
+    }
     hide_system_tab_bar(window);
     hide_system_tab_bar(into);
     let numbers: Vec<isize> = tab_windows(into)
@@ -973,6 +996,15 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     add_tab(&lead, window);
+    // While a launch's front window opens its project, its tab stays the one
+    // shown: a restored tab that joins after it opens behind it.
+    let front = front_restoring()
+        .and_then(session_window)
+        .filter(|front| {
+            front.windowNumber() != window.windowNumber()
+                && tab_windows(&lead).iter().any(|t| t.windowNumber() == front.windowNumber())
+        });
+    let window: &NSWindow = front.as_deref().unwrap_or(window);
     if app.isActive() {
         gpui_macos::child_window::present(window, true);
     } else {
@@ -2063,13 +2095,29 @@ pub fn set_front_restoring(id: Option<u64>) {
 pub fn front_restoring() -> Option<u64> {
     Some(FRONT_RESTORING.load(std::sync::atomic::Ordering::Acquire)).filter(|id| *id != 0)
 }
+/// The editor window with session id `id`.
+fn session_window(id: u64) -> Option<Retained<NSWindow>> {
+    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n))?;
+    let mtm = MainThreadMarker::new()?;
+    NSApplication::sharedApplication(mtm).windowWithWindowNumber(number)
+}
+/// Records a restored window's place in its group's strip, before it joins.
+pub fn restore_tab_index(window: &NSWindow, index: usize) {
+    RESTORE_TAB_INDEX.with(|m| m.borrow_mut().insert(window.windowNumber(), index));
+}
+/// Where a restored tab with place `index` goes among a group's tabs, whose
+/// places are `existing` in strip order: after every one placed before it.
+/// None (it joins at the end) when a tab there was not restored.
+fn tab_insert_index(existing: &[Option<usize>], index: usize) -> Option<usize> {
+    let places: Option<Vec<usize>> = existing.iter().copied().collect();
+    Some(places?.iter().filter(|place| **place < index).count())
+}
 pub fn bring_session_window(id: u64) {
-    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let Some(window) = number.and_then(|n| app.windowWithWindowNumber(n)) else {
+    let Some(window) = session_window(id) else {
         return;
     };
     if app.isActive() {
@@ -8274,4 +8322,19 @@ pub fn viewer_preference(key: &str, default: bool) -> bool {
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
     objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+}
+
+#[cfg(test)]
+mod restore_tab_tests {
+    /// A restored tab takes its place among the restored tabs already in its
+    /// group (the front one opened early), whatever order they opened in.
+    #[test]
+    fn a_restored_tab_takes_its_own_place_in_the_strip() {
+        // Leader 0, then the front tab (place 7) opened early.
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(7)], 1), Some(1));
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(1), Some(7)], 8), Some(3));
+        assert_eq!(super::tab_insert_index(&[Some(0), Some(1), Some(7), Some(8)], 3), Some(2));
+        // A tab there that was not restored: it joins at the end.
+        assert_eq!(super::tab_insert_index(&[Some(0), None], 1), None);
+    }
 }

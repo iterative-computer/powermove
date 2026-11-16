@@ -200,12 +200,7 @@ fn restore_session(cx: &mut App) {
     // The window (or tab group) that was in front opens last, so it lies
     // over the others from the start: separate windows each take the front
     // as they open.
-    let group = |s: &session::WindowState| s.tab_group.unwrap_or(s.id);
-    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
-    let (mut plan, last): (Vec<_>, Vec<_>) =
-        plan.into_iter().partition(|s| Some(group(s)) != front_group);
-    plan.extend(last);
-    for state in plan {
+    for state in session::front_first(plan, front) {
         let leader = state.tab_group;
         open_editor_window(cx, true, Some(state), leader);
     }
@@ -305,6 +300,9 @@ fn open_editor_window(
                         }
                     }
                     None => {}
+                }
+                if let Some(s) = &restore {
+                    native::restore_tab_index(&h.window, s.tab_index);
                 }
                 if let Some(leader) = tab_leader {
                     h.join_tabs(leader);

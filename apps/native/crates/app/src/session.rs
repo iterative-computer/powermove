@@ -1239,10 +1239,13 @@ impl Controller {
                 != Some(false);
         // Its picture stands in from the window's first frame, while the
         // library is read (PM-384).
-        if keep {
-            self.stage_open(&project);
-        }
         let front = self.host.borrow().restored_front;
+        // A tab behind the front one shows its own layout and the quiet
+        // loading state until its own open, never a picture (PM-384).
+        let picture = front || pm_shell::front_restoring().is_none();
+        if keep {
+            self.stage_open_with(&project, picture);
+        }
         self.front_restore = front;
         let profile = self.profile.clone();
         let found = cx.background_executor().spawn(async move {
@@ -1271,7 +1274,7 @@ impl Controller {
                     && v.session.is_none()
                     && !v.opening
                 {
-                    v.stage_open(id);
+                    v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
                     v.begin_ghost(name, None, cx);
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_retire();
@@ -2051,7 +2054,15 @@ impl Controller {
     /// opening viewer until its first real frame (Home's poster where none
     /// was kept), and the window lays out its saved workspace (PM-384).
     pub(crate) fn stage_open(&mut self, project: &str) {
-        let poster = crate::poster::opening_poster(&self.profile, project);
+        self.stage_open_with(project, true);
+    }
+    /// [`Self::stage_open`]; without `picture`, its layout alone (a restored
+    /// tab behind the front one while that one opens: the picture comes
+    /// with its own open, so the tab shown never has another's).
+    fn stage_open_with(&mut self, project: &str, picture: bool) {
+        let poster = picture
+            .then(|| crate::poster::opening_poster(&self.profile, project))
+            .flatten();
         // Decoded here, so the ghost shows it from its first frame (a path
         // loads after it: the frame was empty white at first).
         self.ghost_retire();
@@ -2172,8 +2183,12 @@ impl Controller {
                         Err(_) => None,
                     };
                     let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
-                    if let Some(call) = response.and_then(|action| recovery.decision(action)) {
-                        result = kernel.shell(call).await;
+                    match response.and_then(|action| recovery.decision(action)) {
+                        Some(call) => result = kernel.shell(call).await,
+                        // Cancelled (Escape) or never answered: nothing is
+                        // decided, and the open it prepared lets go of the
+                        // project (its lock would make the next open a copy).
+                        None => drop(kernel.shell(recovery.forget()).await),
                     }
                 }
             }
