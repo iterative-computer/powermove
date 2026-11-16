@@ -4,7 +4,7 @@ mod flowchart;
 pub use flowchart::FlowchartRow;
 
 use crate::{
-    keyboard::{Class, Effect, Key, Resolver},
+    keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
     transient::{Choice, Picker},
 };
@@ -35,6 +35,9 @@ thread_local! {
     static ROUTES:RefCell<HashMap<isize,async_channel::Sender<Command>>>=RefCell::new(HashMap::new());
     static MENU_TARGET:RefCell<Option<Retained<Target>>>=const{RefCell::new(None)};
     static REPLAYING:Cell<bool>=const{Cell::new(false)};
+    /// A press replayed in its turn: the key monitor handles it as a press
+    /// but does not queue it again.
+    static ORDERED:Cell<bool>=const{Cell::new(false)};
     /// Each editor window's host by window number, for what must reach it
     /// from outside its own event handling (the text being typed, flushed).
     static HOSTS:RefCell<HashMap<isize,std::rc::Weak<RefCell<Host>>>>=RefCell::new(HashMap::new());
@@ -278,6 +281,56 @@ fn active_send(command: Command) {
             if let Some(tx) = r.borrow().get(&n) {
                 let _ = tx.try_send(command);
             }
+        });
+    }
+}
+/// A press or its gesture's other events (not a move or a scroll).
+fn is_pointer(e: &NSEvent) -> bool {
+    matches!(
+        e.r#type(),
+        NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::LeftMouseDragged
+            | NSEventType::RightMouseDown
+            | NSEventType::RightMouseUp
+            | NSEventType::RightMouseDragged
+    )
+}
+/// Sends an event the key queue held, in its turn. A key goes past the key
+/// monitor (it was handled there); a press goes through it, so its pointer
+/// handling runs, without being queued again; afterwards the keys queued
+/// behind it go where the keyboard now is (a click that opened a text).
+fn send_replayed(event: &NSEvent, host: Option<&Rc<RefCell<Host>>>) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if is_pointer(event) {
+        ORDERED.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
+        });
+        if let Some(mut h) = host.and_then(|h| h.try_borrow_mut().ok()) {
+            if crate::typing::expecting() {
+                // The press opens a text a turn from now: what was typed
+                // after it waits for that text, in order (typing::hold).
+                for key in h.resolver.take_queued() {
+                    h.typed.remove(&key.token);
+                    if let Some(event) = h.events.remove(&key.token) {
+                        crate::typing::hold(event);
+                    }
+                }
+            } else {
+                let field = h.text_has_keyboard();
+                h.resolver.retarget(field);
+            }
+        }
+    } else {
+        REPLAYING.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
         });
     }
 }
@@ -870,7 +923,7 @@ define_class!(
             // keys held for a field that never came do; replayed now it would
             // be a shortcut on the canvas.
             let stale=token.is_some_and(|t|host.as_ref().and_then(|h|h.try_borrow_mut().ok()).is_some_and(|mut h|h.typed.remove(&t)&&!h.text_has_keyboard()));
-            if !stale{REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});}
+            if !stale{send_replayed(event,host.as_ref());}
             let Some(token)=token else{return};
             // The next key goes on now: a turn through the editor's queue per
             // key let typing fall behind a busy frame (and Escape or a click
@@ -3472,6 +3525,39 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // PM-465: input is handled in the order it arrived. A
+                    // press made while keys still wait their turn (⌘T whose
+                    // command the editor has not answered yet, behind a slow
+                    // frame) joins their queue, with the rest of its gesture:
+                    // a click after ⌘T acts with the Text tool.
+                    if is_pointer(e) && !ORDERED.with(|o| o.get()) {
+                        let mut h = host.borrow_mut();
+                        if e.windowNumber() == h.window.windowNumber() && h.resolver.busy() {
+                            h.next_token += 1;
+                            let token = h.next_token;
+                            h.events
+                                .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
+                            let effects = h.resolver.submit(Key {
+                                token,
+                                chord: POINTER.into(),
+                                field: false,
+                                repeat: false,
+                                up: false,
+                                compat: false,
+                            });
+                            h.effects(effects);
+                            return std::ptr::null_mut();
+                        }
+                    }
+                    // Drags and the right button's release only take a turn.
+                    if matches!(
+                        e.r#type(),
+                        NSEventType::LeftMouseDragged
+                            | NSEventType::RightMouseUp
+                            | NSEventType::RightMouseDragged
+                    ) {
+                        return event.as_ptr();
+                    }
                     // Every release of the button is told to the session, which
                     // ends a pointer gesture whose own view never heard it (it
                     // was drawn again, or covered, while held).
@@ -3791,7 +3877,10 @@ impl Host {
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
                     | NSEventMask::LeftMouseUp
-                    | NSEventMask::RightMouseDown,
+                    | NSEventMask::LeftMouseDragged
+                    | NSEventMask::RightMouseDown
+                    | NSEventMask::RightMouseUp
+                    | NSEventMask::RightMouseDragged,
                 &handler,
             )
         };
@@ -5219,10 +5308,6 @@ impl Host {
     /// next text. A key typed for a text that has since lost the keyboard
     /// goes nowhere (it would be a shortcut on the canvas).
     fn deliver_waiting(host: &Rc<RefCell<Self>>) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let app = NSApplication::sharedApplication(mtm);
         // Bounded: a key handed over can queue no more than it was.
         for _ in 0..4096 {
             let next = {
@@ -5236,11 +5321,7 @@ impl Host {
             };
             let Some((token, event, stale)) = next else { return };
             if !stale {
-                REPLAYING.with(|guard| {
-                    guard.set(true);
-                    app.sendEvent(&event);
-                    guard.set(false);
-                });
+                send_replayed(&event, Some(host));
             }
             let Ok(mut h) = host.try_borrow_mut() else {
                 return;

@@ -36,6 +36,9 @@ pub fn class(command: &str) -> Class {
         Class::MayDecline
     }
 }
+/// The chord of a press (and the rest of its gesture) queued behind keys
+/// still waiting: no binding has it, so it replays in its turn.
+pub const POINTER: &str = "pointer";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Key {
     pub token: u64,
@@ -173,7 +176,7 @@ impl Resolver {
             let Some(key) = self.queue.pop_front() else {
                 break;
             };
-            if key.up {
+            if key.up || key.chord == POINTER {
                 self.waiting_replay = Some(key.token);
                 out.push(Effect::Replay(key.token));
                 break;
@@ -261,6 +264,24 @@ impl Resolver {
         } else {
             vec![]
         }
+    }
+    /// Input still waiting its turn: keys queued, a command not yet answered,
+    /// or one posted for replay. A press made now joins the queue rather
+    /// than act before them (a click after ⌘T acts with the new tool).
+    pub fn busy(&self) -> bool {
+        !self.queue.is_empty() || self.pending.is_some() || self.waiting_replay.is_some()
+    }
+    /// A press has been delivered and may have moved the keyboard (a click
+    /// that opened a text): the keys queued behind it go where it now is.
+    pub fn retarget(&mut self, field: bool) {
+        for key in self.queue.iter_mut().filter(|k| k.chord != POINTER) {
+            key.field = field;
+        }
+    }
+    /// The keys queued and not yet looked at, in order, taken out (a press
+    /// delivered just now opens a text they were typed for).
+    pub fn take_queued(&mut self) -> Vec<Key> {
+        self.queue.drain(..).collect()
     }
     /// The key posted for replay that has not been reported replayed.
     pub fn waiting_replay(&self) -> Option<u64> {
