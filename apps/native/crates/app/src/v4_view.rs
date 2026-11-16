@@ -5049,7 +5049,7 @@ mod tests {
             .expect("animated color");
         assert!(
             keys.iter()
-                .any(|k| k["t"] == json!(1.) && k["v"] == json!("#8040BF")),
+                .any(|k| k["t"].as_f64() == Some(1.) && k["v"] == json!("#8040BF")),
             "{keys:?}"
         );
         rig.kernel
