@@ -33,13 +33,14 @@ pub(crate) fn effect_binding_rows<'a>(
     channels: &[String],
 ) -> Option<Vec<&'a Value>> {
     // Every editable parameter the panel shows: its own rows, and those a
-    // summary row edits (Effect Controls' wheel master).
+    // summary row edits (Effect Controls' wheel master) or a point row does
+    // (its X and Y).
     let parameters: Vec<&Value> = projection["rows"]
         .as_array()?
         .iter()
         .flat_map(|r| match r["kind"].as_str() {
             Some("parameter") => vec![&r["parameter"]],
-            Some("summary") => r["parameters"]
+            Some("summary" | "point") => r["parameters"]
                 .as_array()
                 .map(|list| list.iter().collect())
                 .unwrap_or_default(),
@@ -322,7 +323,11 @@ impl Backend {
                 .remove_definition(&id);
         }
         self.panel.presentation.parameters.clear();
+        self.panel.presentation.ui.clear();
         for (id, d) in latest {
+            if let Some(ui) = d.get("ui").filter(|ui| ui.is_array()) {
+                self.panel.presentation.ui.insert(id.clone(), ui.clone());
+            }
             let mut params = vec![];
             for p in d["params"].as_array().into_iter().flatten() {
                 let Some(key) = p["k"].as_str() else {
@@ -359,6 +364,7 @@ impl Backend {
                                 .map(|a| a.iter().map(model).collect())
                                 .transpose()?
                                 .unwrap_or_default(),
+                            advanced: p["advanced"].as_bool(),
                         },
                     );
                 }
@@ -826,6 +832,12 @@ impl KernelData for Data {
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
                     plan = Some(next);
+                    // A plan the kernel need not run (a disclosure, a
+                    // selection, the rows' window) is answered at once with
+                    // the projection it changed: the panel adopts only that.
+                    if kernel.is_none() {
+                        return b.projection();
+                    }
                 }
                 HostOperation::Command { command, args } => {
                     match b.native_command(command, args)? {
