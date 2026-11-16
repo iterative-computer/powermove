@@ -48,6 +48,41 @@ fn panel_scroll_body(
         )
         .into_any_element()
 }
+/// How long a panel's scroll thumb stays after the last scroll.
+const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+/// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
+const SCROLL_BAR: f32 = 9.;
+const SCROLL_THUMB_INSET: f32 = 2.;
+/// A panel body's overlay scroll thumb (the original app's thin one: 9 pt,
+/// inset 2 pt, text ink at `translucency.faint`), when its content is taller
+/// than its slot of `width` × `height`.
+fn scroll_thumb(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    t: &pm_design::Tokens,
+) -> Option<AnyElement> {
+    let max = f32::from(handle.max_offset().y);
+    if max <= 0.5 || height <= 0. {
+        return None;
+    }
+    let content = height + max;
+    let length = (height * height / content).max(t.metrics.hit);
+    let offset = (-f32::from(handle.offset().y)).clamp(0., max);
+    let top = (height - length) * offset / max;
+    let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
+    Some(
+        div()
+            .absolute()
+            .top(px(top + SCROLL_THUMB_INSET))
+            .left(px(width - thick - SCROLL_THUMB_INSET - t.metrics.border * 2.))
+            .w(px(thick))
+            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
+            .rounded(px(thick / 2.))
+            .bg(pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8))
+            .into_any_element(),
+    )
+}
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
 #[derive(Default)]
