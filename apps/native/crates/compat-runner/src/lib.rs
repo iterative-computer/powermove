@@ -122,7 +122,21 @@ pub(crate) fn pool(scope: &str, host: Arc<NativeHost>) -> Result<RuntimePool> {
         },
     )
 }
+/// Waits for the realm's turn in the shared heap account, calling `waiting`
+/// about every quarter second meanwhile. The realm gives up on its own only
+/// when the account stays stuck (`ADMISSION_PATIENCE`) or it is closed.
+pub(crate) fn admitted(realm: &Realm, waiting: &dyn Fn()) -> Result<()> {
+    loop {
+        match realm.admitted(Duration::from_millis(250)) {
+            Some(admitted) => return admitted,
+            None => waiting(),
+        }
+    }
+}
+/// Runs `source` and waits up to `seconds` for it, not counting the time the
+/// realm waited in line for its heap.
 pub(crate) fn settled(realm: &Realm, source: &str, seconds: u64) -> Result<Evaluation> {
+    admitted(realm, &|| {})?;
     let mut ticket = realm.eval(source)?;
     let deadline = Instant::now() + Duration::from_secs(seconds);
     wait_until(&mut ticket, deadline).unwrap_or_else(|| {
