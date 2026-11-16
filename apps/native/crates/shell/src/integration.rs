@@ -87,6 +87,8 @@ pub trait Integration {
     fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Discovery or activation is still running for this window.
+    fn panels_loading(&self, _cx: &App) -> bool { false }
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The panels on screen this frame (each tab group's front panel, or the

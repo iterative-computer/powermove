@@ -292,6 +292,11 @@ impl Drop for Extensions {
     }
 }
 impl Extensions {
+    /// A new panel runtime has none of the old runtime's mounted surfaces.
+    pub(crate) fn panel_runtime_changed(&mut self) {
+        self.surfaces.clear();
+        self.seen = 0;
+    }
     fn palette_choices(&self) -> Vec<Choice> {
         self.compat_choices
             .iter()
@@ -657,9 +662,6 @@ impl Controller {
         for toast in toasts {
             self.note(toast, cx);
         }
-        for request in requests {
-            self.extension_request(request, cx);
-        }
         // The trusted realm's document gets its page as soon as the realm
         // starts, not only when a panel shows: hidden elements extensions
         // measure (a caret, a label) need real layout (plan 3.5.2).
@@ -669,15 +671,20 @@ impl Controller {
             self.ensure_page("", cx);
         }
         self.sync_export_pages(cx);
+        self.mount_surfaces(cx);
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
-            self.mount_surfaces(cx);
             if publication.contributions.is_some() {
                 self.apply_contributions(&publication, cx);
             } else {
                 // No extension to run, or none has published yet.
                 self.pin_definitions(&publication);
             }
+        }
+        // A panel-open request can arrive with the publication registering
+        // it. Install the catalog first so the shell never sees Unknown panel.
+        for request in requests {
+            self.extension_request(request, cx);
         }
         self.present_page();
     }
@@ -2673,4 +2680,26 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
             Some(entry)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod recovered_runtime_tests {
+    use super::*;
+    #[test]
+    fn recovery_replays_discovery_when_the_panel_runtime_arrives_or_restarts() {
+        let mut extensions = Extensions::default();
+        // Discovery can publish while Recover is awaiting the person's answer.
+        extensions.seen = 7;
+        extensions.surfaces.insert("motion-notes".into(), ("Motion Notes".into(), "hash".into()));
+        extensions.panel_runtime_changed();
+        assert_eq!(extensions.seen, 0, "the same publication must be applied again");
+        assert!(extensions.surfaces.is_empty(), "mounts belonged to the retired runtime");
+        assert_ne!(extensions.seen, 7);
+        // The next project-runtime rebuild must retry these same definitions.
+        extensions.seen = 7;
+        extensions.surfaces.insert("pexels".into(), ("Pexels".into(), "hash".into()));
+        extensions.panel_runtime_changed();
+        assert_eq!(extensions.seen, 0);
+        assert!(extensions.surfaces.is_empty());
+    }
 }

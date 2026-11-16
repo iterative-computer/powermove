@@ -2569,7 +2569,10 @@ impl Render for Editor {
                 panel = panel.child(content);
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
-                let (heading, line, action) = if panels.contains(&id) {
+                let loading = self.integration.as_ref().is_some_and(|i| i.panels_loading(cx));
+                let (heading, line, action) = if loading && !layout::PANELS.contains(&id.as_str()) {
+                    ("Loading…", "", None)
+                } else if panels.contains(&id) {
                     layout::empty_state(&id)
                 } else {
                     ("Panel Unavailable", unknown.as_str(), None)

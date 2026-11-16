@@ -487,7 +487,31 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).write_workspace(write);
     }
     fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
-        self.0.read(cx).extensions.contributed.clone()
+        let v = self.0.read(cx);
+        let mut panels = v.extensions.contributed.clone();
+        // Titles are profile registry metadata, available even while this
+        // recovered window's own callbacks and panel runtime are loading.
+        for entry in v.kernel.state().registries.get("panels").into_iter().flatten() {
+            if !panels.iter().any(|(id, _)| id == &entry.id) {
+                if let Some(title) = entry.definition.get("title").and_then(pm_model::Value::as_str) {
+                    panels.push((entry.id.clone(), title.to_owned()));
+                }
+            }
+        }
+        if let Some(host) = &v.extensions.host {
+            for surface in host.surfaces() {
+                if let (Some(id), Some(title)) = (surface["id"].as_str(), surface["manifest"]["name"].as_str()) {
+                    if !panels.iter().any(|(known, _)| known == id) {
+                        panels.push((id.to_owned(), title.to_owned()));
+                    }
+                }
+            }
+        }
+        panels
+    }
+    fn panels_loading(&self, cx: &App) -> bool {
+        let v = self.0.read(cx);
+        v.extensions.host.as_ref().is_some_and(|host| !host.is_ready())
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
