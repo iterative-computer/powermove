@@ -3406,17 +3406,14 @@ impl Render for Editor {
                             .border_color(rgb(c.accent)),
                     );
                 }
-                // Where the panel lands: a light wash of the accent inside a
-                // 2 pt accent outline, so the panels it would cover stay in
-                // view (an opaque wash hid them while their hosted controls
-                // showed).
+                // A quiet landing outline and neutral wash keep the destination readable.
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
                         .rounded(px(m.panel_radius))
                         .border(px(m.drop_stroke))
-                        .border_color(rgb(c.accent))
-                        .bg(tint(c.accent, t.translucency.selected)),
+                        .border_color(rgb(c.separator))
+                        .bg(tint(c.text, t.translucency.selected)),
                 );
                 // Joining a stack: a tab marks its place in the header.
                 if let (DropTarget::Tab { index, .. }, Some((d, g, r))) = (p.target, target) {

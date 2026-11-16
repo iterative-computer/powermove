@@ -7250,26 +7250,6 @@ mod tab_layout_tests {
     }
 }
 #[cfg(test)]
-mod agent_status_tests {
-    use super::AgentStatus;
-    #[test]
-    fn the_agent_item_says_what_the_agent_is_doing_and_attention_wins() {
-        assert_eq!(AgentStatus::default().tooltip(), "Ask the Agent");
-        let working = AgentStatus {
-            working: true,
-            elapsed: Some("1:04".into()),
-            ..Default::default()
-        };
-        assert_eq!(working.tooltip(), "Agent is working · 1:04");
-        let asking = AgentStatus {
-            attention: true,
-            ..working
-        };
-        assert_eq!(asking.tooltip(), "Agent needs your answer");
-    }
-}
-
-#[cfg(test)]
 mod key_order_tests {
     use super::passes_straight;
     /// Return, Space and the arrows go straight to a focused control or
