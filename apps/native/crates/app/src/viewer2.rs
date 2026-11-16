@@ -202,7 +202,9 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 37] = [
+    /// Every action the View menu can hold; an item's tag is its place here.
+    /// New actions go at the end, so earlier tags stay as they are.
+    const ALL: [Action; 39] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -240,6 +242,8 @@ impl Action {
         Action::Rulers,
         Action::Grid,
         Action::ClearGuides,
+        Action::LockGuides,
+        Action::Snapping,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -1372,6 +1376,76 @@ mod tests {
         }
         assert_eq!(Action::from_tag(-1), None);
         assert_eq!(Action::from_tag(99), None);
+    }
+    /// Building the View menu tags every item; an action missing from
+    /// `Action::ALL` stopped the app at launch (Lock Guides and Snapping).
+    #[test]
+    fn every_menu_action_has_a_tag() {
+        // Exhaustive: a new kind of action does not compile here until it is
+        // listed, and then it must be in `ALL`.
+        fn kinds(action: Action) -> Vec<Action> {
+            match action {
+                Action::Output(_) => OutputMode::ALL.map(Action::Output).to_vec(),
+                Action::Channels(_) => CHANNELS.map(|(c, _, _)| Action::Channels(c)).to_vec(),
+                Action::Media(_) => vec![
+                    Action::Media(MediaMode::Automatic),
+                    Action::Media(MediaMode::Originals),
+                    Action::Media(MediaMode::ProxyPreferred),
+                    Action::Media(MediaMode::ProxyOnly),
+                ],
+                Action::Interpret(_) => std::iter::once(None)
+                    .chain((0..crate::colour::CAMERA_LOGS.len()).map(Some))
+                    .map(Action::Interpret)
+                    .collect(),
+                Action::Rulers
+                | Action::Grid
+                | Action::ClearGuides
+                | Action::LockGuides
+                | Action::Snapping
+                | Action::SafeAreas
+                | Action::Guides
+                | Action::Popout
+                | Action::ToggleProxies
+                | Action::ApplyLut
+                | Action::InterpretFootage
+                | Action::CleanAperture
+                | Action::RenderSelection
+                | Action::KeepRendered
+                | Action::DeleteRendered
+                | Action::Skimming
+                | Action::AudioSkimming => vec![action],
+            }
+        }
+        let every = [
+            Action::Output(OutputMode::Sdr),
+            Action::Channels(Channels::Rgb),
+            Action::Media(MediaMode::Automatic),
+            Action::Interpret(None),
+            Action::Rulers,
+            Action::Grid,
+            Action::ClearGuides,
+            Action::LockGuides,
+            Action::Snapping,
+            Action::SafeAreas,
+            Action::Guides,
+            Action::Popout,
+            Action::ToggleProxies,
+            Action::ApplyLut,
+            Action::InterpretFootage,
+            Action::CleanAperture,
+            Action::RenderSelection,
+            Action::KeepRendered,
+            Action::DeleteRendered,
+            Action::Skimming,
+            Action::AudioSkimming,
+        ];
+        for action in every
+            .into_iter()
+            .flat_map(kinds)
+            .chain(GUIDE_TOGGLES.map(|(_, a)| a))
+        {
+            assert!(Action::ALL.contains(&action), "{action:?} has no menu tag");
+        }
     }
 }
 
