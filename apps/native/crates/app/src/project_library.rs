@@ -72,8 +72,12 @@ pub enum Outbound {
     /// A menu command this window runs (Open…, New Project, Store, sign-in).
     Command(&'static str),
     /// The library began opening a project (ghost loading starts now): its
-    /// name and its composition's aspect when the index knows it.
-    Opening { name: String, aspect: Option<f32> },
+    /// name, and its id and composition's aspect when the index knows them.
+    Opening {
+        name: String,
+        project: Option<String>,
+        aspect: Option<f32>,
+    },
     /// The library's open ended without a project (failed or declined).
     OpenEnded,
 }
@@ -269,16 +273,16 @@ impl ProjectLibrary {
         let opening = self.controller.opening().map(str::to_owned);
         if crate::ghost::announce(&self.announced_open, &opening) {
             let event = match &opening {
-                Some(name) => Outbound::Opening {
-                    name: name.clone(),
-                    aspect: self
-                        .controller
-                        .rows
-                        .iter()
-                        .find(|r| &r.name == name)
-                        .and_then(|r| r.dimensions())
-                        .map(|(w, h)| w as f32 / h as f32),
-                },
+                Some(name) => {
+                    let row = self.controller.rows.iter().find(|r| &r.name == name);
+                    Outbound::Opening {
+                        name: name.clone(),
+                        project: row.map(|r| r.id.clone()),
+                        aspect: row
+                            .and_then(|r| r.dimensions())
+                            .map(|(w, h)| w as f32 / h as f32),
+                    }
+                }
                 None => Outbound::OpenEnded,
             };
             self.announced_open = opening;
