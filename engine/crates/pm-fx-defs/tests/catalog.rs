@@ -9,7 +9,8 @@ fn pinned_main_has_every_family_and_full_historical_revisions() {
     // 53 pinned from main, Apply Color LUT's native revision 2, the four
     // unclipped revisions, Levels and Levels (Individual Controls) with their
     // clip switches off, Duotone and Posterize grading faint pixels, and
-    // Color Wheels, Color Curves and Color Space Transform.
+    // Color Wheels, Color Curves, Color Space Transform, and Gradient Ramp's
+    // stop-aware revision 3 (both older ramp implementations are retained).
     assert_eq!(main_catalog().definitions().count(), 66);
     assert_eq!(main_catalog().current_definitions().count(), 46);
     assert_eq!(main_effects().blobs.len(), 22);
@@ -238,7 +239,7 @@ fn changed_historical_gradient_requires_provenance_instead_of_silent_reinterpret
 fn assembled_programs_are_keyed_by_implementation_revision_and_preserve_raw_sources() {
     use std::collections::BTreeSet;
     let shaders = &main_effects().shaders;
-    assert_eq!(shaders.len(), 65);
+    assert_eq!(shaders.len(), 66);
     let mut keys = BTreeSet::new();
     for shader in shaders {
         assert!(keys.insert((&shader.id, shader.version)));
