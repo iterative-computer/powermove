@@ -74,14 +74,5 @@ pub use native::{
     zoom_limit,
 };
 
-// These suites use pure geometry or a headless renderer, never native windows.
-#[cfg(test)]
-extern crate self as pm_shell;
-#[cfg(test)]
-#[path = "../tests/models.rs"]
-mod regression_models;
-#[cfg(all(test, target_os = "macos"))]
-#[path = "../tests/dock_scroll.rs"]
-mod regression_dock_scroll;
 #[cfg(all(test, target_os = "macos"))]
 mod utility_capture_tests;
