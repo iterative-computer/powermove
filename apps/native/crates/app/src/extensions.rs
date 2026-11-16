@@ -181,7 +181,7 @@ pub struct Extensions {
     v4_themes: Vec<Value>,
     v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
-    surfaces: BTreeMap<String, (String, String)>,
+    pub(crate) surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
     forks: BTreeMap<String, (String, String)>,
     /// Surface ids this window has mounted, and whether the first scan is done:
@@ -1223,6 +1223,7 @@ impl Controller {
         ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
         cx: &mut Context<Self>,
     ) {
+        self.panel_builds.entry(panel.clone()).or_default();
         cx.spawn(async move |this, cx| {
             let mounted = match ticket.await {
                 Ok(ticket) => ticket.await.map(|e| e.generation.number),
@@ -1230,7 +1231,12 @@ impl Controller {
             };
             let _ = this.update(cx, |v, cx| {
                 match mounted {
-                    Ok(generation) => v.surface_ready(panel, generation),
+                    Ok(generation) => {
+                        if let Some(build) = v.panel_builds.get_mut(&panel) {
+                            build.published([0], true);
+                        }
+                        v.surface_ready(panel, generation)
+                    }
                     Err(error) => {
                         v.builtins.forget_surface(&panel);
                         v.message = format!("{source} could not start: {error}");

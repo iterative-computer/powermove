@@ -1767,6 +1767,7 @@ impl Editor {
         placement: &serde_json::Value,
         height: f32,
     ) -> serde_json::Value {
+        self.slides.armed = true;
         self.maximized_panel = None;
         let used = layout::reserve_build(&mut self.layout, id, placement, height);
         self.agent_build_slots

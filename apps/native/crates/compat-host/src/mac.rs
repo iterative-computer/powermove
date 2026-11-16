@@ -82,10 +82,31 @@ fn snapshot_geometry(source: Rect, target: Rect, height: f64) -> (Rect, Rect) {
 }
 #[derive(Default)]
 struct PanelSnapshot {
+    request_sequence: u64,
+    failed: bool,
+    build_done: bool,
     requested: u64,
     revision: u64,
     captured_revision: u64,
     image: Option<(Rect, Retained<NSImage>)>,
+}
+impl PanelSnapshot {
+    fn invalidate_build(&mut self) {
+        self.request_sequence = self.request_sequence.wrapping_add(1);
+        self.requested = 0;
+        self.failed = false;
+        self.build_done = false;
+    }
+    fn begin_capture(&mut self, generation: u64) -> u64 {
+        self.request_sequence = self.request_sequence.wrapping_add(1);
+        self.requested = generation;
+        self.failed = false;
+        self.build_done = false;
+        self.request_sequence
+    }
+    fn accepts(&self, sequence: u64) -> bool {
+        self.request_sequence == sequence
+    }
 }
 #[derive(Clone)]
 struct Overscan {
@@ -845,6 +866,7 @@ pub struct MacDomHost {
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
     overlays: BTreeMap<String, (Retained<SnapshotView>, Retained<NSImageView>)>,
+    build_masks: BTreeMap<String, (u64, f32)>,
     /// The continuous radius of each region's bottom corners
     /// (`set_corner_radius`): the panels' bodies end in their corners.
     corner_radius: f64,
@@ -993,6 +1015,7 @@ impl MacDomHost {
             content: None,
             fill: None,
             overlays: BTreeMap::new(),
+            build_masks: BTreeMap::new(),
             corner_radius: 0.,
         };
         host.load();
@@ -1307,7 +1330,13 @@ impl MacDomHost {
             };
             return !match &self.content {
                 Some(content) => content.iter().any(|r| r.contains(x, y)),
-                None => self.shared.panels.borrow().visible().iter().any(|r| r.contains(x, y)),
+                None => self
+                    .shared
+                    .panels
+                    .borrow()
+                    .visible()
+                    .iter()
+                    .any(|r| r.contains(x, y)),
             };
         };
         if let Some((x, y)) = self.pressed.take() {
@@ -1323,6 +1352,36 @@ impl MacDomHost {
     pub fn set_fill(&mut self, fill: Option<[f64; 4]>) {
         if self.fill != fill {
             self.fill = fill;
+            self.shared.geometry_dirty.set(true);
+        }
+    }
+    /// Reuse the asynchronous WK snapshot cache. A new commit invalidates only
+    /// this panel; frame changes are already keyed by layout generation.
+    pub fn panel_build_snapshot(
+        &mut self,
+        id: &str,
+        revision: u64,
+        live_alpha: f32,
+    ) -> (bool, Option<(Rect, Retained<NSImage>)>) {
+        if self.build_masks.get(id).map(|v| v.0) != Some(revision) {
+            let mut snapshots = self.shared.snapshots.borrow_mut();
+            let snapshot = snapshots.entry(id.to_owned()).or_default();
+            snapshot.invalidate_build();
+        }
+        if self
+            .build_masks
+            .insert(id.to_owned(), (revision, live_alpha))
+            != Some((revision, live_alpha))
+        {
+            self.shared.geometry_dirty.set(true);
+        }
+        let snapshots = self.shared.snapshots.borrow();
+        let snapshot = snapshots.get(id);
+        let image = snapshot.and_then(|s| s.image.clone());
+        (snapshot.is_some_and(|s| s.build_done), image)
+    }
+    pub fn finish_panel_build(&mut self, id: &str) {
+        if self.build_masks.remove(id).is_some() {
             self.shared.geometry_dirty.set(true);
         }
     }
@@ -1457,6 +1516,7 @@ impl MacDomHost {
     /// original scale, pinned to the new top-left and clipped by a native layer.
     fn present_snapshots(&mut self, viewport: Rect) {
         let layouts = self.shared.layouts.borrow().clone();
+        self.build_masks.retain(|id, _| layouts.contains_key(id));
         self.overlays.retain(|id, (view, _)| {
             let keep = layouts.contains_key(id);
             if !keep {
@@ -1483,7 +1543,7 @@ impl MacDomHost {
                 {
                     continue;
                 }
-                snapshot.requested = generation;
+                let request_sequence = snapshot.begin_capture(generation);
                 drop(snapshots);
                 let shared = self.shared.clone();
                 let configuration =
@@ -1496,18 +1556,41 @@ impl MacDomHost {
                 }
                 let callback =
                     block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
-                        if shared.closed.get() || !error.is_null() {
+                        if shared.closed.get() {
                             return;
                         }
                         let valid = shared
                             .layouts
                             .borrow()
                             .get(&id)
-                            .is_some_and(|(g, _, applied)| *g == generation && *applied);
+                            .is_some_and(|(g, _, applied)| *g == generation && *applied)
+                            && shared
+                                .snapshots
+                                .borrow()
+                                .get(&id)
+                                .is_some_and(|s| s.accepts(request_sequence));
                         if !valid {
                             return;
                         }
+                        if !error.is_null() || image.is_null() {
+                            {
+                                let mut snapshots = shared.snapshots.borrow_mut();
+                                let snapshot = snapshots.entry(id.clone()).or_default();
+                                snapshot.failed = true;
+                                snapshot.build_done = true;
+                                snapshot.image = None;
+                            }
+                            shared.geometry_dirty.set(true);
+                            shared.handler.event(HostEvent::GeometryChanged);
+                            return;
+                        }
                         if let Some(image) = unsafe { image.as_ref() } {
+                            shared
+                                .snapshots
+                                .borrow_mut()
+                                .entry(id.clone())
+                                .or_default()
+                                .build_done = true;
                             shared
                                 .snapshots
                                 .borrow_mut()
@@ -1601,7 +1684,8 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot.clip(self.shared.panels.borrow().visible(), self.corner_radius);
+        self.slot
+            .clip(self.shared.panels.borrow().visible(), self.corner_radius);
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field
@@ -1619,7 +1703,19 @@ impl MacDomHost {
         let rects = panels.fill_regions.as_deref().unwrap_or(&visible);
         let path = CGMutablePath::new();
         let h = self.slot.bounds().size.height;
-        for r in rects {
+        let cuts = self
+            .build_masks
+            .keys()
+            .filter_map(|id| self.shared.layouts.borrow().get(id).map(|(_, r, _)| *r))
+            .collect::<Vec<_>>();
+        let mut ground_regions = rects.to_vec();
+        for cut in &cuts {
+            ground_regions = ground_regions
+                .into_iter()
+                .flat_map(|r| subtract_build_region(r, *cut))
+                .collect();
+        }
+        for r in &ground_regions {
             unsafe {
                 CGMutablePath::add_rect(
                     Some(&path),
@@ -1637,7 +1733,12 @@ impl MacDomHost {
         drop(panels);
         self.web.setWantsLayer(true);
         if let Some(layer) = self.web.layer() {
-            match &self.content {
+            let build_content = if self.content.is_none() && !self.build_masks.is_empty() {
+                Some(self.shared.panels.borrow().visible())
+            } else {
+                self.content.clone()
+            };
+            match &build_content {
                 Some(rects) => {
                     let path = CGMutablePath::new();
                     // WebKit's view is flipped (its layer's geometry with it):
@@ -1664,6 +1765,14 @@ impl MacDomHost {
                         })
                         .filter(|r| r.w > 0. && r.h > 0.)
                         .collect();
+                    let all_regions = regions.clone();
+                    let mut regions = regions;
+                    for cut in &cuts {
+                        regions = regions
+                            .into_iter()
+                            .flat_map(|r| subtract_build_region(r, *cut))
+                            .collect();
+                    }
                     for r in &regions {
                         let y = if flipped { r.y } else { h - r.y - r.h };
                         unsafe {
@@ -1677,12 +1786,53 @@ impl MacDomHost {
                     let mask = objc2_quartz_core::CAShapeLayer::new();
                     mask.setFrame(self.web.bounds());
                     mask.setPath(Some(&path));
-                    unsafe { layer.setMask(Some(&mask)) }
+                    if self.build_masks.is_empty() {
+                        unsafe { layer.setMask(Some(&mask)) }
+                    } else {
+                        let group = objc2_quartz_core::CALayer::new();
+                        group.setFrame(self.web.bounds());
+                        group.addSublayer(&mask);
+                        for (id, (_, alpha)) in &self.build_masks {
+                            let Some((_, cut, _)) = self.shared.layouts.borrow().get(id).cloned()
+                            else {
+                                continue;
+                            };
+                            if *alpha <= 0. {
+                                continue;
+                            }
+                            let path = CGMutablePath::new();
+                            for r in &all_regions {
+                                let r = r.intersection(cut);
+                                if r.w <= 0. || r.h <= 0. {
+                                    continue;
+                                }
+                                let y = if flipped { r.y } else { h - r.y - r.h };
+                                unsafe {
+                                    CGMutablePath::add_rect(
+                                        Some(&path),
+                                        std::ptr::null(),
+                                        NSRect::new(NSPoint::new(r.x, y), NSSize::new(r.w, r.h)),
+                                    );
+                                }
+                            }
+                            let reveal = objc2_quartz_core::CAShapeLayer::new();
+                            reveal.setFrame(self.web.bounds());
+                            reveal.setPath(Some(&path));
+                            reveal.setOpacity(*alpha);
+                            group.addSublayer(&reveal);
+                        }
+                        unsafe { layer.setMask(Some(&group)) }
+                    }
                 }
                 None => unsafe { layer.setMask(None) },
             }
         }
         self.present_snapshots(viewport);
+        for id in self.build_masks.keys() {
+            if let Some((view, _)) = self.overlays.get(id) {
+                view.setHidden(true);
+            }
+        }
         self.overscan_snapshot(viewport);
         refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
@@ -2115,5 +2265,44 @@ mod admission_tests {
         s.ready.set(false);
         assert_eq!(s.handle(r#"{"generation":3,"panel":0,"kind":"ready","payload":{"origin":"https://example.invalid"}}"#),Err(Error::Forbidden));
         assert_eq!(h.events.get(), 1);
+    }
+}
+
+fn subtract_build_region(r: Rect, cut: Rect) -> Vec<Rect> {
+    let i = r.intersection(cut);
+    if i.w <= 0. || i.h <= 0. {
+        return vec![r];
+    }
+    [
+        Rect::new(r.x, r.y, r.w, i.y - r.y),
+        Rect::new(r.x, i.y + i.h, r.w, r.y + r.h - i.y - i.h),
+        Rect::new(r.x, i.y, i.x - r.x, i.h),
+        Rect::new(i.x + i.w, i.y, r.x + r.w - i.x - i.w, i.h),
+    ]
+    .into_iter()
+    .filter(|r| r.w > 0. && r.h > 0.)
+    .collect()
+}
+#[cfg(test)]
+mod build_mask_tests {
+    use super::*;
+    #[test]
+    fn stale_commit_snapshots_cannot_release_a_newer_control() {
+        let mut snapshot = PanelSnapshot::default();
+        let first = snapshot.begin_capture(10);
+        snapshot.invalidate_build();
+        assert!(!snapshot.accepts(first));
+        let second = snapshot.begin_capture(10);
+        assert!(!snapshot.accepts(first));
+        assert!(snapshot.accepts(second));
+    }
+    #[test]
+    fn building_panel_mask_does_not_hide_its_neighbour() {
+        let a = Rect::new(0., 0., 100., 100.);
+        let b = Rect::new(100., 0., 100., 100.);
+        assert_eq!(subtract_build_region(b, a), vec![b]);
+        assert!(subtract_build_region(a, a).is_empty());
+        let pieces = subtract_build_region(Rect::new(0., 0., 200., 100.), a);
+        assert_eq!(pieces, vec![b]);
     }
 }

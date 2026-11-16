@@ -374,7 +374,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned) });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
                 cx.notify();
             });
             editor.update(cx, |_, cx| cx.notify());
@@ -425,7 +425,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                     }).await?;
                     if !rendered { return Err(Error::invalid("Panel has not committed its first render. Build slot remains; inspect the extension or cancel.")); }
                 }
-                cx.background_executor().timer(Duration::from_millis(360)).await;
+                cx.background_executor().timer(Duration::from_millis(if event == "ready" {700} else {360})).await;
                 target.with(cx, |c, editor, _, cx| {
                     editor.update(cx, |e, cx| {
                         if event == "ready" {
@@ -436,7 +436,10 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                     });
                     c.update(cx, |v, cx| {
                         if let Some(build) = v.agent_panel_builds.remove(&id) {
-                            if let Some(target) = build.target { v.panel_builds.remove(&target); }
+                            if let Some(target) = build.target {
+                                if let Some(page)=v.extensions.page_of(&target){page.borrow_mut().finish_panel_build(&target);}
+                                v.panel_builds.remove(&target);
+                            }
                         }
                         v.panel_builds.remove(&id); cx.notify();
                     });

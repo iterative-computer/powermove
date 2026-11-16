@@ -238,6 +238,8 @@ struct Compiled {
     prepared: Prepared,
 }
 pub struct SurfaceView {
+    panel_build: Option<crate::generated_panel::panel_build::State>,
+    build_painted: Cell<u64>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
     table: Arc<TokenTable>,
@@ -376,6 +378,8 @@ impl SurfaceView {
         let table = Arc::new(TokenTable::new(tokens));
         let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
         let mut this = Self {
+            panel_build: None,
+            build_painted: Cell::new(u64::MAX),
             runtime,
             publication,
             table,
@@ -448,6 +452,150 @@ impl SurfaceView {
         };
         this.reconcile(window, cx);
         this
+    }
+    fn build_rows(&self) -> Vec<Id> {
+        fn walk(view: &SurfaceView, id: Id, rows: &mut Vec<Id>) {
+            let Some(node) = view.prepared.node(id) else {
+                return;
+            };
+            if node.component == Some(Component::InspectorRow) {
+                rows.push(id);
+            }
+            for child in &node.children {
+                walk(view, *child, rows);
+            }
+        }
+        let mut rows = Vec::new();
+        walk(self, 0, &mut rows);
+        rows
+    }
+    pub(crate) fn panel_build_rendered(&self, cx: &App) -> bool {
+        self.shown == self.latest
+            && self.build_painted.get() == self.shown
+            && self
+                .controls
+                .iter()
+                .all(|(id, c)| self.left_out(*id) || !c.read(cx).snapshot_pending())
+            && self.fields.values().all(|f| !f.read(cx).snapshot_pending())
+    }
+    pub(crate) fn set_panel_build(
+        &mut self,
+        state: Option<crate::generated_panel::panel_build::State>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = state.filter(|s| s.resolve(s.now()) < 1.);
+        if let Some(ready) = state
+            .as_ref()
+            .filter(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
+        {
+            if self
+                .panel_build
+                .as_ref()
+                .is_none_or(|old| old.changed != ready.changed || old.stage != ready.stage)
+            {
+                let changed = ready.changed;
+                let deadline =
+                    changed + std::time::Duration::from_secs_f32(pm_design::dots::RESOLVE_SECONDS);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                        .await;
+                    let _ = this.update(cx, |view, cx| {
+                        if view.panel_build.as_ref().is_some_and(|s| {
+                            s.changed == changed
+                                && s.stage == crate::generated_panel::panel_build::Stage::Ready
+                        }) {
+                            view.set_panel_build(None, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        let rows = self.build_rows();
+        let mut controls = self.controls.iter().collect::<Vec<_>>();
+        controls.sort_by_key(|(id, _)| **id);
+        for (fallback, (id, control)) in controls.into_iter().enumerate() {
+            let mut parent = Some(*id);
+            let mut row = None;
+            while let Some(id) = parent {
+                if let Some(index) = rows.iter().position(|r| *r == id) {
+                    row = Some(index);
+                    break;
+                }
+                parent = self.prepared.node(id).and_then(|n| n.parent);
+            }
+            let index = row.unwrap_or(fallback);
+            let mode = state.as_ref().map(|s| {
+                let index = if s.explicit { index } else { 0 };
+                let revision = s
+                    .committed
+                    .get(&index)
+                    .map(|at| at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready = (s.stage == crate::generated_panel::panel_build::Stage::Ready)
+                    .then(|| s.resolve(s.now()));
+                let filter = if row.is_none() {
+                    crate::generated_panel::dot_filter(Some(s), Some(index), &self.table.tokens)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+                pm_shell::native_control::BuildSnapshot {
+                    revision,
+                    ready,
+                    filter,
+                }
+            });
+            control.update(cx, |control, cx| {
+                if control.set_build_snapshot(mode) {
+                    cx.notify();
+                }
+            });
+        }
+        for (fallback, (id, field)) in self.fields.iter().enumerate() {
+            let mut parent = Some(*id);
+            let mut row = None;
+            while let Some(id) = parent {
+                if let Some(index) = rows.iter().position(|r| *r == id) {
+                    row = Some(index);
+                    break;
+                }
+                parent = self.prepared.node(id).and_then(|n| n.parent);
+            }
+            let index = row.unwrap_or(fallback);
+            let mode = state.as_ref().map(|s| {
+                let index = if s.explicit { index } else { 0 };
+                let revision = s
+                    .committed
+                    .get(&index)
+                    .map(|at| at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready = (s.stage == crate::generated_panel::panel_build::Stage::Ready)
+                    .then(|| s.resolve(s.now()));
+                let filter = if row.is_none() {
+                    crate::generated_panel::dot_filter(Some(s), Some(index), &self.table.tokens)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+                pm_shell::native_control::BuildSnapshot {
+                    revision,
+                    ready,
+                    filter,
+                }
+            });
+            field.update(cx, |field, cx| {
+                if field.set_build_snapshot(mode) {
+                    cx.notify();
+                }
+            });
+        }
+        let active = self.panel_build.is_some() || state.is_some();
+        self.panel_build = state;
+        if active {
+            cx.notify();
+        }
     }
     /// A reopened panel window keeps its view; later publications install
     /// there, and so does one that finished while no window was open.
@@ -815,6 +963,9 @@ impl SurfaceView {
             self.subscriptions.entry(id).or_default().extend([focused, blurred]);
             self.focus_events.insert(id);
         }
+        if let Some(build) = self.panel_build.clone() {
+            self.set_panel_build(Some(build), cx);
+        }
         if crate::diag::enabled() {
             crate::diag::line(
                 serde_json::json!({"ui": "reconcile", "nodes": prepared.nodes.len(),
@@ -947,6 +1098,9 @@ impl SurfaceView {
         };
         self.mount_control(kind, view, node, view.binding.clone(), window, cx);
         self.host_rows(id, node, cx);
+        if let Some(build) = self.panel_build.clone() {
+            self.set_panel_build(Some(build), cx);
+        }
     }
     fn mount_control(
         &mut self,
@@ -1887,6 +2041,7 @@ impl SurfaceView {
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
+        self.build_painted.set(self.shown);
         for (id, control) in &self.controls {
             // A control whose row is left out stays where it is: hidden.
             if self.left_out(*id) {
@@ -3036,6 +3191,52 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if let Some(build) = &self.panel_build {
+            if id == 0 || node.parent == Some(0) {
+                element.style().background = None;
+            }
+            if node.component == Some(Component::InspectorRow) {
+                let index = if build.explicit {
+                    self.build_rows()
+                        .iter()
+                        .position(|row| *row == id)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                element = element
+                    .filter(crate::generated_panel::dot_filter(
+                        Some(build),
+                        Some(index),
+                        &self.table.tokens,
+                    ))
+                    .opacity(crate::generated_panel::control_opacity(
+                        Some(build),
+                        index,
+                        self.table.tokens.accessibility.reduce_motion,
+                    ));
+            } else if node.text.is_some() {
+                let mut parent = node.parent;
+                let mut in_row = false;
+                while let Some(id) = parent {
+                    let Some(n) = self.prepared.node(id) else {
+                        break;
+                    };
+                    if n.component == Some(Component::InspectorRow) {
+                        in_row = true;
+                        break;
+                    }
+                    parent = n.parent;
+                }
+                if !in_row {
+                    element = element.filter(crate::generated_panel::dot_filter(
+                        Some(build),
+                        None,
+                        &self.table.tokens,
+                    ));
+                }
+            }
+        }
         // In a body that scrolls, the root and the panel fill the body by
         // growing into it, not as a share of a height that their content
         // sets (which would leave them their content's height).
@@ -3212,10 +3413,7 @@ impl SurfaceView {
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let size = (
-                            f32::from(bounds.size.width),
-                            f32::from(bounds.size.height),
-                        );
+                        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
                         if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
@@ -4205,7 +4403,8 @@ impl SurfaceView {
             let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
                 let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
-                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
+                cx.new(|_| Tooltip::following(source, id, title, tokens))
+                    .into()
             });
         }
         element

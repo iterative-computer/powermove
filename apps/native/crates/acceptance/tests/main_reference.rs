@@ -332,7 +332,10 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            assert!(!required.contains(&serde_json::json!("compositionId")), "{name}");
+            assert!(
+                !required.contains(&serde_json::json!("compositionId")),
+                "{name}"
+            );
         }
         let actual = &actual;
         if tool["name"] == "edit_3d" {
@@ -471,13 +474,13 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             assert_eq!(tool, actual);
         }
     }
-    for field in [
-        "inspection",
-        "app",
-        "instructions",
-        "commandFields",
-        "easePresets",
-    ] {
+    for field in ["inspection", "instructions", "commandFields", "easePresets"] {
         assert_eq!(bare[field], expected[field]);
     }
+    let mut app = bare["app"].as_array().unwrap().clone();
+    app.extend([
+        serde_json::json!("panel_begin"),
+        serde_json::json!("panel_build"),
+    ]);
+    assert_eq!(expected["app"], serde_json::json!(app));
 }

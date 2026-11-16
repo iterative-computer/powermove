@@ -9,6 +9,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::rc::Rc;
 
 pub struct TextField {
+    build: Option<crate::native_control::BuildSnapshot>,
+    build_pixels: Rc<std::cell::RefCell<crate::native_control::BuildPixels>>,
     slot: Rc<NativeTextSlot>,
     /// Where the slot was painted inside a scroll layer, to follow it.
     layer: Rc<crate::layer_stage::LayerStage>,
@@ -96,6 +98,8 @@ impl TextField {
         })
         .detach();
         Self {
+            build: None,
+            build_pixels: Default::default(),
             slot,
             layer: Rc::default(),
             kind,
@@ -221,19 +225,58 @@ impl TextField {
     }
     /// A form's field (Settings): AppKit's bordered field is the whole
     /// control, shown at all times; the unit stands beside it.
-    fn render_form(&mut self, window: &mut Window) -> AnyElement {
+    pub fn snapshot_pending(&self) -> bool {
+        !matches!(
+            self.kind,
+            TextKind::DenseText | TextKind::DenseNumber | TextKind::Canvas
+        ) && self.slot.snapshot_visible()
+            && self
+                .build
+                .and_then(|b| b.revision)
+                .is_some_and(|r| !self.build_pixels.borrow().attempted(r))
+    }
+    pub fn set_build_snapshot(
+        &mut self,
+        build: Option<crate::native_control::BuildSnapshot>,
+    ) -> bool {
+        let build = build.filter(|b| b.ready.unwrap_or(0.) < 1. && self.kind != TextKind::Canvas);
+        if self.build == build {
+            return false;
+        }
+        self.build = build;
+        if build.is_none() {
+            *self.build_pixels.borrow_mut() = Default::default();
+        }
+        true
+    }
+    fn render_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let build = self.build;
+        let pixels = self.build_pixels.clone();
+        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
+        let owner = cx.entity().downgrade();
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let t = &self.tokens;
         let rect = |b: Bounds<Pixels>| {
             NSRect::new(
                 NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
-                NSSize::new(f32::from(b.size.width) as f64, f32::from(b.size.height) as f64),
+                NSSize::new(
+                    f32::from(b.size.width) as f64,
+                    f32::from(b.size.height) as f64,
+                ),
             )
         };
         let _ = window;
         div()
             .id("native-text")
+            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
+            .opacity(
+                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
+                    0.
+                } else {
+                    1.
+                },
+            )
             .w_full()
             .flex()
             .items_center()
@@ -241,18 +284,45 @@ impl TextField {
             .text_size(px(t.typography.body))
             .font_family(pm_design::TEXT_FONT)
             .child(
-                div().relative().flex_1().min_w(px(0.)).h(px(t.metrics.field)).child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            let mask = window.content_mask().bounds;
-                            let (bounds, mask) = layer.painted(bounds, mask, window);
-                            slot.stage(rect(bounds), rect(mask));
-                        },
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h(px(t.metrics.field))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let mask = window.content_mask().bounds;
+                                let (bounds, mask) = layer.painted(bounds, mask, window);
+                                slot.stage(rect(bounds), rect(mask));
+                                if let Some(build) = build {
+                                    if let Some(revision) = build.revision {
+                                        if pixels.borrow_mut().capture(
+                                            slot.native_view(),
+                                            bounds,
+                                            revision,
+                                        ) {
+                                            let _ = owner.update(cx, |_, cx| cx.notify());
+                                        }
+                                    }
+                                    let (_, live) = pm_design::dots::snapshot_visibility(
+                                        pixels.borrow().captured(),
+                                        build.ready,
+                                    );
+                                    slot.stage_build_alpha(live as f64);
+                                } else {
+                                    slot.stage_build_alpha(1.);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
                     )
-                    .absolute()
-                    .inset_0(),
-                ),
+                    .children(
+                        snapshot
+                            .map(|image| div().absolute().inset_0().child(img(image).size_full())),
+                    ),
             )
             .children(self.unit.clone().map(|unit| {
                 div()
@@ -381,8 +451,11 @@ const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
-            return self.render_form(window);
+            return self.render_form(window, cx);
         }
+        let build = self.build;
+        let pixels = self.build_pixels.clone();
+        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
@@ -394,7 +467,7 @@ impl Render for TextField {
         let seen = self.width.clone();
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
-        let editing = self.slot.is_editing();
+        let editing = self.slot.is_editing() && build.is_none();
         let (t, bare) = (&self.tokens, self.bare);
         let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
         // A well is a soft ink fill with no outline; while it is edited a
@@ -410,6 +483,14 @@ impl Render for TextField {
         };
         div()
             .id("native-text")
+            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
+            .opacity(
+                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
+                    0.
+                } else {
+                    1.
+                },
+            )
             .relative()
             .w_full()
             .when(self.fill, |d| d.h_full())
@@ -469,8 +550,10 @@ impl Render for TextField {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.slot.begin_editing();
-                    cx.notify();
+                    if this.build.is_none() {
+                        this.slot.begin_editing();
+                        cx.notify();
+                    }
                 }),
             )
             .flex()
@@ -543,10 +626,33 @@ impl Render for TextField {
                         }
                         let (bounds, mask) = layer.painted(bounds, mask, window);
                         slot.stage(rect(bounds), rect(mask));
+                        if let Some(build) = build {
+                            if !dense {
+                                if let Some(revision) = build.revision {
+                                    if pixels.borrow_mut().capture(
+                                        slot.native_view(),
+                                        bounds,
+                                        revision,
+                                    ) {
+                                        let _ = entity.update(cx, |_, cx| cx.notify());
+                                    }
+                                }
+                            }
+                            let (_, live) = pm_design::dots::snapshot_visibility(
+                                dense || pixels.borrow().captured(),
+                                build.ready,
+                            );
+                            slot.stage_build_alpha(live as f64);
+                        } else {
+                            slot.stage_build_alpha(1.);
+                        }
                     },
                 )
                 .absolute()
                 .inset_0(),
+            )
+            .children(
+                snapshot.map(|image| div().absolute().inset_0().child(img(image).size_full())),
             )
             .into_any_element()
     }
