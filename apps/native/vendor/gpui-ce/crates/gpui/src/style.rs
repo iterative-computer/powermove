@@ -536,6 +536,8 @@ impl BoxShadow {
 pub enum Filter {
     /// A gaussian blur with the given radius, in logical pixels. Maps to CSS `blur(<px>)`.
     Blur(Pixels),
+    /// Fixed-size, additive dot generations sampled from isolated content.
+    DotMatrix { detail: f32, resolve: f32, accent: u32 },
 }
 
 impl Filter {
@@ -548,6 +550,7 @@ impl Filter {
     pub fn is_identity(&self) -> bool {
         match self {
             Filter::Blur(radius) => *radius <= Pixels::ZERO,
+            Filter::DotMatrix { resolve, .. } => *resolve >= 1.0,
         }
     }
 
@@ -556,6 +559,7 @@ impl Filter {
     pub fn scale(&self, factor: f32) -> ScaledFilter {
         match self {
             Filter::Blur(radius) => ScaledFilter::Blur(radius.scale(factor)),
+            Filter::DotMatrix { detail, resolve, accent } => ScaledFilter::DotMatrix { detail: *detail, resolve: *resolve, accent: *accent, scale: factor },
         }
     }
 }
@@ -571,6 +575,8 @@ impl Filter {
 pub enum ScaledFilter {
     /// A gaussian blur with the given radius, in scaled (device) pixels.
     Blur(ScaledPixels),
+    /// Device scale keeps the grid fixed in logical pixels.
+    DotMatrix { detail: f32, resolve: f32, accent: u32, scale: f32 },
 }
 
 /// How to handle whitespace in text

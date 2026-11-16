@@ -1442,6 +1442,7 @@ impl MetalRenderer {
                                 filter.max_blur_radius(),
                                 filter.opacity,
                                 true,
+                                None,
                             );
                         }
                     }
@@ -1499,6 +1500,10 @@ impl MetalRenderer {
                         boundary.max_blur_radius(),
                         boundary.opacity,
                         false,
+                        boundary.filters.iter().find_map(|filter| match filter {
+                            gpui::ScaledFilter::DotMatrix { detail, resolve, accent, scale } => Some((*detail, *resolve, *accent, *scale)),
+                            _ => None,
+                        }),
                     );
                     command_encoder = new_command_encoder_for_texture(
                         command_buffer,
@@ -1654,6 +1659,7 @@ impl MetalRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
+        dots: Option<(f32, f32, u32, f32)>,
     ) {
         if clip_rounded && blur_radius <= 0.0 {
             return;
@@ -1732,7 +1738,7 @@ impl MetalRenderer {
         } else {
             bounds.dilate(ScaledPixels(dilation))
         };
-        let composite_uniforms = BlurUniforms::composite(
+        let mut composite_uniforms = BlurUniforms::composite(
             composite_bounds,
             content_mask,
             corner_radii,
@@ -1742,6 +1748,10 @@ impl MetalRenderer {
             source_size,
             full_size,
         );
+        if let Some((detail, resolve, accent, scale)) = dots {
+            composite_uniforms.dots = wgsl_rs::std::vec4f(detail, resolve, 0.0, scale);
+            composite_uniforms.dot_accent = wgsl_rs::std::vec4f(((accent >> 16) & 255) as f32 / 255.0, ((accent >> 8) & 255) as f32 / 255.0, (accent & 255) as f32 / 255.0, 1.0);
+        }
         let encoder = new_command_encoder_for_texture(
             command_buffer,
             target,
@@ -1815,6 +1825,7 @@ impl MetalRenderer {
                 0.0,
                 1.0,
                 false,
+                None,
             );
         }
     }
