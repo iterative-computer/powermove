@@ -4261,13 +4261,17 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             if text.is_empty() {
                 return;
             }
+            let mut font = Font {
+                family: pm_design::TEXT_FONT.into(),
+                features: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+                ..window.text_style().font()
+            };
+            if let Some(weight) = op.detail["weight"].as_f64() {
+                font.weight = FontWeight(weight as f32);
+            }
             let run = TextRun {
                 len: text.len(),
-                font: Font {
-                    family: pm_design::TEXT_FONT.into(),
-                    features: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-                    ..window.text_style().font()
-                },
+                font,
                 color: rgb_to_hsla(color),
                 background_color: None,
                 underline: None,
