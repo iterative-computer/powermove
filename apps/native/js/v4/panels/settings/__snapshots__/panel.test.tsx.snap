@@ -3,1159 +3,1036 @@
 exports[`empty: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts" selected
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Accounts"
         div
           div
             div group settings.section.accounts label="Accounts"
-              div
-                text heading
-                  text "Accounts"
-                text
-                  text "Your Powermove account, and the models your agent works with."
               div group label="Powermove Account"
                 text heading
                   text "Powermove Account"
-                div form-group group label="Powermove Account"
-                  div group settings.row.account.sign-in label="Powermove Account"
+                div group label="Powermove Account"
+                  div form-group group label="Powermove Account"
+                    div group settings.row.account.sign-in label="Powermove Account"
+                      div
+                        div
+                          text
+                            text "Powermove Account"
+                        text
+                          text "Remember installs and publish to the Store."
+                      div
+                        button push-button label="Sign In…" disabled
+                          text "Sign In…"
                     div
-                      text
-                        text "Powermove Account"
-                      text
-                        text "Remember installs and publish to the Store."
+                    div group settings.row.account.remember label="Remember Installs on This Account"
+                      div
+                        div
+                          text
+                            text "Remember Installs on This Account"
+                      div
                     div
-                      button push-button label="Sign In…" disabled
-                        text "Sign In…"
-                  div group settings.row.account.remember label="Remember Installs on This Account"
-                    div
-                      text
-                        text "Remember Installs on This Account"
-                    div
-                  div group settings.row.account.bring-sign-ins label="Sign-Ins from the Original App"
-                    div
-                      text
-                        text "Sign-Ins from the Original App"
-                      text
-                        text "Copies your extension secrets and sign-ins, with one macOS Keychain request."
-                    div
-                      button push-button label="Bring Sign-Ins from the Original App…"
-                        text "Bring Sign-Ins from the Original App…"
+                    div group settings.row.account.bring-sign-ins label="Sign-Ins from the Original App"
+                      div
+                        div
+                          text
+                            text "Sign-Ins from the Original App"
+                        text
+                          text "Copies your extension secrets and sign-ins, with one macOS Keychain request."
+                      div
+                        button push-button label="Bring Sign-Ins from the Original App…"
+                          text "Bring Sign-Ins from the Original App…"
               div group label="Subscriptions"
                 text heading
                   text "Subscriptions"
-                div form-group group label="Subscriptions"
-                  div group settings.row.account.chatgpt label="ChatGPT"
-                    div
-                      text
-                        text "ChatGPT"
-                    div
-                      text
+                div group label="Subscriptions"
+                  div form-group group label="Subscriptions"
+                    div group settings.row.account.chatgpt label="ChatGPT"
+                      div
+                        div
+                          text
+                            text "ChatGPT"
+                      div
                         text
-                  div group settings.row.account.claude label="Claude"
+                          text
                     div
-                      text
-                        text "Claude"
-                    div
-                      text
+                    div group settings.row.account.claude label="Claude"
+                      div
+                        div
+                          text
+                            text "Claude"
+                      div
                         text
+                          text
               div group label="API or Local Model"
                 text heading
                   text "API or Local Model"
-                div form-group group label="API or Local Model"
-                  div group settings.row.account.provider label="Connection Type"
+                div group label="API or Local Model"
+                  div form-group group label="API or Local Model"
+                    div group settings.row.account.provider label="Connection Type"
+                      div
+                        div
+                          text
+                            text "Connection Type"
+                      div
                     div
-                      text
-                        text "Connection Type"
+                    div group settings.row.account.url label="API Base URL"
+                      div
+                        div
+                          text
+                            text "API Base URL"
+                        text
+                          text "Base URL of the API, ending in /v1."
+                      div
                     div
-                  div group settings.row.account.url label="API Base URL"
+                    div group settings.row.account.key label="API Key"
+                      div
+                        div
+                          text
+                            text "API Key"
+                        text
+                          text "Key saved securely. Leave blank to keep it."
+                      div
                     div
-                      text
-                        text "API Base URL"
-                      text
-                        text "Base URL of the API, ending in /v1."
+                    div group settings.row.account.model label="Model Name"
+                      div
+                        div
+                          text
+                            text "Model Name"
+                        text
+                          text "The exact model name your provider expects."
+                      div
                     div
-                  div group settings.row.account.key label="API Key"
+                    div group settings.row.account.vision label="This Model Supports Images"
+                      div
+                        div
+                          text
+                            text "This Model Supports Images"
+                        text
+                          text "The model can read pictures you attach to a message."
+                      div
                     div
-                      text
-                        text "API Key"
-                      text
-                        text "Key saved securely. Leave blank to keep it."
-                    div
-                  div group settings.row.account.model label="Model Name"
-                    div
-                      text
-                        text "Model Name"
-                      text
-                        text "The exact model name your provider expects."
-                    div
-                  div group settings.row.account.vision label="This Model Supports Images"
-                    div
-                      text
-                        text "This Model Supports Images"
-                      text
-                        text "The model can read pictures you attach to a message."
-                    div
-                  div group settings.row.account.status label="Status"
-                    div
-                      text
-                        text "Status"
-                      text
-                        text "Restart Powermove to enable API and local connections."
-                    div
-                      button push-button label="Test and Connect" disabled
-                        text "Test and Connect"
-Focus: ["settings.search","settings.sections","Bring Sign-Ins from the Original App…"]"
+                    div group settings.row.account.status label="Status"
+                      div
+                        div
+                          text
+                            text "Status"
+                        text
+                          text "Restart Powermove to enable API and local connections."
+                      div
+                        button push-button label="Test and Connect" disabled
+                          text "Test and Connect"
+Focus: ["Bring Sign-Ins from the Original App…"]"
 `;
 
 exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value="no-fixture-match"
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div status label="No Results. Try a different search."
           text
-            text "No Results"
-          text
-            text "Try a different search."
-Focus: ["settings.search","settings.sections"]"
+            text "No settings found."
+Focus: []"
 `;
 
 exports[`extension-detail: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General" selected
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="General"
         div
           div
             div group settings.section.general label="General"
-              div
-                text heading
-                  text "General"
-                text
-                  text "How Powermove looks and works on this Mac."
               div group label="Appearance"
                 text heading
                   text "Appearance"
-                div form-group group label="Appearance"
-                  div group settings.row.appearance label="Appearance"
-                    div
-                      text
-                        text "Appearance"
-                      text
-                        text "Follow your system setting, or pick a light or dark theme."
-                    div
+                div group label="Appearance"
+                  div form-group group label="Appearance"
+                    div group settings.row.appearance label="Appearance"
+                      div
+                        div
+                          text
+                            text "Appearance"
+                        text
+                          text "Follow your system setting, or pick a light or dark theme."
+                      div
               div group label="Workspace"
                 text heading
                   text "Workspace"
-                div form-group group label="Workspace"
-                  div group settings.row.workspace label="After Effects Workspace"
-                    div
-                      text
-                        text "After Effects Workspace"
-                      text
-                        text "Bring your saved panels and tools into Powermove with your agent."
-                    div
-                      button push-button label="Bring My Workspace…"
-                        text "Bring My Workspace…"
+                div group label="Workspace"
+                  div form-group group label="Workspace"
+                    div group settings.row.workspace label="After Effects Workspace"
+                      div
+                        div
+                          text
+                            text "After Effects Workspace"
+                        text
+                          text "Bring your saved panels and tools into Powermove with your agent."
+                      div
+                        button push-button label="Bring My Workspace…"
+                          text "Bring My Workspace…"
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.row.preview-memory label="Preview Memory Limit"
-                    div
-                      text
-                        text "Preview Memory Limit"
-                      text
-                        text "Frames kept in memory so replays are instant."
-                    div
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.row.preview-memory label="Preview Memory Limit"
+                      div
+                        div
+                          text
+                            text "Preview Memory Limit"
+                        text
+                          text "Frames kept in memory so replays are instant."
+                      div
               div group label="Media"
                 text heading
                   text "Media"
-                div form-group group label="Media"
-                  div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                    div
-                      text
-                        text "Automatically Download Cloud Media"
-                      text
-                        text "Download offloaded files when opening a project."
-                    div
-                      button switch switch label="Automatically Download Cloud Media" value=false disabled
+                div group label="Media"
+                  div form-group group label="Media"
+                    div group settings.row.cloud-media label="Automatically Download Cloud Media"
+                      div
+                        div
+                          text
+                            text "Automatically Download Cloud Media"
+                        text
+                          text "Download offloaded files when opening a project."
+                      div
+                        button switch switch label="Automatically Download Cloud Media" value=false disabled
               div group label="Windows"
                 text heading
                   text "Windows"
-                div form-group group label="Windows"
-                  div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                div group label="Windows"
+                  div form-group group label="Windows"
+                    div group settings.row.open-projects-in label="Open Projects In"
+                      div
+                        div
+                          text
+                            text "Open Projects In"
+                        text
+                          text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
+                      div
                     div
-                      text
-                        text "Reopen Last Project on Launch"
-                      text
-                        text "Open only the project you were last working on."
-                    div
-                      button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["settings.search","settings.sections","Bring My Workspace…"]"
+                    div group settings.row.restore-windows label="Reopen Last Project on Launch"
+                      div
+                        div
+                          text
+                            text "Reopen Last Project on Launch"
+                        text
+                          text "Open only the project you were last working on."
+                      div
+                        button switch switch label="Reopen Last Project on Launch" value=true disabled
+Focus: ["Bring My Workspace…"]"
 `;
 
 exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions" selected
-            text "Extensions"
     div
       scroll group settings.detail label="Extensions"
         div
           div
             div group settings.section.extensions label="Extensions"
-              div
-                text heading
-                  text "Extensions"
-                text
-                  text "Manage extensions and turn them on or off."
               div
                 div
                   input text-field label="Filter extensions" value=""
@@ -1163,785 +1040,675 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
               div group label="Installed"
                 text heading
                   text "Installed"
-                div form-group group label="Installed"
-                  div
-                    virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
-                      div list-item listitem settings.extension.fixture-29980 label="Fixture 29980"
-                        text
-                          text "Fixture 29980"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29981 label="Fixture 29981"
-                        text
-                          text "Fixture 29981"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29982 label="Fixture 29982"
-                        text
-                          text "Fixture 29982"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29983 label="Fixture 29983"
-                        text
-                          text "Fixture 29983"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29984 label="Fixture 29984"
-                        text
-                          text "Fixture 29984"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29985 label="Fixture 29985"
-                        text
-                          text "Fixture 29985"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29986 label="Fixture 29986"
-                        text
-                          text "Fixture 29986"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29987 label="Fixture 29987"
-                        text
-                          text "Fixture 29987"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29988 label="Fixture 29988"
-                        text
-                          text "Fixture 29988"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29989 label="Fixture 29989"
-                        text
-                          text "Fixture 29989"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29990 label="Fixture 29990"
-                        text
-                          text "Fixture 29990"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29991 label="Fixture 29991"
-                        text
-                          text "Fixture 29991"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29992 label="Fixture 29992"
-                        text
-                          text "Fixture 29992"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29993 label="Fixture 29993"
-                        text
-                          text "Fixture 29993"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29994 label="Fixture 29994"
-                        text
-                          text "Fixture 29994"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29995 label="Fixture 29995"
-                        text
-                          text "Fixture 29995"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29996 label="Fixture 29996"
-                        text
-                          text "Fixture 29996"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29997 label="Fixture 29997"
-                        text
-                          text "Fixture 29997"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29998 label="Fixture 29998"
-                        text
-                          text "Fixture 29998"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-29999 label="Fixture 29999"
-                        text
-                          text "Fixture 29999"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30000 label="Fixture 30000"
-                        text
-                          text "Fixture 30000"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30001 label="Fixture 30001"
-                        text
-                          text "Fixture 30001"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30002 label="Fixture 30002"
-                        text
-                          text "Fixture 30002"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30003 label="Fixture 30003"
-                        text
-                          text "Fixture 30003"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30004 label="Fixture 30004"
-                        text
-                          text "Fixture 30004"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30005 label="Fixture 30005"
-                        text
-                          text "Fixture 30005"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30006 label="Fixture 30006"
-                        text
-                          text "Fixture 30006"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30007 label="Fixture 30007"
-                        text
-                          text "Fixture 30007"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30008 label="Fixture 30008"
-                        text
-                          text "Fixture 30008"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30009 label="Fixture 30009"
-                        text
-                          text "Fixture 30009"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30010 label="Fixture 30010"
-                        text
-                          text "Fixture 30010"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30011 label="Fixture 30011"
-                        text
-                          text "Fixture 30011"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30012 label="Fixture 30012"
-                        text
-                          text "Fixture 30012"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30013 label="Fixture 30013"
-                        text
-                          text "Fixture 30013"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30014 label="Fixture 30014"
-                        text
-                          text "Fixture 30014"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30015 label="Fixture 30015"
-                        text
-                          text "Fixture 30015"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30016 label="Fixture 30016"
-                        text
-                          text "Fixture 30016"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30017 label="Fixture 30017"
-                        text
-                          text "Fixture 30017"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30018 label="Fixture 30018"
-                        text
-                          text "Fixture 30018"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30019 label="Fixture 30019"
-                        text
-                          text "Fixture 30019"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30020 label="Fixture 30020"
-                        text
-                          text "Fixture 30020"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30021 label="Fixture 30021"
-                        text
-                          text "Fixture 30021"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30022 label="Fixture 30022"
-                        text
-                          text "Fixture 30022"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30023 label="Fixture 30023"
-                        text
-                          text "Fixture 30023"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30024 label="Fixture 30024"
-                        text
-                          text "Fixture 30024"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30025 label="Fixture 30025"
-                        text
-                          text "Fixture 30025"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30026 label="Fixture 30026"
-                        text
-                          text "Fixture 30026"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30027 label="Fixture 30027"
-                        text
-                          text "Fixture 30027"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30028 label="Fixture 30028"
-                        text
-                          text "Fixture 30028"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30029 label="Fixture 30029"
-                        text
-                          text "Fixture 30029"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30030 label="Fixture 30030"
-                        text
-                          text "Fixture 30030"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30031 label="Fixture 30031"
-                        text
-                          text "Fixture 30031"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30032 label="Fixture 30032"
-                        text
-                          text "Fixture 30032"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30033 label="Fixture 30033"
-                        text
-                          text "Fixture 30033"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30034 label="Fixture 30034"
-                        text
-                          text "Fixture 30034"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30035 label="Fixture 30035"
-                        text
-                          text "Fixture 30035"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30036 label="Fixture 30036"
-                        text
-                          text "Fixture 30036"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30037 label="Fixture 30037"
-                        text
-                          text "Fixture 30037"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30038 label="Fixture 30038"
-                        text
-                          text "Fixture 30038"
-                        text
-                          text "Effects · Installed"
-                      div list-item listitem settings.extension.fixture-30039 label="Fixture 30039"
-                        text
-                          text "Fixture 30039"
-                        text
-                          text "Effects · Installed"
+                div group label="Installed"
+                  div form-group group label="Installed"
+                    div
+                      virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
+                        div list-item listitem settings.extension.fixture-29980 label="Fixture 29980"
+                          text
+                            text "Fixture 29980"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29981 label="Fixture 29981"
+                          text
+                            text "Fixture 29981"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29982 label="Fixture 29982"
+                          text
+                            text "Fixture 29982"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29983 label="Fixture 29983"
+                          text
+                            text "Fixture 29983"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29984 label="Fixture 29984"
+                          text
+                            text "Fixture 29984"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29985 label="Fixture 29985"
+                          text
+                            text "Fixture 29985"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29986 label="Fixture 29986"
+                          text
+                            text "Fixture 29986"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29987 label="Fixture 29987"
+                          text
+                            text "Fixture 29987"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29988 label="Fixture 29988"
+                          text
+                            text "Fixture 29988"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29989 label="Fixture 29989"
+                          text
+                            text "Fixture 29989"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29990 label="Fixture 29990"
+                          text
+                            text "Fixture 29990"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29991 label="Fixture 29991"
+                          text
+                            text "Fixture 29991"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29992 label="Fixture 29992"
+                          text
+                            text "Fixture 29992"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29993 label="Fixture 29993"
+                          text
+                            text "Fixture 29993"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29994 label="Fixture 29994"
+                          text
+                            text "Fixture 29994"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29995 label="Fixture 29995"
+                          text
+                            text "Fixture 29995"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29996 label="Fixture 29996"
+                          text
+                            text "Fixture 29996"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29997 label="Fixture 29997"
+                          text
+                            text "Fixture 29997"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29998 label="Fixture 29998"
+                          text
+                            text "Fixture 29998"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-29999 label="Fixture 29999"
+                          text
+                            text "Fixture 29999"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30000 label="Fixture 30000"
+                          text
+                            text "Fixture 30000"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30001 label="Fixture 30001"
+                          text
+                            text "Fixture 30001"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30002 label="Fixture 30002"
+                          text
+                            text "Fixture 30002"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30003 label="Fixture 30003"
+                          text
+                            text "Fixture 30003"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30004 label="Fixture 30004"
+                          text
+                            text "Fixture 30004"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30005 label="Fixture 30005"
+                          text
+                            text "Fixture 30005"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30006 label="Fixture 30006"
+                          text
+                            text "Fixture 30006"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30007 label="Fixture 30007"
+                          text
+                            text "Fixture 30007"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30008 label="Fixture 30008"
+                          text
+                            text "Fixture 30008"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30009 label="Fixture 30009"
+                          text
+                            text "Fixture 30009"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30010 label="Fixture 30010"
+                          text
+                            text "Fixture 30010"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30011 label="Fixture 30011"
+                          text
+                            text "Fixture 30011"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30012 label="Fixture 30012"
+                          text
+                            text "Fixture 30012"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30013 label="Fixture 30013"
+                          text
+                            text "Fixture 30013"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30014 label="Fixture 30014"
+                          text
+                            text "Fixture 30014"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30015 label="Fixture 30015"
+                          text
+                            text "Fixture 30015"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30016 label="Fixture 30016"
+                          text
+                            text "Fixture 30016"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30017 label="Fixture 30017"
+                          text
+                            text "Fixture 30017"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30018 label="Fixture 30018"
+                          text
+                            text "Fixture 30018"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30019 label="Fixture 30019"
+                          text
+                            text "Fixture 30019"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30020 label="Fixture 30020"
+                          text
+                            text "Fixture 30020"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30021 label="Fixture 30021"
+                          text
+                            text "Fixture 30021"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30022 label="Fixture 30022"
+                          text
+                            text "Fixture 30022"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30023 label="Fixture 30023"
+                          text
+                            text "Fixture 30023"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30024 label="Fixture 30024"
+                          text
+                            text "Fixture 30024"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30025 label="Fixture 30025"
+                          text
+                            text "Fixture 30025"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30026 label="Fixture 30026"
+                          text
+                            text "Fixture 30026"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30027 label="Fixture 30027"
+                          text
+                            text "Fixture 30027"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30028 label="Fixture 30028"
+                          text
+                            text "Fixture 30028"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30029 label="Fixture 30029"
+                          text
+                            text "Fixture 30029"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30030 label="Fixture 30030"
+                          text
+                            text "Fixture 30030"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30031 label="Fixture 30031"
+                          text
+                            text "Fixture 30031"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30032 label="Fixture 30032"
+                          text
+                            text "Fixture 30032"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30033 label="Fixture 30033"
+                          text
+                            text "Fixture 30033"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30034 label="Fixture 30034"
+                          text
+                            text "Fixture 30034"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30035 label="Fixture 30035"
+                          text
+                            text "Fixture 30035"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30036 label="Fixture 30036"
+                          text
+                            text "Fixture 30036"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30037 label="Fixture 30037"
+                          text
+                            text "Fixture 30037"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30038 label="Fixture 30038"
+                          text
+                            text "Fixture 30038"
+                          text
+                            text "Effects · Installed"
+                        div list-item listitem settings.extension.fixture-30039 label="Fixture 30039"
+                          text
+                            text "Fixture 30039"
+                          text
+                            text "Effects · Installed"
               div group label="Store"
                 text heading
                   text "Store"
-                div form-group group label="Store"
-                  div group label="Powermove Store"
-                    div
-                      text
-                        text "Powermove Store"
-                      text
-                        text "Publish and manage your extensions on the Store."
-                    div
-                      button push-button label="Open Store"
-                        text "Open Store"
-Focus: ["settings.search","settings.sections","Filter extensions","Extension Type","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
+                div group label="Store"
+                  div form-group group label="Store"
+                    div group label="Powermove Store"
+                      div
+                        div
+                          text
+                            text "Powermove Store"
+                        text
+                          text "Publish and manage your extensions on the Store."
+                      div
+                        button push-button label="Open Store"
+                          text "Open Store"
+Focus: ["Filter extensions","Extension Type","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="Project"
-          text
-            text "Project"
-          div list-item listitem settings.nav.project label="Project" selected
-            text "Project"
-          div list-item listitem settings.nav.memory label="Memory"
-            text "Memory"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Project"
         div
           div
             div group settings.section.project label="Project"
-              div
-                text heading
-                  text "Project"
-                text
-                  text "Settings for “Fixture”."
               div group label="Project"
                 text heading
                   text "Project"
-                div form-group group label="Project"
-                  div group settings.row.project.name label="Name"
-                    div
-                      text
-                        text "Name"
-                      text
-                        text "Shown in the title bar and used for exported file names."
-                    div
+                div group label="Project"
+                  div form-group group label="Project"
+                    div group settings.row.project.name label="Name"
+                      div
+                        div
+                          text
+                            text "Name"
+                        text
+                          text "Shown in the title bar and used for exported file names."
+                      div
               div group label="Composition"
                 text heading
                   text "Composition"
-                div form-group group label="Composition"
-                  div group settings.row.project.size label="Size"
+                div group label="Composition"
+                  div form-group group label="Composition"
+                    div group settings.row.project.size label="Size"
+                      div
+                        div
+                          text
+                            text "Size"
+                        text
+                          text "Pick a common size, or set your own pixel dimensions."
+                      div
                     div
-                      text
-                        text "Size"
-                      text
-                        text "Pick a common size, or set your own pixel dimensions."
+                    div group settings.row.project.width label="Width"
+                      div
+                        div
+                          text
+                            text "Width"
+                      div
                     div
-                  div group settings.row.project.width label="Width"
+                    div group settings.row.project.height label="Height"
+                      div
+                        div
+                          text
+                            text "Height"
+                      div
                     div
-                      text
-                        text "Width"
+                    div group settings.row.project.fps label="Frame Rate"
+                      div
+                        div
+                          text
+                            text "Frame Rate"
+                        text
+                          text "Frames rendered per second of the composition — any rate from 1 to 240."
+                      div
                     div
-                  div group settings.row.project.height label="Height"
+                    div group settings.row.project.duration label="Duration"
+                      div
+                        div
+                          text
+                            text "Duration"
+                      div
                     div
-                      text
-                        text "Height"
+                    div group settings.row.project.background label="Background"
+                      div
+                        div
+                          text
+                            text "Background"
+                        text
+                          text "Colour shown behind every layer of the composition."
+                      div
                     div
-                  div group settings.row.project.fps label="Frame Rate"
-                    div
-                      text
-                        text "Frame Rate"
-                      text
-                        text "Frames rendered per second of the composition — any rate from 1 to 240."
-                    div
-                  div group settings.row.project.duration label="Duration"
-                    div
-                      text
-                        text "Duration"
-                    div
-                  div group settings.row.project.background label="Background"
-                    div
-                      text
-                        text "Background"
-                      text
-                        text "Colour shown behind every layer of the composition."
-                    div
-                  div group settings.row.project.colorDepth label="Color Depth"
-                    div
-                      text
-                        text "Color Depth"
-                      text
-                        text "Precision per color channel. Applies to every composition in this project."
-                    div
+                    div group settings.row.project.colorDepth label="Color Depth"
+                      div
+                        div
+                          text
+                            text "Color Depth"
+                        text
+                          text "Precision per color channel. Applies to every composition in this project."
+                      div
               div group label="Export defaults"
                 text heading
                   text "Export defaults"
-                div form-group group label="Export defaults"
-                  div group settings.row.project.format label="Format"
+                div group label="Export defaults"
+                  div form-group group label="Export defaults"
+                    div group settings.row.project.format label="Format"
+                      div
+                        div
+                          text
+                            text "Format"
+                        text
+                          text "Container and codec of the exported file."
+                      div
                     div
-                      text
-                        text "Format"
-                      text
-                        text "Container and codec of the exported file."
+                    div group settings.row.project.resolution label="Resolution"
+                      div
+                        div
+                          text
+                            text "Resolution"
+                        text
+                          text "Rendered size relative to the composition, or any pixel size."
+                      div
                     div
-                  div group settings.row.project.resolution label="Resolution"
+                    div group settings.row.project.export-fps label="Frame Rate"
+                      div
+                        div
+                          text
+                            text "Frame Rate"
+                        text
+                          text "Frames written per second of exported video."
+                      div
                     div
-                      text
-                        text "Resolution"
-                      text
-                        text "Rendered size relative to the composition, or any pixel size."
+                    div group settings.row.project.range label="Range"
+                      div
+                        div
+                          text
+                            text "Range"
+                        text
+                          text "Export the work area or the whole composition."
+                      div
                     div
-                  div group settings.row.project.export-fps label="Frame Rate"
+                    div group settings.row.project.quality label="Quality"
+                      div
+                        div
+                          text
+                            text "Quality"
+                        text
+                          text "Video bitrate used for video exports."
+                      div
                     div
-                      text
-                        text "Frame Rate"
-                      text
-                        text "Frames written per second of exported video."
+                    div group settings.row.project.motion-blur label="Motion Blur"
+                      div
+                        div
+                          text
+                            text "Motion Blur"
+                        text
+                          text "Render motion blur for moving layers."
+                      div
                     div
-                  div group settings.row.project.range label="Range"
+                    div group settings.row.project.audio label="Include Audio"
+                      div
+                        div
+                          text
+                            text "Include Audio"
+                        text
+                          text "Mix composition audio into the video."
+                      div
                     div
-                      text
-                        text "Range"
-                      text
-                        text "Export the work area or the whole composition."
-                    div
-                  div group settings.row.project.quality label="Quality"
-                    div
-                      text
-                        text "Quality"
-                      text
-                        text "Video bitrate used for video exports."
-                    div
-                  div group settings.row.project.motion-blur label="Motion Blur"
-                    div
-                      text
-                        text "Motion Blur"
-                      text
-                        text "Render motion blur for moving layers."
-                    div
-                  div group settings.row.project.audio label="Include Audio"
-                    div
-                      text
-                        text "Include Audio"
-                      text
-                        text "Mix composition audio into the video."
-                    div
-                  div group settings.row.project.alpha label="Transparent Background"
-                    div
-                      text
-                        text "Transparent Background"
-                      text
-                        text "Keep the background see-through, with straight alpha."
-                    div
-Focus: ["settings.search","settings.sections"]"
+                    div group settings.row.project.alpha label="Transparent Background"
+                      div
+                        div
+                          text
+                            text "Transparent Background"
+                        text
+                          text "Keep the background see-through, with straight alpha."
+                      div
+Focus: []"
 `;
 
 exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts" selected
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription"
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Shortcuts"
         div
           div
             div group settings.section.shortcuts label="Shortcuts"
-              div
-                text heading
-                  text "Shortcuts"
-                text
-                  text "Keys for every command. Start from After Effects, Premiere Pro, Final Cut Pro or DaVinci Resolve, then change any of them."
               div group label="Layer"
                 text heading
                   text "Layer"
-                div form-group group label="Layer"
-                  div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
+                div group label="Layer"
+                  div form-group group label="Layer"
+                    div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
+                      div
+                        div
+                          text
+                            text "Ripple Trim In Point to Playhead"
+                        text
+                          text "Q"
+                      div
+                        button push-button label="Reset"
+                          text "Reset"
+                        button push-button label="Remove"
+                          text "Remove"
+                        button push-button label="Change…"
+                          text "Change…"
                     div
-                      text
-                        text "Ripple Trim In Point to Playhead"
-                      text
-                        text "Q"
-                    div
-                      button push-button label="Reset"
-                        text "Reset"
-                      button push-button label="Remove"
-                        text "Remove"
-                      button push-button label="Change…"
-                        text "Change…"
-                  div group settings.shortcut.extendEdit label="Extend Edit to Playhead"
-                    div
-                      text
-                        text "Extend Edit to Playhead"
-                      text
-                        text "Press the new key. Escape keeps the old one."
-                    div
-                      button push-button label="Cancel"
-                        text "Cancel"
+                    div group settings.shortcut.extendEdit label="Extend Edit to Playhead"
+                      div
+                        div
+                          text
+                            text "Extend Edit to Playhead"
+                        text
+                          text "Press the new key. Escape keeps the old one."
+                      div
+                        button push-button label="Cancel"
+                          text "Cancel"
               div group label="File"
                 text heading
                   text "File"
-                div form-group group label="File"
-                  div group settings.shortcut.save label="Save"
-                    div
-                      text
-                        text "Save"
-                      text
-                        text "⌘S · The menu bar's key."
+                div group label="File"
+                  div form-group group label="File"
+                    div group settings.shortcut.save label="Save"
+                      div
+                        div
+                          text
+                            text "Save"
+                        text
+                          text "⌘S · The menu bar's key."
               div group label="Playback"
                 text heading
                   text "Playback"
-                div form-group group label="Playback"
-                  div group settings.shortcut.prevEdge label="Previous Edge"
-                    div
-                      text
-                        text "Previous Edge"
-                      text
-                        text "No key"
-                    div
-                      button push-button label="Change…"
-                        text "Change…"
+                div group label="Playback"
+                  div form-group group label="Playback"
+                    div group settings.shortcut.prevEdge label="Previous Edge"
+                      div
+                        div
+                          text
+                            text "Previous Edge"
+                        text
+                          text "No key"
+                      div
+                        button push-button label="Change…"
+                          text "Change…"
               div group label="Shared Keys"
                 text heading
                   text "Shared Keys"
-                div form-group group label="Shared Keys"
-                  div group settings.shared.alt+shift+s label="⌥⇧S"
-                    div
-                      text
-                        text "⌥⇧S"
-                      text
-                        text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
-Focus: ["settings.search","settings.sections","Reset","Remove","Change…","Cancel","Change…"]"
+                div group label="Shared Keys"
+                  div form-group group label="Shared Keys"
+                    div group settings.shared.alt+shift+s label="⌥⇧S"
+                      div
+                        div
+                          text
+                            text "⌥⇧S"
+                        text
+                          text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
+Focus: ["Reset","Remove","Change…","Cancel","Change…"]"
 `;
 
 exports[`transcription available wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
-                div form-group group label="Models"
-                  div group label="Fixture speech"
-                    div
-                      text
-                        text "Fixture speech"
-                      text
-                        text "Fixture size"
-                    div
-                      button push-button label="Download"
-                        text "Download"
-Focus: ["settings.search","settings.sections","Download"]"
+                div group label="Models"
+                  div form-group group label="Models"
+                    div group label="Fixture speech"
+                      div
+                        div
+                          text
+                            text "Fixture speech"
+                        text
+                          text "Fixture size"
+                      div
+                        button push-button label="Download"
+                          text "Download"
+Focus: ["Download"]"
 `;
 
 exports[`transcription downloading wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
-                div form-group group label="Models"
-                  div group label="Fixture speech"
-                    div
-                      text
-                        text "Fixture speech"
-                      text
-                        text "Fixture size"
-                    div
-                      div progress-row progressbar label="Fixture speech" value=0.25
-                        text "Fixture speech"
-                      button push-button label="Cancel"
-                        text "Cancel"
-Focus: ["settings.search","settings.sections","Cancel"]"
+                div group label="Models"
+                  div form-group group label="Models"
+                    div group label="Fixture speech"
+                      div
+                        div
+                          text
+                            text "Fixture speech"
+                        text
+                          text "Fixture size"
+                      div
+                        div progress-row progressbar label="Fixture speech" value=0.25
+                          text "Fixture speech"
+                        button push-button label="Cancel"
+                          text "Cancel"
+Focus: ["Cancel"]"
 `;
 
 exports[`transcription installed wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
-                div form-group group label="Models"
-                  div group label="Fixture speech"
-                    div
-                      text
-                        text "Fixture speech"
-                      text
-                        text "Fixture size"
-                    div
-                      button push-button label="Use"
-                        text "Use"
-                      button push-button label="Delete…"
-                        text "Delete…"
-Focus: ["settings.search","settings.sections","Use","Delete…"]"
+                div group label="Models"
+                  div form-group group label="Models"
+                    div group label="Fixture speech"
+                      div
+                        div
+                          text
+                            text "Fixture speech"
+                        text
+                          text "Fixture size"
+                      div
+                        button push-button label="Use"
+                          text "Use"
+                        button push-button label="Delete…"
+                          text "Delete…"
+Focus: ["Use","Delete…"]"
 `;
 
 exports[`transcription error wire/AX state 1`] = `
 "root
   div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.storage label="Storage"
-            text "Storage"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
     div
       scroll group settings.detail label="Transcription"
         div
           div
             div group settings.section.transcription label="Transcription"
-              div
-                text heading
-                  text "Transcription"
-                text
-                  text "Turn speech into text for captions and your agent, on this Mac."
               div group label="Models"
                 text heading
                   text "Models"
-                div form-group group label="Models"
-                  div group label="Fixture speech"
-                    div
-                      text
-                        text "Fixture speech"
-                      text
-                        text "Fixture size"
-                    div
-                      div status label="Fixture service error"
-                        text "Fixture service error"
-                      button push-button label="Retry"
-                        text "Retry"
-Focus: ["settings.search","settings.sections","Retry"]"
+                div group label="Models"
+                  div form-group group label="Models"
+                    div group label="Fixture speech"
+                      div
+                        div
+                          text
+                            text "Fixture speech"
+                        text
+                          text "Fixture size"
+                      div
+                        div status label="Fixture service error"
+                          text "Fixture service error"
+                        button push-button label="Retry"
+                          text "Retry"
+Focus: ["Retry"]"
 `;

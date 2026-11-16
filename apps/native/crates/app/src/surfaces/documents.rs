@@ -106,6 +106,8 @@ pub enum WriteFailure {
     Missing,
     ChangedElsewhere,
     InProgress,
+    /// An edit was still open (a drag held, text being typed).
+    EditOpen,
     Other,
 }
 impl WriteFailure {
@@ -135,6 +137,8 @@ impl WriteFailure {
             Self::Missing
         } else if has(&["already in progress", "save is in flight"]) {
             Self::InProgress
+        } else if has(&["finish the active edit"]) {
+            Self::EditOpen
         } else {
             Self::Other
         }
@@ -151,6 +155,7 @@ impl WriteFailure {
                 "The file was moved, deleted or changed by something else since you opened it."
             }
             Self::InProgress => "Another save hadn’t finished.",
+            Self::EditOpen => "An edit was still in progress. Finish it, then save again.",
             Self::Other => "Something went wrong while writing it.",
         }
     }
@@ -802,6 +807,11 @@ mod write_failure_tests {
             (
                 "A save to this project file is already in progress.",
                 WriteFailure::InProgress,
+            ),
+            // An edit still in progress is said as that, never as a failed write.
+            (
+                "Storage(\"Finish the active edit before saving or closing\")",
+                WriteFailure::EditOpen,
             ),
             ("Storage(\"unexpected\")", WriteFailure::Other),
         ] {

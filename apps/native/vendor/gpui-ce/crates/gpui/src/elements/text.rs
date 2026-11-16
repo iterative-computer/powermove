@@ -1180,7 +1180,117 @@ impl TextLayout {
     }
 }
 
+/// Powermove P-TRUNCATE-CACHE: a truncation is shaped once per text, runs,
+/// size, widths and affix. Laying a panel out measures each truncated label
+/// several times a frame, and every scroll step laid it out again.
+pub(crate) struct TruncationEntry {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    sizes: (u32, Option<u32>, u32),
+    max_lines: Option<usize>,
+    affix: SharedString,
+    direction: TruncateFrom,
+    paragraph_direction: ParagraphDirection,
+    unicode_bidi: UnicodeBidi,
+    /// `None`: the text fits as it is.
+    result: Option<(SharedString, Vec<TextRun>)>,
+}
+
+/// Entries kept before the cache starts again.
+const TRUNCATIONS: usize = 8192;
+
+#[allow(clippy::too_many_arguments)]
 fn truncate_to_shaped_layout<'a>(
+    text: SharedString,
+    font_size: Pixels,
+    wrap_width: Option<Pixels>,
+    truncate_width: Pixels,
+    max_lines: Option<usize>,
+    affix: &str,
+    runs: &'a [TextRun],
+    direction: TruncateFrom,
+    paragraph_direction: ParagraphDirection,
+    unicode_bidi: UnicodeBidi,
+    window: &mut Window,
+) -> (SharedString, Cow<'a, [TextRun]>) {
+    use std::hash::{Hash, Hasher};
+    if !crate::scroll_layer::enabled() {
+        return shape_truncation(
+            text,
+            font_size,
+            wrap_width,
+            truncate_width,
+            max_lines,
+            affix,
+            runs,
+            direction,
+            paragraph_direction,
+            unicode_bidi,
+            window,
+        );
+    }
+    let bits = |p: Pixels| f32::from(p).to_bits();
+    let sizes = (bits(font_size), wrap_width.map(bits), bits(truncate_width));
+    let mut hasher = collections::FxHasher::default();
+    (&text, runs, sizes, max_lines, affix, direction, paragraph_direction, unicode_bidi)
+        .hash(&mut hasher);
+    let hash = hasher.finish();
+    let same = |e: &TruncationEntry| {
+        e.text == text
+            && e.runs == runs
+            && e.sizes == sizes
+            && e.max_lines == max_lines
+            && e.affix.as_ref() == affix
+            && e.direction == direction
+            && e.paragraph_direction == paragraph_direction
+            && e.unicode_bidi == unicode_bidi
+    };
+    if let Some(entry) = window
+        .truncations
+        .get(&hash)
+        .and_then(|entries| entries.iter().find(|e| same(e)))
+    {
+        return match &entry.result {
+            None => (text, Cow::Borrowed(runs)),
+            Some((shown, shown_runs)) => (shown.clone(), Cow::Owned(shown_runs.clone())),
+        };
+    }
+    let (shown, shown_runs) = shape_truncation(
+        text.clone(),
+        font_size,
+        wrap_width,
+        truncate_width,
+        max_lines,
+        affix,
+        runs,
+        direction,
+        paragraph_direction,
+        unicode_bidi,
+        window,
+    );
+    let result = match &shown_runs {
+        Cow::Borrowed(_) if shown == text => None,
+        _ => Some((shown.clone(), shown_runs.to_vec())),
+    };
+    if window.truncations.len() >= TRUNCATIONS {
+        window.truncations.clear();
+    }
+    window.truncations.entry(hash).or_default().push(TruncationEntry {
+        text,
+        runs: runs.to_vec(),
+        sizes,
+        max_lines,
+        affix: SharedString::from(affix.to_owned()),
+        direction,
+        paragraph_direction,
+        unicode_bidi,
+        result,
+    });
+    (shown, shown_runs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_truncation<'a>(
     text: SharedString,
     font_size: Pixels,
     wrap_width: Option<Pixels>,

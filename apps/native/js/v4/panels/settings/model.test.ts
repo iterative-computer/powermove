@@ -45,10 +45,14 @@ test("profile hydration preserves legacy keys, defaults and unknown authored val
     "extension-authored",
   );
   expect(requests.map((r) => r.operation.type)).toEqual(
-    Array(4).fill("settings.get"),
+    Array(5).fill("settings.get"),
   );
   expect(model.rows.find((r) => r.id === "cloud-media")?.value).toBe(false);
   expect(model.rows.find((r) => r.id === "restore-windows")?.value).toBe(true);
+  // Projects open in tabs unless Separate Windows was chosen.
+  expect(model.rows.find((r) => r.id === "open-projects-in")?.value).toBe(
+    "tabs",
+  );
 });
 test("preferences persist immediately through serialized v4 host acknowledgements", async () => {
   const { model, settings, requests } = fixture();
@@ -56,13 +60,15 @@ test("preferences persist immediately through serialized v4 host acknowledgement
   expect(await model.write("preview-memory", 0)).toBe(true);
   expect(await model.write("cloud-media", true)).toBe(true);
   expect(await model.write("restore-windows", false)).toBe(true);
+  expect(await model.write("open-projects-in", "windows")).toBe(true);
   expect([...settings]).toEqual([
     ["themeMode", "dark"],
     ["previewMemoryMiB", 0],
     ["autoDownloadCloudMedia", true],
     ["restoreWindows", false],
+    ["openProjectsIn", "windows"],
   ]);
-  expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3]);
+  expect(requests.map((r) => r.expectedRevision)).toEqual([0, 1, 2, 3, 4]);
 });
 test("failed acknowledgement keeps the last accepted value and allows retry", async () => {
   const f = fixture();
@@ -388,6 +394,46 @@ test("ordinary extension-scoped settings client cannot read or write app prefere
   model.dispose();
 });
 
+test("a choice made while the previous one saves is kept: the last choice is what is stored", async () => {
+  const f = fixture();
+  const stored: [string, unknown][] = [];
+  const gates: (() => void)[] = [];
+  const model = new SettingsModel(f.host, publication(), f.window, undefined, {
+    scope: "kernel-profile",
+    getSetting: (key) => f.host.getSetting(key),
+    // Each save returns only when the test lets it.
+    setSetting: async (key, value) => {
+      await new Promise<void>((done) => gates.push(done));
+      stored.push([key, value]);
+      return { ...(await f.host.getSetting(key)), accepted: true };
+    },
+  });
+  await model.hydrate();
+  const appearance = () =>
+    model.rows.find((row) => row.id === "appearance")?.value;
+  // Dark, then Match System a moment later, while Dark is still saving.
+  const dark = model.write("appearance", "dark");
+  await Promise.resolve();
+  expect(appearance()).toBe("dark");
+  expect(await model.write("appearance", "system")).toBe(true);
+  // The row shows the last choice at once, and stays open for another.
+  expect(appearance()).toBe("system");
+  expect(await model.write("appearance", "light")).toBe(true);
+  expect(appearance()).toBe("light");
+  // The earlier save returns; the last choice is saved after it.
+  gates.shift()!();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(gates).toHaveLength(1);
+  gates.shift()!();
+  expect(await dark).toBe(true);
+  expect(stored).toEqual([
+    ["themeMode", "dark"],
+    ["themeMode", "light"],
+  ]);
+  expect(appearance()).toBe("light");
+  expect(model.pending.size).toBe(0);
+  model.dispose();
+});
 test("profile adapter declined acknowledgements never publish read or write values", async () => {
   const f = fixture();
   const model = new SettingsModel(f.host, publication(), f.window, undefined, {

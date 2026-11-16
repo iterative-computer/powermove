@@ -1265,8 +1265,11 @@ impl Editor {
             "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
-            // One project per window: a new tab is a new window.
-            "newTab" => crate::open_editor(cx),
+            // Tabs mode: a new tab of this window; else a new window.
+            "newTab" => crate::open_editor_tab(cx, self.window_id),
+            // The window's tab group changed (a tab joined): the session
+            // records it.
+            "persistSession" => self.persist_session(),
             "deselect" | "cancel" => {
                 if self.gesture.is_some() {
                     self.cancel_gesture(cx);

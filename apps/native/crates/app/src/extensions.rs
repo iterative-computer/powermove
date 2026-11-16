@@ -1936,12 +1936,14 @@ impl Controller {
         // while the editor is occluded; neither activates or parks the window.
         let background_review = cfg!(debug_assertions)
             && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
-        if (key.starts_with(EXPORT_PAGE) || background_review) && host.begin_background_job(false).is_err() {
+        let exporting = key.starts_with(EXPORT_PAGE);
+        if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
-        let shell = self.host.borrow();
-        host.install_below(&shell.native_container(), &shell.gpui);
-        drop(shell);
+        if !exporting {
+            let shell = self.host.borrow();
+            host.install_below(&shell.native_container(), &shell.gpui);
+        }
         drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions
@@ -2035,6 +2037,9 @@ impl Controller {
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 let _ = host.set_content_regions(content);
                 host.set_fill(Some(fill.get()));
+                // The ground is the panels': the viewer's stage shows the
+                // viewer through the page, never under a panel's tint.
+                let _ = host.set_fill_regions(Some(mine.iter().map(|(_, r)| *r).collect()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,
