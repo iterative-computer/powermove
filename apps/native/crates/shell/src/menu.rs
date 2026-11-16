@@ -11,10 +11,22 @@ pub struct Equivalent {
 pub fn equivalents() -> Vec<Equivalent> {
     serde_json::from_str(include_str!("../data/menu-equivalents.json")).unwrap()
 }
-/// A command whose key the menu bar itself matches (Save, Undo): its key is
-/// not the keymap's to change.
+/// A command whose key the menu bar itself matches (Save, Undo). A key the
+/// person records for it becomes the menu item's own (`menus`).
 pub fn is_equivalent(command: &str) -> bool {
     equivalents().iter().any(|e| e.command == command)
+}
+/// The system's own items (Hide, Hide Others, Quit): their keys are macOS's
+/// and are never changed.
+pub fn is_fixed(command: &str) -> bool {
+    matches!(command, "hide" | "hideOthers" | "quit")
+}
+/// The key a menu-bar command has when the person has not changed it.
+pub fn equivalent_accelerator(command: &str) -> Option<String> {
+    equivalents()
+        .into_iter()
+        .find(|e| e.command == command)
+        .map(|e| e.accelerator)
 }
 #[derive(Clone, Debug)]
 pub struct Item {
@@ -226,9 +238,18 @@ pub fn new3d() -> Vec<Item> {
 }
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     let eq = equivalents();
+    // The menu bar matches these keys itself: the person's key, once they
+    // record one (or none, once they remove it), else the item's own.
     let m = |command: &str| {
         let e = eq.iter().find(|e| e.command == command).unwrap();
-        Item::command(&e.label, &e.command, &e.accelerator)
+        let mine = crate::keymap::user_keys(command)
+            .filter(|_| !is_fixed(command))
+            .map(|keys| keys.first().cloned().unwrap_or_default());
+        Item::command(
+            &e.label,
+            &e.command,
+            mine.as_deref().unwrap_or(&e.accelerator),
+        )
     };
     let sep = || Item::command("", "", "");
     // Registry-only commands, labelled for the menu bar, with their W1 chords.
