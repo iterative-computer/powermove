@@ -1542,7 +1542,7 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                 div group label="Layer"
                   div form-group group label="Layer"
                     div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
-                      div
+                      button label="Ripple Trim In Point to Playhead"
                         div
                           text
                             text "Ripple Trim In Point to Playhead"
@@ -1556,36 +1556,36 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                                 text "Q"
                     div
                     div group settings.shortcut.extendEdit label="Extend Edit to Playhead"
-                      div
+                      button label="Extend Edit to Playhead"
                         div
                           text
                             text "Extend Edit to Playhead"
                       div
-                        button label="Type a shortcut. Press to stop."
+                        button label="Type a shortcut. Escape cancels."
                           text
                             text "●"
                           text
                             text "Type a shortcut…"
-              div group label="File"
+              div group label="Powermove"
                 div
                   text heading
-                    text "File"
-                div group label="File"
-                  div form-group group label="File"
-                    div group settings.shortcut.save label="Save"
-                      div
+                    text "Powermove"
+                div group label="Powermove"
+                  div form-group group label="Powermove"
+                    div group settings.shortcut.quit label="Quit Powermove"
+                      button label="Quit Powermove" disabled
                         div
                           text
-                            text "Save"
+                            text "Quit Powermove"
                       div
-                        div group label="Save: the menu bar's key, not assignable"
+                        div group label="Quit Powermove: macOS's key, not assignable"
                           div
                             div
                               text
                                 text "⌘"
                             div
                               text
-                                text "S"
+                                text "Q"
               div group label="Playback"
                 div
                   text heading
@@ -1593,7 +1593,7 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                 div group label="Playback"
                   div form-group group label="Playback"
                     div group settings.shortcut.prevEdge label="Previous Edge"
-                      div
+                      button label="Previous Edge"
                         div
                           text
                             text "Previous Edge"
@@ -1613,7 +1613,7 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                             text "⌥⇧S"
                         text
                           text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
-Focus: ["Search Commands","Reset","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Press to stop.","Change the shortcut for Previous Edge"]"
+Focus: ["Search Commands","Reset","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Escape cancels.","Change the shortcut for Previous Edge"]"
 `;
 
 exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1633,7 +1633,7 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
                 div group label="Layer"
                   div form-group group label="Layer"
                     div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
-                      div
+                      button label="Ripple Trim In Point to Playhead"
                         div
                           text
                             text "Ripple Trim In Point to Playhead"
@@ -1645,12 +1645,12 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
                                 text "Q"
                     div
                     div group settings.shortcut.extendEdit label="Extend Edit to Playhead"
-                      div
+                      button label="Extend Edit to Playhead"
                         div
                           text
                             text "Extend Edit to Playhead"
                       div
-                        button label="Type a shortcut. Press to stop."
+                        button label="Type a shortcut. Escape cancels."
                           text
                             text "●"
                           text
@@ -1658,7 +1658,7 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
                     div
                     div status label="Shortcut in use"
                       text "Q is used by Ripple Trim In Point to Playhead. Press it again to move it here, or Esc to cancel."
-Focus: ["Search Commands","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Press to stop."]"
+Focus: ["Search Commands","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Escape cancels."]"
 `;
 
 exports[`transcription available wire/AX state 1`] = `

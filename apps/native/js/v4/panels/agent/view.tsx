@@ -89,20 +89,34 @@ const strong: Style = {
   fontWeight: t("typography.semibold_weight"),
 };
 /** A hairline chip in the code face (`data-pm-variant="code"`), cut in the
- * middle so a path keeps its start and its file name. */
-const chip: Style = {
-  fontSize: t("typography.minimum"),
-  color: t("colors.secondary"),
+ * middle so a path keeps its start and its file name. The box is a `div`:
+ * a text leaf draws no fill or edge. */
+const chipBox: Style = {
+  ...row,
   background: t("colors.fill"),
   borderWidth: t("metrics.border"),
   borderColor: t("colors.hairline"),
   borderRadius: t("metrics.inner_radius"),
   paddingLeft: t("metrics.gap"),
   paddingRight: t("metrics.gap"),
+  ...shrink,
+};
+const chipText: Style = {
+  fontSize: t("typography.minimum"),
+  color: t("colors.secondary"),
   whiteSpace: "nowrap",
   textOverflow: "middle",
   ...shrink,
 };
+function Chip({ children }: { children: string }) {
+  return (
+    <div style={chipBox}>
+      <text data-pm-variant="code" style={chipText}>
+        {children}
+      </text>
+    </div>
+  );
+}
 /** A card in the conversation: questions, errors, results. */
 const card: Style = {
   ...column,
@@ -154,7 +168,10 @@ function Prose({ text, style = reading }: { text: string; style?: Style }) {
         g.length === 1 ? (
           <ProseBlock key={i} block={g[0]!} style={style} />
         ) : (
-          <div key={i} style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}>
+          <div
+            key={i}
+            style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}
+          >
             {g.map((b, j) => (
               <ProseBlock key={j} block={b} style={style} />
             ))}
@@ -192,7 +209,9 @@ function ProseBlock({
             paddingLeft: b.depth ? t("metrics.agent_gap") : t("metrics.gap"),
           }}
         >
-          <text style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}>
+          <text
+            style={{ ...style, color: t("colors.secondary"), flexShrink: 0 }}
+          >
             {b.marker}
           </text>
           <Para runs={b.runs} style={{ ...style, flexGrow: 1 }} />
@@ -812,9 +831,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <text key={i} data-pm-variant="code" style={chip}>
-                {str(obj(f).name) || "File"}
-              </text>
+              <Chip key={i}>{str(obj(f).name) || "File"}</Chip>
             ))}
           </div>
         )}
@@ -1178,9 +1195,7 @@ function Tools({
           }}
         >
           {r.files.map((f) => (
-            <text key={f} data-pm-variant="code" style={chip}>
-              {f}
-            </text>
+            <Chip key={f}>{f}</Chip>
           ))}
         </div>
       )}
@@ -1302,22 +1317,22 @@ function ToolLine({
       <text style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}>
         {d.label}
       </text>
-      {d.detail && !(open && d.kind === "thought") && (
-        <text
-          style={
-            d.kind === "thought"
-              ? {
-                  ...faint,
-                  ...shrink,
-                  whiteSpace: "nowrap",
-                  textOverflow: "ellipsis",
-                }
-              : chip
-          }
-        >
-          {d.detail}
-        </text>
-      )}
+      {d.detail &&
+        !(open && d.kind === "thought") &&
+        (d.kind === "thought" ? (
+          <text
+            style={{
+              ...faint,
+              ...shrink,
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {d.detail}
+          </text>
+        ) : (
+          <Chip>{d.detail}</Chip>
+        ))}
       <div style={{ flexGrow: 1 }} />
       {word && (
         <text
