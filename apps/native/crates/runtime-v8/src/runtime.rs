@@ -418,6 +418,12 @@ impl Admission {
             patience,
         }
     }
+    /// Room held outside any isolate, given back when the holder is dropped
+    /// (a test fills the account with it).
+    #[doc(hidden)]
+    pub fn hold(&self, bytes: usize) -> Result<impl Drop + Send + use<>> {
+        self.reserve(bytes)
+    }
     /// How many isolates wait for room now.
     pub fn waiting(&self) -> usize {
         let queue = self.queue.0.lock().unwrap();
@@ -551,6 +557,11 @@ impl Reservation {
     }
     pub(crate) fn shrink(&self, bytes: usize) {
         let bytes = bytes.min(self.bytes());
+        if bytes == 0 {
+            // Nothing given back: waiters must not take it for a change, or
+            // trims that free nothing keep a stuck account from ever saying so.
+            return;
+        }
         self.bytes.fetch_sub(bytes, Ordering::AcqRel);
         self.account.used.fetch_sub(bytes, Ordering::AcqRel);
         self.account.changed();

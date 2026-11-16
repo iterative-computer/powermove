@@ -1060,6 +1060,30 @@ fn a_stuck_account_refuses_after_its_patience_and_closing_stops_a_wait() {
     assert_eq!(f.admission.isolates(), 1);
     close(&r);
 }
+/// A trim that gives nothing back is no change: a stuck account still says
+/// so after its patience, however often its isolates trim.
+#[test]
+fn a_trim_that_frees_nothing_never_keeps_a_stuck_wait_going() {
+    let account = Admission::with_patience(slice(), Duration::from_millis(300));
+    let held = account.reserve(slice()).unwrap();
+    let waiter = {
+        let account = account.clone();
+        thread::spawn(move || {
+            let asked = Instant::now();
+            let refused = account.reserve_waiting(slice(), || true).is_err();
+            (asked.elapsed(), refused)
+        })
+    };
+    let until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until {
+        held.shrink(0);
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (took, refused) = waiter.join().unwrap();
+    assert!(refused, "the stuck account refuses");
+    assert!(took < Duration::from_millis(1000), "refused after its patience, not {took:?}");
+    drop(held);
+}
 #[test]
 fn heap_quota_child() {
     if std::env::var_os("PM_RUNTIME_SYNTHETIC_HEAP_CHILD").is_none() {
