@@ -3686,7 +3686,11 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
+            Kit::Wheel { .. }
+            | Kit::Curve { .. }
+            | Kit::Ease { .. }
+            | Kit::Pad { .. }
+            | Kit::Ramp { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures

@@ -753,6 +753,72 @@ export function ColorWheel(props: ColorWheelProps) {
     },
   );
 }
+export interface PointPadProps extends SurfaceProps {
+  label: string;
+  /** A grouped binding over the point's X and Y rows. */
+  binding: string;
+  /** X and Y as the parameters hold them. */
+  value: [number, number];
+  /** The point's bounds: X then Y. */
+  min: [number, number];
+  max: [number, number];
+}
+/** v1's point pad (drawn by the host): a 2D area whose dot is the point; a
+ * press places it there and dragging moves it (X and Y in one Undo step); a
+ * double-click returns it to the middle. Its X and Y fields stay beside it
+ * for exact values and the keyboard. */
+export function PointPad(props: PointPadProps) {
+  const { min, max, ...rest } = props;
+  return kit(
+    "point-pad",
+    "div",
+    {
+      ...rest,
+      control: "point-pad",
+      metadata: kitMetadata(props, {
+        minX: min[0],
+        maxX: max[0],
+        minY: min[1],
+        maxY: max[1],
+      }),
+    },
+    // As wide as its row lets it; the host makes it two controls tall.
+    { flexGrow: 1, minWidth: token("metrics.hit") },
+  );
+}
+export interface GradientBarProps extends SurfaceProps {
+  label: string;
+  /** The gradient's ends as the parameters hold them. */
+  start: string;
+  end: string;
+  /** The midpoint's binding and value, when the gradient has one. */
+  binding?: string;
+  value?: number;
+  min?: number;
+  max?: number;
+}
+/** v1's gradient bar (drawn by the host): start to end colour, and when the
+ * gradient has a midpoint a diamond on it: a press puts it there and
+ * dragging moves it (one Undo step); a double-click returns it to the
+ * middle. */
+export function GradientBar(props: GradientBarProps) {
+  const { start, end, min, max, ...rest } = props;
+  return kit(
+    "gradient-bar",
+    "div",
+    {
+      ...rest,
+      control: "gradient-bar",
+      metadata: kitMetadata(props, {
+        start,
+        end,
+        ...(min !== undefined ? { min } : {}),
+        ...(max !== undefined ? { max } : {}),
+      }),
+    },
+    { flexGrow: 1, minWidth: token("metrics.hit") },
+  );
+}
 export interface CurveEditorProps extends SurfaceProps {
   label: string;
   /** A grouped binding over the curve's point count and every point. */
