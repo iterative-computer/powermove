@@ -134,6 +134,20 @@ fn typed_file(
     rx
 }
 
+/// Ends every sheet still up (each answered as if dismissed), so a quit no
+/// longer waits behind one.
+pub fn end_all_sheets() {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    for window in app.windows().iter() {
+        // Nested sheets (a save panel over the Export sheet) end innermost first.
+        for _ in 0..4 {
+            let Some(host) = window.attachedSheet() else { break };
+            let host = sheet_host(&host);
+            let parent = unsafe { host.sheetParent() }.unwrap_or_else(|| window.clone());
+            parent.endSheet_returnCode(&host, objc2_app_kit::NSModalResponseAbort);
+        }
+    }
+}
 /// The window a new sheet attaches to: the topmost sheet already shown on
 /// `window` (the Export sheet asking where to save), else `window` itself.
 /// A second sheet begun on a window that already has one is queued by AppKit

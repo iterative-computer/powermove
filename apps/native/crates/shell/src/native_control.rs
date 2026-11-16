@@ -228,11 +228,12 @@ impl Control {
     fn value(&self, value: &Value, options: &[Value]) {
         match self {
             Self::Popup(v) if v.pullsDown() => {
+                // A value no row has titles the button itself (Publish).
                 let title = options
                     .iter()
                     .find(|o| row_value(o) == value)
                     .map(row_title)
-                    .unwrap_or_else(|| NSString::from_str(""));
+                    .unwrap_or_else(|| NSString::from_str(value.as_str().unwrap_or("")));
                 if let Some(item) = v.itemAtIndex(0) {
                     item.setTitle(&title);
                 }
@@ -596,8 +597,9 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 watch_menu(&target, &v);
-                let font = if pull {
-                    // A header's title: the name it heads, in its type.
+                let font = if pull && inline {
+                    // A header's title (borderless): the name it heads, in
+                    // its type. A bezelled pull-down (Publish) is a button.
                     unsafe {
                         NSFont::systemFontOfSize_weight(
                             t.typography.heading as f64,
@@ -608,7 +610,7 @@ impl NativeControl {
                     NSFont::systemFontOfSize(t.typography.body as f64)
                 };
                 v.setFont(Some(&font));
-                if pull {
+                if pull && inline {
                     // The title is a heading; its menu lists in menu type.
                     if let Some(menu) = v.menu() {
                         unsafe { menu.setFont(Some(&NSFont::menuFontOfSize(0.))) };
