@@ -403,6 +403,20 @@ impl SurfaceView {
     }
     pub(crate) fn set_panel_build(&mut self, state:Option<crate::generated_panel::panel_build::State>,cx:&mut Context<Self>) {
         let state=state.filter(|s|s.resolve(s.now())<1.);
+        if let Some(ready)=state.as_ref().filter(|s|s.stage==crate::generated_panel::panel_build::Stage::Ready) {
+            if self.panel_build.as_ref().is_none_or(|old|old.changed!=ready.changed || old.stage!=ready.stage) {
+                let changed=ready.changed;
+                let deadline=changed+std::time::Duration::from_secs_f32(pm_design::dots::RESOLVE_SECONDS);
+                cx.spawn(async move |this,cx| {
+                    cx.background_executor().timer(deadline.saturating_duration_since(std::time::Instant::now())).await;
+                    let _=this.update(cx,|view,cx| {
+                        if view.panel_build.as_ref().is_some_and(|s|s.changed==changed && s.stage==crate::generated_panel::panel_build::Stage::Ready) {
+                            view.set_panel_build(None,cx);
+                        }
+                    });
+                }).detach();
+            }
+        }
         let rows=self.build_rows();
         let mut controls=self.controls.iter().collect::<Vec<_>>();controls.sort_by_key(|(id,_)|**id);
         for (fallback,(id,control)) in controls.into_iter().enumerate() {
