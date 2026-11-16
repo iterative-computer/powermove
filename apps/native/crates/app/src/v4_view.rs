@@ -3196,6 +3196,7 @@ impl SurfaceView {
                                 this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
                             },
                         )
+                        .animate_when_visible()
                         .into_any_element()
                 });
             }
