@@ -1182,10 +1182,11 @@ impl Backend {
                 .model
                 .menu(&context)
                 .into_iter()
+                .filter(|item| item.is_action())
                 .map(|item| {
                     json!({
                         "id": item.id,
-                        "label": pm_panel_timeline::menu_label(item.id),
+                        "label": item.label,
                         "checked": item.checked,
                         "enabled": item.enabled,
                         "intent": {"type":"graphMenu","action":item.id},

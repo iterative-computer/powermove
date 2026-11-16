@@ -690,6 +690,22 @@ impl TimelineModel {
     }
     /// Every one of these keys holds its value to the next key: the legacy
     /// `hold` flag, or the outgoing interpolation the kernel writes now.
+    /// The named ease each key has (`None`: hold, custom or flat), read as
+    /// the kernel names what Set Easing wrote.
+    fn key_presets(&self, keys: &[String]) -> Vec<Option<&'static str>> {
+        let mut tracks: std::collections::HashMap<(String, String), Vec<pm_model::Value>> =
+            std::collections::HashMap::new();
+        keys.iter()
+            .map(|id| {
+                let (layer, channel, key) = self.index.key(id)?;
+                let at = channel.keys.iter().position(|k| k.id == key.id)?;
+                let stored = tracks
+                    .entry((layer.id.clone(), channel.path.clone()))
+                    .or_insert_with(|| channel.keys.iter().map(|k| k.stored.to_value()).collect());
+                pm_kernel::commands::keyframes::ease_preset(stored, at)
+            })
+            .collect()
+    }
     fn all_held(&self, keys: &[String]) -> bool {
         keys.iter().all(|id| {
             self.index.key(id).is_some_and(|(_, _, k)| {
@@ -1979,9 +1995,22 @@ pub(crate) fn finite(value: f64) -> Result<(), ModelError> {
 /// Semantic context rows; no labels, menu layout or styling. Extension rows append.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem {
+    /// The action (`menu_action`); [`MenuItem::SEPARATOR`] and
+    /// [`MenuItem::HEADER`] are rows that are no action.
     pub id: &'static str,
+    /// What the row says (a count when it acts on several keys).
+    pub label: String,
     pub enabled: bool,
     pub checked: bool,
+}
+impl MenuItem {
+    pub const SEPARATOR: &'static str = "-";
+    /// A section's title (the keyframe menu's "Keyframe" / "3 Keyframes").
+    pub const HEADER: &'static str = "header";
+    /// Whether choosing the row does something.
+    pub fn is_action(&self) -> bool {
+        self.id != Self::SEPARATOR && self.id != Self::HEADER
+    }
 }
 #[derive(Clone, Debug)]
 pub enum Context {
@@ -1996,12 +2025,31 @@ pub enum Context {
 impl TimelineModel {
     pub fn menu(&self, context: &Context) -> Vec<MenuItem> {
         let mut items = Vec::new();
-        let mut add = |id, enabled, checked| {
+        let mut row = |id: &'static str, label: String, enabled, checked| {
             items.push(MenuItem {
                 id,
+                label,
                 enabled,
                 checked,
             })
+        };
+        let mut add = |id, enabled, checked| row(id, menu_label(id).to_owned(), enabled, checked);
+        // v1 (timeline.ts onCtx): the work area's three, then the switch
+        // naming the timeline it goes to.
+        let work_and_mode = |add: &mut dyn FnMut(&'static str, bool, bool)| {
+            for id in ["work.start", "work.end", "work.reset"] {
+                add(id, true, false);
+            }
+            add(MenuItem::SEPARATOR, false, false);
+            add(
+                if self.mode == TimelineMode::Layers {
+                    "mode.tracks"
+                } else {
+                    "mode.layers"
+                },
+                true,
+                false,
+            );
         };
         match context {
             Context::Marker { id } => add(
@@ -2017,9 +2065,8 @@ impl TimelineModel {
                         .is_none(),
                     false,
                 );
-                for id in ["work.start", "work.end", "work.reset", "mode.toggle"] {
-                    add(id, true, false);
-                }
+                add(MenuItem::SEPARATOR, false, false);
+                work_and_mode(&mut add);
             }
             Context::Keys { ids } => {
                 let keys = self.context_keys(ids);
@@ -2029,10 +2076,23 @@ impl TimelineModel {
                             .key(id)
                             .is_some_and(|(l, _, _)| !l.effectively_locked)
                     });
+                // v1's pushKeyframeMenu: a header naming what it acts on,
+                // the dialogs, the eases (the one every key has checked),
+                // hold, then Copy and Delete.
+                let many = keys.len() > 1;
+                let count = keys.len();
+                drop(add);
+                row(
+                    MenuItem::HEADER,
+                    if many { format!("{count} Keyframes") } else { "Keyframe".into() },
+                    false,
+                    false,
+                );
+                for id in ["keys.value", "keys.velocity", "keys.scale"] {
+                    row(id, menu_label(id).into(), editable, false);
+                }
+                let presets = self.key_presets(&keys);
                 for id in [
-                    "keys.value",
-                    "keys.velocity",
-                    "keys.scale",
                     "ease.linear",
                     "ease.easeIn",
                     "ease.easeOut",
@@ -2043,12 +2103,25 @@ impl TimelineModel {
                     "ease.backOut",
                     "ease.snap",
                     "ease.glide",
-                    "keys.hold",
-                    "keys.delete",
                 ] {
-                    add(id, editable, false);
+                    let on = !presets.is_empty() && presets.iter().all(|p| *p == Some(&id[5..]));
+                    row(id, menu_label(id).into(), editable, on);
                 }
-                add("keys.copy", !keys.is_empty(), false);
+                let hold = if self.all_held(&keys) {
+                    "Remove Hold"
+                } else if many {
+                    "Hold Keyframes"
+                } else {
+                    "Toggle Hold"
+                };
+                row("keys.hold", hold.into(), editable, false);
+                row(MenuItem::SEPARATOR, String::new(), false, false);
+                let counted = |verb: &str| {
+                    if many { format!("{verb} {count} Keyframes") } else { format!("{verb} Keyframe") }
+                };
+                row("keys.copy", counted("Copy"), !keys.is_empty(), false);
+                row("keys.delete", counted("Delete"), editable, false);
+                return items;
             }
             Context::Track { layer, channel } => {
                 let editable = self.require_channel(layer, channel).is_ok();
@@ -2090,11 +2163,7 @@ impl TimelineModel {
                     self.graph_display == GraphDisplay::Combined,
                 );
             }
-            Context::Empty => {
-                for id in ["work.start", "work.end", "work.reset", "mode.toggle"] {
-                    add(id, true, false);
-                }
-            }
+            Context::Empty => work_and_mode(&mut add),
         }
         items
     }
@@ -2153,6 +2222,14 @@ impl TimelineModel {
                 .into(),
             ),
             "work.reset" => edit(CompCommand::ResetWorkArea { comp: None }.into()),
+            "mode.tracks" | "mode.layers" => {
+                self.mode = if action == "mode.tracks" {
+                    TimelineMode::Tracks
+                } else {
+                    TimelineMode::Layers
+                };
+                Plan::default()
+            }
             "mode.toggle" => {
                 self.mode = if self.mode == TimelineMode::Layers {
                     TimelineMode::Tracks
@@ -2311,12 +2388,14 @@ pub fn playhead_targets(index: &TimelineIndex) -> Vec<f64> {
 /// Menu row titles, shared by every surface that shows the model's menus.
 pub fn menu_label(id: &str) -> &'static str {
     match id {
-        "marker.add" => "Add Marker",
+        "marker.add" => "Add Marker Here",
         "marker.remove" => "Remove Marker",
         "work.start" => "Set Work Area Start",
         "work.end" => "Set Work Area End",
         "work.reset" => "Reset Work Area",
         "mode.toggle" => "Toggle Layers and Tracks",
+        "mode.tracks" => "Switch to Track Timeline",
+        "mode.layers" => "Switch to Layer Timeline",
         "keys.value" => "Edit Value…",
         "keys.velocity" => "Keyframe Velocity…",
         "keys.scale" => "Scale Keyframes…",
@@ -2333,9 +2412,9 @@ pub fn menu_label(id: &str) -> &'static str {
         "ease.backOut" => "Overshoot",
         "ease.snap" => "Snap",
         "ease.glide" => "Glide",
-        "track.add" => "Add Keyframe",
-        "track.paste" => "Paste Keyframes",
-        "track.clear" => "Remove All Keyframes",
+        "track.add" => "Add Keyframe Here",
+        "track.paste" => "Paste Keyframes Here",
+        "track.clear" => "Clear All Keyframes",
         "track.separate" => "Separate Dimensions",
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
