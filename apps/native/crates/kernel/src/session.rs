@@ -992,11 +992,19 @@ impl Kernel {
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
                 self.flush_project(&handle.project)?;
-                // A file that already holds everything is not rewritten.
-                let unchanged = matches!(
-                    self.sessions[&handle.project].destination,
-                    Destination::File(_)
-                ) && !self.project(&handle.project).unwrap().store().needs_save();
+                // A file that already holds everything is not rewritten, nor
+                // the project's own library slot when it holds the project as
+                // it is (a recovered copy closed untouched rewrote its whole
+                // body for 15-20 s, run 22).
+                let store = self.project(&handle.project).unwrap().store();
+                let unchanged = match &self.sessions[&handle.project].destination {
+                    Destination::File(_) => !store.needs_save(),
+                    Destination::Library(slot) => {
+                        slot == &handle.project
+                            && store.as_saved()
+                            && self.library_slot_holds(slot, store)
+                    }
+                };
                 // Nothing edited since it opened or was saved: what the close
                 // writes keeps the row's edit time (PM-392).
                 let edited = self.project(&handle.project).unwrap().store().needs_save();
@@ -3745,6 +3753,24 @@ impl Kernel {
     }
     /// The library entry's view state alone, for a file closed unchanged:
     /// where the person left off, without rewriting the project body.
+    /// Whether library slot `slot` already holds what a close would write
+    /// for a store that is as saved: no closed-project rename waiting to be
+    /// written into its body, and every media item stored in the library
+    /// (a close stores the others).
+    fn library_slot_holds(&self, slot: &str, store: &crate::DocumentStore) -> bool {
+        let Some(writer) = &self.library else {
+            return false;
+        };
+        let Some(profile) = writer.store().dir().parent() else {
+            return false;
+        };
+        let media = profile.join(crate::library_media::DIR);
+        writer.store().renamed(slot).ok().flatten().is_none()
+            && store
+                .media()
+                .iter()
+                .all(|entry| crate::library_media::is_stored(entry, &media))
+    }
     fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
         let Some(writer) = &self.library else {
             return Ok(());

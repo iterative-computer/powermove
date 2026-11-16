@@ -115,3 +115,90 @@ fn an_open_keeps_the_edit_time_and_a_save_after_an_edit_moves_it() {
         assert!(at(&dir.0).is_some_and(|t| t > EDITED), "{format:?}: saved after an edit");
     }
 }
+
+/// A library project closed untouched is not written again (a recovered copy
+/// closed with nothing to save rewrote its whole body, 15-20 s on a large
+/// project, run 22); its journal is gone all the same. One with an unsaved
+/// edit is written as before.
+#[test]
+fn a_library_project_closed_untouched_is_not_written_again() {
+    let dir = common::TempDir::new("close-untouched");
+    fs::create_dir(dir.path("store")).unwrap();
+    let project = parse(
+        r##"{"id":"P","name":"Kept","compId":"C","compName":"Main","w":640,"h":360,"fps":30,"dur":5,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+    )
+    .unwrap();
+    let mut slot = pm_model::Map::new();
+    slot.insert("v", Value::from("1.2.0"));
+    slot.insert("proj", project);
+    fs::write(
+        dir.path("store/project.P.json"),
+        encode_disk_value(&Value::Object(slot), DiskFormat::V1_3).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.path("store/projects.json"), r#"[{"id":"P","name":"Kept","at":1}]"#).unwrap();
+    let mut k = Kernel::new(KernelConfig {
+        journal_root: Some(dir.path("journals")),
+        ..Default::default()
+    });
+    k.shell(ShellCall::AttachLibrary {
+        profile: dir.0.clone(),
+        format: DiskFormat::V1_3,
+        electron_profile: None,
+    })
+    .unwrap();
+    let open = |k: &mut Kernel| match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::Library {
+                profile: dir.0.clone(),
+                project: "P".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    };
+    // The first close may write what the open brought up to date.
+    let session = open(&mut k);
+    k.shell(ShellCall::Close(session)).unwrap();
+    let body = || fs::read(dir.path("store/project.P.json")).unwrap();
+    let modified = || fs::metadata(dir.path("store/project.P.json")).unwrap().modified().unwrap();
+    let (before, at) = (body(), modified());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let session = open(&mut k);
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(body(), before, "closed untouched: the body is as it was");
+    assert_eq!(modified(), at, "closed untouched: not written");
+    assert!(
+        pm_kernel::journal::sessions(&dir.path("journals").join("P")).is_empty(),
+        "its journal is gone"
+    );
+    // An unsaved edit is written at close as before.
+    let session = open(&mut k);
+    k.handle(
+        "P",
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("Rate".into()),
+                body: vec![
+                    CompCommand::Set {
+                        patch: Box::new(CompPatch {
+                            fps: Some(24.),
+                            ..Default::default()
+                        }),
+                    }
+                    .into(),
+                ]
+                .into(),
+                expected_revision: None,
+            },
+        ),
+    )
+    .unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_ne!(body(), before, "an unsaved edit is written at close");
+}
