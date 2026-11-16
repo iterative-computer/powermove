@@ -54,11 +54,17 @@ fn scroll_thumb(
         div()
             .absolute()
             .top(px(top + SCROLL_THUMB_INSET))
-            .left(px(width - thick - SCROLL_THUMB_INSET - t.metrics.border * 2.))
+            .left(px(width
+                - thick
+                - SCROLL_THUMB_INSET
+                - t.metrics.border * 2.))
             .w(px(thick))
             .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
             .rounded(px(thick / 2.))
-            .bg(pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8))
+            .bg(pm_shell::kit::ink(
+                t.colors.text,
+                t.translucency.faint * 0.8,
+            ))
             .into_any_element(),
     )
 }
@@ -334,7 +340,9 @@ impl Controller {
                                 .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
                             if live {
                                 let _ = match v.builtins.settings_history.current() {
-                                    Some(page) if id == "settings" => check.show_section(&id, &page),
+                                    Some(page) if id == "settings" => {
+                                        check.show_section(&id, &page)
+                                    }
                                     _ => check.show(&id),
                                 };
                             }
@@ -1062,14 +1070,19 @@ impl Controller {
             self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();
-        let build=self.agent_panel_builds.iter().find(|(_,b)|b.target.as_deref()==Some(id))
-            .and_then(|(slot,_)|self.panel_builds.get(slot)).or_else(||self.panel_builds.get(id)).cloned();
+        let build = self
+            .agent_panel_builds
+            .iter()
+            .find(|(_, b)| b.target.as_deref() == Some(id))
+            .and_then(|(slot, _)| self.panel_builds.get(slot))
+            .or_else(|| self.panel_builds.get(id))
+            .cloned();
         view.update(cx, |v, cx| {
             v.attach(window, cx);
             if *v.tokens() != t {
                 v.retheme(t.clone(), cx);
             }
-            v.set_panel_build(build,cx);
+            v.set_panel_build(build, cx);
         });
         if id == "timeline" {
             if let Some(timeline) = self.builtins.timeline.clone() {
@@ -1135,7 +1148,8 @@ impl Controller {
             let cropped = free || self.host.borrow().viewer_crop.get().is_some();
             self.builtins.frame_outline.show(
                 &self.host.borrow(),
-                !cropped && crate::panels::needs_frame_outline(self.background, t.viewer_surround()),
+                !cropped
+                    && crate::panels::needs_frame_outline(self.background, t.viewer_surround()),
                 t.colors.separator,
                 t.metrics.border,
             );
@@ -1179,7 +1193,9 @@ impl Controller {
         let on_wheel = {
             let panel = panel.clone();
             cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
-                v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                v.builtins
+                    .scrolled_at
+                    .insert(panel.clone(), std::time::Instant::now());
                 // A panel that leaves rows out draws again as its body
                 // scrolls, so they come back before they show (`v4_cull`).
                 if surface.read(cx).culls() {
@@ -1381,7 +1397,10 @@ impl Controller {
     /// (Settings, a file picker, another app) leaves it open.
     fn agent_resigned(&mut self, cx: &mut Context<Self>) {
         let editor = self.close_window;
-        if agent_dismisses(self.agent_open(cx), editor.is_some() && cx.active_window() == editor) {
+        if agent_dismisses(
+            self.agent_open(cx),
+            editor.is_some() && cx.active_window() == editor,
+        ) {
             self.close_agent(cx);
             self.builtins.agent_dismissed = Some(std::time::Instant::now());
         }
@@ -1570,39 +1589,45 @@ impl Controller {
                             // A press anywhere in the editor closes the
                             // popover, as a popover does (the original app's
                             // outside-press dismissal).
-                            cx.observe_window_activation(window, |this: &mut SurfaceWindow, window, cx| {
-                                if window.is_window_active() {
-                                    // Key again (a reopen, a return from
-                                    // another window): Escape still reaches
-                                    // it with nothing inside focused.
-                                    this.keys.claim(window, cx);
-                                    return;
-                                }
-                                let owner = this.owner.clone();
-                                cx.spawn(async move |_, cx| {
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_millis(60))
-                                        .await;
-                                    let _ = owner.update(cx, |v, cx| v.agent_resigned(cx));
-                                })
-                                .detach();
-                            })
+                            cx.observe_window_activation(
+                                window,
+                                |this: &mut SurfaceWindow, window, cx| {
+                                    if window.is_window_active() {
+                                        // Key again (a reopen, a return from
+                                        // another window): Escape still reaches
+                                        // it with nothing inside focused.
+                                        this.keys.claim(window, cx);
+                                        return;
+                                    }
+                                    let owner = this.owner.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(60))
+                                            .await;
+                                        let _ = owner.update(cx, |v, cx| v.agent_resigned(cx));
+                                    })
+                                    .detach();
+                                },
+                            )
                             .detach();
                         }
                         // Settings follows the app's appearance: when its
                         // window changes, it draws again once the editor
                         // has rebuilt the tokens it is drawn with.
                         if panel == "settings" {
-                            cx.observe_window_appearance(window, |_: &mut SurfaceWindow, window, cx| {
-                                cx.notify();
-                                cx.spawn_in(window, async move |this, cx| {
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_millis(120))
-                                        .await;
-                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                })
-                                .detach();
-                            })
+                            cx.observe_window_appearance(
+                                window,
+                                |_: &mut SurfaceWindow, window, cx| {
+                                    cx.notify();
+                                    cx.spawn_in(window, async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(120))
+                                            .await;
+                                        let _ = this.update(cx, |_, cx| cx.notify());
+                                    })
+                                    .detach();
+                                },
+                            )
                             .detach();
                         }
                         SurfaceWindow {
@@ -1758,7 +1783,11 @@ impl Controller {
                             self.host.borrow().send_command(name, args);
                         }
                         Some("compositionSettings") => {
-                            self.composition_sheet(true, request.input["id"].as_str().map(str::to_owned), cx);
+                            self.composition_sheet(
+                                true,
+                                request.input["id"].as_str().map(str::to_owned),
+                                cx,
+                            );
                         }
                         Some("openComposition") => {
                             self.open_builtin_composition(
@@ -1878,7 +1907,10 @@ impl Controller {
                         && n("width") > 0
                         && n("height") > 0
                     {
-                        let time = viewer.status().frame.map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
+                        let time = viewer
+                            .status()
+                            .frame
+                            .map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
                         if let Err(error) = viewer.estimate_studio_export_scaled(
                             stamp,
                             time,
@@ -2366,7 +2398,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
         let input = crate::skimming::input();
-        let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
+        let _ = self.0.update(cx, |v, _| {
+            v.skim(seconds, input);
+            // The skimmer is drawn with the playhead: place it again.
+            if let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
     }
     fn skimming(&self, cx: &App) -> bool {
         crate::skimming::on(&self.0, cx)
@@ -2791,9 +2829,11 @@ impl SurfaceWindow {
             return;
         };
         let toolbar = f64::from(self.owner.read(cx).host.borrow().tokens.metrics.toolbar);
-        let Ok(Some(content)) = cx.update_window(editor, |_, w, _| -> Option<crate::popover_drag::Area> {
-            crate::platform::ns_window(w).map(|n| native::content(&n))
-        }) else {
+        let Ok(Some(content)) =
+            cx.update_window(editor, |_, w, _| -> Option<crate::popover_drag::Area> {
+                crate::platform::ns_window(w).map(|n| native::content(&n))
+            })
+        else {
             return;
         };
         let area = Area {
@@ -3147,8 +3187,8 @@ fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
 mod popover_keys_tests {
     use super::PopoverKeys;
     use gpui::{
-        Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
-        Render, Styled, TestAppContext, Window, div,
+        Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+        Styled, TestAppContext, Window, div,
     };
     /// A popover's root as SurfaceWindow draws it: its keys, a control inside.
     struct Popover {
@@ -3198,9 +3238,18 @@ mod agent_close_tests {
     use std::time::Duration;
     #[::core::prelude::v1::test]
     fn closing_the_docked_agent_returns_it_to_its_popover_and_parking_does_not() {
-        assert!(returns_to_popover(true, false, false), "closed: the popover");
-        assert!(!returns_to_popover(true, false, true), "parked: hidden in place");
-        assert!(!returns_to_popover(false, true, false), "docking is no return");
+        assert!(
+            returns_to_popover(true, false, false),
+            "closed: the popover"
+        );
+        assert!(
+            !returns_to_popover(true, false, true),
+            "parked: hidden in place"
+        );
+        assert!(
+            !returns_to_popover(false, true, false),
+            "docking is no return"
+        );
         assert!(!returns_to_popover(false, false, false));
     }
     #[::core::prelude::v1::test]
@@ -3209,9 +3258,15 @@ mod agent_close_tests {
         assert_eq!(agent_toggle(true, None), AgentToggle::Close);
         assert_eq!(agent_toggle(false, None), AgentToggle::Open);
         // The press on the item closed it from outside first: stay closed.
-        assert_eq!(agent_toggle(false, Some(Duration::from_millis(80))), AgentToggle::Keep);
+        assert_eq!(
+            agent_toggle(false, Some(Duration::from_millis(80))),
+            AgentToggle::Keep
+        );
         // Long after an outside press, the item opens it again.
-        assert_eq!(agent_toggle(false, Some(Duration::from_secs(5))), AgentToggle::Open);
+        assert_eq!(
+            agent_toggle(false, Some(Duration::from_secs(5))),
+            AgentToggle::Open
+        );
     }
     #[::core::prelude::v1::test]
     fn a_press_in_the_editor_closes_the_popover_but_another_window_does_not() {

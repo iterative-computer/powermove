@@ -11,8 +11,8 @@
 use gpui::{prelude::*, *};
 use gpui_macos::native_control::NativeControlSlot;
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
-    runtime::AnyObject, sel,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    rc::Retained, runtime::AnyObject, sel,
 };
 use objc2_app_kit::*;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -85,9 +85,8 @@ impl Range {
         let sign = if up { 1. } else { -1. };
         if self.log {
             let span = (self.max.ln() - self.min.ln()) / 20.;
-            return self.value(
-                (self.position(value) + sign * span).clamp(self.min.ln(), self.max.ln()),
-            );
+            return self
+                .value((self.position(value) + sign * span).clamp(self.min.ln(), self.max.ln()));
         }
         let step = if self.step > 0. {
             self.step
@@ -295,57 +294,102 @@ pub struct BuildSnapshot {
 }
 #[derive(Default)]
 pub(crate) struct BuildPixels {
-    key: Option<(u64, [u32;4])>,
+    key: Option<(u64, [u32; 4])>,
     image: Option<std::sync::Arc<RenderImage>>,
 }
 impl BuildPixels {
-    pub(crate) fn texture(&self, revision:Option<u64>) -> Option<std::sync::Arc<RenderImage>> {
-        revision.and_then(|r|self.key.filter(|(key,_)|*key==r)).and(self.image.clone())
+    pub(crate) fn texture(&self, revision: Option<u64>) -> Option<std::sync::Arc<RenderImage>> {
+        revision
+            .and_then(|r| self.key.filter(|(key, _)| *key == r))
+            .and(self.image.clone())
     }
-    pub(crate) fn captured(&self)->bool {self.image.is_some()}
-    pub(crate) fn attempted(&self,revision:u64)->bool {self.key.is_some_and(|(key,_)|key==revision)}
-    pub(crate) fn capture(&mut self,native:&NSView,bounds:Bounds<Pixels>,revision:u64)->bool {
-        let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
-        let key=(revision,frame);if self.key==Some(key){return false;}
-        native.setFrameSize(NSSize::new(f32::from(bounds.size.width) as f64,f32::from(bounds.size.height) as f64));
+    pub(crate) fn captured(&self) -> bool {
+        self.image.is_some()
+    }
+    pub(crate) fn attempted(&self, revision: u64) -> bool {
+        self.key.is_some_and(|(key, _)| key == revision)
+    }
+    pub(crate) fn capture(
+        &mut self,
+        native: &NSView,
+        bounds: Bounds<Pixels>,
+        revision: u64,
+    ) -> bool {
+        let frame = [
+            f32::from(bounds.origin.x).to_bits(),
+            f32::from(bounds.origin.y).to_bits(),
+            f32::from(bounds.size.width).to_bits(),
+            f32::from(bounds.size.height).to_bits(),
+        ];
+        let key = (revision, frame);
+        if self.key == Some(key) {
+            return false;
+        }
+        native.setFrameSize(NSSize::new(
+            f32::from(bounds.size.width) as f64,
+            f32::from(bounds.size.height) as f64,
+        ));
         // cacheDisplay draws into its own bitmap; presentation alpha remains
         // owned exclusively by the staged native frame transaction.
-        let rect=native.bounds();
-        self.image=native.bitmapImageRepForCachingDisplayInRect(rect).and_then(|rep|{
-            native.cacheDisplayInRect_toBitmapImageRep(rect,&rep);snapshot_bitmap(&rep)
-        });
-        self.key=Some(key);true
+        let rect = native.bounds();
+        self.image = native
+            .bitmapImageRepForCachingDisplayInRect(rect)
+            .and_then(|rep| {
+                native.cacheDisplayInRect_toBitmapImageRep(rect, &rep);
+                snapshot_bitmap(&rep)
+            });
+        self.key = Some(key);
+        true
     }
 }
 /// PNG decoding normalizes AppKit bitmap layouts; GPUI sprites use straight BGRA.
 pub fn snapshot_bitmap(rep: &NSBitmapImageRep) -> Option<std::sync::Arc<RenderImage>> {
-    snapshot_bitmap_on_ground(rep,None)
+    snapshot_bitmap_on_ground(rep, None)
 }
-fn snapshot_bitmap_on_ground(rep:&NSBitmapImageRep,ground:Option<u32>)->Option<std::sync::Arc<RenderImage>> {
-    let properties=objc2_foundation::NSDictionary::new();
-    let data=unsafe {rep.representationUsingType_properties(NSBitmapImageFileType::PNG,&properties)}?;
-    let mut pixels=image::load_from_memory(unsafe {data.as_bytes_unchecked()}).ok()?.to_rgba8();
+fn snapshot_bitmap_on_ground(
+    rep: &NSBitmapImageRep,
+    ground: Option<u32>,
+) -> Option<std::sync::Arc<RenderImage>> {
+    let properties = objc2_foundation::NSDictionary::new();
+    let data =
+        unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties) }?;
+    let mut pixels = image::load_from_memory(unsafe { data.as_bytes_unchecked() })
+        .ok()?
+        .to_rgba8();
     for pixel in pixels.pixels_mut() {
-        if let Some(ground)=ground {
-            let matches=[(ground>>16) as u8,(ground>>8) as u8,ground as u8];
-            if pixel.0[..3].iter().zip(matches).all(|(a,b)|a.abs_diff(b)<=2){pixel.0[3]=0;}
+        if let Some(ground) = ground {
+            let matches = [(ground >> 16) as u8, (ground >> 8) as u8, ground as u8];
+            if pixel.0[..3]
+                .iter()
+                .zip(matches)
+                .all(|(a, b)| a.abs_diff(b) <= 2)
+            {
+                pixel.0[3] = 0;
+            }
         }
-        pixel.0.swap(0,2);
+        pixel.0.swap(0, 2);
     }
-    if pixels.pixels().all(|p|p.0[3]==0){return None;}
-    Some(std::sync::Arc::new(RenderImage::new([image::Frame::new(pixels)])))
+    if pixels.pixels().all(|p| p.0[3] == 0) {
+        return None;
+    }
+    Some(std::sync::Arc::new(RenderImage::new([image::Frame::new(
+        pixels,
+    )])))
 }
 pub fn snapshot_image(image: &NSImage) -> Option<std::sync::Arc<RenderImage>> {
-    let data=image.TIFFRepresentation()?;
-    let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data)?;
+    let data = image.TIFFRepresentation()?;
+    let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &data)?;
     snapshot_bitmap(&rep)
 }
 /// The normal panel ground is painted separately, so a WK body contributes
 /// its actual controls rather than turning an opaque background into hot dots.
-pub fn snapshot_image_on_ground(image:&NSImage,ground:u32)->Option<std::sync::Arc<RenderImage>> {
-    let data=image.TIFFRepresentation()?;
-    let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data)?;
-    snapshot_bitmap_on_ground(&rep,Some(ground))
+pub fn snapshot_image_on_ground(
+    image: &NSImage,
+    ground: u32,
+) -> Option<std::sync::Arc<RenderImage>> {
+    let data = image.TIFFRepresentation()?;
+    let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &data)?;
+    snapshot_bitmap_on_ground(&rep, Some(ground))
 }
 pub struct NativeControl {
     build: Option<BuildSnapshot>,
@@ -377,16 +421,24 @@ pub struct NativeControl {
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
     pub fn set_build_snapshot(&mut self, build: Option<BuildSnapshot>) -> bool {
-        let build=build.filter(|b| b.ready.unwrap_or(0.)<1.);
-        if self.build==build {return false;}
-        if build.is_none() {
-            *self.build_pixels.borrow_mut()=Default::default();
+        let build = build.filter(|b| b.ready.unwrap_or(0.) < 1.);
+        if self.build == build {
+            return false;
         }
-        self.build=build;
+        if build.is_none() {
+            *self.build_pixels.borrow_mut() = Default::default();
+        }
+        self.build = build;
         true
     }
-    pub fn snapshot_pending(&self)->bool {
-        !self.slot.wrapper().isHidden() && self.build.and_then(|b|b.revision).is_some_and(|r|self.build_pixels.borrow().key.is_none_or(|(key,_)|key!=r))
+    pub fn snapshot_pending(&self) -> bool {
+        !self.slot.wrapper().isHidden()
+            && self.build.and_then(|b| b.revision).is_some_and(|r| {
+                self.build_pixels
+                    .borrow()
+                    .key
+                    .is_none_or(|(key, _)| key != r)
+            })
     }
     /// The width the control fits its title in.
     pub fn width(&self) -> f32 {
@@ -991,12 +1043,15 @@ impl NativeControl {
 }
 impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let build=self.build;
-        let pixels=self.build_pixels.clone();
-        let owner=cx.entity().downgrade();
-        let snapshot=build.and_then(|b| b.revision).and_then(|revision| {
-            let cached=pixels.borrow();
-            cached.key.filter(|(r,_)|*r==revision).and(cached.image.clone())
+        let build = self.build;
+        let pixels = self.build_pixels.clone();
+        let owner = cx.entity().downgrade();
+        let snapshot = build.and_then(|b| b.revision).and_then(|revision| {
+            let cached = pixels.borrow();
+            cached
+                .key
+                .filter(|(r, _)| *r == revision)
+                .and(cached.image.clone())
         });
         let slot = self.slot.clone();
         let focus = self.focus.clone();
@@ -1011,38 +1066,51 @@ impl Render for NativeControl {
         } else {
             div().w(px(self.width))
         };
-        root.relative().h(px(self.height))
-            .filter(build.and_then(|b|b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(if build.is_some_and(|b|b.revision.is_none() && b.ready.is_none()){0.}else{1.}).child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    let (bounds, clip) =
-                        layer.painted(bounds, window.content_mask().bounds, window);
-                    slot.stage(ns_rect(bounds), ns_rect(clip));
-                    if let Some(build)=build {
-                        if let Some(revision)=build.revision {
-                            if pixels.borrow_mut().capture(&native,bounds,revision) {
-                                let _=owner.update(cx,|_,cx|cx.notify());
-                            }
-                        }
-                        let captured=pixels.borrow().image.is_some();
-                        let (_,live)=pm_design::dots::snapshot_visibility(captured,build.ready);
-                        slot.stage_alpha(live as f64);
-                    } else {slot.stage_alpha(1.);}
-                    if build.is_none() && focus.get()
-                        && let Some(window) = native.window()
-                    {
-                        focus.set(false);
-                        window.makeFirstResponder(Some(&native));
-                    }
+        root.relative()
+            .h(px(self.height))
+            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
+            .opacity(
+                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
+                    0.
+                } else {
+                    1.
                 },
             )
-            .absolute()
-            .inset_0(),
-        ).children(snapshot.map(|image| {
-            div().absolute().inset_0().child(img(image).size_full())
-        }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        let (bounds, clip) =
+                            layer.painted(bounds, window.content_mask().bounds, window);
+                        slot.stage(ns_rect(bounds), ns_rect(clip));
+                        if let Some(build) = build {
+                            if let Some(revision) = build.revision {
+                                if pixels.borrow_mut().capture(&native, bounds, revision) {
+                                    let _ = owner.update(cx, |_, cx| cx.notify());
+                                }
+                            }
+                            let captured = pixels.borrow().image.is_some();
+                            let (_, live) =
+                                pm_design::dots::snapshot_visibility(captured, build.ready);
+                            slot.stage_alpha(live as f64);
+                        } else {
+                            slot.stage_alpha(1.);
+                        }
+                        if build.is_none()
+                            && focus.get()
+                            && let Some(window) = native.window()
+                        {
+                            focus.set(false);
+                            window.makeFirstResponder(Some(&native));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .children(
+                snapshot.map(|image| div().absolute().inset_0().child(img(image).size_full())),
+            )
     }
 }
 /// A segment's content, drawn by us in the label ink. AppKit paints a title
@@ -1327,7 +1395,12 @@ pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
 fn hex_colour(hex: &str) -> Option<Retained<NSColor>> {
     let v = u32::from_str_radix(hex.trim_start_matches('#').get(..6)?, 16).ok()?;
     let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
-    Some(NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.))
+    Some(NSColor::colorWithSRGBRed_green_blue_alpha(
+        c(16),
+        c(8),
+        c(0),
+        1.,
+    ))
 }
 /// A colour as `#rrggbb` in sRGB.
 fn colour_hex(colour: &NSColor) -> String {
@@ -1343,23 +1416,29 @@ fn colour_hex(colour: &NSColor) -> String {
     )
 }
 
-#[cfg(test)] mod snapshot_bridge_tests {
-    use super::{snapshot_bitmap,snapshot_image,NSBitmapImageRep,NSImage};
+#[cfg(test)]
+mod snapshot_bridge_tests {
+    use super::{NSBitmapImageRep, NSImage, snapshot_bitmap, snapshot_image};
     use objc2::AnyThread;
-    #[test] fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
+    #[test]
+    fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
         objc2::rc::autoreleasepool(|_| {
-            let image=image::RgbaImage::from_pixel(2,2,image::Rgba([40,80,120,160]));
-            let mut bytes=std::io::Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgba8(image).write_to(&mut bytes,image::ImageFormat::Png).unwrap();
-            let data=objc2_foundation::NSData::with_bytes(bytes.get_ref());
-            let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data).unwrap();
-            let texture=snapshot_bitmap(&rep).unwrap();
-            let p=&texture.as_bytes(0).unwrap()[..4];
-            assert_eq!(p,&[120,80,40,160]);
-            let image=NSImage::initWithData(NSImage::alloc(),&data).unwrap();
-            let texture=snapshot_image(&image).unwrap();
-            let p=&texture.as_bytes(0).unwrap()[..4];
-            for (actual,expected) in p.iter().zip([120_u8,80,40,160]) {assert!(actual.abs_diff(expected)<=2);}
+            let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([40, 80, 120, 160]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .unwrap();
+            let data = objc2_foundation::NSData::with_bytes(bytes.get_ref());
+            let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &data).unwrap();
+            let texture = snapshot_bitmap(&rep).unwrap();
+            let p = &texture.as_bytes(0).unwrap()[..4];
+            assert_eq!(p, &[120, 80, 40, 160]);
+            let image = NSImage::initWithData(NSImage::alloc(), &data).unwrap();
+            let texture = snapshot_image(&image).unwrap();
+            let p = &texture.as_bytes(0).unwrap()[..4];
+            for (actual, expected) in p.iter().zip([120_u8, 80, 40, 160]) {
+                assert!(actual.abs_diff(expected) <= 2);
+            }
         });
     }
 }

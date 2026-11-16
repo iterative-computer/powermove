@@ -552,10 +552,7 @@ impl Layout {
             let other: f32 = geometry
                 .panels
                 .iter()
-                .filter(|p| {
-                    p.dock != divider.dock
-                        && is_band(&self.docks[p.dock].id)
-                })
+                .filter(|p| p.dock != divider.dock && is_band(&self.docks[p.dock].id))
                 .map(|p| p.rect.h + gap)
                 .sum();
             // The original app: at least `band_least` (and its panels'
@@ -602,7 +599,9 @@ impl Layout {
         // wide, and never more than the fluid column can give.
         let _ = min;
         let least = t.metrics.column_least.min(current.w);
-        let most = (current.w + room).min(t.metrics.column_most.max(current.w)).max(least);
+        let most = (current.w + room)
+            .min(t.metrics.column_most.max(current.w))
+            .max(least);
         let width = (current.w + delta * sign).clamp(least, most);
         self.docks[divider.dock].size = Some(width);
     }
@@ -633,9 +632,11 @@ impl Layout {
     ) -> Option<DropPreview> {
         // A folded panel is not a zone (its header is all there is of it):
         // the dock around it places the panel above or below it.
-        if let Some(p) = geometry.panels.iter().find(|p| {
-            p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed
-        }) {
+        if let Some(p) = geometry
+            .panels
+            .iter()
+            .find(|p| p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed)
+        {
             return Some(self.panel_zone(geometry, p, x, y, t, true));
         }
         self.off_panel_target(geometry, bounds, x, y, t)
@@ -807,17 +808,28 @@ impl Layout {
         // side columns' inserts between panels, and their strips.
         let side = |p: &Placement| matches!(self.docks[p.dock].id.as_str(), "left" | "right");
         let only_sides = Geometry {
-            panels: geometry.panels.iter().filter(|p| side(p)).cloned().collect(),
+            panels: geometry
+                .panels
+                .iter()
+                .filter(|p| side(p))
+                .cloned()
+                .collect(),
             ..Geometry::default()
         };
         let preview = self.off_panel_target(&only_sides, bounds, x, y, t)?;
         let near = |r: Rect| {
-            let edge = (x - r.x).abs().min((x - r.x - r.w).abs()).min((y - r.y).abs()).min((y - r.y - r.h).abs());
+            let edge = (x - r.x)
+                .abs()
+                .min((x - r.x - r.w).abs())
+                .min((y - r.y).abs())
+                .min((y - r.y - r.h).abs());
             edge <= FLOATING_EDGE
         };
         let ok = match preview.target {
             DropTarget::Edge(Edge::Left | Edge::Right) => true,
-            DropTarget::Split { dock, .. } if matches!(self.docks[dock].id.as_str(), "left" | "right") => {
+            DropTarget::Split { dock, .. }
+                if matches!(self.docks[dock].id.as_str(), "left" | "right") =>
+            {
                 let panels: Vec<Rect> = geometry
                     .panels
                     .iter()
@@ -831,9 +843,9 @@ impl Layout {
                     h: (a.y + a.h).max(b.y + b.h) - a.y.min(b.y),
                 });
                 column.is_some_and(near)
-                    || panels.iter().any(|r| {
-                        (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM
-                    })
+                    || panels
+                        .iter()
+                        .any(|r| (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM)
             }
             _ => false,
         };
@@ -869,11 +881,17 @@ impl Layout {
         };
         if group && y < header_end {
             // Before the first tab whose middle is right of the pointer.
-            let spans = geometry.tabs.get(&(p.dock, p.group)).cloned().unwrap_or_else(|| {
-                let n = g.tabs.len().max(1);
-                let w = r.w / n as f32;
-                (0..n).map(|i| (i, r.x + w * i as f32, r.x + w * (i + 1) as f32)).collect()
-            });
+            let spans = geometry
+                .tabs
+                .get(&(p.dock, p.group))
+                .cloned()
+                .unwrap_or_else(|| {
+                    let n = g.tabs.len().max(1);
+                    let w = r.w / n as f32;
+                    (0..n)
+                        .map(|i| (i, r.x + w * i as f32, r.x + w * (i + 1) as f32))
+                        .collect()
+                });
             let index = spans
                 .iter()
                 .find(|(_, left, right)| x < (left + right) / 2.)
@@ -954,9 +972,10 @@ impl Layout {
         let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
         // Over the very stack being moved: it is already there.
         if whole
-            && geometry.panels.iter().any(|p| {
-                (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1)
-            })
+            && geometry
+                .panels
+                .iter()
+                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
         {
             return DropOutcome::Here;
         }
@@ -1007,7 +1026,8 @@ impl Layout {
             return Some(group.active().to_owned());
         }
         let rest: Vec<&String> = group.tabs.iter().filter(|t| *t != moving).collect();
-        rest.get(group.active.min(rest.len() - 1)).map(|t| (*t).clone())
+        rest.get(group.active.min(rest.len() - 1))
+            .map(|t| (*t).clone())
     }
     /// The panel a drop's preview names as the one it lands against (above
     /// or below it).
@@ -1020,7 +1040,12 @@ impl Layout {
     /// A release over `preview`: the move, then the neighbour's share
     /// (`drop_panel`). The preview is worked out with this same call, so the
     /// panel lands exactly where the chip and the preview said.
-    pub fn apply_drop(&mut self, id: &str, preview: &DropPreview, stack: bool) -> anyhow::Result<()> {
+    pub fn apply_drop(
+        &mut self,
+        id: &str,
+        preview: &DropPreview,
+        stack: bool,
+    ) -> anyhow::Result<()> {
         let neighbour = self.neighbour(preview.near, id, stack);
         self.drop_panel(id, preview.target, stack, neighbour.as_deref())
     }
@@ -1465,7 +1490,9 @@ impl Layout {
                     None => self.add_dock(dock_for(edge.dock_id(), single())),
                 }
             }
-            DropTarget::Beside { dock, .. } => self.insert_at(id, DropTarget::Split { dock, group: 0 }),
+            DropTarget::Beside { dock, .. } => {
+                self.insert_at(id, DropTarget::Split { dock, group: 0 })
+            }
         }
     }
     /// Adds a dock where its id puts it: a left dock is the first column.
@@ -1563,10 +1590,7 @@ fn upper_least(bounds: Rect, t: &Tokens) -> f32 {
 }
 /// The least height of a dock: every group's least height and the gaps.
 fn dock_floor(d: &Dock, t: &Tokens) -> f32 {
-    d.groups
-        .iter()
-        .map(|g| group_least(g, t))
-        .sum::<f32>()
+    d.groups.iter().map(|g| group_least(g, t)).sum::<f32>()
         + t.metrics.dock_gap * d.groups.len().saturating_sub(1) as f32
 }
 /// The heights of a dock's groups in `space`: sized groups keep their size,
@@ -1639,8 +1663,7 @@ fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
     let mut open: Vec<usize> = flex.clone();
     loop {
         let share = pool / open.len().max(1) as f32;
-        let (low, high): (Vec<usize>, Vec<usize>) =
-            open.iter().partition(|&&i| least[i] > share);
+        let (low, high): (Vec<usize>, Vec<usize>) = open.iter().partition(|&&i| least[i] > share);
         if low.is_empty() {
             for &i in &open {
                 h[i] = share;
@@ -1970,7 +1993,12 @@ mod view_tile_tests {
     use super::*;
     #[test]
     fn four_views_tile_two_by_two_with_gaps() {
-        let r = Rect { x: 10., y: 20., w: 402., h: 202. };
+        let r = Rect {
+            x: 10.,
+            y: 20.,
+            w: 402.,
+            h: 202.,
+        };
         let t = view_tiles(r, 4, 2.);
         assert_eq!(t.len(), 4);
         assert_eq!((t[0].w, t[0].h), (200., 100.));
@@ -1981,52 +2009,118 @@ mod view_tile_tests {
 
 /// Reserve a build body without changing other tab groups. Unknown targets and
 /// unsupported floating placement fall back beside Properties in the right dock.
-pub fn reserve_build(layout: &mut Layout, id: &str, placement: &serde_json::Value, height: f32) -> serde_json::Value {
+pub fn reserve_build(
+    layout: &mut Layout,
+    id: &str,
+    placement: &serde_json::Value,
+    height: f32,
+) -> serde_json::Value {
     let beside = placement["beside"].as_str();
     let tab = placement["tab_in"].as_str();
-    let found = beside.or(tab).and_then(|id| layout.docks.iter().enumerate().find_map(|(d, dock)| dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == id)).map(|g| (d,g))));
-    let requested = placement["dock"].as_str().filter(|d| beside.is_none() && tab.is_none() && ["left", "right", "bottom"].contains(d));
+    let found = beside.or(tab).and_then(|id| {
+        layout.docks.iter().enumerate().find_map(|(d, dock)| {
+            dock.groups
+                .iter()
+                .position(|g| g.tabs.iter().any(|p| p == id))
+                .map(|g| (d, g))
+        })
+    });
+    let requested = placement["dock"]
+        .as_str()
+        .filter(|d| beside.is_none() && tab.is_none() && ["left", "right", "bottom"].contains(d));
     let fallback = found.is_none() && requested.is_none();
     let dock_name = requested.unwrap_or("right");
     let d = found.map(|p| p.0).unwrap_or_else(|| {
-        layout.docks.iter().position(|d| d.id == dock_name).unwrap_or_else(|| {
-            layout.docks.push(Dock { id: dock_name.into(), size: Some(320.), groups: vec![], collapsed: false }); layout.docks.len()-1
-        })
+        layout
+            .docks
+            .iter()
+            .position(|d| d.id == dock_name)
+            .unwrap_or_else(|| {
+                layout.docks.push(Dock {
+                    id: dock_name.into(),
+                    size: Some(320.),
+                    groups: vec![],
+                    collapsed: false,
+                });
+                layout.docks.len() - 1
+            })
     });
     let dock = &mut layout.docks[d];
     dock.collapsed = false;
     if let Some((_, g)) = found.filter(|_| tab.is_some()) {
         dock.groups[g].tabs.push(id.into());
-        dock.groups[g].active = dock.groups[g].tabs.len()-1;
+        dock.groups[g].active = dock.groups[g].tabs.len() - 1;
         dock.groups[g].collapsed = false;
         return serde_json::json!({"dock":dock.id,"tab_in":tab,"fallback":false});
     }
-    let g = found.map(|p| p.1+1).unwrap_or_else(|| if fallback { dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == "inspector")).map(|g| g+1).unwrap_or(dock.groups.len()) } else { dock.groups.len() });
-    dock.groups.insert(g, Group { tabs: vec![id.into()], active: 0, size: Some(height.clamp(120., 1200.)), collapsed: false });
+    let g = found.map(|p| p.1 + 1).unwrap_or_else(|| {
+        if fallback {
+            dock.groups
+                .iter()
+                .position(|g| g.tabs.iter().any(|p| p == "inspector"))
+                .map(|g| g + 1)
+                .unwrap_or(dock.groups.len())
+        } else {
+            dock.groups.len()
+        }
+    });
+    dock.groups.insert(
+        g,
+        Group {
+            tabs: vec![id.into()],
+            active: 0,
+            size: Some(height.clamp(120., 1200.)),
+            collapsed: false,
+        },
+    );
     let neighbor = g.checked_sub(1).map(|g| dock.groups[g].active().to_owned());
     serde_json::json!({"dock":dock.id,"beside":neighbor,"fallback":fallback})
 }
 
 pub fn remove_build(layout: &mut Layout, id: &str) {
     for dock in &mut layout.docks {
-        for group in &mut dock.groups { group.tabs.retain(|p| p != id); group.active = group.active.min(group.tabs.len().saturating_sub(1)); }
+        for group in &mut dock.groups {
+            group.tabs.retain(|p| p != id);
+            group.active = group.active.min(group.tabs.len().saturating_sub(1));
+        }
         dock.groups.retain(|g| !g.tabs.is_empty());
     }
 }
 #[cfg(test)]
 mod build_slot_tests {
     use super::*;
-    #[test] fn reserves_and_cancels() {
-        let mut l = Layout { version: 1, workspace: "test".into(), docks: vec![] };
+    #[test]
+    fn reserves_and_cancels() {
+        let mut l = Layout {
+            version: 1,
+            workspace: "test".into(),
+            docks: vec![],
+        };
         let used = reserve_build(&mut l, "build", &serde_json::json!({"dock":"left"}), 280.);
-        assert_eq!(used["dock"], "left"); assert_eq!(l.docks[0].groups[0].size, Some(280.));
-        remove_build(&mut l,"build"); assert!(l.docks[0].groups.is_empty());
+        assert_eq!(used["dock"], "left");
+        assert_eq!(l.docks[0].groups[0].size, Some(280.));
+        remove_build(&mut l, "build");
+        assert!(l.docks[0].groups.is_empty());
     }
-    #[test] fn invalid_falls_back_and_tabs_keep_height() {
-        let mut l = Layout { version: 1, workspace: "test".into(), docks: vec![] };
-        assert_eq!(reserve_build(&mut l,"one",&serde_json::json!({"beside":"missing"}),250.)["fallback"], true);
-        reserve_build(&mut l,"two",&serde_json::json!({"tab_in":"one"}),500.);
-        assert_eq!(l.docks[0].groups.len(),1); assert_eq!(l.docks[0].groups[0].size,Some(250.));
-        assert_eq!(l.docks[0].groups[0].active(),"two");
+    #[test]
+    fn invalid_falls_back_and_tabs_keep_height() {
+        let mut l = Layout {
+            version: 1,
+            workspace: "test".into(),
+            docks: vec![],
+        };
+        assert_eq!(
+            reserve_build(
+                &mut l,
+                "one",
+                &serde_json::json!({"beside":"missing"}),
+                250.
+            )["fallback"],
+            true
+        );
+        reserve_build(&mut l, "two", &serde_json::json!({"tab_in":"one"}), 500.);
+        assert_eq!(l.docks[0].groups.len(), 1);
+        assert_eq!(l.docks[0].groups[0].size, Some(250.));
+        assert_eq!(l.docks[0].groups[0].active(), "two");
     }
 }

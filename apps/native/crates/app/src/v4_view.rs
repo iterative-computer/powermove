@@ -101,8 +101,7 @@ impl Outline {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        let stepped =
-            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
+        let stepped = window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
         if stepped {
             self.scroll_y.set(scroll_y);
             // Rows past JS's window are asked for as before; they arrive as
@@ -299,6 +298,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// The field the panel last asked to take the keyboard (`focusRequest`).
+    focus_requested: Option<String>,
     /// A semantic id to scroll into view once a publication has it.
     reveal: Option<(String, std::time::Instant)>,
     /// Told when a new tree is installed: the timeline's native timecode
@@ -381,6 +382,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            focus_requested: None,
             reveal: None,
             installed: None,
             grows: false,
@@ -396,65 +398,148 @@ impl SurfaceView {
         this
     }
     fn build_rows(&self) -> Vec<Id> {
-        fn walk(view:&SurfaceView,id:Id,rows:&mut Vec<Id>) {
-            let Some(node)=view.prepared.node(id) else{return;};
-            if node.component==Some(Component::InspectorRow) {rows.push(id);}
-            for child in &node.children {walk(view,*child,rows);}
-        }
-        let mut rows=Vec::new();walk(self,0,&mut rows);rows
-    }
-    pub(crate) fn panel_build_rendered(&self,cx:&App)->bool {
-        self.shown==self.latest && self.build_painted.get()==self.shown
-            && self.controls.iter().all(|(id,c)|self.left_out(*id) || !c.read(cx).snapshot_pending())
-            && self.fields.values().all(|f|!f.read(cx).snapshot_pending())
-    }
-    pub(crate) fn set_panel_build(&mut self, state:Option<crate::generated_panel::panel_build::State>,cx:&mut Context<Self>) {
-        let state=state.filter(|s|s.resolve(s.now())<1.);
-        if let Some(ready)=state.as_ref().filter(|s|s.stage==crate::generated_panel::panel_build::Stage::Ready) {
-            if self.panel_build.as_ref().is_none_or(|old|old.changed!=ready.changed || old.stage!=ready.stage) {
-                let changed=ready.changed;
-                let deadline=changed+std::time::Duration::from_secs_f32(pm_design::dots::RESOLVE_SECONDS);
-                cx.spawn(async move |this,cx| {
-                    cx.background_executor().timer(deadline.saturating_duration_since(std::time::Instant::now())).await;
-                    let _=this.update(cx,|view,cx| {
-                        if view.panel_build.as_ref().is_some_and(|s|s.changed==changed && s.stage==crate::generated_panel::panel_build::Stage::Ready) {
-                            view.set_panel_build(None,cx);
-                        }
-                    });
-                }).detach();
+        fn walk(view: &SurfaceView, id: Id, rows: &mut Vec<Id>) {
+            let Some(node) = view.prepared.node(id) else {
+                return;
+            };
+            if node.component == Some(Component::InspectorRow) {
+                rows.push(id);
+            }
+            for child in &node.children {
+                walk(view, *child, rows);
             }
         }
-        let rows=self.build_rows();
-        let mut controls=self.controls.iter().collect::<Vec<_>>();controls.sort_by_key(|(id,_)|**id);
-        for (fallback,(id,control)) in controls.into_iter().enumerate() {
-            let mut parent=Some(*id);let mut row=None;
-            while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
-            let index=row.unwrap_or(fallback);
-            let mode=state.as_ref().map(|s| {
-                let index=if s.explicit{index}else{0};
-                let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
-                let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
-                let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
-                pm_shell::native_control::BuildSnapshot{revision,ready,filter}
-            });
-            control.update(cx,|control,cx|{if control.set_build_snapshot(mode){cx.notify();}});
+        let mut rows = Vec::new();
+        walk(self, 0, &mut rows);
+        rows
+    }
+    pub(crate) fn panel_build_rendered(&self, cx: &App) -> bool {
+        self.shown == self.latest
+            && self.build_painted.get() == self.shown
+            && self
+                .controls
+                .iter()
+                .all(|(id, c)| self.left_out(*id) || !c.read(cx).snapshot_pending())
+            && self.fields.values().all(|f| !f.read(cx).snapshot_pending())
+    }
+    pub(crate) fn set_panel_build(
+        &mut self,
+        state: Option<crate::generated_panel::panel_build::State>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = state.filter(|s| s.resolve(s.now()) < 1.);
+        if let Some(ready) = state
+            .as_ref()
+            .filter(|s| s.stage == crate::generated_panel::panel_build::Stage::Ready)
+        {
+            if self
+                .panel_build
+                .as_ref()
+                .is_none_or(|old| old.changed != ready.changed || old.stage != ready.stage)
+            {
+                let changed = ready.changed;
+                let deadline =
+                    changed + std::time::Duration::from_secs_f32(pm_design::dots::RESOLVE_SECONDS);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                        .await;
+                    let _ = this.update(cx, |view, cx| {
+                        if view.panel_build.as_ref().is_some_and(|s| {
+                            s.changed == changed
+                                && s.stage == crate::generated_panel::panel_build::Stage::Ready
+                        }) {
+                            view.set_panel_build(None, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
         }
-        for (fallback,(id,field)) in self.fields.iter().enumerate() {
-            let mut parent=Some(*id);let mut row=None;
-            while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
-            let index=row.unwrap_or(fallback);
-            let mode=state.as_ref().map(|s|{
-                let index=if s.explicit{index}else{0};
-                let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
-                let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
-                let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
-                pm_shell::native_control::BuildSnapshot{revision,ready,filter}
+        let rows = self.build_rows();
+        let mut controls = self.controls.iter().collect::<Vec<_>>();
+        controls.sort_by_key(|(id, _)| **id);
+        for (fallback, (id, control)) in controls.into_iter().enumerate() {
+            let mut parent = Some(*id);
+            let mut row = None;
+            while let Some(id) = parent {
+                if let Some(index) = rows.iter().position(|r| *r == id) {
+                    row = Some(index);
+                    break;
+                }
+                parent = self.prepared.node(id).and_then(|n| n.parent);
+            }
+            let index = row.unwrap_or(fallback);
+            let mode = state.as_ref().map(|s| {
+                let index = if s.explicit { index } else { 0 };
+                let revision = s
+                    .committed
+                    .get(&index)
+                    .map(|at| at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready = (s.stage == crate::generated_panel::panel_build::Stage::Ready)
+                    .then(|| s.resolve(s.now()));
+                let filter = if row.is_none() {
+                    crate::generated_panel::dot_filter(Some(s), Some(index), &self.table.tokens)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+                pm_shell::native_control::BuildSnapshot {
+                    revision,
+                    ready,
+                    filter,
+                }
             });
-            field.update(cx,|field,cx|{if field.set_build_snapshot(mode){cx.notify();}});
+            control.update(cx, |control, cx| {
+                if control.set_build_snapshot(mode) {
+                    cx.notify();
+                }
+            });
         }
-        let active=self.panel_build.is_some() || state.is_some();
-        self.panel_build=state;
-        if active {cx.notify();}
+        for (fallback, (id, field)) in self.fields.iter().enumerate() {
+            let mut parent = Some(*id);
+            let mut row = None;
+            while let Some(id) = parent {
+                if let Some(index) = rows.iter().position(|r| *r == id) {
+                    row = Some(index);
+                    break;
+                }
+                parent = self.prepared.node(id).and_then(|n| n.parent);
+            }
+            let index = row.unwrap_or(fallback);
+            let mode = state.as_ref().map(|s| {
+                let index = if s.explicit { index } else { 0 };
+                let revision = s
+                    .committed
+                    .get(&index)
+                    .map(|at| at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready = (s.stage == crate::generated_panel::panel_build::Stage::Ready)
+                    .then(|| s.resolve(s.now()));
+                let filter = if row.is_none() {
+                    crate::generated_panel::dot_filter(Some(s), Some(index), &self.table.tokens)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+                pm_shell::native_control::BuildSnapshot {
+                    revision,
+                    ready,
+                    filter,
+                }
+            });
+            field.update(cx, |field, cx| {
+                if field.set_build_snapshot(mode) {
+                    cx.notify();
+                }
+            });
+        }
+        let active = self.panel_build.is_some() || state.is_some();
+        self.panel_build = state;
+        if active {
+            cx.notify();
+        }
     }
     /// A reopened panel window keeps its view; later publications install
     /// there, and so does one that finished while no window was open.
@@ -595,6 +680,7 @@ impl SurfaceView {
             self.reconcile(window, cx);
         }
         self.try_focus_text(cx);
+        self.follow_focus_request(cx);
         self.take_ready(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
@@ -745,7 +831,9 @@ impl SurfaceView {
             mounts.2 += 1;
             mounts.3 += started.elapsed();
         }
-        if let Some(build)=self.panel_build.clone(){self.set_panel_build(Some(build),cx);}
+        if let Some(build) = self.panel_build.clone() {
+            self.set_panel_build(Some(build), cx);
+        }
         if crate::diag::enabled() {
             crate::diag::line(
                 serde_json::json!({"ui": "reconcile", "nodes": prepared.nodes.len(),
@@ -878,7 +966,9 @@ impl SurfaceView {
         };
         self.mount_control(kind, view, node, view.binding.clone(), window, cx);
         self.host_rows(id, node, cx);
-        if let Some(build)=self.panel_build.clone(){self.set_panel_build(Some(build),cx);}
+        if let Some(build) = self.panel_build.clone() {
+            self.set_panel_build(Some(build), cx);
+        }
     }
     fn mount_control(
         &mut self,
@@ -988,10 +1078,11 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
-                    // `data-pm-variant="glass"`: a segmented control in the
-                    // system's capsule at the large size.
-                    glass: crate::v4_compile::variant(node) == Some("glass")
-                        && matches!(kind, crate::v4_control::Kind::Segmented),
+                    // Every segmented control is the kit's one: the system's
+                    // Liquid Glass capsule at the large size (PM-409).
+                    // Settings keeps the plain AppKit control of its pages.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
+                        && self.publication.panel != "settings",
                 },
                 &tokens,
                 window,
@@ -1641,6 +1732,36 @@ impl SurfaceView {
             .runtime
             .bound_layers(&self.publication.panel, &binding)?;
         (*bound == [layer.clone()]).then_some(id)
+    }
+    /// A panel names the field that should take the keyboard (`focusRequest`,
+    /// a field's own id): the field takes it once each time the request
+    /// appears or changes, so a search button that opens its field puts the
+    /// caret in it and typed letters never fire shortcuts on the way (PM-402).
+    fn follow_focus_request(&mut self, cx: &mut Context<Self>) {
+        let request = self
+            .publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("focusRequest").and_then(Value::as_str))
+            .filter(|r| !r.is_empty())
+            .find(|r| {
+                self.prepared
+                    .semantics
+                    .get(*r)
+                    .is_some_and(|id| self.fields.contains_key(id))
+            })
+            .map(str::to_owned);
+        if request == self.focus_requested {
+            return;
+        }
+        self.focus_requested = request.clone();
+        let field = request
+            .and_then(|r| self.prepared.semantics.get(&r).copied())
+            .and_then(|id| self.fields.get(&id).cloned());
+        if let Some(field) = field {
+            field.update(cx, |f, cx| f.begin_editing(cx));
+        }
     }
     /// The text field `semantic` lets go of the keyboard (the editor has it).
     pub(crate) fn blur_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
@@ -2375,16 +2496,50 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
-        if let Some(build)=&self.panel_build {
-            if id==0 || node.parent==Some(0) {element.style().background=None;}
-            if node.component==Some(Component::InspectorRow) {
-                let index=if build.explicit{self.build_rows().iter().position(|row|*row==id).unwrap_or(0)}else{0};
-                element=element.filter(crate::generated_panel::dot_filter(Some(build),Some(index),&self.table.tokens))
-                    .opacity(crate::generated_panel::control_opacity(Some(build),index,self.table.tokens.accessibility.reduce_motion));
+        if let Some(build) = &self.panel_build {
+            if id == 0 || node.parent == Some(0) {
+                element.style().background = None;
+            }
+            if node.component == Some(Component::InspectorRow) {
+                let index = if build.explicit {
+                    self.build_rows()
+                        .iter()
+                        .position(|row| *row == id)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                element = element
+                    .filter(crate::generated_panel::dot_filter(
+                        Some(build),
+                        Some(index),
+                        &self.table.tokens,
+                    ))
+                    .opacity(crate::generated_panel::control_opacity(
+                        Some(build),
+                        index,
+                        self.table.tokens.accessibility.reduce_motion,
+                    ));
             } else if node.text.is_some() {
-                let mut parent=node.parent;let mut in_row=false;
-                while let Some(id)=parent {let Some(n)=self.prepared.node(id) else{break;};if n.component==Some(Component::InspectorRow){in_row=true;break;}parent=n.parent;}
-                if !in_row {element=element.filter(crate::generated_panel::dot_filter(Some(build),None,&self.table.tokens));}
+                let mut parent = node.parent;
+                let mut in_row = false;
+                while let Some(id) = parent {
+                    let Some(n) = self.prepared.node(id) else {
+                        break;
+                    };
+                    if n.component == Some(Component::InspectorRow) {
+                        in_row = true;
+                        break;
+                    }
+                    parent = n.parent;
+                }
+                if !in_row {
+                    element = element.filter(crate::generated_panel::dot_filter(
+                        Some(build),
+                        None,
+                        &self.table.tokens,
+                    ));
+                }
             }
         }
         // In a body that scrolls, the root and the panel fill the body by
@@ -2557,10 +2712,7 @@ impl SurfaceView {
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let size = (
-                            f32::from(bounds.size.width),
-                            f32::from(bounds.size.height),
-                        );
+                        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
                         if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
@@ -2598,9 +2750,7 @@ impl SurfaceView {
             // order, as on the web (a segmented control's other segments).
             let tab = node.tab_index.unwrap_or(0);
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
-            element = element
-                .track_focus(focus)
-                .tab_index(tab.max(0));
+            element = element.track_focus(focus).tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -3293,7 +3443,8 @@ impl SurfaceView {
             let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
                 let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
-                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
+                cx.new(|_| Tooltip::following(source, id, title, tokens))
+                    .into()
             });
         }
         element
@@ -3436,6 +3587,7 @@ impl SurfaceView {
                                 this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
                             },
                         )
+                        .animate_when_visible()
                         .into_any_element()
                 });
             }

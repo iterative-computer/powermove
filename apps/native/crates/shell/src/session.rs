@@ -11,6 +11,9 @@ use std::{
     },
 };
 
+/// A quit kept the windows it found open (`Change::Keep`): the key window it
+/// recorded stays the one in front at the next launch.
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Most windows (tabs included) a launch reopens: a session that grew past
 /// it (lane runs, a crash loop) opens its key window's group and the most
 /// recently opened others, never hundreds (PM-400).
@@ -276,6 +279,8 @@ pub enum Change {
     Remove(u64),
     /// A quit: only these windows (the ones open) stay.
     Keep(Vec<u64>),
+    /// A quit: this window was in front.
+    Front(u64),
     /// A launch: the windows it restores, the file complete.
     Replace(Session),
 }
@@ -370,11 +375,22 @@ fn update<'a>(
             }
             Change::Remove(id) => session.remove(*id),
             Change::Keep(ids) => session.keep(ids),
+            Change::Front(id) => session.key = Some(*id),
             Change::Replace(whole) => session = whole.clone(),
         }
     }
     session.version = 1;
     session.save(path)
+}
+/// A quit began (`on`) or was cancelled. While it runs, the windows it closes
+/// one by one become key in turn and must not be recorded as the one in front:
+/// the next launch brings forward the one in front when the quit began (PM-292).
+pub fn set_quitting(on: bool) {
+    QUITTING.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+/// Whether a quit is closing the windows (`set_quitting`).
+pub fn quitting() -> bool {
+    QUITTING.load(std::sync::atomic::Ordering::SeqCst)
 }
 /// Queues `change` to the session file at `path`; returns at once.
 pub fn write(path: &Path, change: Change) {
@@ -657,5 +673,38 @@ mod bound_tests {
         assert!(ids.starts_with(&[1]) && ids.contains(&2) && ids.contains(&3));
         // The most recently opened others fill the rest.
         assert!(ids.contains(&40) && !ids.contains(&4));
+    }
+}
+#[cfg(test)]
+mod quit_front_tests {
+    use super::*;
+    #[test]
+    fn the_window_in_front_when_a_quit_began_stays_the_front_one() {
+        let dir = std::env::temp_dir().join(format!("pm-session-front-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("session.json");
+        let w = |id: u64| WindowState {
+            id,
+            frame: [10., 10., 800., 600.],
+            project: format!("p{id}"),
+            workspace: "design".into(),
+            tab_group: (id != 1).then_some(1),
+            tab_index: id as usize - 1,
+            pages: Vec::new(),
+            fullscreen: false,
+        };
+        for id in 1..=3 {
+            write(&path, Change::Upsert { state: w(id), key: id == 1 });
+        }
+        // The quit: windows 1 to 3 are open, 2 in front; then the windows it
+        // closes record themselves without claiming the front.
+        write(&path, Change::Keep(vec![1, 2, 3]));
+        write(&path, Change::Front(2));
+        write(&path, Change::Upsert { state: w(3), key: false });
+        flush().unwrap();
+        let s = Session::load(&path).unwrap();
+        assert_eq!(s.key, Some(2));
+        assert!(s.complete);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

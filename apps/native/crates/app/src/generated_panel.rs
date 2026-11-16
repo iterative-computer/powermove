@@ -18,6 +18,7 @@ use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2_app_kit::NSAccessibility;
 use pm_kernel::{Call, Caller, HistoryCall, Request, WriteBody};
+use pm_shell::native_control::{ControlSpec, Kind, NativeControl};
 use pm_shell::workspace::{self, Write};
 use serde_json::{Value, json};
 
@@ -51,7 +52,9 @@ pub fn panel(
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
     let (_, _, def) = section(v, id)?;
-    if let Some(state) = v.panel_builds.get_mut(id) { state.tick(); }
+    if let Some(state) = v.panel_builds.get_mut(id) {
+        state.tick();
+    }
     Some(render(v, id, &def, rect, window, cx))
 }
 
@@ -64,20 +67,37 @@ pub(crate) fn publication(
     after: &Value,
 ) {
     let sections = after["custom"].as_array().cloned().unwrap_or_default();
-    builds.retain(|id, state| state.explicit || sections.iter().any(|s| s["id"].as_str() == Some(id)));
+    builds.retain(|id, state| {
+        state.explicit || sections.iter().any(|s| s["id"].as_str() == Some(id))
+    });
     for section in &sections {
-        let Some(id) = section["id"].as_str() else { continue; };
-        if builds.get(id).is_some_and(|state| state.explicit) { continue; }
-        let previous = before["custom"].as_array().and_then(|sections| sections.iter().find(|s| s["id"] == id));
+        let Some(id) = section["id"].as_str() else {
+            continue;
+        };
+        if builds.get(id).is_some_and(|state| state.explicit) {
+            continue;
+        }
+        let previous = before["custom"]
+            .as_array()
+            .and_then(|sections| sections.iter().find(|s| s["id"] == id));
         let controls = section["controls"].as_array().cloned().unwrap_or_default();
-        let changed: Vec<_> = controls.iter().enumerate().filter_map(|(index, control)| {
-            let old = previous.and_then(|s| s["controls"].get(index));
-            (old != Some(control)).then_some(index)
-        }).collect();
+        let changed: Vec<_> = controls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, control)| {
+                let old = previous.and_then(|s| s["controls"].get(index));
+                (old != Some(control)).then_some(index)
+            })
+            .collect();
         if !changed.is_empty() || (previous.is_none() && controls.is_empty()) {
-            builds.entry(id.to_owned()).or_default().published(changed, section["building"] != true);
+            builds
+                .entry(id.to_owned())
+                .or_default()
+                .published(changed, section["building"] != true);
         } else if section["building"] != true {
-            if let Some(state) = builds.get_mut(id) { state.complete = true; }
+            if let Some(state) = builds.get_mut(id) {
+                state.complete = true;
+            }
         }
     }
 }
@@ -94,11 +114,18 @@ fn build_surface(
     cx: &mut Context<Controller>,
 ) -> AnyElement {
     let entity = cx.entity().downgrade();
-    if state.animating(std::time::Instant::now(),t.accessibility.reduce_motion) {
-    cx.spawn(async move |_, cx| {
-        cx.background_executor().timer(std::time::Duration::from_millis(if playing { 33 } else { 16 })).await;
-        let _ = entity.update(cx, |_, cx| cx.notify());
-    }).detach();
+    if state.animating(std::time::Instant::now(), t.accessibility.reduce_motion) {
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(if playing {
+                    33
+                } else {
+                    16
+                }))
+                .await;
+            let _ = entity.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
     let age = state.started.elapsed().as_secs_f32();
     let elapsed = state.changed.elapsed().as_secs_f32();
@@ -119,31 +146,69 @@ fn build_frame(
     let reduced = t.accessibility.reduce_motion;
     let height = (rect.h - t.metrics.header).max(0.);
     let fade = match state.stage {
-        panel_build::Stage::Ready => 1.-pm_design::dots::resolve(elapsed),
-        panel_build::Stage::Erase => 1.-panel_build::fade(elapsed,0.24),
-        _ => panel_build::fade(age,0.24),
+        panel_build::Stage::Ready => 1. - pm_design::dots::resolve(elapsed),
+        panel_build::Stage::Erase => 1. - panel_build::fade(elapsed, 0.24),
+        _ => panel_build::fade(age, 0.24),
     };
-    let (accent,text,muted)=(t.colors.accent,t.colors.text,t.colors.muted);
-    let radius=t.radius.lg;
-    let dim=panel_build::playback(playing).0;
+    let (accent, text, muted) = (t.colors.accent, t.colors.text, t.colors.muted);
+    let radius = t.radius.lg;
+    let dim = panel_build::playback(playing).0;
     let _ = fraction;
-    div().absolute().inset_0().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
-        .child(canvas(|_,_,_|(),move |bounds,_,window,_| {
-            if ink_only || reduced || fade<=0. { return; }
-            let size=[f32::from(bounds.size.width),f32::from(bounds.size.height)];
-            let opening=panel_build::fade(age,0.48);
-            window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}), |window| {
-                for dot in pm_design::dots::aurora(size,age,accent,text,muted) {
-                    if !inside_ground(dot.center,size,radius) {continue;}
-                    // The thin initial row expands into a sparse-to-dense slot field.
-                    if dot.center[1]>3.+(size[1]-3.)*opening {continue;}
-                    if pm_design::dots::hash(dot.center)>opening {continue;}
-                    let p=bounds.origin+point(px(dot.center[0]-dot.radius),px(dot.center[1]-dot.radius));
-                    window.paint_quad(PaintQuad::new(Bounds::new(p,gpui::size(px(dot.radius*2.),px(dot.radius*2.))))
-                        .corner_radii(px(dot.radius)).background(pm_shell::kit::ink(dot.color,dot.alpha*fade*dim)));
-                }
-            });
-        }).size_full()).into_any_element()
+    div()
+        .absolute()
+        .inset_0()
+        .h(px(height))
+        .overflow_hidden()
+        .rounded(px(t.radius.lg))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if ink_only || reduced || fade <= 0. {
+                        return;
+                    }
+                    let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
+                    let opening = panel_build::fade(age, 0.48);
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds,
+                            ..Default::default()
+                        }),
+                        |window| {
+                            for dot in pm_design::dots::aurora(size, age, accent, text, muted) {
+                                if !inside_ground(dot.center, size, radius) {
+                                    continue;
+                                }
+                                // The thin initial row expands into a sparse-to-dense slot field.
+                                if dot.center[1] > 3. + (size[1] - 3.) * opening {
+                                    continue;
+                                }
+                                if pm_design::dots::hash(dot.center) > opening {
+                                    continue;
+                                }
+                                let p = bounds.origin
+                                    + point(
+                                        px(dot.center[0] - dot.radius),
+                                        px(dot.center[1] - dot.radius),
+                                    );
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        p,
+                                        gpui::size(px(dot.radius * 2.), px(dot.radius * 2.)),
+                                    ))
+                                    .corner_radii(px(dot.radius))
+                                    .background(
+                                        pm_shell::kit::ink(dot.color, dot.alpha * fade * dim),
+                                    ),
+                                );
+                            }
+                        },
+                    );
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 const BUILD_ROW: f32 = 32.;
@@ -151,39 +216,83 @@ const BUILD_HEADER: f32 = 42.;
 const BUILD_INSET: f32 = 16.;
 
 fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u32 {
-    let _=build;
+    let _ = build;
     t.colors.panel
 }
 
-fn inside_ground(point: [f32;2], size: [f32;2], radius: f32) -> bool {
-    let r=radius.min(size[0].min(size[1])*0.5);
-    let dx=point[0]-point[0].clamp(r,size[0]-r);
-    let dy=point[1]-point[1].clamp(r,size[1]-r);
-    dx*dx+dy*dy <= r*r
+fn inside_ground(point: [f32; 2], size: [f32; 2], radius: f32) -> bool {
+    let r = radius.min(size[0].min(size[1]) * 0.5);
+    let dx = point[0] - point[0].clamp(r, size[0] - r);
+    let dy = point[1] - point[1].clamp(r, size[1] - r);
+    dx * dx + dy * dy <= r * r
 }
 
 fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
-    let resolve=build.map_or(1.,|b|b.resolve(b.now()));
-    if resolve>=1. || t.accessibility.reduce_motion {return div().absolute().inset_0().rounded(px(t.radius.lg)).bg(rgb(t.colors.panel));}
-    let color=t.colors.panel;
-    let radius=t.radius.lg;
-    div().absolute().inset_0().child(canvas(|_,_,_|(),move |bounds,_,window,_| {
-        window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}),|window| {
-            if resolve>0. {window.paint_quad(PaintQuad::new(bounds).corner_radii(px(radius)).background(pm_shell::kit::ink(color,resolve)));}
-            let dimensions=[f32::from(bounds.size.width),f32::from(bounds.size.height)];
-            for dot in pm_design::dots::matrix(dimensions,4.,|_|[1.;4]) {
-                if !inside_ground(dot.center,dimensions,radius) {continue;}
-                let p=bounds.origin+point(px(dot.center[0]-dot.radius),px(dot.center[1]-dot.radius));
-                window.paint_quad(PaintQuad::new(Bounds::new(p,size(px(dot.radius*2.),px(dot.radius*2.))))
-                    .corner_radii(px(dot.radius)).background(pm_shell::kit::ink(color,1.-resolve)));
-            }
-        });
-    }).size_full())
+    let resolve = build.map_or(1., |b| b.resolve(b.now()));
+    if resolve >= 1. || t.accessibility.reduce_motion {
+        return div()
+            .absolute()
+            .inset_0()
+            .rounded(px(t.radius.lg))
+            .bg(rgb(t.colors.panel));
+    }
+    let color = t.colors.panel;
+    let radius = t.radius.lg;
+    div().absolute().inset_0().child(
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds,
+                        ..Default::default()
+                    }),
+                    |window| {
+                        if resolve > 0. {
+                            window.paint_quad(
+                                PaintQuad::new(bounds)
+                                    .corner_radii(px(radius))
+                                    .background(pm_shell::kit::ink(color, resolve)),
+                            );
+                        }
+                        let dimensions =
+                            [f32::from(bounds.size.width), f32::from(bounds.size.height)];
+                        for dot in pm_design::dots::matrix(dimensions, 4., |_| [1.; 4]) {
+                            if !inside_ground(dot.center, dimensions, radius) {
+                                continue;
+                            }
+                            let p = bounds.origin
+                                + point(
+                                    px(dot.center[0] - dot.radius),
+                                    px(dot.center[1] - dot.radius),
+                                );
+                            window.paint_quad(
+                                PaintQuad::new(Bounds::new(
+                                    p,
+                                    size(px(dot.radius * 2.), px(dot.radius * 2.)),
+                                ))
+                                .corner_radii(px(dot.radius))
+                                .background(pm_shell::kit::ink(color, 1. - resolve)),
+                            );
+                        }
+                    },
+                );
+            },
+        )
+        .size_full(),
+    )
 }
 
 fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
-    div().h(px(BUILD_HEADER)).flex_none().px(px(BUILD_INSET)).flex().items_center()
-        .text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.colors.text))
+    div()
+        .h(px(BUILD_HEADER))
+        .flex_none()
+        .px(px(BUILD_INSET))
+        .flex()
+        .items_center()
+        .text_size(px(14.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(t.colors.text))
         .child(def["title"].as_str().unwrap_or("Controls").to_owned())
 }
 
@@ -191,39 +300,133 @@ fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
 /// Sharing this element prevents capture-only stand-ins from drifting from UI.
 fn slider_control(control: &Value, current: &Value, t: &pm_design::Tokens) -> Div {
     let fraction = control_fraction(control, current);
-    let text = format!("{}{}", shown(current), control["unit"].as_str().unwrap_or(""));
-    div().h(px(BUILD_ROW)).flex_none().px(px(BUILD_INSET)).child(
-        div().relative().size_full().text_size(px(12.)).text_color(rgb(t.colors.secondary))
-            .child(div().absolute().left_0().top_0().h_full().w(relative(0.34)).flex().items_center()
-                .truncate().child(control["label"].as_str().unwrap_or("").to_owned()))
-            .child(div().absolute().left(relative(0.38)).top(px(15.)).w(relative(0.44)).h(px(2.))
-                .rounded(px(1.)).bg(pm_shell::kit::ink(t.colors.text, 0.14))
-                .child(div().h_full().w(relative(fraction)).rounded(px(1.)).bg(rgb(t.colors.text))))
-            .child(div().absolute().left(relative(0.87)).top_0().h_full().w(relative(0.13)).flex()
-                .items_center().justify_end().text_size(px(11.)).text_color(rgb(t.colors.text))
-                .child(div().flex_none().whitespace_nowrap()
-                    .font_family(pm_design::TEXT_FONT).font_features(pm_shell::kit::tabular())
-                    .letter_spacing(px(0.)).child(text))))
+    let text = format!(
+        "{}{}",
+        shown(current),
+        control["unit"].as_str().unwrap_or("")
+    );
+    div()
+        .h(px(BUILD_ROW))
+        .flex_none()
+        .px(px(BUILD_INSET))
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .text_size(px(12.))
+                .text_color(rgb(t.colors.secondary))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .h_full()
+                        .w(relative(0.34))
+                        .flex()
+                        .items_center()
+                        .truncate()
+                        .child(control["label"].as_str().unwrap_or("").to_owned()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(0.38))
+                        .top(px(15.))
+                        .w(relative(0.44))
+                        .h(px(2.))
+                        .rounded(px(1.))
+                        .bg(pm_shell::kit::ink(t.colors.text, 0.14))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(fraction))
+                                .rounded(px(1.))
+                                .bg(rgb(t.colors.text)),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(0.87))
+                        .top_0()
+                        .h_full()
+                        .w(relative(0.13))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .text_size(px(11.))
+                        .text_color(rgb(t.colors.text))
+                        .child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .font_family(pm_design::TEXT_FONT)
+                                .font_features(pm_shell::kit::tabular())
+                                .letter_spacing(px(0.))
+                                .child(text),
+                        ),
+                ),
+        )
 }
 
 fn control_fraction(control: &Value, current: &Value) -> f32 {
-    match (control["min"].as_f64(), control["max"].as_f64(), current.as_f64()) {
-        (Some(lo), Some(hi), Some(value)) if hi > lo => ((value-lo)/(hi-lo)).clamp(0., 1.) as f32,
+    match (
+        control["min"].as_f64(),
+        control["max"].as_f64(),
+        current.as_f64(),
+    ) {
+        (Some(lo), Some(hi), Some(value)) if hi > lo => {
+            ((value - lo) / (hi - lo)).clamp(0., 1.) as f32
+        }
         _ => 0.5,
     }
 }
 
-pub(crate) fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bool) -> f32 {
-    let Some(build)=build else {return 1.;};
-    if build.stage==panel_build::Stage::Ready {return 1.;}
-    build.committed.get(&index).map_or(0.,|at| if reduced {panel_build::reveal(build.now().saturating_duration_since(*at).as_secs_f32(),true)} else {1.})
+pub(crate) fn control_opacity(
+    build: Option<&panel_build::State>,
+    index: usize,
+    reduced: bool,
+) -> f32 {
+    let Some(build) = build else {
+        return 1.;
+    };
+    if build.stage == panel_build::Stage::Ready {
+        return 1.;
+    }
+    build.committed.get(&index).map_or(0., |at| {
+        if reduced {
+            panel_build::reveal(
+                build.now().saturating_duration_since(*at).as_secs_f32(),
+                true,
+            )
+        } else {
+            1.
+        }
+    })
 }
-pub(crate) fn dot_filter(build: Option<&panel_build::State>, index: Option<usize>, t: &pm_design::Tokens) -> Vec<Filter> {
-    let Some(build)=build else {return vec![];};
-    if t.accessibility.reduce_motion {return vec![];}
-    let now=build.now();
-    let detail=index.or(Some(0)).and_then(|i|build.committed.get(&i)).map_or(0.6,|at|pm_design::dots::detail(now.saturating_duration_since(*at).as_secs_f32()));
-    vec![Filter::DotMatrix{detail,resolve:build.resolve(now),accent:t.colors.accent}]
+pub(crate) fn dot_filter(
+    build: Option<&panel_build::State>,
+    index: Option<usize>,
+    t: &pm_design::Tokens,
+) -> Vec<Filter> {
+    let Some(build) = build else {
+        return vec![];
+    };
+    if t.accessibility.reduce_motion {
+        return vec![];
+    }
+    let now = build.now();
+    let detail = index
+        .or(Some(0))
+        .and_then(|i| build.committed.get(&i))
+        .map_or(0.6, |at| {
+            pm_design::dots::detail(now.saturating_duration_since(*at).as_secs_f32())
+        });
+    vec![Filter::DotMatrix {
+        detail,
+        resolve: build.resolve(now),
+        accent: t.colors.accent,
+    }]
 }
 
 /// What a control reads and writes.
@@ -806,15 +1009,31 @@ fn render(
     let t = v.host.borrow().tokens.clone();
     let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
     let build = v.panel_builds.get(id).cloned();
-    let overlay = build.as_ref().filter(|b| b.stage != panel_build::Stage::Ready || b.changed.elapsed().as_secs_f32() < 0.7)
+    let overlay = build
+        .as_ref()
+        .filter(|b| b.stage != panel_build::Stage::Ready || b.changed.elapsed().as_secs_f32() < 0.7)
         .map(|b| {
             let control = &def["controls"][b.row];
             let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
             let fraction = control_fraction(control, &current);
-            (build_surface(b.clone(), rect, &t, v.running(), fraction, window, cx),
-             build_frame(b.clone(), rect, &t, v.running(), b.started.elapsed().as_secs_f32(), b.changed.elapsed().as_secs_f32(), fraction, true))
+            (
+                build_surface(b.clone(), rect, &t, v.running(), fraction, window, cx),
+                build_frame(
+                    b.clone(),
+                    rect,
+                    &t,
+                    v.running(),
+                    b.started.elapsed().as_secs_f32(),
+                    b.changed.elapsed().as_secs_f32(),
+                    fraction,
+                    true,
+                ),
+            )
         });
-    let (under, over) = match overlay { Some((under,over)) => (Some(under),Some(over)), None => (None,None) };
+    let (under, over) = match overlay {
+        Some((under, over)) => (Some(under), Some(over)),
+        None => (None, None),
+    };
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -833,14 +1052,15 @@ fn render(
         .id(SharedString::from(format!("generated-{id}")))
         .flex()
         .flex_col()
-        .relative().rounded(px(t.radius.lg))
+        .relative()
+        .rounded(px(t.radius.lg))
         .w_full()
         .h(px((rect.h - m.header).max(0.)))
         .overflow_y_scroll()
         .text_size(px(ty.body))
-        .child(ground(&t,build.as_ref()))
+        .child(ground(&t, build.as_ref()))
         .children(under)
-        .child(panel_title(def, &t).filter(dot_filter(build.as_ref(),None,&t)));
+        .child(panel_title(def, &t).filter(dot_filter(build.as_ref(), None, &t)));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
         body = body.child(
             div()
@@ -848,7 +1068,7 @@ fn render(
                 .pb(px(m.gap))
                 .text_size(px(ty.label))
                 .text_color(rgb(c.muted))
-                .filter(dot_filter(build.as_ref(),None,&t))
+                .filter(dot_filter(build.as_ref(), None, &t))
                 .child(note.to_owned()),
         );
     }
@@ -900,9 +1120,8 @@ fn render(
         value(v, def, &controls[start]),
         value(v, def, &controls[end]),
     ) {
-        let colour = |x: &Value| {
-            crate::v4_compile::parse_hex(x.as_str().unwrap_or("")).unwrap_or(c.text)
-        };
+        let colour =
+            |x: &Value| crate::v4_compile::parse_hex(x.as_str().unwrap_or("")).unwrap_or(c.text);
         let (from, to) = (colour(&a), colour(&b));
         let half = |eid: &str, index: usize, text: Value| {
             let panel = id.to_owned();
@@ -918,23 +1137,30 @@ fn render(
                 }))
         };
         body = body.child(
-            div().px(px(m.inset)).pb(px(m.gap))
-                .filter(dot_filter(build.as_ref(),Some(start),&t))
-                .opacity(control_opacity(build.as_ref(),start,t.accessibility.reduce_motion)).child(
-                div()
-                    .flex()
-                    .h(px(m.control))
-                    .rounded(px(m.control_radius))
-                    .border_1()
-                    .border_color(ink(c.text, tr.edge))
-                    .bg(linear_gradient(
-                        90.,
-                        linear_color_stop(rgb(from), 0.),
-                        linear_color_stop(rgb(to), 1.),
-                    ))
-                    .child(half("ramp-start", start, a))
-                    .child(half("ramp-end", end, b)),
-            ),
+            div()
+                .px(px(m.inset))
+                .pb(px(m.gap))
+                .filter(dot_filter(build.as_ref(), Some(start), &t))
+                .opacity(control_opacity(
+                    build.as_ref(),
+                    start,
+                    t.accessibility.reduce_motion,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .h(px(m.control))
+                        .rounded(px(m.control_radius))
+                        .border_1()
+                        .border_color(ink(c.text, tr.edge))
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(rgb(from), 0.),
+                            linear_color_stop(rgb(to), 1.),
+                        ))
+                        .child(half("ramp-start", start, a))
+                        .child(half("ramp-end", end, b)),
+                ),
         );
     }
     let chevron = |window: &Window| {
@@ -946,6 +1172,7 @@ fn render(
             window,
         )
     };
+    let mut switches = vec![];
     for (index, control) in controls.iter().enumerate() {
         let kind = control["type"].as_str().unwrap_or("");
         let label = control["label"].as_str().unwrap_or("").to_owned();
@@ -969,11 +1196,15 @@ fn render(
             "slider" => {
                 let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
                 let text = shown(&current);
-                div().child(slider_control(control, &current, &t).id(SharedString::from(eid))
-                    .role(Role::Slider).aria_label(label.clone())
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        v.generated_edit(panel.clone(), index, text.clone(), cx)
-                    })))
+                div().child(
+                    slider_control(control, &current, &t)
+                        .id(SharedString::from(eid))
+                        .role(Role::Slider)
+                        .aria_label(label.clone())
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.generated_edit(panel.clone(), index, text.clone(), cx)
+                        })),
+                )
             }
             "button" => {
                 let accent = control["primary"] == true && primaries == 1;
@@ -1008,42 +1239,76 @@ fn render(
                 ),
                 Ok(current) => row(&label).child(match kind {
                     // Off and On as two segments (v1's ToggleField): the
-                    // state reads as a word.
+                    // state reads as a word. The kit's one segmented control
+                    // (PM-409), the system's glass one; until the window can
+                    // host it, its place stays empty.
                     "toggle" => {
-                        let on = current == true;
-                        let segment = |name: &'static str, is: bool| {
+                        let key = format!("{panel}#{index}");
+                        let selected = json!(usize::from(current == true));
+                        let options = vec![json!({"label": "Off"}), json!({"label": "On"})];
+                        let switch = if let Some(s) = v.generated_switches.get(&key) {
+                            Some(s.clone())
+                        } else if pm_shell::text::available(window) {
+                            let tokens = t.clone();
+                            let (eid, label) = (eid.to_string(), label.to_string());
+                            let switch = cx.new(|cx| {
+                                let mut s = NativeControl::new(
+                                    ControlSpec {
+                                        kind: Kind::Segmented,
+                                        label: &label,
+                                        identifier: &eid,
+                                        value: &selected,
+                                        options: options.clone(),
+                                        disabled: false,
+                                        default: false,
+                                        destructive: false,
+                                        inline: false,
+                                        quiet: false,
+                                        tint: None,
+                                        symbol: None,
+                                        glass: true,
+                                        well: false,
+                                    },
+                                    &tokens,
+                                    window,
+                                    cx,
+                                );
+                                s.stretch();
+                                s
+                            });
                             let panel = panel.clone();
-                            div()
-                                .id(SharedString::from(format!("{eid}-{name}")))
-                                .role(Role::RadioButton)
-                                .aria_label(format!("{label} {name}"))
-                                .aria_toggled(if on == is {
-                                    gpui::Toggled::True
-                                } else {
-                                    gpui::Toggled::False
-                                })
-                                .flex_1()
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(m.inner_radius))
-                                .when(on == is, |d| {
-                                    d.bg(ink(c.text, tr.selected)).text_color(rgb(c.text))
-                                })
-                                .when(on != is, |d| d.text_color(rgb(c.secondary)))
-                                .child(name)
-                                .on_click(cx.listener(move |v, _, _, cx| {
-                                    if on != is {
-                                        v.generated_set(&panel, index, json!(is), cx)
-                                    }
-                                }))
+                            cx.subscribe(
+                                &switch,
+                                move |v: &mut Controller, _, value: &Value, cx| {
+                                    v.generated_set(
+                                        &panel,
+                                        index,
+                                        json!(value.as_u64() == Some(1)),
+                                        cx,
+                                    )
+                                },
+                            )
+                            .detach();
+                            v.generated_switches.insert(key.clone(), switch.clone());
+                            Some(switch)
+                        } else {
+                            None
                         };
-                        well(eid.clone(), label.clone(), true)
-                            .px(px(2.))
-                            .gap(px(2.))
-                            .child(segment("Off", false))
-                            .child(segment("On", true))
+                        switches.push(key);
+                        let place = div()
+                            .id(SharedString::from(eid.clone()))
+                            .flex_1()
+                            .min_w(px(m.value_column.min(m.control * 2.)))
+                            .h(px(m.field))
+                            .flex()
+                            .items_center();
+                        match switch {
+                            Some(switch) => {
+                                switch.update(cx, |s, cx| s.update(&selected, &options, false, cx));
+                                place.child(switch)
+                            }
+                            None => place,
+                        }
                     }
                     "select" => {
                         let options: Vec<(Value, String)> = control["options"]
@@ -1142,9 +1407,19 @@ fn render(
                 }),
             },
         };
-        body = body.child(div().flex_none().w_full().child(element).filter(dot_filter(build.as_ref(),Some(index),&t)).opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
+        body = body.child(
+            div()
+                .flex_none()
+                .w_full()
+                .child(element)
+                .filter(dot_filter(build.as_ref(), Some(index), &t))
+                .opacity(control_opacity(
+                    build.as_ref(),
+                    index,
+                    t.accessibility.reduce_motion,
+                )),
+        );
     }
-    if let Some(overlay) = over { body = body.child(overlay); }
     body.into_any_element()
 }
 
@@ -1188,7 +1463,8 @@ mod tests {
     fn panel_build_publications_ignore_state_edits() {
         let mut builds = std::collections::HashMap::new();
         let before = json!({"custom":[]});
-        let after = json!({"custom":[{"id":"new", "controls":[{"type":"slider"},{"type":"number"}]}]});
+        let after =
+            json!({"custom":[{"id":"new", "controls":[{"type":"slider"},{"type":"number"}]}]});
         super::publication(&mut builds, &before, &after);
         assert_eq!(builds["new"].pending.len(), 2);
         assert!(builds["new"].complete);
@@ -1376,29 +1652,113 @@ mod tests {
 
 #[cfg(test)]
 mod panel_build_capture {
-    use super::{build_frame, panel_build, panel_title, slider_control, control_opacity};
-    use gpui::{AppContext, HeadlessAppContext, IntoElement, ParentElement, Render, Styled, px, size};
+    use super::{build_frame, control_opacity, panel_build, panel_title, slider_control};
+    use gpui::{
+        AppContext, HeadlessAppContext, IntoElement, ParentElement, Render, Styled, px, size,
+    };
     use pm_design::{Accessibility, Scheme, Tokens};
     use serde_json::json;
     use std::sync::Arc;
 
-    struct Frame { state: panel_build::State, tokens: Tokens, age: f32, elapsed: f32, definition: serde_json::Value }
+    struct Frame {
+        state: panel_build::State,
+        tokens: Tokens,
+        age: f32,
+        elapsed: f32,
+        definition: serde_json::Value,
+    }
     impl Render for Frame {
-        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            let mut body = gpui::div().relative().opacity(if self.state.stage == panel_build::Stage::Erase { 1.-panel_build::fade(self.elapsed,0.36) } else { 1. }).w(px(300.)).h(px(260.)).flex().flex_col().overflow_hidden().rounded(px(self.tokens.radius.lg)).child(super::ground(&self.tokens,Some(&self.state)))
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let mut body = gpui::div()
+                .relative()
+                .opacity(if self.state.stage == panel_build::Stage::Erase {
+                    1. - panel_build::fade(self.elapsed, 0.36)
+                } else {
+                    1.
+                })
+                .w(px(300.))
+                .h(px(260.))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded(px(self.tokens.radius.lg))
+                .child(super::ground(&self.tokens, Some(&self.state)))
                 .font_family(pm_design::TEXT_FONT);
-            let rect = pm_shell::layout::Rect { x: 0., y: 0., w: 300., h: 260. + self.tokens.metrics.header };
-            let fraction = super::control_fraction(&self.definition["controls"][self.state.row.min(4)], &self.definition["controls"][self.state.row.min(4)]["def"]);
-            body = body.child(build_frame(self.state.clone(), rect, &self.tokens, false, self.age, self.elapsed, fraction, false));
-            body = body.child(panel_title(&self.definition, &self.tokens).filter(super::dot_filter(Some(&self.state),None,&self.tokens)));
-            for (index, control) in self.definition["controls"].as_array().unwrap().iter().enumerate() {
-                body = body.child(slider_control(control, &control["def"], &self.tokens)
-                    .filter(super::dot_filter(Some(&self.state),Some(index),&self.tokens)).opacity(control_opacity(Some(&self.state), index, self.tokens.accessibility.reduce_motion)));
+            let rect = pm_shell::layout::Rect {
+                x: 0.,
+                y: 0.,
+                w: 300.,
+                h: 260. + self.tokens.metrics.header,
+            };
+            let fraction = super::control_fraction(
+                &self.definition["controls"][self.state.row.min(4)],
+                &self.definition["controls"][self.state.row.min(4)]["def"],
+            );
+            body = body.child(build_frame(
+                self.state.clone(),
+                rect,
+                &self.tokens,
+                false,
+                self.age,
+                self.elapsed,
+                fraction,
+                false,
+            ));
+            body = body.child(
+                panel_title(&self.definition, &self.tokens).filter(super::dot_filter(
+                    Some(&self.state),
+                    None,
+                    &self.tokens,
+                )),
+            );
+            for (index, control) in self.definition["controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+            {
+                body = body.child(
+                    slider_control(control, &control["def"], &self.tokens)
+                        .filter(super::dot_filter(
+                            Some(&self.state),
+                            Some(index),
+                            &self.tokens,
+                        ))
+                        .opacity(control_opacity(
+                            Some(&self.state),
+                            index,
+                            self.tokens.accessibility.reduce_motion,
+                        )),
+                );
             }
-            body = body.child(build_frame(self.state.clone(), rect, &self.tokens, false, self.age, self.elapsed, fraction, true));
-            let body=body.opacity(if self.state.stage==panel_build::Stage::Erase {1.-panel_build::fade(self.elapsed,0.24)}else{1.});
-            gpui::div().size_full().p(px(16.)).bg(gpui::rgb(if self.tokens.scheme == Scheme::Light { 0xececec } else { 0x151515 })).child(body)
-
+            body = body.child(build_frame(
+                self.state.clone(),
+                rect,
+                &self.tokens,
+                false,
+                self.age,
+                self.elapsed,
+                fraction,
+                true,
+            ));
+            let body = body.opacity(if self.state.stage == panel_build::Stage::Erase {
+                1. - panel_build::fade(self.elapsed, 0.24)
+            } else {
+                1.
+            });
+            gpui::div()
+                .size_full()
+                .p(px(16.))
+                .bg(gpui::rgb(if self.tokens.scheme == Scheme::Light {
+                    0xececec
+                } else {
+                    0x151515
+                }))
+                .child(body)
         }
     }
 
@@ -1407,33 +1767,77 @@ mod panel_build_capture {
     fn capture_panel_build_key_frames() {
         let dir = std::env::var("PM_PANEL_CAPTURE").expect("PM_PANEL_CAPTURE");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut cases=Vec::new();
-        for scheme in [Scheme::Dark,Scheme::Light] {
-            for (label,stage,row,elapsed) in [
-                ("opening",panel_build::Stage::Wake,0,0.12),
-                ("field",panel_build::Stage::Sketch,0,0.42),
-                ("coarse",panel_build::Stage::Ink,0,0.35),
-                ("fine",panel_build::Stage::Ink,1,0.82),
-                ("waiting",panel_build::Stage::Rest,4,2.),
-                ("resolving",panel_build::Stage::Ready,4,0.35),
-                ("ready",panel_build::Stage::Ready,4,0.8),
-                ("cancel",panel_build::Stage::Erase,4,0.12),
-            ] {cases.push((format!("{:?}-{label}",scheme),stage,row,elapsed,scheme,false));}
+        let mut cases = Vec::new();
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for (label, stage, row, elapsed) in [
+                ("opening", panel_build::Stage::Wake, 0, 0.12),
+                ("field", panel_build::Stage::Sketch, 0, 0.42),
+                ("coarse", panel_build::Stage::Ink, 0, 0.35),
+                ("fine", panel_build::Stage::Ink, 1, 0.82),
+                ("waiting", panel_build::Stage::Rest, 4, 2.),
+                ("resolving", panel_build::Stage::Ready, 4, 0.35),
+                ("ready", panel_build::Stage::Ready, 4, 0.8),
+                ("cancel", panel_build::Stage::Erase, 4, 0.12),
+            ] {
+                cases.push((
+                    format!("{:?}-{label}", scheme),
+                    stage,
+                    row,
+                    elapsed,
+                    scheme,
+                    false,
+                ));
+            }
         }
         for frame in 0..=90 {
-            let time=frame as f32/15.;
-            let (stage,row,elapsed)=if time<0.48 {(panel_build::Stage::Wake,0,time)}
-                else if time<4.98 {let p=(time-0.48)/0.9;(panel_build::Stage::Ink,(p as usize).min(4),(p.fract()*0.9))}
-                else {(panel_build::Stage::Ready,4,time-4.98)};
-            cases.push((format!("frame-{frame:03}"),stage,row,elapsed,Scheme::Dark,false));
+            let time = frame as f32 / 15.;
+            let (stage, row, elapsed) = if time < 0.48 {
+                (panel_build::Stage::Wake, 0, time)
+            } else if time < 4.98 {
+                let p = (time - 0.48) / 0.9;
+                (
+                    panel_build::Stage::Ink,
+                    (p as usize).min(4),
+                    (p.fract() * 0.9),
+                )
+            } else {
+                (panel_build::Stage::Ready, 4, time - 4.98)
+            };
+            cases.push((
+                format!("frame-{frame:03}"),
+                stage,
+                row,
+                elapsed,
+                Scheme::Dark,
+                false,
+            ));
         }
-        cases.push(("reduced-motion".into(),panel_build::Stage::Ink,1,0.2,Scheme::Dark,true));
+        cases.push((
+            "reduced-motion".into(),
+            panel_build::Stage::Ink,
+            1,
+            0.2,
+            Scheme::Dark,
+            true,
+        ));
         for (name, stage, row, elapsed, scheme, reduced) in cases {
-            if std::env::var_os("PM_PANEL_CAPTURE_READY_ONLY").is_some() && stage!=panel_build::Stage::Ready {continue;}
+            if std::env::var_os("PM_PANEL_CAPTURE_READY_ONLY").is_some()
+                && stage != panel_build::Stage::Ready
+            {
+                continue;
+            }
             objc2::rc::autoreleasepool(|_| {
                 let mut cx = HeadlessAppContext::with_platform(
-                    Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
-                    Arc::new(()), || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+                    Arc::new(
+                        gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                            .with_automatic_optical_sizing(),
+                    ),
+                    Arc::new(()),
+                    || {
+                        Some(Box::new(
+                            gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                        ))
+                    },
                 );
                 let mut state = panel_build::State::default();
                 state.explicit = true;
@@ -1444,27 +1848,82 @@ mod panel_build_capture {
                 assert_eq!(state.stage, panel_build::Stage::Ink);
                 state.stage = stage;
                 state.row = row;
-                state.changed = std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed);
-                state.pending = ((row+1)..5).collect();
-                let count = if matches!(stage,panel_build::Stage::Ready|panel_build::Stage::Erase) { 5 } else if stage == panel_build::Stage::Rest { row+1 } else { row };
-                for index in 0..count { state.committed.insert(index, std::time::Instant::now() - std::time::Duration::from_secs(2)); }
-                if stage == panel_build::Stage::Ink { state.committed.insert(row, std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed)); }
-                state.sampled_at=Some(std::time::Instant::now());
+                state.changed =
+                    std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed);
+                state.pending = ((row + 1)..5).collect();
+                let count =
+                    if matches!(stage, panel_build::Stage::Ready | panel_build::Stage::Erase) {
+                        5
+                    } else if stage == panel_build::Stage::Rest {
+                        row + 1
+                    } else {
+                        row
+                    };
+                for index in 0..count {
+                    state.committed.insert(
+                        index,
+                        std::time::Instant::now() - std::time::Duration::from_secs(2),
+                    );
+                }
+                if stage == panel_build::Stage::Ink {
+                    state.committed.insert(
+                        row,
+                        std::time::Instant::now() - std::time::Duration::from_secs_f32(elapsed),
+                    );
+                }
+                state.sampled_at = Some(std::time::Instant::now());
                 let definition = json!({"title":"Colour grade","controls":[
                     {"type":"slider","label":"Exposure","def":0.35,"min":-1,"max":1},
                     {"type":"slider","label":"Contrast","def":12,"min":0,"max":30},
                     {"type":"slider","label":"Saturation","def":108,"min":0,"max":135},
                     {"type":"slider","label":"Warmth","def":5600,"min":2000,"max":8000},
                     {"type":"slider","label":"Tint","def":-4,"min":-10,"max":20}]});
-                let tokens = Tokens::new(scheme, Accessibility { reduce_motion: reduced, ..Default::default() });
-                let window = cx.open_window(size(px(332.), px(292.)), |_, cx| cx.new(|_| Frame { state, tokens, age: name.strip_prefix("frame-").and_then(|n|n.parse::<f32>().ok()).map_or(if stage == panel_build::Stage::Wake {elapsed}else{1.},|n|n/15.), elapsed, definition })).unwrap();
-                for _ in 0..4 { cx.run_until_parked(); }
-                cx.update_window(window.into(), |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); }).unwrap();
+                let tokens = Tokens::new(
+                    scheme,
+                    Accessibility {
+                        reduce_motion: reduced,
+                        ..Default::default()
+                    },
+                );
+                let window = cx
+                    .open_window(size(px(332.), px(292.)), |_, cx| {
+                        cx.new(|_| Frame {
+                            state,
+                            tokens,
+                            age: name
+                                .strip_prefix("frame-")
+                                .and_then(|n| n.parse::<f32>().ok())
+                                .map_or(
+                                    if stage == panel_build::Stage::Wake {
+                                        elapsed
+                                    } else {
+                                        1.
+                                    },
+                                    |n| n / 15.,
+                                ),
+                            elapsed,
+                            definition,
+                        })
+                    })
+                    .unwrap();
+                for _ in 0..4 {
+                    cx.run_until_parked();
+                }
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                })
+                .unwrap();
                 cx.run_until_parked();
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 assert_eq!(image.width(), 664, "capture must be 2x");
                 assert_eq!(image.height(), 584);
-                assert!(image.pixels().any(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0), "empty {name}");
+                assert!(
+                    image
+                        .pixels()
+                        .any(|p| p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0),
+                    "empty {name}"
+                );
                 image.save(format!("{dir}/{name}.png")).unwrap();
                 println!("CAPTURE {dir}/{name}.png");
             });
@@ -1480,30 +1939,48 @@ pub(crate) struct AgentBuild {
     pub target: Option<String>,
     pub finishing: bool,
     pub owner: Option<String>,
-    pub snapshot: Option<(usize,std::sync::Arc<RenderImage>)>,
+    pub snapshot: Option<(usize, std::sync::Arc<RenderImage>)>,
     pub snapshot_key: Option<usize>,
 }
 
-pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &mut Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
+pub(crate) fn agent_slot(
+    v: &mut Controller,
+    id: &str,
+    rect: pm_shell::layout::Rect,
+    window: &mut Window,
+    cx: &mut Context<Controller>,
+) -> Option<AnyElement> {
     let build = v.agent_panel_builds.get(id)?.clone();
-    if build.owner.as_deref().is_some_and(|run| !pm_agents::launch::grants::run_live(run)) {
+    if build
+        .owner
+        .as_deref()
+        .is_some_and(|run| !pm_agents::launch::grants::run_live(run))
+    {
         if let Some(state) = v.panel_builds.get_mut(id) {
-            if state.stage != panel_build::Stage::Erase { state.event("cancel", state.row); }
+            if state.stage != panel_build::Stage::Erase {
+                state.event("cancel", state.row);
+            }
             if state.changed.elapsed().as_secs_f32() >= 0.36 {
                 let id = id.to_owned();
                 let owner = cx.weak_entity();
                 cx.defer(move |cx| {
                     let _ = owner.update(cx, |v, cx| {
-                    if let Some(shell) = v.shell.clone().and_then(|shell| shell.upgrade()) {
-                        shell.update(cx, |e, cx| { e.release_agent_panel(&id); cx.notify(); });
-                    }
-                    if let Some(build) = v.agent_panel_builds.remove(&id) {
-                        if let Some(target) = build.target {
-                            if let Some(page)=v.extensions.page_of(&target){page.borrow_mut().finish_panel_build(&target);}
-                            v.panel_builds.remove(&target);
+                        if let Some(shell) = v.shell.clone().and_then(|shell| shell.upgrade()) {
+                            shell.update(cx, |e, cx| {
+                                e.release_agent_panel(&id);
+                                cx.notify();
+                            });
                         }
-                    }
-                    v.panel_builds.remove(&id); cx.notify();
+                        if let Some(build) = v.agent_panel_builds.remove(&id) {
+                            if let Some(target) = build.target {
+                                if let Some(page) = v.extensions.page_of(&target) {
+                                    page.borrow_mut().finish_panel_build(&target);
+                                }
+                                v.panel_builds.remove(&target);
+                            }
+                        }
+                        v.panel_builds.remove(&id);
+                        cx.notify();
                     });
                 });
             }
@@ -1511,50 +1988,98 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     }
     let mut content = None;
     let mut generated = false;
-    let mut native_tree=false;
-    let mut web_capture=None;
+    let mut native_tree = false;
+    let mut web_capture = None;
     if let Some(target) = &build.target {
         content = v.extension_panel(target, rect, cx);
-        if content.is_none() { content=v.builtin_panel(target,rect,window,cx); native_tree=content.is_some(); }
-        let rendered = if v.extensions.owns_panel(target) { v.extension_build_rendered(target) }
-            else if content.is_some() { v.builtins.views.get(target).is_some_and(|view|view.read(cx).panel_build_rendered(cx)) }
-            else { section(v, target).is_some() };
-        let rendered=if v.extensions.owns_panel(target) {
-            if let Some(page)=v.extensions.page_of(target) {
-                let state=v.panel_builds.get(id).cloned().unwrap_or_default();
-                let resolve=state.resolve(state.now());
-                let ready=(state.stage==panel_build::Stage::Ready).then_some(resolve);
-                let captured=build.snapshot.is_some();
-                let (_,live)=pm_design::dots::snapshot_visibility(captured,ready);
-                let revision=state.committed.values().max().map_or(0,|at|at.saturating_duration_since(state.started).as_nanos() as u64);
-                let mut capture_done=true;
-                if resolve>=1. {page.borrow_mut().finish_panel_build(target);}
-                else {
-                    let (done,image)=page.borrow_mut().panel_build_snapshot(target,revision,live);
-                    capture_done=done;
-                    if done && image.is_none(){v.agent_panel_builds.get_mut(id).unwrap().snapshot=None;}
-                    if let Some((source,image))=image {
-                        let key=(&*image as *const objc2_app_kit::NSImage) as usize;
-                        let cached=v.agent_panel_builds.get_mut(id).unwrap();
-                        if cached.snapshot_key!=Some(key) {
-                            cached.snapshot_key=Some(key);
-                            cached.snapshot=pm_shell::native_control::snapshot_image_on_ground(&image,v.host.borrow().tokens.colors.panel).map(|image|(key,image));
-                        }
-                        web_capture=cached.snapshot.as_ref().map(|(_,image)|(source,image.clone()));
+        if content.is_none() {
+            content = v.builtin_panel(target, rect, window, cx);
+            native_tree = content.is_some();
+        }
+        let rendered = if v.extensions.owns_panel(target) {
+            v.extension_build_rendered(target)
+        } else if content.is_some() {
+            v.builtins
+                .views
+                .get(target)
+                .is_some_and(|view| view.read(cx).panel_build_rendered(cx))
+        } else {
+            section(v, target).is_some()
+        };
+        let rendered = if v.extensions.owns_panel(target) {
+            if let Some(page) = v.extensions.page_of(target) {
+                let state = v.panel_builds.get(id).cloned().unwrap_or_default();
+                let resolve = state.resolve(state.now());
+                let ready = (state.stage == panel_build::Stage::Ready).then_some(resolve);
+                let captured = build.snapshot.is_some();
+                let (_, live) = pm_design::dots::snapshot_visibility(captured, ready);
+                let revision = state.committed.values().max().map_or(0, |at| {
+                    at.saturating_duration_since(state.started).as_nanos() as u64
+                });
+                let mut capture_done = true;
+                if resolve >= 1. {
+                    page.borrow_mut().finish_panel_build(target);
+                } else {
+                    let (done, image) = page
+                        .borrow_mut()
+                        .panel_build_snapshot(target, revision, live);
+                    capture_done = done;
+                    if done && image.is_none() {
+                        v.agent_panel_builds.get_mut(id).unwrap().snapshot = None;
                     }
-                    content=None;
-                    if !done && web_capture.is_none() {return Some(div().relative().size_full().child(build_surface(state,rect,&v.host.borrow().tokens.clone(),v.running(),0.5,window,cx)).into_any_element());}
+                    if let Some((source, image)) = image {
+                        let key = (&*image as *const objc2_app_kit::NSImage) as usize;
+                        let cached = v.agent_panel_builds.get_mut(id).unwrap();
+                        if cached.snapshot_key != Some(key) {
+                            cached.snapshot_key = Some(key);
+                            cached.snapshot = pm_shell::native_control::snapshot_image_on_ground(
+                                &image,
+                                v.host.borrow().tokens.colors.panel,
+                            )
+                            .map(|image| (key, image));
+                        }
+                        web_capture = cached
+                            .snapshot
+                            .as_ref()
+                            .map(|(_, image)| (source, image.clone()));
+                    }
+                    content = None;
+                    if !done && web_capture.is_none() {
+                        return Some(
+                            div()
+                                .relative()
+                                .size_full()
+                                .child(build_surface(
+                                    state,
+                                    rect,
+                                    &v.host.borrow().tokens.clone(),
+                                    v.running(),
+                                    0.5,
+                                    window,
+                                    cx,
+                                ))
+                                .into_any_element(),
+                        );
+                    }
                 }
                 rendered && capture_done
-            } else {rendered}
-        } else {rendered};
+            } else {
+                rendered
+            }
+        } else {
+            rendered
+        };
         if build.finishing {
-            if let Some(state) = v.panel_builds.get_mut(id) { state.complete = rendered; }
+            if let Some(state) = v.panel_builds.get_mut(id) {
+                state.complete = rendered;
+            }
         }
         if content.is_none() {
             if let Some((_, _, def)) = section(v, target) {
                 generated = true;
-                if let Some(state) = v.panel_builds.get(id).cloned() { v.panel_builds.insert(target.clone(), state); }
+                if let Some(state) = v.panel_builds.get(id).cloned() {
+                    v.panel_builds.insert(target.clone(), state);
+                }
                 content = Some(render(v, target, &def, rect, window, cx));
             }
         }
@@ -1562,38 +2087,97 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     let state = v.panel_builds.get_mut(id)?;
     state.tick();
     let state = state.clone();
-    if generated && state.stage != panel_build::Stage::Erase { return content; }
-    if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 { return content; }
+    if generated && state.stage != panel_build::Stage::Erase {
+        return content;
+    }
+    if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 {
+        return content;
+    }
     let tokens = v.host.borrow().tokens.clone();
     let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
-    let root_alpha=if state.stage==panel_build::Stage::Erase {1.-panel_build::fade(state.changed.elapsed().as_secs_f32(),0.36)}else{1.};
-    let mut body=div().relative().size_full().overflow_hidden().opacity(root_alpha).child(ground(&tokens,Some(&state))).child(overlay);
-    if let Some((source,image))=web_capture {
-        body=body.child(div().absolute().inset_0().overflow_hidden().filter(dot_filter(Some(&state),None,&tokens))
-            .child(img(image).w(px(source.w as f32)).h(px(source.h as f32))));
-    } else if let Some(content)=content {
-        body=body.child(div().size_full().child(content).filter(if native_tree{vec![]}else{dot_filter(Some(&state),None,&tokens)}));
+    let root_alpha = if state.stage == panel_build::Stage::Erase {
+        1. - panel_build::fade(state.changed.elapsed().as_secs_f32(), 0.36)
+    } else {
+        1.
+    };
+    let mut body = div()
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .opacity(root_alpha)
+        .child(ground(&tokens, Some(&state)))
+        .child(overlay);
+    if let Some((source, image)) = web_capture {
+        body = body.child(
+            div()
+                .absolute()
+                .inset_0()
+                .overflow_hidden()
+                .filter(dot_filter(Some(&state), None, &tokens))
+                .child(img(image).w(px(source.w as f32)).h(px(source.h as f32))),
+        );
+    } else if let Some(content) = content {
+        body = body.child(div().size_full().child(content).filter(if native_tree {
+            vec![]
+        } else {
+            dot_filter(Some(&state), None, &tokens)
+        }));
     } else if build.target.is_none() {
-        body=body.child(div().h(px(BUILD_HEADER)).px(px(16.)).filter(dot_filter(Some(&state),None,&tokens)).child(build.title.clone()));
-        for (row,control) in build.planned.iter().enumerate() {
-            body=body.child(div().h(px(BUILD_ROW)).px(px(16.))
-                .opacity(control_opacity(Some(&state),row,tokens.accessibility.reduce_motion))
-                .filter(dot_filter(Some(&state),Some(row),&tokens))
-                .child(control["label"].as_str().unwrap_or_default().to_owned()));
+        body = body.child(
+            div()
+                .h(px(BUILD_HEADER))
+                .px(px(16.))
+                .filter(dot_filter(Some(&state), None, &tokens))
+                .child(build.title.clone()),
+        );
+        for (row, control) in build.planned.iter().enumerate() {
+            body = body.child(
+                div()
+                    .h(px(BUILD_ROW))
+                    .px(px(16.))
+                    .opacity(control_opacity(
+                        Some(&state),
+                        row,
+                        tokens.accessibility.reduce_motion,
+                    ))
+                    .filter(dot_filter(Some(&state), Some(row), &tokens))
+                    .child(control["label"].as_str().unwrap_or_default().to_owned()),
+            );
         }
     }
     Some(body.into_any_element())
 }
 
 /// Extension realms publish a subtree atomically; sample that same subtree.
-pub(crate) fn extension_build(v: &mut Controller, id: &str, content: AnyElement, rect: pm_shell::layout::Rect, window: &Window, cx: &mut Context<Controller>) -> AnyElement {
-    if !v.extensions.surfaces.contains_key(id) { return content; }
-    let t=v.host.borrow().tokens.clone();
-    let Some(state)=v.panel_builds.get_mut(id) else {return content;};
-    state.tick(); let state=state.clone();
-    if state.stage==panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32()>=0.7 {return content;}
-    let field=build_surface(state.clone(),rect,&t,v.running(),0.5,window,cx);
-    div().relative().size_full().child(field)
-        .child(div().size_full().child(content)
-            .opacity(control_opacity(Some(&state),0,t.accessibility.reduce_motion))).into_any_element()
+pub(crate) fn extension_build(
+    v: &mut Controller,
+    id: &str,
+    content: AnyElement,
+    rect: pm_shell::layout::Rect,
+    window: &Window,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
+    if !v.extensions.surfaces.contains_key(id) {
+        return content;
+    }
+    let t = v.host.borrow().tokens.clone();
+    let Some(state) = v.panel_builds.get_mut(id) else {
+        return content;
+    };
+    state.tick();
+    let state = state.clone();
+    if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 {
+        return content;
+    }
+    let field = build_surface(state.clone(), rect, &t, v.running(), 0.5, window, cx);
+    div()
+        .relative()
+        .size_full()
+        .child(field)
+        .child(div().size_full().child(content).opacity(control_opacity(
+            Some(&state),
+            0,
+            t.accessibility.reduce_motion,
+        )))
+        .into_any_element()
 }

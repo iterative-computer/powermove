@@ -895,10 +895,10 @@ impl Style {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
 
-                if self
+                let bordered = self
                     .border_color
-                    .is_some_and(|background| !background.is_transparent())
-                {
+                    .is_some_and(|background| !background.is_transparent());
+                if bordered {
                     min.x += self.border_widths.left.to_pixels(rem_size);
                     max.x -= self.border_widths.right.to_pixels(rem_size);
                     min.y += self.border_widths.top.to_pixels(rem_size);
@@ -935,7 +935,36 @@ impl Style {
                     fade_out.bottom = Pixels::ZERO;
                 }
 
-                Some(ContentMask { bounds, fade_out })
+                // Rounded corners hiding the overflow clip it to their shape
+                // (the corners the shape keeps: an axis left visible is not
+                // clipped, so it takes no rounding).
+                let (corner_radii, corner_smoothing) =
+                    if self.overflow.x != Overflow::Visible && self.overflow.y != Overflow::Visible {
+                        let mut radii = self.corner_radii.to_pixels(rem_size);
+                        if bordered {
+                            // Inside a drawn border the corner is the border's
+                            // inner edge: the radius less the wider side.
+                            let border = self.border_widths.to_pixels(rem_size);
+                            let inner = |r: Pixels, a: Pixels, b: Pixels| (r - a.max(b)).max(Pixels::ZERO);
+                            radii = Corners {
+                                top_left: inner(radii.top_left, border.top, border.left),
+                                top_right: inner(radii.top_right, border.top, border.right),
+                                bottom_right: inner(radii.bottom_right, border.bottom, border.right),
+                                bottom_left: inner(radii.bottom_left, border.bottom, border.left),
+                            };
+                        }
+                        (radii, Pixels(self.corner_smoothing.unwrap_or_default()))
+                    } else {
+                        (Corners::default(), Pixels::ZERO)
+                    };
+                Some(ContentMask {
+                    bounds,
+                    fade_out,
+                    shape: bounds,
+                    corner_radii,
+                    corner_smoothing,
+                    padding: [Pixels::ZERO; 3],
+                })
             }
         }
     }

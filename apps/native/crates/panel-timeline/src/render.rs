@@ -857,6 +857,38 @@ impl Scene {
     /// clip, the work-area veils and the column's edge reach as far; the
     /// ruler's ops, before [`Frame::fixed`], are the view's own.
     pub fn prepare_reaching(&self, v: Viewport, t: &Tokens, reach: f64) -> Result<Frame, Error> {
+        self.prepare_in(v, t, reach, Seen::of(v))
+    }
+    /// [`Self::prepare_reaching`] with the tracks and the ruler `reach_x`
+    /// points past each side of the view too: the frame is prepared for a
+    /// view that much wider each side, starting `reach_x` earlier (its
+    /// `viewport`), so the view's own tracks start `reach_x` into it. Clip
+    /// names, marks and grips and the ruler's first label stand where the view
+    /// itself shows them (a name stays in sight at the view's left edge).
+    pub fn prepare_wide(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+    ) -> Result<Frame, Error> {
+        let rx = if reach_x.is_finite() && v.pps > 0. {
+            reach_x.max(0.)
+        } else {
+            0.
+        };
+        let wide = Viewport {
+            width: v.width + 2. * rx,
+            scroll_time: v.scroll_time - rx / v.pps,
+            ..v
+        };
+        let seen = Seen {
+            left: v.layer_column + rx,
+            right: v.width + rx,
+        };
+        self.prepare_in(wide, t, reach, seen)
+    }
+    fn prepare_in(&self, v: Viewport, t: &Tokens, reach: f64, seen: Seen) -> Result<Frame, Error> {
         let reach = if reach.is_finite() { reach.max(0.) } else { 0. };
         if !v.valid() {
             return Err(Error::InvalidGeometry);
@@ -893,7 +925,7 @@ impl Scene {
             Rect::new(0., 0., v.layer_column, v.height),
             c.panel_secondary,
         ));
-        self.ruler(v, t, &mut ops);
+        self.ruler(v, t, &mut ops, seen);
         let fixed = ops.len();
         let range = self.range(v, t, reach);
         let mut ax = vec![];
@@ -901,7 +933,7 @@ impl Scene {
         for i in range.clone() {
             let op_start = ops.len();
             let row = &self.rows[i];
-            self.row_ops(i, v, t, &mut ops, Some(&mut controls));
+            self.row_ops(i, v, t, &mut ops, Some(&mut controls), seen);
             for op in &mut ops[op_start..] {
                 let track = op.id.starts_with("clip")
                     || op.id.starts_with("lane:")
@@ -1014,7 +1046,7 @@ impl Scene {
         let (mut covered, mut ops) = (Marquee::default(), vec![]);
         for i in first..end {
             ops.clear();
-            self.row_ops(i, v, t, &mut ops, None);
+            self.row_ops(i, v, t, &mut ops, None, Seen::of(v));
             for o in ops.iter().filter(|o| intersects(o.bounds, area)) {
                 if let Some(id) = o.id.strip_prefix("clip:") {
                     covered.clips.push(id.to_owned());
@@ -1055,6 +1087,7 @@ impl Scene {
         t: &Tokens,
         ops: &mut Vec<Op>,
         controls: Option<&mut Vec<Control>>,
+        seen: Seen,
     ) {
         let (m, c) = (t.metrics, &t.colors);
         let row = &self.rows[i];
@@ -1102,7 +1135,7 @@ impl Scene {
             RowContent::Layer { clip, summary } => {
                 let strip = clip
                     .as_ref()
-                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, t, ops));
+                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, seen, t, ops));
                 if let (Some(clip), Some(strip)) = (clip, strip) {
                     self.paint_stagger(clip, strip, v, t, ops);
                 }
@@ -1141,7 +1174,7 @@ impl Scene {
                 });
                 let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    if let Some(strip) = paint_clip(clip, y, h, v, grid, t, ops) {
+                    if let Some(strip) = paint_clip(clip, y, h, v, grid, seen, t, ops) {
                         self.paint_stagger(clip, strip, v, t, ops);
                     }
                 }
@@ -1205,7 +1238,7 @@ impl Scene {
         };
         (step, frames)
     }
-    fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
+    fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>, seen: Seen) {
         let (m, c) = (t.metrics, &t.colors);
         let h = m.ruler as f64;
         // The ruler and the band over the layer column are one piece: its
@@ -1342,7 +1375,7 @@ impl Scene {
             });
             o.font_size = t.typography.minimum as f64;
             o.detail =
-                json!({"tabular":true,"align":"center","minX":v.layer_column + m.gap as f64});
+                json!({"tabular":true,"align":"center","minX":seen.left + m.gap as f64});
             ops.push(o);
             let Some(next) = i.checked_add(1) else {
                 break;
@@ -1458,6 +1491,38 @@ fn valid_clip(c: &Clip) -> bool {
             .flatten()
             .all(|w| w.rate.is_finite() && w.rate > 0. && w.trim.is_finite() && w.trim >= 0.)
 }
+/// The tracks a reader sees, in a frame's x: the whole view's, or for a
+/// frame prepared wider ([`Scene::prepare_wide`]) the part the view shows.
+#[derive(Clone, Copy)]
+struct Seen {
+    left: f64,
+    right: f64,
+}
+impl Seen {
+    fn of(v: Viewport) -> Self {
+        Self {
+            left: v.layer_column,
+            right: v.width,
+        }
+    }
+    /// What of a strip's box `r` keeps its name and marks: a strip that
+    /// runs on past either edge of what is seen keeps them inside it; one
+    /// wholly outside keeps its own (a step brings it in with its name).
+    fn inside(self, r: Rect) -> Rect {
+        let end = r.x + r.width;
+        let x = if r.x < self.left && end > self.left {
+            self.left
+        } else {
+            r.x
+        };
+        let end = if r.x < self.right && end > self.right {
+            self.right
+        } else {
+            end
+        };
+        Rect::new(x, r.y, (end - x).max(0.), r.height)
+    }
+}
 fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
     let x = a.max(v.layer_column);
     let end = b.min(v.width);
@@ -1493,12 +1558,14 @@ const TRIM_INSIDE: f64 = 6.;
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
 /// clip is off screen).
+#[allow(clippy::too_many_arguments)]
 fn paint_clip(
     c: &Clip,
     y: f64,
     h: f64,
     v: Viewport,
     grid: f64,
+    seen: Seen,
     t: &Tokens,
     ops: &mut Vec<Op>,
 ) -> Option<Rect> {
@@ -1514,6 +1581,9 @@ fn paint_clip(
     // `r` is the strip's part in view: what sits inside it (its name, marks,
     // waveform) stays in sight.
     let r = span(start, end, y + gap, h - 2. * gap, v)?;
+    // What of it keeps the name, the marks and the grip (all of it, unless
+    // the frame reaches past what is seen).
+    let n = seen.inside(r);
     let radius = t.strip_radius(r.height as f32) as f64;
     // The body runs on past the view's edges by more than its corner, so a
     // strip that goes on out of view is cut straight by the tracks, never
@@ -1586,7 +1656,7 @@ fn paint_clip(
         let mut o = Op::new(
             format!("clip-offline:{}", c.id),
             "text",
-            Rect::new(r.x + lead, r.y, w.min((r.width - lead).max(0.)), r.height),
+            Rect::new(n.x + lead, n.y, w.min((n.width - lead).max(0.)), n.height),
             colors.danger,
         );
         o.text = Some("Offline".into());
@@ -1604,7 +1674,7 @@ fn paint_clip(
     let badge = c
         .missing_effect
         .as_ref()
-        .filter(|_| r.width - lead - offline_w > badge_w + 3. * lead);
+        .filter(|_| n.width - lead - offline_w > badge_w + 3. * lead);
     let reserve = if badge.is_some() { badge_w + lead } else { 0. };
     let ink = if offline {
         colors.text
@@ -1618,8 +1688,8 @@ fn paint_clip(
         // Captions (S089): each cue a quiet chip with its text, in place of
         // the clip's name; a cue is clicked, double-clicked and read by itself.
         for cue in &c.cues {
-            let x0 = v.x(cue.start).max(r.x + m.border as f64);
-            let x1 = v.x(cue.end).min(r.x + r.width - m.border as f64);
+            let x0 = v.x(cue.start).max(n.x + m.border as f64);
+            let x1 = v.x(cue.end).min(n.x + n.width - m.border as f64);
             if x1 - x0 < 2. {
                 continue;
             }
@@ -1687,10 +1757,10 @@ fn paint_clip(
             format!("clip-content:{}", c.id),
             "text",
             Rect::new(
-                r.x + lead + offline_w,
-                r.y,
-                (r.width - lead - offline_w - reserve).max(0.),
-                r.height,
+                n.x + lead + offline_w,
+                n.y,
+                (n.width - lead - offline_w - reserve).max(0.),
+                n.height,
             ),
             ink,
         );
@@ -1713,7 +1783,7 @@ fn paint_clip(
         let mut o = Op::new(
             format!("clip-missing-effect:{}", c.id),
             "text",
-            Rect::new(r.x + r.width - badge_w - lead, r.y, badge_w, r.height),
+            Rect::new(n.x + n.width - badge_w - lead, n.y, badge_w, n.height),
             colors.danger,
         );
         o.text = Some("Missing effect".into());
@@ -1729,11 +1799,11 @@ fn paint_clip(
         let grip = t.trim_grip();
         let (w, inset) = (grip.width as f64, grip.inset as f64);
         let x = match edge {
-            Edge::In => r.x + inset,
-            Edge::Out => r.x + r.width - inset - w,
+            Edge::In => n.x + inset,
+            Edge::Out => n.x + n.width - inset - w,
         };
         let height = (r.height * grip.height as f64).round();
-        if x >= v.layer_column && x + w <= v.width && r.width > 3. * inset && !c.locked {
+        if x >= v.layer_column && x + w <= v.width && n.width > 3. * inset && !c.locked {
             let mut o = Op::new(
                 format!("trim:{}", c.id),
                 "rect",

@@ -420,21 +420,24 @@ impl MetalRenderer {
         let layer = new_window_layer(transparent);
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        // PM_GPUI_DRAWABLES (2 or 3) measures what the third drawable costs
-        // in input-to-glass latency.
+        // Powermove P-120 (PM-310): the shortest queue the system allows, and
+        // each drawable goes to the compositor when it is ready rather than
+        // queued for a vsync. With display sync, a window presenting every
+        // refresh queues about four (34 ms from draw to glass at 120 Hz on a
+        // bare layer, 17 ms without); measured in Powermove, scrolling went
+        // from 35-42 to 27-29 ms input to screen, as evenly paced, and
+        // playback holds its 24 fps without tearing. Frames stay driven by the
+        // display link alone: drawing on input as well paced unevenly.
+        // `PM_GPUI_DISPLAY_SYNC=1` keeps the vsync queue; `PM_GPUI_DRAWABLES=3`
+        // the third drawable.
         let drawables = std::env::var("PM_GPUI_DRAWABLES")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| (2..=3).contains(v))
-            .unwrap_or(3);
+            .unwrap_or(2);
         layer.set_maximum_drawable_count(drawables);
-        // PM_GPUI_DISPLAY_SYNC=0 hands each drawable to the compositor when
-        // it is ready instead of at the next vsync (PM-310): a refresh sooner
-        // to the glass, but frames that take more than about half a refresh
-        // land on uneven refreshes, so it stays a measurement for now.
-        if std::env::var_os("PM_GPUI_DISPLAY_SYNC").is_some_and(|v| v == "0") {
-            layer.set_display_sync_enabled(false);
-        }
+        let sync = std::env::var_os("PM_GPUI_DISPLAY_SYNC").is_some_and(|v| v == "1");
+        layer.set_display_sync_enabled(sync);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         layer.set_framebuffer_only(false);
 

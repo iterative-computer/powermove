@@ -80,6 +80,8 @@ pub trait AnimationExt {
         Self: Sized,
     {
         AnimationElement {
+            visible_only: false,
+            pending_visible_frame: false,
             id: id.into(),
             element: Some(self),
             animator: Box::new(move |this, _, value| animator(this, value)),
@@ -100,6 +102,8 @@ pub trait AnimationExt {
         debug_assert!(!animations.is_empty(), "animations must not be empty");
 
         AnimationElement {
+            visible_only: false,
+            pending_visible_frame: false,
             id: id.into(),
             element: Some(self),
             animator: Box::new(animator),
@@ -148,6 +152,8 @@ impl<E: IntoElement + 'static> AnimationExt for E {}
 
 /// A GPUI element that applies an animation to another element
 pub struct AnimationElement<E> {
+    visible_only: bool,
+    pending_visible_frame: bool,
     id: ElementId,
     element: Option<E>,
     animations: SmallVec<[Animation; 1]>,
@@ -203,6 +209,13 @@ impl<E: ParentElement> ParentElement for AnimationElement<E> {
 }
 
 impl<E> AnimationElement<E> {
+    /// Stop requesting full-rate frames while clipped out of view. Intended
+    /// for in-place decorations such as spinners, not entrance animations.
+    pub fn animate_when_visible(mut self) -> Self {
+        self.visible_only = true;
+        self
+    }
+
     /// Returns a new [`AnimationElement<E>`] after applying the given function
     /// to the element being animated.
     pub fn map_element(mut self, f: impl FnOnce(E) -> E) -> AnimationElement<E> {
@@ -443,6 +456,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                                 .detach();
                         }
                     }
+                    _ if self.visible_only => self.pending_visible_frame = true,
                     _ => window.request_animation_frame(),
                 }
             }
@@ -455,11 +469,14 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: crate::Bounds<crate::Pixels>,
+        bounds: crate::Bounds<crate::Pixels>,
         element: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        if self.pending_visible_frame && bounds.intersects(&window.content_mask().bounds) {
+            window.request_animation_frame();
+        }
         element.prepaint(window, cx);
     }
 
@@ -929,6 +946,32 @@ mod tests {
         assert_eq!(simulate_next_frame(&window, cx), 1);
         assert_eq!(*rendered_samples.borrow(), vec![(0, 1.0), (1, 1.0)]);
         assert_eq!(simulate_next_frame(&window, cx), 0);
+    }
+
+    #[gpui::test]
+    fn test_clipped_spinner_stops_and_resumes(cx: &mut TestAppContext) {
+        struct Spinner { visible: bool }
+        impl Render for Spinner {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().overflow_hidden().child(
+                    div().absolute().left(px(if self.visible { 0. } else { 200. }))
+                        .size(px(16.)).with_animation("spinner",
+                            Animation::new(Duration::from_secs(1)).repeat(), |this, _| this)
+                        .animate_when_visible()
+                )
+            }
+        }
+        let window = cx.open_window(size(px(100.), px(100.)), |_, _| Spinner { visible: false });
+        cx.run_until_parked();
+        assert_eq!(simulate_next_frame(&window, cx), 0, "clipped spinner must stay idle");
+        window.update(cx, |view, _, cx| { view.visible = true; cx.notify(); }).unwrap();
+        cx.run_until_parked();
+        assert!(simulate_next_frame(&window, cx) > 0, "visible spinner must animate");
+        window.update(cx, |view, _, cx| { view.visible = false; cx.notify(); }).unwrap();
+        cx.run_until_parked();
+        // Drain a callback already queued while the spinner was visible.
+        simulate_next_frame(&window, cx);
+        assert_eq!(simulate_next_frame(&window, cx), 0, "clipping must stop further frames");
     }
 
     #[gpui::test]
