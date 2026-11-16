@@ -129,7 +129,15 @@ def codex():
                 threading.Thread(target=stream, args=(turn,), daemon=True).start()
             elif mode != 'hold' and not request['params']['input'][0]['text'].split('\n')[-1].startswith('Hold:'):
                 if mode == 'slow':
-                    time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
+                    release = os.environ.get('PM_FAKE_CHILD_RELEASE')
+                    if release and last == 'Child brief':
+                        # The test observes the parent's held state before allowing
+                        # this child to finish, rather than racing two sleeps.
+                        deadline = time.monotonic() + 20
+                        while not os.path.exists(release) and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                    else:
+                        time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
                 elif request['params']['input'][0]['text'].split('\n')[-1].startswith('Slow:'):
                     time.sleep(12)
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]

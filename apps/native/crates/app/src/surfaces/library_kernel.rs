@@ -182,11 +182,16 @@ impl KernelLibrary {
                 if name.trim().is_empty() {
                     return Err(Failure::Service(ServiceErrorCode::InvalidInput));
                 }
+                // A project no window has open is renamed where it is kept,
+                // without opening it.
                 let Some(published) = self.kernel.published(&id).filter(|p| p.session.is_some())
                 else {
-                    return Err(Failure::Unsupported(
-                        "Kernel needs an unopened-slot rename operation; never open/save/close a hidden editing session to rename.",
-                    ));
+                    return match self.shell(ShellCall::Rename { project: id, name })? {
+                        ShellReply::Changed(true) => Ok(Outcome::Changed),
+                        ShellReply::HasUnsavedWork => Err(Failure::UnsavedWork),
+                        ShellReply::Changed(false) => Err(Failure::RenameByOpening),
+                        _ => Err(Failure::Stale),
+                    };
                 };
                 let session = published.session.as_ref().expect("session").handle.clone();
                 let call = pm_kernel::tx::Call::Transact {

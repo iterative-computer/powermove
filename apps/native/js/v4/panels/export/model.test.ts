@@ -279,8 +279,14 @@ test("both export shortcuts, Esc settings-only, Return preset-only and command-p
   expect(f.model.open).toBe(true);
   f.model.namePreset("Delivery");
   await f.model.key("Enter", false, false, true);
-  // Escape ended the sheet on the host; Return then saved only the preset.
-  expect(commands(f)).toEqual(["export.dismiss", "export.preset.save"]);
+  // Each opening planned the sheet; Escape ended it on the host; Return
+  // then saved only the preset.
+  expect(commands(f)).toEqual([
+    "export.plan",
+    "export.dismiss",
+    "export.plan",
+    "export.preset.save",
+  ]);
   await f.model.key("Enter");
   expect(f.model.state.run.phase).toBe("preparing");
   expect(await f.model.key("Escape")).toBe(false);

@@ -28,7 +28,13 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
         return None;
     }
     let t = v.host.borrow().tokens.clone();
-    Some(crate::ghost::body(id, bounds, v.ghost_aspect, &t))
+    Some(crate::ghost::body(
+        id,
+        bounds,
+        v.ghost_aspect,
+        v.ghost_poster.as_deref(),
+        &t,
+    ))
 }
 
 impl Controller {

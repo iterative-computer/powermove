@@ -1171,6 +1171,7 @@ fn number(value: &Value, min: f64, max: f64) -> Result<f64, String> {
 pub(crate) fn validate_profile(key: &str, value: &Value) -> Result<(), String> {
     let valid = match key {
         "themeMode" => matches!(value.as_str(), Some("system" | "light" | "dark")),
+        "openProjectsIn" => matches!(value.as_str(), Some("tabs" | "windows")),
         "previewMemoryMiB" => value
             .as_f64()
             .is_some_and(|n| [0., 128., 256., 512., 1024., 2048.].contains(&n)),

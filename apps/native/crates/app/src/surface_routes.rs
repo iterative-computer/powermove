@@ -50,6 +50,17 @@ impl Controller {
                     self.hide_home(cx)
                 }
             }
+            // Development builds: the app's appearance as Settings › General
+            // › Appearance sets it (`reviewAppearance:light|dark|system`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewAppearance:") => {
+                use crate::appearance::{Mode, apply_later};
+                apply_later(match &command["reviewAppearance:".len()..] {
+                    "light" => Mode::Light,
+                    "dark" => Mode::Dark,
+                    _ => Mode::System,
+                });
+            }
             // Development builds: an event on a built-in panel's node, by
             // semantic id (`reviewPanel:<panel>:<event>:<semantic>`).
             #[cfg(debug_assertions)]
@@ -496,9 +507,7 @@ impl Controller {
             window.focus(&focus, cx);
             // A window with no project is Home (its tab's name too).
             if self.session.is_none() {
-                self.host
-                    .borrow()
-                    .set_document_metadata("Home", "", false, None);
+                self.host.borrow().set_home_title();
             }
         }
         Some(library.into_any_element())

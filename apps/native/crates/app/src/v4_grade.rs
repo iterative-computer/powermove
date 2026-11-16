@@ -320,6 +320,7 @@ impl SurfaceView {
                 id,
                 start: event.position,
                 number: Default::default(),
+                motion: pm_surface::kit::NumericMotion::new((0., 0.), 0.),
                 binding: None,
                 active: false,
                 grade: Some(GradeDrag::Ease {
@@ -436,6 +437,7 @@ impl SurfaceView {
                         id,
                         start: event.position,
                         number: Default::default(),
+                        motion: pm_surface::kit::NumericMotion::new((0., 0.), 0.),
                         binding: Some(binding),
                         active: true,
                         grade: Some(drag),
@@ -452,6 +454,7 @@ impl SurfaceView {
             id,
             start: event.position,
             number: Default::default(),
+            motion: pm_surface::kit::NumericMotion::new((0., 0.), 0.),
             binding: Some(binding),
             active: false,
             grade: Some(drag),

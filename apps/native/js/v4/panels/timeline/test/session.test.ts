@@ -351,3 +351,39 @@ test("native event projection strips methods/routing while retaining UTF-16/drag
   });
   expect(() => nativeEvent({ x: NaN })).toThrow();
 });
+
+test("numeric axis leases are registered before publication and disposed with the session", async () => {
+  const f = fixture();
+  const value = states["scale-linked"]?.() ?? states.disabled();
+  const row = value.window.rows.find((r) => r.kind === "property");
+  if (!row || row.kind !== "property")
+    throw new Error("numeric fixture missing");
+  row.axes = [
+    {
+      path: "position.x",
+      readout: "10",
+      numeric: {
+        binding: { handle: "axis-x", channels: ["axis-x"] },
+        value: 10,
+        step: 1,
+      },
+    },
+  ];
+  f.model.value = value;
+  await f.session.start();
+  expect(
+    f.requests.some(
+      (r) =>
+        r.operation.type === "binding.register" &&
+        r.operation.handle === "axis-x",
+    ),
+  ).toBe(true);
+  await f.session.dispose();
+  expect(
+    f.requests.some(
+      (r) =>
+        r.operation.type === "binding.dispose" &&
+        r.operation.handle === "axis-x",
+    ),
+  ).toBe(true);
+});

@@ -995,3 +995,20 @@ its command registry and consent UI. That registry/native shell is outside this
 lane's owned files. Actual installed-client restart, both signed architectures,
 configuration environment selection and descendant drainage remain Mac checks.
 No A02 or other main-delta row is marked fully closed by this component alone.
+
+### Target any composition
+
+`get_project_state` includes `compositions`: every composition's ID, name,
+width, height, fps, duration, layer count and `open` flag. Pass one of these IDs
+as optional `compositionId` to `get_project_state`, `get_timeline`,
+`apply_commands`, `render_frames`, `check_project`, `select_layers`,
+`edit_layer_strips`, `edit_video`, `edit_3d`, `get_3d_scene`, `export_captions`,
+`export_video`, `generate_captions` or `import_media_to_timeline`.
+Omitting it uses the composition currently open in the editor.
+
+Targeting a precomp never opens its tab or moves the person's playhead, selection
+or scroll. Layer references and agent selections resolve inside the target.
+Edits use the project's existing undo, save and guarded disconnect rollback.
+Rendering uses a private headless projection of that composition. Both external
+MCP and the in-app agent use this contract; the run's `api/mcp-tools.json`
+contains the same optional field. Read fresh state after a revision conflict.

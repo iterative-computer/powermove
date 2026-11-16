@@ -1387,3 +1387,138 @@ fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
         );
     }
 }
+
+#[test]
+fn citations_survive_save_reopen_and_send_structured_context() {
+    for provider in ["chatgpt", "claude", "compatible"] {
+        let mut store = Memory::default();
+        store.values.insert("agentThreads.p".into(), json!({"version":1,"activeId":"t","threads":[{"id":"t","provider":provider,"conversation":[],"composerDraft":"","attachments":[]}]}));
+        let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+        let quotes = vec![
+            json!({"messageId":"history:m","text":"😀 exact", "start":2,"end":10,"comment":"Explain this"}),
+        ];
+        p.draft_mut("t")
+            .unwrap()
+            .set_citations(quotes.clone())
+            .unwrap();
+        p.draft_mut("t").unwrap().set_text("My request", 1).unwrap();
+        p.save(&mut store, 2).unwrap();
+        let mut p = Panel::load(&mut store, "p", "t", 3).unwrap();
+        assert_eq!(p.session("t").unwrap().draft.citations(), quotes);
+        let effect = p.submit("t", "run", "request", 4).unwrap();
+        let EffectKind::Send { text, settings, .. } = effect.kind else {
+            panic!("send");
+        };
+        assert_eq!(settings.provider.name(), provider);
+        assert!(text.contains("<assistant_citations>"));
+        assert!(text.contains("Explain this"));
+        assert!(text.ends_with("My request"));
+        let message = p
+            .session("t")
+            .unwrap()
+            .conversation
+            .values()
+            .last()
+            .unwrap();
+        assert_eq!(message["text"], "My request");
+        assert_eq!(message["citations"], json!(quotes));
+        assert!(p.session("t").unwrap().draft.citations().is_empty());
+    }
+}
+#[test]
+fn invalid_citation_does_not_replace_existing_draft_context() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    let valid = vec![json!({"messageId":"m","text":"😀","start":0,"end":2,"comment":""})];
+    draft.set_citations(valid.clone()).unwrap();
+    assert!(draft.sendable());
+    assert!(
+        draft
+            .set_citations(vec![
+                json!({"messageId":"m","text":"😀","start":0,"end":1,"comment":""})
+            ])
+            .is_err()
+    );
+    assert_eq!(draft.citations(), valid);
+}
+
+#[test]
+fn undoing_composer_typing_keeps_reference_chips() {
+    let mut draft = pm_panel_agentpanel::composer::Draft::default();
+    draft.insert_text("before", 1, false);
+    let quote = vec![json!({"messageId":"m","text":"quote","start":0,"end":5,"comment":"Explain"})];
+    draft.set_citations(quote.clone()).unwrap();
+    draft.insert_text(" after", 100, false);
+    assert!(draft.undo(false));
+    assert_eq!(draft.request_text(), "before");
+    assert_eq!(draft.citations(), quote);
+}
+
+#[test]
+fn quotes_from_live_replies_keep_a_resolvable_source_after_finishing_and_reopening() {
+    let mut store = Memory::default();
+    let mut p = Panel::load(&mut store, "p", "t", 0).unwrap();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: "Reference".into(),
+            error: false,
+            cancelled: false,
+        },
+        30,
+    )
+    .unwrap();
+    p.save(&mut store, 31).unwrap();
+    let p = Panel::load(&mut store, "p", "t", 32).unwrap();
+    let source = p.session("t").unwrap().draft.citations()[0]["messageId"]
+        .as_str()
+        .unwrap();
+    assert!(source.starts_with("history:"));
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let snapshot = window
+        .snapshot(&p, 0..window.count(&p).unwrap(), 33)
+        .unwrap();
+    assert!(
+        snapshot["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == source)
+    );
+}
+#[test]
+fn steering_with_a_live_quote_sends_its_archived_source_id() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Reference"}));
+    let source = p
+        .session("t")
+        .unwrap()
+        .trace
+        .rows
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    p.draft_mut("t").unwrap().set_citations(vec![json!({"messageId":format!("live:{source}"),"text":"Reference","start":0,"end":9,"comment":"Explain"})]).unwrap();
+    let effect = p.submit("t", "run1", "request2", 30).unwrap();
+    let EffectKind::Send { text, steer, .. } = effect.kind else {
+        panic!("send");
+    };
+    assert!(steer);
+    assert!(text.contains("history:message-1/step-0:"));
+    assert!(!text.contains(&format!("live:{source}")));
+}
