@@ -4773,6 +4773,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-web-kit",
+ "pm-design",
  "pm-remote-dom",
  "pm-store-host",
  "serde",

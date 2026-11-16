@@ -604,51 +604,34 @@ impl SlotView {
     }
 }
 
-/// How far a continuous (Apple "squircle") corner of radius 1 reaches along
-/// each side, and its control points: the corner AppKit draws for
-/// `CALayerCornerCurve.continuous`.
-const CONTINUOUS_REACH: f64 = 1.528_664_8;
-
 /// Adds `rect` (y up) to `path` with continuous corners of `radius` at its
 /// bottom (min y) corners and square top ones, wound as `CGPathAddRect`.
 fn add_bottom_rounded(path: &CGMutablePath, rect: NSRect, radius: f64) {
+    use pm_design::corner::{CONTINUOUS_REACH, continuous_corner, fit};
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let r = radius.min(rect.size.width.min(rect.size.height) / 2. / CONTINUOUS_REACH);
+    let r = fit(radius, rect.size.width, rect.size.height);
+    let p = Some(path);
+    let none = std::ptr::null();
     unsafe {
         if r <= 0. {
-            CGMutablePath::add_rect(Some(path), std::ptr::null(), rect);
+            CGMutablePath::add_rect(p, none, rect);
             return;
         }
-        let k = CONTINUOUS_REACH * r;
-        // One corner at `c`, from `c + a·k` to `c + b·k` (`a`, `b` unit
-        // vectors along its two sides, away from it).
-        let corner = |c: (f64, f64), a: (f64, f64), b: (f64, f64)| {
-            let at = |u: f64, v: f64| (c.0 + (a.0 * u + b.0 * v) * r, c.1 + (a.1 * u + b.1 * v) * r);
-            let curve = |p1: (f64, f64), p2: (f64, f64), to: (f64, f64)| {
-                CGMutablePath::add_curve_to_point(
-                    Some(path),
-                    std::ptr::null(),
-                    p1.0,
-                    p1.1,
-                    p2.0,
-                    p2.1,
-                    to.0,
-                    to.1,
-                )
-            };
-            curve(at(1.088_493, 0.), at(0.868_407, 0.), at(0.669_934, 0.064_413));
-            curve(at(0.372_824, 0.188_345), at(0.188_345, 0.372_824), at(0.064_413, 0.669_934));
-            curve(at(0., 0.868_407), at(0., 1.088_493), at(0., 1.528_665));
+        let corner = |c, a, b| {
+            for [c1, c2, to] in continuous_corner(c, a, b, r).1 {
+                CGMutablePath::add_curve_to_point(p, none, c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+            }
         };
-        CGMutablePath::move_to_point(Some(path), std::ptr::null(), x0 + k, y0);
-        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x1 - k, y0);
+        let k = CONTINUOUS_REACH * r;
+        CGMutablePath::move_to_point(p, none, x0 + k, y0);
+        CGMutablePath::add_line_to_point(p, none, x1 - k, y0);
         corner((x1, y0), (-1., 0.), (0., 1.));
-        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x1, y1);
-        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x0, y1);
-        CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), x0, y0 + k);
+        CGMutablePath::add_line_to_point(p, none, x1, y1);
+        CGMutablePath::add_line_to_point(p, none, x0, y1);
+        CGMutablePath::add_line_to_point(p, none, x0, y0 + k);
         corner((x0, y0), (0., 1.), (1., 0.));
-        CGMutablePath::close_subpath(Some(path));
+        CGMutablePath::close_subpath(p);
     }
 }
 
