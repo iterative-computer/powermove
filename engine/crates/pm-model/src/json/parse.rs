@@ -538,13 +538,13 @@ impl Scan<'_> {
     fn skip_string(&mut self) -> Option<()> {
         self.pos += 1;
         loop {
+            self.pos = string_stop(self.bytes, self.pos);
             match *self.bytes.get(self.pos)? {
                 b'"' => {
                     self.pos += 1;
                     return Some(());
                 }
-                b'\\' => self.pos += 2,
-                _ => self.pos += 1,
+                _ => self.pos += 2,
             }
         }
     }
