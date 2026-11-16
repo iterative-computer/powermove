@@ -447,10 +447,13 @@ fn ask_stalled(stall: crate::quit_limit::Stall, cx: &mut App) {
         return;
     }
     let busy = q.asking_now.is_some()
-        || q.controllers.iter().filter_map(|weak| weak.upgrade()).any(|c| {
-            let c = c.read(cx);
-            c.save_pending || c.host.borrow().window.attachedSheet().is_some()
-        });
+        || q.controllers
+            .iter()
+            .filter_map(|weak| weak.upgrade())
+            .any(|c| {
+                let c = c.read(cx);
+                c.save_pending || c.host.borrow().window.attachedSheet().is_some()
+            });
     if busy {
         if let Some((name, bound)) = q.stage {
             crate::quit_limit::stage(name, bound);
@@ -494,10 +497,9 @@ async fn quit_as_is(note: String, cx: &mut gpui::AsyncApp) {
 /// keeps running with every window it still has.
 fn cannot_quit_now(reason: &str, cx: &mut App) {
     use crate::alert::{Alert, Button, Key};
-    crate::error_log::shared(cx).borrow_mut().push(
-        "Quit",
-        &format!("Quit Now stopped: {reason}"),
-    );
+    crate::error_log::shared(cx)
+        .borrow_mut()
+        .push("Quit", &format!("Quit Now stopped: {reason}"));
     let window = cx
         .global::<QuitCoordinator>()
         .controllers
