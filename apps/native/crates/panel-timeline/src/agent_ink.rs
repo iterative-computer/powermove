@@ -214,7 +214,7 @@ impl AgentInk {
             }
             if a.event.kind == Kind::Held {
                 let row = v4::row_id(&RowId::Layer(a.event.layer.clone()));
-                if let Some(top) = _scene.scroll_for(&row) {
+                if let Some(top) = scene.scroll_for(&row) {
                     let y = t.metrics.ruler as f64 + top - v.scroll_y
                         + t.metrics.track_row as f64 / 2.
                         - 1.35;
