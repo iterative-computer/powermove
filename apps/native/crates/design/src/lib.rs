@@ -11,6 +11,7 @@
 //! [`Elevation`]); motion is springs ([`motion`]); the timeline's strips are a
 //! drawn material ([`Strip`]).
 pub mod color;
+pub mod corner;
 pub mod motion;
 mod recipe;
 mod strip;

@@ -109,7 +109,7 @@ pub use selection::Selection;
 
 pub use actor::{
     ActorHandle, HistorySummary, KernelActor, KernelEvent, KernelHandle, OpenEntryInfo, Pending,
-    Published, QueryMirror, RealmEnvelope,
+    Published, QueryMirror, RealmEnvelope, detached_publication,
 };
 pub use journal::{JournalConfig, Recovered, Recovery};
 pub use kernel::{Kernel, KernelConfig, KernelFailure, OpenInfo, OpenSource, base_hash_of};

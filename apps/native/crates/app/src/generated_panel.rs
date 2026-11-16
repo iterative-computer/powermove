@@ -18,6 +18,7 @@ use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2_app_kit::NSAccessibility;
 use pm_kernel::{Call, Caller, HistoryCall, Request, WriteBody};
+use pm_shell::native_control::{ControlSpec, Kind, NativeControl};
 use pm_shell::workspace::{self, Write};
 use serde_json::{Value, json};
 
@@ -130,7 +131,7 @@ fn build_frame(
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
             let y = (BUILD_HEADER + (state.row as f32 + 0.5) * row_height).min((size[1] - 16.).max(0.));
-            window.with_content_mask(Some(ContentMask { bounds, fade_out: Default::default() }), |window| {
+            window.with_content_mask(Some(ContentMask { bounds, ..Default::default() }), |window| {
 
                 let mut paint = |x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, alpha: f32| {
                     let b = Bounds::new(bounds.origin + point(px(x), px(y)), gpui::size(px(w), px(h)));
@@ -980,6 +981,7 @@ fn render(
             window,
         )
     };
+    let mut switches = vec![];
     for (index, control) in controls.iter().enumerate() {
         let kind = control["type"].as_str().unwrap_or("");
         let label = control["label"].as_str().unwrap_or("").to_owned();
@@ -1042,42 +1044,68 @@ fn render(
                 ),
                 Ok(current) => row(&label).child(match kind {
                     // Off and On as two segments (v1's ToggleField): the
-                    // state reads as a word.
+                    // state reads as a word. The kit's one segmented control
+                    // (PM-409), the system's glass one; until the window can
+                    // host it, its place stays empty.
                     "toggle" => {
-                        let on = current == true;
-                        let segment = |name: &'static str, is: bool| {
+                        let key = format!("{panel}#{index}");
+                        let selected = json!(usize::from(current == true));
+                        let options = vec![json!({"label": "Off"}), json!({"label": "On"})];
+                        let switch = if let Some(s) = v.generated_switches.get(&key) {
+                            Some(s.clone())
+                        } else if pm_shell::text::available(window) {
+                            let tokens = t.clone();
+                            let (eid, label) = (eid.to_string(), label.to_string());
+                            let switch = cx.new(|cx| {
+                                let mut s = NativeControl::new(
+                                    ControlSpec {
+                                        kind: Kind::Segmented,
+                                        label: &label,
+                                        identifier: &eid,
+                                        value: &selected,
+                                        options: options.clone(),
+                                        disabled: false,
+                                        default: false,
+                                        destructive: false,
+                                        inline: false,
+                                        quiet: false,
+                                        tint: None,
+                                        symbol: None,
+                                        glass: true,
+                                        well: false,
+                                    },
+                                    &tokens,
+                                    window,
+                                    cx,
+                                );
+                                s.stretch();
+                                s
+                            });
                             let panel = panel.clone();
-                            div()
-                                .id(SharedString::from(format!("{eid}-{name}")))
-                                .role(Role::RadioButton)
-                                .aria_label(format!("{label} {name}"))
-                                .aria_toggled(if on == is {
-                                    gpui::Toggled::True
-                                } else {
-                                    gpui::Toggled::False
-                                })
-                                .flex_1()
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(m.inner_radius))
-                                .when(on == is, |d| {
-                                    d.bg(ink(c.text, tr.selected)).text_color(rgb(c.text))
-                                })
-                                .when(on != is, |d| d.text_color(rgb(c.secondary)))
-                                .child(name)
-                                .on_click(cx.listener(move |v, _, _, cx| {
-                                    if on != is {
-                                        v.generated_set(&panel, index, json!(is), cx)
-                                    }
-                                }))
+                            cx.subscribe(&switch, move |v: &mut Controller, _, value: &Value, cx| {
+                                v.generated_set(&panel, index, json!(value.as_u64() == Some(1)), cx)
+                            })
+                            .detach();
+                            v.generated_switches.insert(key.clone(), switch.clone());
+                            Some(switch)
+                        } else {
+                            None
                         };
-                        well(eid.clone(), label.clone(), true)
-                            .px(px(2.))
-                            .gap(px(2.))
-                            .child(segment("Off", false))
-                            .child(segment("On", true))
+                        switches.push(key);
+                        let place = div()
+                            .id(SharedString::from(eid.clone()))
+                            .flex_1()
+                            .min_w(px(m.value_column.min(m.control * 2.)))
+                            .h(px(m.field))
+                            .flex()
+                            .items_center();
+                        match switch {
+                            Some(switch) => {
+                                switch.update(cx, |s, cx| s.update(&selected, &options, false, cx));
+                                place.child(switch)
+                            }
+                            None => place,
+                        }
                     }
                     "select" => {
                         let options: Vec<(Value, String)> = control["options"]
@@ -1178,6 +1206,9 @@ fn render(
         };
         body = body.child(element.opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
     }
+    // A toggle no longer shown (its control removed or retyped) gives back its control.
+    let mine = format!("{id}#");
+    v.generated_switches.retain(|key, _| !key.starts_with(&mine) || switches.contains(key));
     if let Some(overlay) = over { body = body.child(overlay); }
     body.into_any_element()
 }
