@@ -764,6 +764,7 @@ fn a_delivery_names_the_installed_extension_that_provides_nothing_now() {
         id: "acme".into(),
         name: "Acme Effects".into(),
         why: "is turned off".into(),
+        provides: vec![],
     }];
     let refused = finish(off);
     assert_eq!(refused.state, JobState::Failed, "{refused:?}");

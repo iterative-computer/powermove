@@ -32,6 +32,17 @@ pub struct Unavailable {
     pub id: String,
     pub name: String,
     pub why: String,
+    /// The definitions it provided when it last ran, whatever their ids
+    /// (`macos-cursor` provides `macos.cursor`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+}
+impl Unavailable {
+    /// Whether it would provide `definition`: one it provided when it last
+    /// ran, or one its id names (`<extension>.<name>`).
+    pub fn would_provide(&self, definition: &str) -> bool {
+        self.provides.iter().any(|d| d == definition) || provides(&self.id, definition)
+    }
 }
 /// Whether an effect's id is its extension's: `<extension>` or
 /// `<extension>.<name>`.
@@ -51,7 +62,7 @@ impl ResourceSnapshot {
     /// The installed extension that would provide `effect`, if it is one that
     /// provides nothing now.
     pub fn unavailable_owner(&self, effect: &str) -> Option<&Unavailable> {
-        self.unavailable.iter().find(|u| provides(&u.id, effect))
+        self.unavailable.iter().find(|u| u.would_provide(effect))
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         // Definitions arrive whole in `definitions`; a pinned extension

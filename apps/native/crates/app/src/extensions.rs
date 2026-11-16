@@ -466,6 +466,7 @@ pub(crate) fn unavailable(
                 id: id.clone(),
                 name: name.clone(),
                 why: why.clone(),
+                provides: publication.provides.get(id).cloned().unwrap_or_default(),
             },
         )
         .collect()
@@ -2582,6 +2583,7 @@ mod tests {
             settled: false,
             loading: vec![("b-slow".into(), "Slow".into())],
             unavailable: vec![],
+            provides: Default::default(),
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
@@ -2592,6 +2594,7 @@ mod tests {
             settled: true,
             loading: vec![],
             unavailable: vec![],
+            provides: Default::default(),
         };
         let start = ResourceSnapshot {
             pending: true,

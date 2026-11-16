@@ -678,6 +678,7 @@ fn the_viewer_names_the_installed_extension_that_provides_nothing_now() {
             id: "ext".into(),
             name: "Acme Effects".into(),
             why: "is off until Powermove restarts".into(),
+            provides: vec![],
         }],
         ..Default::default()
     }))
