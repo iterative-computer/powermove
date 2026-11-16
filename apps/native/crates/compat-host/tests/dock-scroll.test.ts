@@ -5,7 +5,7 @@ function setup() {
   const listeners: Record<string, (e:any)=>void> = {}, sent:any[]=[];
   const source=readFileSync(new URL('../src/remote-dom.js',import.meta.url),'utf8');
   const start=source.indexOf('  // Route each momentum/wheel event');
-  runInNewContext(source.slice(start,source.indexOf('  const panelLayouts =',start)), {
+  runInNewContext(source.slice(start,source.indexOf('  // Measure contribution content',start)), {
     document:{addEventListener:(kind:string,fn:any)=>listeners[kind]=fn},
     getComputedStyle:(node:any)=>({overflowY:node.overflow ?? 'auto'}), call:(event:any)=>sent.push(event),
   });

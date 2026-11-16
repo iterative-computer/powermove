@@ -2108,8 +2108,8 @@ impl Controller {
                         .find(|(key, _)| key == id)
                         .map_or(r, |(_, clip)| to_rect(clip))
                 };
-                let panel_regions = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
-                let overlay_regions = stage.as_ref().map(to_rect).into_iter().collect();
+                let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
+                let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
                 // ... and its content only within that panel's body and every
                 // place recently sent to the page: a page that has not yet
                 // moved a panel's content (a splitter drag) never shows it
@@ -2119,11 +2119,7 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            let mask = if host.panel_layout_applied(id, *r) {
-                                *r
-                            } else {
-                                sent.mask(id, *r)
-                            };
+                            let mask = if host.panel_layout_applied(id, *r) { *r } else { sent.mask(id, *r) };
                             let clip = clipped(id, *r);
                             Rect::new(
                                 mask.x.max(clip.x),

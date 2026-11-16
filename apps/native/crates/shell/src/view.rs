@@ -5,7 +5,6 @@ use crate::{
     session::WindowState,
     workspace,
 };
-use gpui::{prelude::*, *};
 #[cfg(test)]
 use ::core::prelude::v1::test;
 use gpui::{prelude::*, *};
@@ -361,9 +360,36 @@ impl Editor {
         self.seen = None;
         self.persist_session();
     }
+    fn dock_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if event.modifiers.control || event.modifiers.platform || event.modifiers.shift {
+            return;
+        }
+        let by = -f32::from(event.delta.pixel_delta(px(16.)).y);
+        if by == 0. || !by.is_finite() {
+            return;
+        }
+        let Some(di) = self.geometry.wheel_dock(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            self.tokens.metrics.splitter_reach,
+        ) else {
+            return;
+        };
+        let id = self.layout.docks[di].id.clone();
+        let moved = self.scroll_dock(&id, by);
+        // The gutter belongs to this column, even at its limit. Never pass a
+        // wheel to the viewer beneath the divider's overlapping hit area.
+        cx.stop_propagation();
+        if moved {
+            cx.notify();
+        }
+    }
+
     /// Move a side column without saving transient viewport state (Electron's rule).
     pub fn scroll_dock(&mut self, id: &str, by: f32) -> bool {
-        if !by.is_finite() { return false; }
+        if !by.is_finite() {
+            return false;
+        }
         let old = self.dock_scroll.get(id).copied().unwrap_or(0.);
         let maximum = self.dock_scroll_max.get(id).copied().unwrap_or(0.);
         let next = (old + by).clamp(0., maximum);
@@ -552,8 +578,8 @@ impl Editor {
         let (Some(path), Some(state)) = (self.session_path.clone(), self.window_state()) else {
             return;
         };
-        let key = !crate::session::quitting()
-            && self.host.as_ref().is_some_and(|h| h.borrow().is_key());
+        let key =
+            !crate::session::quitting() && self.host.as_ref().is_some_and(|h| h.borrow().is_key());
         crate::session::write(&path, crate::session::Change::Upsert { state, key });
     }
     /// Removes this window from the session (the user closed it).
@@ -1433,7 +1459,9 @@ impl Editor {
             return None;
         };
         let preview = drag.preview?;
-        self.layout.apply_drop(&drag.id, &preview, drag.stack).ok()?;
+        self.layout
+            .apply_drop(&drag.id, &preview, drag.stack)
+            .ok()?;
         self.save();
         Some(preview.target)
     }
@@ -1702,6 +1730,7 @@ impl Editor {
     ) -> anyhow::Result<(String, String)> {
         let base = layout::layout_name(name)?;
         let layout = Layout {
+            flex_bases: self.layout.flex_bases.clone(),
             version: self.layout.version,
             workspace: workspace::new_id(),
             docks,
@@ -2197,9 +2226,21 @@ impl Render for Editor {
         }
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
-            (a.rect.y + self.dock_scroll.get(&self.layout.docks[a.dock].id).copied().unwrap_or(0.))
-                .total_cmp(&(b.rect.y + self.dock_scroll.get(&self.layout.docks[b.dock].id).copied().unwrap_or(0.)))
-                .then(a.rect.x.total_cmp(&b.rect.x))
+            (a.rect.y
+                + self
+                    .dock_scroll
+                    .get(&self.layout.docks[a.dock].id)
+                    .copied()
+                    .unwrap_or(0.))
+            .total_cmp(
+                &(b.rect.y
+                    + self
+                        .dock_scroll
+                        .get(&self.layout.docks[b.dock].id)
+                        .copied()
+                        .unwrap_or(0.)),
+            )
+            .then(a.rect.x.total_cmp(&b.rect.x))
         });
         self.panel_order = ordered
             .iter()
@@ -2264,7 +2305,10 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
-        let viewer_corners = self.host.as_ref().map_or([true, true], |h| h.borrow().viewer_corners.get());
+        let viewer_corners = self
+            .host
+            .as_ref()
+            .map_or([true, true], |h| h.borrow().viewer_corners.get());
         let (ground, ground_alpha) = t.ground();
         // The native layers in the holes round their bottom corners (the
         // viewer a border inside its panel, an extension body its inset).
@@ -2284,24 +2328,7 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
-                if e.modifiers.control || e.modifiers.platform || e.modifiers.shift {
-                    return;
-                }
-                let dock = this
-                    .geometry
-                    .side_docks
-                    .iter()
-                    .find(|(_, r)| r.contains(f32::from(e.position.x), f32::from(e.position.y)))
-                    .map(|(di, _)| this.layout.docks[*di].id.clone());
-                if let Some(id) = dock {
-                    let by = -f32::from(e.delta.pixel_delta(px(16.)).y);
-                    if this.scroll_dock(&id, by) {
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }
-            }))
+            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2745,7 +2772,7 @@ impl Render for Editor {
                         } else {
                             title_width(panels.title(tab), t.typography.title, w)
                         };
-                        let drawn = match tab_track.title_limit.map(|limit| (limit - TAB_SPACING).max(0.)) {
+                        let drawn = match tab_track.active_limit.filter(|_| ti == active) {
                             Some(limit) => full.min(limit),
                             None => full,
                         };
@@ -2795,7 +2822,7 @@ impl Render for Editor {
                         .font_weight(FontWeight(t.typography.medium_weight))
                         .whitespace_nowrap();
                     // Long titles truncate; every panel retains its tab in the strip.
-                    cell = match tab_track.title_limit.map(|limit| (limit - TAB_SPACING).max(0.)) {
+                    cell = match tab_track.active_limit.filter(|_| selected) {
                         Some(limit) => cell
                             .max_w(px(limit))
                             .min_w(px(0.))
@@ -2859,9 +2886,9 @@ impl Render for Editor {
                 }
                 tab_spans.insert((p.dock, p.group), spans);
                 header = header.child(strip);
-                if multi {
-                    let entries: Vec<_> = (0..tabs.len())
-                        .map(|i| {
+                if !tab_track.overflow.is_empty() {
+                    let entries: Vec<_> = tab_track.overflow.iter()
+                        .map(|&i| {
                             MenuEntry::item(
                                 panels.title(&tabs[i]),
                                 format!("panel:activate:{}", tabs[i]),
@@ -3002,7 +3029,8 @@ impl Render for Editor {
                 panel = panel.child(content);
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
-                let coming = !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
+                let coming =
+                    !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
                 let (heading, line, action) = if panels.contains(&id) {
                     layout::empty_state(&id)
                 } else if coming {
@@ -3150,6 +3178,7 @@ impl Render for Editor {
             };
             let mut splitter = positioned(hit)
                 .id(format!("splitter-{i}"))
+                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
                 .role(Role::Splitter)
                 .aria_label("Resize dock")
                 .tab_index(1000 + i as isize)
@@ -3214,13 +3243,16 @@ impl Render for Editor {
                             h.borrow_mut().splitter_focus = true;
                         }
                         // A double-click puts a dock back at its size
-                        // (the original app), and two panels back at
-                        // their heights.
+                        // (the original app); between panels it does nothing.
                         if e.click_count >= 2 {
                             this.gesture = None;
-                            let (bounds, t) = (this.dock_bounds, this.tokens.clone());
                             if this.layout.reset_dock(&divd)
-                                || this.layout.reset_split(&divd, bounds, &t)
+                                || this.layout.reset_split_with_panel_heights(
+                                    &divd,
+                                    this.dock_bounds,
+                                    &this.tokens,
+                                    &this.dock_natural_heights,
+                                )
                             {
                                 this.slides.armed = true;
                                 this.save();
@@ -3672,7 +3704,13 @@ impl Render for Editor {
 
 /// Paints `color` in what a native layer filling `r` rounds off its bottom
 /// corners (`[left, right]`): continuous corners of `radius`, as the layer's.
-fn fill_rounded_off(window: &mut Window, r: Rect, radius: f32, [left, right]: [bool; 2], color: impl Into<Background> + Copy) {
+fn fill_rounded_off(
+    window: &mut Window,
+    r: Rect,
+    radius: f32,
+    [left, right]: [bool; 2],
+    color: impl Into<Background> + Copy,
+) {
     use pm_design::corner::{continuous_corner, fit};
     let radius = fit(radius as f64, r.w as f64, r.h as f64);
     if radius <= 0. {
@@ -4570,8 +4608,14 @@ mod tests {
                                 (r.x + across, r.y + at)
                             };
                             // Scrolling docks keep offscreen dividers in geometry.
-                            if d.group.is_some() && view.read_with(cx, |v, _|
-                                v.geometry.side_docks.get(&d.dock).is_some_and(|clip| !clip.contains(x, y))) {
+                            if d.group.is_some()
+                                && view.read_with(cx, |v, _| {
+                                    v.geometry
+                                        .side_docks
+                                        .get(&d.dock)
+                                        .is_some_and(|clip| !clip.contains(x, y))
+                                })
+                            {
                                 continue;
                             }
                             // Where two dividers' grabs cross, either answers.
@@ -4614,8 +4658,16 @@ mod tests {
                     } else {
                         (r.x + thick + reach - 0.5, r.y + length / 2.)
                     };
-                    if d.group.is_some() && view.read_with(cx, |v, _|
-                        v.geometry.side_docks.get(&d.dock).is_some_and(|clip| !clip.contains(x, y))) {
+                    // An offscreen splitter has no press target, just as it
+                    // has no cursor target in the sweep above.
+                    if d.group.is_some()
+                        && view.read_with(cx, |v, _| {
+                            v.geometry
+                                .side_docks
+                                .get(&d.dock)
+                                .is_some_and(|clip| !clip.contains(x, y))
+                        })
+                    {
                         continue;
                     }
                     if dividers
