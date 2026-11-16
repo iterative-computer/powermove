@@ -222,9 +222,9 @@ impl Chrome {
 pub struct SettingsChrome {
     chrome: Retained<Chrome>,
     window: Retained<NSWindow>,
-    /// The detail item's view: it carries the page's ground (under the
-    /// toolbar too), so nothing opaque sits under the sidebar.
-    detail: Retained<NSView>,
+    /// The page's ground, beside the sidebar (under the toolbar too): nothing
+    /// opaque sits under the sidebar's glass.
+    ground: Retained<NSView>,
     /// The window's own keys (⌘F, typing in the sidebar).
     monitor: Option<Retained<AnyObject>>,
 }
@@ -385,10 +385,23 @@ impl SettingsChrome {
             gpui.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
         ]);
         content.setWantsLayer(true);
+        // The page's ground: beside the sidebar and up under the toolbar,
+        // never under the sidebar (the detail runs under it, unpainted, so
+        // its glass shows what is behind the window).
+        let ground = NSView::new(mtm);
+        ground.setWantsLayer(true);
+        ground.setTranslatesAutoresizingMaskIntoConstraints(false);
+        content.addSubview_positioned_relativeTo(&ground, NSWindowOrderingMode::Below, Some(&gpui));
+        activate(&[
+            ground.topAnchor().constraintEqualToAnchor(&content.topAnchor()),
+            ground.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
+            ground.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
+            ground.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
+        ]);
         // The sidebar is the system's own material, blended with what is
         // behind the window: GPUI made the window opaque with an opaque
         // background (the window server then has nothing behind it to show),
-        // so the window is clear and only the detail carries the page's ground.
+        // so the window is clear and only the page's ground is painted.
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
             0., 0., 0., 0.0001, // not clearColor: that drops the window's shadow
@@ -408,8 +421,9 @@ impl SettingsChrome {
         let detail = NSViewController::new(mtm);
         detail.setView(&content);
         let detail = NSSplitViewItem::splitViewItemWithViewController(&detail);
-        // The system's floating sidebar sits over the detail, which runs
-        // under it (macOS 26 and later): its glass shows the page's ground.
+        // The system's sidebar sits over the detail, which runs under it
+        // (macOS 26 and later) unpainted: its glass shows what is behind the
+        // window, as System Settings' does.
         if detail.respondsToSelector(sel!(setAutomaticallyAdjustsSafeAreaInsets:)) {
             detail.setAutomaticallyAdjustsSafeAreaInsets(true);
         }
@@ -461,7 +475,7 @@ impl SettingsChrome {
         if let Some(content) = window.contentView() {
             content.layoutSubtreeIfNeeded();
         }
-        Some(SettingsChrome { chrome, window, detail: content, monitor })
+        Some(SettingsChrome { chrome, window, ground, monitor })
     }
 
     /// The sidebar lists `sections` with `active` selected; the title names it.
@@ -523,7 +537,7 @@ impl SettingsChrome {
     pub fn set_scheme(&self, dark: bool, ground: u32) {
         let state = self.chrome.ivars();
         if state.ground.replace(Some(ground)) != Some(ground) {
-            if let Some(layer) = self.detail.layer() {
+            if let Some(layer) = self.ground.layer() {
                 layer.setBackgroundColor(Some(&crate::native::native_color(ground).CGColor()));
             }
         }

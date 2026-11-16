@@ -97,17 +97,44 @@ fn main() {
         );
     }
 
-    // The page's ground is the detail's, never the window's.
+    // The page's ground is beside the sidebar, never under it: nothing under
+    // the sidebar's glass is painted (the window, the detail), so it shows
+    // what is behind the window. (Acceptance found it a flat fill when the
+    // ground was on the detail, which runs under the sidebar.)
     chrome.set_scheme(true, 0x1e1e20);
     assert!(alpha(&window.backgroundColor()) < 0.01, "a scheme leaves the window clear");
     let detail = items.objectAtIndex(1).viewController(mtm).view();
     assert!(std::ptr::eq(&*detail, &*host), "GPUI's host view is the detail");
-    let layer = detail.layer().expect("the detail is layer-backed");
-    let ground = layer.backgroundColor().expect("the detail carries the ground");
-    let ground = objc2_app_kit::NSColor::colorWithCGColor(&ground)
-        .and_then(|c| c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()))
-        .expect("an sRGB ground");
-    let rgb = [ground.redComponent(), ground.greenComponent(), ground.blueComponent()];
+    if let Some(frame) = window.contentView().and_then(|c| unsafe { c.superview() }) {
+        frame.layoutSubtreeIfNeeded();
+    }
+    let painted = |v: &NSView| {
+        v.layer()
+            .and_then(|l| l.backgroundColor())
+            .and_then(|c| objc2_app_kit::NSColor::colorWithCGColor(&c))
+            .and_then(|c| c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()))
+    };
+    assert!(
+        painted(&detail).is_none_or(|c| c.alphaComponent() < 0.01),
+        "the detail, under the sidebar, is unpainted"
+    );
+    let grounds: Vec<_> = detail
+        .subviews()
+        .iter()
+        .filter(|v| painted(v).is_some_and(|c| c.alphaComponent() > 0.99))
+        .collect();
+    assert_eq!(grounds.len(), 1, "one view carries the page's ground");
+    let ground = &grounds[0];
+    let at = ground.convertRect_toView(ground.bounds(), None);
+    let top = window.contentView().map_or(0., |c| c.bounds().size.height);
+    assert!(
+        at.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+        "the ground starts beside the sidebar, at {}",
+        at.origin.x
+    );
+    assert!(at.origin.y + at.size.height >= top - 1., "the ground runs up under the toolbar");
+    let c = painted(ground).unwrap();
+    let rgb = [c.redComponent(), c.greenComponent(), c.blueComponent()];
     let want = [0x1e as f64 / 255., 0x1e as f64 / 255., 0x20 as f64 / 255.];
     for (got, want) in rgb.iter().zip(want) {
         assert!((got - want).abs() < 0.01, "ground {rgb:?}");
