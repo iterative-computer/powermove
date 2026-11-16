@@ -194,9 +194,12 @@ impl WindowInvalidator {
         if inner.draw_phase == DrawPhase::None {
             #[cfg(feature = "profiler")]
             let dirty_at = Self::record_frame_dirty(&mut inner);
+            #[cfg(feature = "profiler")]
             let became_dirty = !inner.dirty;
             inner.dirty = true;
-            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+            // Each new invalidation renews demand, even if a platform tick
+            // was deferred while this window was already dirty.
+            let waker = inner.platform_waker.clone();
             #[cfg(feature = "profiler")]
             let window_id = inner.window_id;
             drop(inner);
@@ -220,6 +223,7 @@ impl WindowInvalidator {
 
     pub fn set_dirty(&self, dirty: bool) {
         let mut inner = self.inner.borrow_mut();
+        #[cfg(feature = "profiler")]
         let became_dirty = dirty && !inner.dirty;
         inner.dirty = dirty;
         if dirty {
@@ -227,7 +231,7 @@ impl WindowInvalidator {
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+        let waker = dirty.then(|| inner.platform_waker.clone()).flatten();
         #[cfg(feature = "profiler")]
         let window_id = inner.window_id;
         drop(inner);
@@ -1828,6 +1832,9 @@ impl Window {
                 if draw_in_progress() {
                     log::debug!("deferring re-entrant window draw request");
                     deferred_force_render |= request_frame_options.force_render;
+                    // The idle platform may pause after this callback. Keep
+                    // the deferred draw armed even when it was already dirty.
+                    invalidator.wake_platform();
                     return;
                 }
                 // Take the deferred flag first: `||` short-circuits, and leaving
@@ -1910,9 +1917,11 @@ impl Window {
                         handle
                             .update(&mut cx, |_, window, cx| {
                                 if force_render {
-                                    // Bypass cached view reuse so we don't replay stale
-                                    // atlas tile references after a GPU device recovery.
-                                    window.refresh();
+                                    // Bypass cached views after GPU recovery or
+                                    // surface changes. Reread native bounds in
+                                    // case a resize/scale callback was temporarily
+                                    // taken by a reentrant AppKit update.
+                                    window.bounds_changed(cx);
                                 }
                                 let arena_clear_needed = measure("GPUI tree", || window.draw(cx));
                                 window.present();
@@ -9203,6 +9212,160 @@ mod tests {
         }
         assert_eq!(platform.frame_wake_count(), settled,
             "a settled animation must not request any more frames");
+    }
+
+    /// Model a paused source: tests deliver only frames that were requested.
+    #[gpui::test]
+    fn pm406_idle_resize_and_scale_present_the_new_surface(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let idle = platform.frame_wake_count();
+        let count = platform.presented_sizes().len();
+        for _ in 0..10 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(platform.frame_wake_count(), idle);
+        assert_eq!(platform.presented_sizes().len(), count);
+
+        platform.simulate_resize(size(px(800.), px(600.)));
+        let first = platform.frame_wake_count();
+        assert!(first > idle);
+        window
+            .update(cx, |_, window, cx| {
+                window.bounds_changed(cx);
+                let first = platform.frame_wake_count();
+                window.bounds_changed(cx);
+                assert!(
+                    platform.frame_wake_count() > first,
+                    "renew a resize wake before the preceding resize has been served"
+                );
+            })
+            .unwrap();
+        // Live resize can deliver another size while the first is still dirty.
+        // Renew the wake: the source may have paused on a deferred callback.
+        platform.simulate_resize(size(px(640.), px(480.)));
+        assert!(platform.frame_wake_count() > first);
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(size(DevicePixels(1280), DevicePixels(960)))
+        );
+        assert!(platform.presented_sizes().len() > count);
+
+        let before = platform.frame_wake_count();
+        platform.simulate_scale_change(1.0);
+        assert!(platform.frame_wake_count() > before);
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(size(DevicePixels(640), DevicePixels(480)))
+        );
+        let idle = platform.frame_wake_count();
+        let count = platform.presented_sizes().len();
+        for _ in 0..120 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(
+            platform.frame_wake_count(),
+            idle,
+            "return to idle after the new frame"
+        );
+        assert_eq!(platform.presented_sizes().len(), count);
+    }
+
+    #[gpui::test]
+    fn pm406_forced_frame_recovers_a_missed_resize_callback(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let new_size = size(px(777.), px(333.));
+        // Change the actual view while its resize callback is unavailable.
+        platform.resize(new_size);
+        platform.simulate_frame_request(RequestFrameOptions {
+            force_render: true,
+            require_presentation: true,
+            ..Default::default()
+        });
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(
+                    window.viewport_size(),
+                    new_size,
+                    "forced surface redraw must reread the native view size"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(new_size.to_device_pixels(2.0))
+        );
+    }
+
+    #[gpui::test]
+    fn pm406_layout_changes_renew_pending_frame_demand(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let id = window.entity(cx).unwrap().entity_id();
+        window
+            .update(cx, |_, window, cx| {
+                window.invalidator.invalidate_view(id, cx);
+                let first = platform.frame_wake_count();
+                window.invalidator.invalidate_view(id, cx);
+                assert!(
+                    platform.frame_wake_count() > first,
+                    "a second dock/comp update must renew the wake while dirty"
+                );
+            })
+            .unwrap();
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let idle = platform.frame_wake_count();
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(platform.frame_wake_count(), idle);
+    }
+
+    #[gpui::test]
+    fn pm406_reentrant_frame_request_keeps_the_idle_source_awake(cx: &mut TestAppContext) {
+        struct Nested {
+            paint: Rc<RefCell<Option<Box<dyn FnOnce()>>>>,
+        }
+        impl Render for Nested {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let paint = self.paint.clone();
+                div().size_full().child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, _, _| {
+                            if let Some(paint) = paint.borrow_mut().take() {
+                                paint();
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+            }
+        }
+        let paint = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let paint = paint.clone();
+            move |_, _| Nested { paint }
+        });
+        let platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        *paint.borrow_mut() = Some(Box::new(move || {
+            let before = platform.frame_wake_count();
+            platform.simulate_frame_request(RequestFrameOptions::default());
+            assert!(
+                platform.frame_wake_count() > before,
+                "a request deferred during paint still needs a later tick"
+            );
+        }));
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
     }
 
     /// A frame request that arrives while next-frame callbacks are pending
