@@ -9,6 +9,25 @@ use std::{
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
+/// The app's own way to the agent's render path, for a still the person
+/// selects (the composer's Select part of the screen).
+static STILLS: std::sync::OnceLock<Arc<Mutex<Automation>>> = std::sync::OnceLock::new();
+/// A PNG of `project`'s composition at `time`, at most `width` pixels wide,
+/// rendered as the agent's render_frames renders. Off the main thread.
+pub fn still(project: &str, time: f64, width: u32) -> std::result::Result<Vec<u8>, String> {
+    use base64::Engine;
+    let automation = STILLS.get().ok_or("Frame capture isn't ready yet.")?;
+    let out = automation
+        .lock()
+        .map_err(|_| "Frame capture is unavailable.".to_owned())?
+        .render(project, &serde_json::json!({"times": [time], "width": width}))
+        .map_err(|e| e.to_string())?;
+    let image = out.images.first().ok_or("The frame couldn't be rendered.")?;
+    base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .map_err(|e| e.to_string())
+}
+
 /// The tool host shared by every connection to this app.
 #[derive(Clone)]
 pub struct Tools {
@@ -16,6 +35,10 @@ pub struct Tools {
     pub automation: Arc<Mutex<Automation>>,
 }
 impl Tools {
+    /// Lets `still` render through this host (once, at startup).
+    pub fn keep_for_stills(&self) {
+        let _ = STILLS.set(self.automation.clone());
+    }
     pub fn new(host: Arc<Host>, exports: PathBuf) -> Self {
         Self {
             automation: Arc::new(Mutex::new(Automation::attached(host.clone(), exports))),

@@ -45,10 +45,18 @@ export interface SurfaceProps {
   "data-pm-component"?: string;
   "data-pm-slot"?: string;
   /** How the native host presents this element: a borderless bar pop-up
-   * (inline, or quiet: no wash), a row whose selection spans its whole band,
+   * (inline, or quiet: no wash), a pull-down titled with its value (a
+   * header's picker), a row whose selection spans its whole band,
    * code (a command, path or tool output, in the monospaced face), or a
    * plate (the grading material a Colour panel group stands on). */
-  "data-pm-variant"?: "inline" | "quiet" | "band" | "code" | "plate" | "glass";
+  "data-pm-variant"?:
+    | "inline"
+    | "quiet"
+    | "pulldown"
+    | "band"
+    | "code"
+    | "plate"
+    | "glass";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
   /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports
