@@ -927,3 +927,12 @@
     display: block;
   }
 }
+
+/* Panel documents keep native scrolling, without scrollbar chrome, including
+   nested extension scroll containers and style opt-outs (Electron v1.2). */
+html, body, body * {
+  scrollbar-width: none !important;
+}
+html::-webkit-scrollbar, body::-webkit-scrollbar, body *::-webkit-scrollbar {
+  display: none !important;
+}

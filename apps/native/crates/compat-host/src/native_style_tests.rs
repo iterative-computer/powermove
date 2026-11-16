@@ -392,3 +392,14 @@ fn v1_extension_tokens_resolve() {
         assert!(css[none..].contains(&format!("{name}:initial;")), "{name}");
     }
 }
+
+#[test]
+fn panel_descendants_hide_scrollbars_without_disabling_scrolling() {
+    let css = include_str!("pm-native.css");
+    let rule = css.split("/* Panel documents").nth(1).unwrap();
+    assert!(rule.contains("body *"));
+    assert!(rule.contains("scrollbar-width: none !important"));
+    assert!(rule.contains("body *::-webkit-scrollbar"));
+    assert!(rule.contains("display: none !important"));
+    assert!(!rule.contains("overflow:"));
+}
