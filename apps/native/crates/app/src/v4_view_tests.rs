@@ -62,7 +62,10 @@ pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
         .unwrap();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A mount waits its turn in the process's shared heap account while
+    // other tests' isolates hold it (the whole suite runs in parallel), then
+    // runs: the time in line counts here too.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(result) = ticket.try_take() {
             result.expect("built-in mount");
