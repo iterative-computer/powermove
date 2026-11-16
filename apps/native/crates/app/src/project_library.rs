@@ -100,6 +100,8 @@ pub struct ProjectLibrary {
     /// tried again and again).
     idle_posters: std::collections::VecDeque<(String, (u32, u32), Option<f64>)>,
     idle_tried: std::collections::HashSet<String>,
+    /// Projects whose poster could not be drawn: their card says so.
+    idle_failed: std::collections::HashSet<String>,
     idle_running: bool,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
@@ -205,6 +207,7 @@ impl ProjectLibrary {
             posters_started: Default::default(),
             idle_posters: Default::default(),
             idle_tried: Default::default(),
+            idle_failed: Default::default(),
             idle_running: false,
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
@@ -688,7 +691,7 @@ mod fit_title_tests {
     fn titles_a_cut_makes_alike_keep_their_ends() {
         let titles: Vec<String> = [
             "Accept — Recovered — Native",
-            "Accept — Recovered — Native — Native",
+            "Accept — Recovered — Native — Native 3",
             "Accept — Recovered — Native 2",
             "Paper",
         ]
@@ -697,7 +700,7 @@ mod fit_title_tests {
         let a = super::fit_title(&titles[1], &titles, 20);
         let b = super::fit_title(&titles[2], &titles, 20);
         assert_ne!(a, b);
-        assert!(a.ends_with("Native — Native") && a.contains('…'), "{a}");
+        assert!(a.ends_with("Native 3") && a.contains('…'), "{a}");
         assert!(b.ends_with("Native 2"), "{b}");
         // Short or alone: as it is (the card cuts its end if it must).
         assert_eq!(super::fit_title("Paper", &titles, 20), "Paper");
@@ -1073,6 +1076,7 @@ impl ProjectLibrary {
                 .timer(std::time::Duration::from_millis(1200))
                 .await;
             let Some(renderer) = this.update(cx, |_, _| factory(&id)).ok().flatten() else {
+                crate::diag::line(serde_json::json!({"poster": id, "renderer": "none"}));
                 let _ = this.update(cx, |v, cx| {
                     v.idle_running = false;
                     v.next_idle_poster(cx);
@@ -1084,13 +1088,23 @@ impl ProjectLibrary {
             let png = cx
                 .background_executor()
                 .spawn(async move {
-                    let stored = pm_kernel::LibraryStore::open(&profile).load(&poster).ok()??;
+                    let stored = match pm_kernel::LibraryStore::open(&profile).load(&poster) {
+                        Ok(Some(stored)) => stored,
+                        other => {
+                            crate::diag::line(serde_json::json!({"poster": poster, "load": format!("{other:?}").chars().take(300).collect::<String>()}));
+                            return None;
+                        }
+                    };
                     let published = Arc::new(pm_kernel::detached_publication(&poster, stored.project));
                     crate::poster::write(&renderer, Some(published), &dir, &poster, taken, size, duration)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.idle_running = false;
+                if png.is_none() {
+                    v.idle_failed.insert(id.clone());
+                    cx.notify();
+                }
                 if let Some(png) = png {
                     v.thumbs.insert(
                         id.clone(),
@@ -1355,12 +1369,13 @@ impl ProjectLibrary {
                         .when(fills, |picture| picture.rounded(px(inner)))
                         .opacity(fade.clamp(0., 1.)),
                 ),
+                // No picture: while its poster is on its way, the empty
+                // frame; once none could be drawn, say so.
                 None => page.bg(rgb(c.panel)).child(
                     div()
                         .text_role(t, Text::Caption)
-                        .font_features(kit::tabular())
                         .text_color(ink(c.text, tr.faint))
-                        .children(row.dimensions().map(|(w, h)| format!("{w} × {h}"))),
+                        .when(self.idle_failed.contains(&row.id), |d| d.child("No Preview")),
                 ),
             });
         // Under the pointer: a round "more" button at the page's top

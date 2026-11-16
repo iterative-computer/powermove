@@ -47,6 +47,7 @@ pub mod symbol;
 pub mod text;
 pub mod theme;
 pub mod transient;
+pub mod typing;
 #[cfg(target_os = "macos")]
 pub mod view;
 pub mod welcome;

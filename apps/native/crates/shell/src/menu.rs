@@ -818,3 +818,52 @@ mod sheet_tests {
         assert!(runs_beside_sheet("contextUndo"));
     }
 }
+
+#[cfg(test)]
+mod every_menu_tests {
+    use super::*;
+    /// Every menu the app builds, built: the menu bar, each submenu the shell
+    /// fills (Tools, 3D, New, Add 3D Layer), the palette's extra rows and
+    /// rows, and every key equivalent. A row that names something absent
+    /// (a command, an equivalent, a keymap chord) fails here, not at launch.
+    #[test]
+    fn every_menu_and_submenu_builds() {
+        let bar = menus();
+        assert!(!bar.is_empty());
+        let mut rows = 0;
+        for (title, items) in &bar {
+            assert!(!title.is_empty());
+            for item in items {
+                if item.label.is_empty() {
+                    continue; // a separator
+                }
+                rows += 1;
+                let label = &item.label;
+                assert!(!item.command.is_empty(), "{title} › {label} runs nothing");
+                if !item.chord.is_empty() {
+                    let (key, _) = accelerator(&item.chord);
+                    let chord = &item.chord;
+                    assert!(!key.is_empty(), "{title} › {label}: chord {chord}");
+                }
+            }
+        }
+        assert!(rows > 50, "{rows} rows");
+        for (name, sub) in [
+            ("tools", tools()),
+            ("view3d", view3d()),
+            ("newLayers", new_layers()),
+            ("new3d", new3d()),
+        ] {
+            assert!(!sub.is_empty(), "{name}");
+            for item in sub.iter().filter(|i| !i.label.is_empty()) {
+                assert!(!item.command.is_empty(), "{name} › {}", item.label);
+            }
+        }
+        assert!(!extras().is_empty());
+        assert!(!palette_rows().is_empty());
+        for e in equivalents() {
+            let (key, _) = accelerator(&e.accelerator);
+            assert!(!key.is_empty(), "{} ({})", e.command, e.accelerator);
+        }
+    }
+}
