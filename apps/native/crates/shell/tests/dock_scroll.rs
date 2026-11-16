@@ -5,8 +5,8 @@ use gpui::{
 };
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
+    Command,
     layout::{Group, Layout},
-    native::Command,
     view::Editor,
 };
 use std::sync::Arc;
