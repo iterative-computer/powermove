@@ -25,20 +25,39 @@ pub fn layer_count(snapshot: &Snapshot) -> usize {
         .map_or(0, |comp| pm_kernel::model::layers_of(comp).count())
 }
 
-/// Keyframes in the open composition (status bar count); O(nodes), so it
-/// runs wherever `list` runs.
+/// Keyframes in the open composition (status bar count), as v1 counts
+/// them: every key of every animated property, with or without an id (a
+/// path's vertex keys carry none; Paper has 400). O(nodes), so it runs
+/// wherever `list` runs.
 pub fn keyframe_count(snapshot: &Snapshot) -> usize {
-    snapshot
-        .root()
-        .and_then(|root| {
-            let open = pm_kernel::model::open_comp_id(root);
-            pm_kernel::model::comp_node(root, open.as_deref())
-        })
-        .map_or(0, |comp| {
-            let mut ids = std::collections::HashSet::new();
-            pm_kernel::model::keyframe_ids(comp, &mut ids);
-            ids.len()
-        })
+    use pm_model::NodeKind;
+    let Some(comp) = snapshot.root().and_then(|root| {
+        let open = pm_kernel::model::open_comp_id(root);
+        pm_kernel::model::comp_node(root, open.as_deref())
+    }) else {
+        return 0;
+    };
+    // Its layers only (v1: `project.layers`), not compositions nested in it.
+    let Some(layers) = comp.get("layers") else {
+        return 0;
+    };
+    let mut count = 0;
+    let mut todo = vec![layers];
+    while let Some(node) = todo.pop() {
+        match node.kind() {
+            NodeKind::Object(members) => {
+                for (key, value) in members.iter() {
+                    match value.kind() {
+                        NodeKind::Array(keys) if key.as_str() == Some("kf") => count += keys.len(),
+                        _ => todo.push(value),
+                    }
+                }
+            }
+            NodeKind::Array(items) => todo.extend(items.iter()),
+            _ => {}
+        }
+    }
+    count
 }
 
 pub fn list(snapshot: &Snapshot) -> Vec<LayerInfo> {
