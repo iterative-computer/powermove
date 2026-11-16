@@ -380,7 +380,7 @@ pub struct GizmoSurface {
     effect_drag: Option<effect_handles::Drag>,
     effect_stop: Option<(usize, usize)>,
     effect_picker: Option<(usize, usize)>,
-    effect_colour: Option<(Entity<crate::colour_picker::Picker>, Subscription)>,
+    effect_colour: Option<(Entity<crate::colour_picker::Picker>, Subscription, AnyWindowHandle)>,
     /// The layer a click would select under the pointer, outlined
     /// (viewer.ts hoverTargetId): its id and composition corners.
     hover_box: Option<(String, [[f64; 2]; 4])>,

@@ -287,7 +287,7 @@ impl GizmoSurface {
         if self.effect_picker.is_some() {
             self.effect_picker = self.effect_stop;
             if self.effect_picker.is_none() {
-                if let Some((picker, _)) = self.effect_colour.take() {
+                if let Some((picker, _, _)) = self.effect_colour.take() {
                     picker.update(cx, |p, _| p.cancel_pending());
                 }
             }
@@ -795,12 +795,17 @@ impl GizmoSurface {
             Edit::Finish(commit) => g.effects_finish_colour(*commit, cx),
             Edit::Sample => (),
         });
-        self.effect_colour = Some((picker, subscription));
+        self.effect_colour = Some((picker, subscription, window.window_handle()));
         cx.notify();
     }
     pub(super) fn effects_finish_colour(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if let Some((picker, _)) = self.effect_colour.take() {
+        if let Some((picker, _, handle)) = self.effect_colour.take() {
             picker.update(cx, |p, _| p.cancel_pending());
+            if let Some(focus) = self.focus.clone() {
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| focus.focus(window, cx));
+                });
+            }
         }
         self.effect_picker = None;
         if self.effect_drag.take().is_some_and(|d| d.active) {
@@ -811,7 +816,7 @@ impl GizmoSurface {
         cx.notify();
     }
     pub(super) fn effects_picker_element(&self, cx: &App) -> Option<AnyElement> {
-        let (picker, _) = self.effect_colour.as_ref()?;
+        let (picker, _, _) = self.effect_colour.as_ref()?;
         let b = self.effects_picker_bounds(self.host.frame(self.bounds, cx)?)?;
         Some(
             deferred(
@@ -827,7 +832,7 @@ impl GizmoSurface {
     }
     #[cfg(test)]
     pub fn effect_colour_entity(&self) -> Option<Entity<crate::colour_picker::Picker>> {
-        self.effect_colour.as_ref().map(|(p, _)| p.clone())
+        self.effect_colour.as_ref().map(|(p, _, _)| p.clone())
     }
 }
 

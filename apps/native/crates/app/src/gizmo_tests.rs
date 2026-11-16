@@ -3221,6 +3221,12 @@ fn gradient_stop_double_click_opens_anchored_picker_and_edits_rgba(cx: &mut Test
     let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
     s.refresh(cx);
     assert!(s.surface.read_with(&s.vcx,|g,_|g.effect_colour_entity()).is_none());
+    // Closing the picker returns keyboard editing to its selected stop.
+    s.vcx.simulate_keystrokes("backspace");
+    let g=s.surface.clone();settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));s.refresh(cx);
+    assert_eq!(stop_values(&s).len(),2);
+    s.undo(cx);
+    assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,0.25]);
     s.undo(cx);
     assert_eq!(stop_values(&s)[1].color,[0.5,0.,0.5,1.]);
     click(&mut s,cx,at,Modifiers::none(),2);
