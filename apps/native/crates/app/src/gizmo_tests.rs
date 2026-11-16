@@ -3210,24 +3210,24 @@ fn gradient_stop_double_click_opens_anchored_picker_and_edits_rgba(cx: &mut Test
         .expect("anchored picker");
     let anchor = s.point_of(at);
     assert!(f32::from(b.origin.y - anchor.y).abs() < 170.);
-    // Drag the R slider from 50% to 100%.
-    let from = b.origin + point(px(100.), px(42.));
-    s.drag(cx, from, point(px(72.), px(0.)), Modifiers::none());
-    assert_eq!(stop_values(&s)[1].color, [1., 0., 0.5, 1.]);
-    // Alpha is a separate gesture and undo item.
-    let from=b.origin+point(px(172.),px(114.));
-    s.drag(cx,from,point(px(-108.),px(0.)),Modifiers::none());
+    let picker = s.surface.read_with(&s.vcx, |g,_|g.effect_colour_entity()).expect("shared picker");
+    picker.update(&mut s.vcx, |p,cx| p.edit_rgba([1.,0.,0.5,1.],cx));
+    let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
+    assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,1.]);
+    picker.update(&mut s.vcx, |p,cx|p.edit_rgba([1.,0.,0.5,0.25],cx));
+    let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
     assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,0.25]);
-    s.undo(cx);assert_eq!(stop_values(&s)[1].color,[1.,0.,0.5,1.]);
+    picker.update(&mut s.vcx, |p,cx|p.finish(true,cx));
+    let g=s.surface.clone(); settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));
+    s.refresh(cx);
+    assert!(s.surface.read_with(&s.vcx,|g,_|g.effect_colour_entity()).is_none());
     s.undo(cx);
-    assert_eq!(stop_values(&s)[1].color, [0.5, 0., 0.5, 1.]);
-    s.vcx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(
-        s.surface
-            .read_with(&s.vcx, |g, cx| g.effect_picker_rect(cx))
-            .is_none()
-    );
+    assert_eq!(stop_values(&s)[1].color,[0.5,0.,0.5,1.]);
+    click(&mut s,cx,at,Modifiers::none(),2);
+    let picker=s.surface.read_with(&s.vcx,|g,_|g.effect_colour_entity()).unwrap();
+    picker.update(&mut s.vcx,|p,cx|{p.edit_rgba([0.,1.,0.,1.],cx);p.finish(false,cx);});
+    let g=s.surface.clone();settle(cx,move|cx|g.read_with(cx,|g,_|g.idle()));s.refresh(cx);
+    assert_eq!(stop_values(&s)[1].color,[0.5,0.,0.5,1.]);
 }
 
 #[gpui::test]

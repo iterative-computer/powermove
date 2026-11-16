@@ -377,6 +377,7 @@ pub struct GizmoSurface {
     effect_drag: Option<effect_handles::Drag>,
     effect_stop: Option<(usize, usize)>,
     effect_picker: Option<(usize, usize)>,
+    effect_colour: Option<(Entity<crate::colour_picker::Picker>, Subscription)>,
     /// The layer a click would select under the pointer, outlined
     /// (viewer.ts hoverTargetId): its id and composition corners.
     hover_box: Option<(String, [[f64; 2]; 4])>,
@@ -661,6 +662,7 @@ impl GizmoSurface {
             effect_drag: None,
             effect_stop: None,
             effect_picker: None,
+            effect_colour: None,
             hover_box: None,
             hover_out: false,
             hover_next: None,
@@ -1774,6 +1776,7 @@ impl GizmoSurface {
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
+        if self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_some()) { return; }
         if let Some(drag) = self.effect_drag.take() {
             if drag.removed { self.effect_stop = None; self.effect_picker = None; }
             if drag.active { self.queue.push_back(Job::Finish(commit)); self.pump(cx); }
@@ -1835,6 +1838,9 @@ impl GizmoSurface {
         }
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.effect_colour.is_some() {
+            self.effects_finish_colour(false, cx); return true;
+        }
         if self.effect_picker.take().is_some() {
             if self.effect_drag.is_some() { self.on_up(false, None, cx); }
             cx.notify(); return true;
@@ -2971,6 +2977,7 @@ impl Render for GizmoSurface {
                 )
                 .size_full(),
             )
+            .children(self.effects_picker_element(cx))
     }
 }
 

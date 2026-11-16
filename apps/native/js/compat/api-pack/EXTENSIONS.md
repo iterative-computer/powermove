@@ -1109,8 +1109,8 @@ normal `x.<key>` channels.
 On the viewer, click an empty part of the line to insert the interpolated colour.
 Drag a swatch along the line to move it. Drag it more than 24 screen points off
 the line, or select it and press Delete, to remove it; two stops always remain.
-Double-click a swatch to open its anchored RGBA slider popover. Escape closes
-the popover; each slider drag is one undo step. A selected swatch has an accent
+Double-click a swatch to open the shared anchored colour picker. Its live
+previews form one undo step when committed; Escape cancels the open edit. A selected swatch has an accent
 ring. The white endpoint centres move the line independently of its stops.
 
 New Gradient Ramp instances use revision 3 and this collection API. Saved

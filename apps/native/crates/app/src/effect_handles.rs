@@ -79,21 +79,6 @@ fn stop_rgba(color: [f64; 4]) -> Rgba {
         (v << 8) | ((c.clamp(0., 1.) * 255.).round() as u32)
     }))
 }
-fn picker_channel(bounds: Bounds<Pixels>, at: Point<Pixels>) -> Option<usize> {
-    let y = f32::from(at.y - bounds.origin.y) - 32.;
-    let x = f32::from(at.x - bounds.origin.x);
-    (y >= 0. && y < 96. && x >= 24. && x <= 176.).then_some((y / 24.) as usize)
-}
-fn picker_origin(anchor: [f64; 2], view: [f64; 4]) -> [f64; 2] {
-    [
-        (anchor[0] - 94.).clamp(view[0], (view[0] + view[2] - 188.).max(view[0])),
-        if anchor[1] + 166. <= view[1] + view[3] {
-            anchor[1] + 18.
-        } else {
-            (anchor[1] - 166.).max(view[1])
-        },
-    ]
-}
 
 impl GizmoSurface {
     pub(super) fn effects_reread(&mut self, cx: &mut Context<Self>) {
@@ -301,6 +286,9 @@ impl GizmoSurface {
         });
         if self.effect_picker.is_some() {
             self.effect_picker = self.effect_stop;
+            if self.effect_picker.is_none() {
+                self.effect_colour = None;
+            }
         }
         cx.notify();
     }
@@ -384,29 +372,14 @@ impl GizmoSurface {
             return false;
         }
         let at = self.to_comp(event.position, frame);
-        if let Some((i, j)) = self.effect_picker {
-            if let Some(bounds) = self.effects_picker_bounds(frame) {
-                if bounds.contains(&event.position) {
-                    if let Some(focus) = &self.focus {
-                        window.focus(focus, cx);
-                    }
-                    if let Some(channel) = picker_channel(bounds, event.position) {
-                        self.effect_drag = Some(Drag {
-                            index: i,
-                            part: j + 2,
-                            original: self.effect_controls[i].clone(),
-                            time: self.host.time(cx),
-                            active: false,
-                            removed: false,
-                            color_channel: Some(channel),
-                        });
-                        self.effects_color_at(event.position, frame, cx);
-                    }
-                    return true;
-                }
+        if self.effect_colour.is_some() {
+            if self
+                .effects_picker_bounds(frame)
+                .is_some_and(|b| b.contains(&event.position))
+            {
+                return true;
             }
-            self.effect_picker = None;
-            cx.notify();
+            self.effects_finish_colour(true, cx);
         }
         let double = event.click_count >= 2;
         let hit = if double {
@@ -423,7 +396,7 @@ impl GizmoSurface {
             if part >= 2 {
                 self.effect_stop = Some((index, part - 2));
                 if double {
-                    self.effect_picker = self.effect_stop;
+                    self.effects_open_colour(index, part - 2, window, cx);
                     cx.notify();
                     return true;
                 }
@@ -472,6 +445,9 @@ impl GizmoSurface {
         let Some((i, j)) = self.effect_stop else {
             return false;
         };
+        if self.effect_colour.is_some() {
+            return false;
+        }
         if self.effect_drag.is_some() {
             return true;
         }
@@ -492,7 +468,11 @@ impl GizmoSurface {
     }
     pub(super) fn effects_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
         if self.effect_drag.is_some() && self.host.playing(cx) {
-            self.on_up(false, None, cx);
+            if self.effect_colour.is_some() {
+                self.effects_finish_colour(false, cx);
+            } else {
+                self.on_up(false, None, cx);
+            }
             return true;
         }
         if self
@@ -500,9 +480,6 @@ impl GizmoSurface {
             .as_ref()
             .is_some_and(|d| d.color_channel.is_some())
         {
-            if let Some(frame) = self.host.frame(self.bounds, cx) {
-                self.effects_color_at(event.position, frame, cx);
-            }
             return true;
         }
         let Some(mut drag) = self.effect_drag.take() else {
@@ -727,7 +704,6 @@ impl GizmoSurface {
                 );
             }
         }
-        self.effects_picker_paint(frame, window, cx);
     }
 }
 
@@ -774,113 +750,90 @@ impl GizmoSurface {
         } else {
             [0., 0., 640., 360.]
         };
-        let at = picker_origin(anchor, view);
+        let w = f64::from(self.tokens.metrics.color_picker_width);
+        let h = 320.;
         Some(Bounds::new(
-            point(px(at[0] as f32), px(at[1] as f32)),
-            size(px(188.), px(148.)),
+            point(
+                px(anchor[0].clamp(view[0], (view[0] + view[2] - w).max(view[0])) as f32),
+                px((anchor[1] + 18.).min((view[1] + view[3] - h).max(view[1])) as f32),
+            ),
+            size(px(w as f32), px(h as f32)),
         ))
     }
-    fn effects_color_at(&mut self, at: Point<Pixels>, frame: ViewFrame, cx: &mut Context<Self>) {
-        let Some(bounds) = self.effects_picker_bounds(frame) else {
-            return;
+    pub(super) fn effects_open_colour(
+        &mut self,
+        i: usize,
+        j: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::{
+            colour_model::Color,
+            colour_picker::{Edit, Picker},
         };
-        let Some(mut drag) = self.effect_drag.take() else {
-            return;
-        };
-        let Some(channel) = drag.color_channel else {
-            self.effect_drag = Some(drag);
-            return;
-        };
-        let value = (f32::from(at.x - bounds.origin.x) - 28.) / 144.;
-        let j = drag.part - 2;
-        let c = &mut self.effect_controls[drag.index];
-        if let Some(stop) = c.stops.get_mut(j) {
-            stop.color[channel] = f64::from(value.clamp(0., 1.));
-        }
-        if !drag.active {
-            drag.active = true;
-            self.queue
-                .push_back(Job::Begin("Change gradient stop colour"));
-        }
-        if let Some(command) = c.stop_command(drag.time) {
-            self.queue.push_back(Job::Step(vec![command], true));
-        }
-        self.effect_drag = Some(drag);
-        self.pump(cx);
+        self.effect_picker = Some((i, j));
+        let color = Color(self.effect_controls[i].stops[j].color.map(|v| v as f32));
+        let tokens = self.tokens.clone();
+        let picker = cx.new(|cx| Picker::new(color, tokens, window, None, cx));
+        let subscription = cx.subscribe(&picker, |g, entity, event, cx| match event {
+            Edit::Begin => {
+                if let Some((i, j)) = g.effect_picker {
+                    g.effect_drag = Some(Drag {
+                        index: i,
+                        part: j + 2,
+                        original: g.effect_controls[i].clone(),
+                        time: g.host.time(cx),
+                        active: true,
+                        removed: false,
+                        color_channel: Some(0),
+                    });
+                    g.queue.push_back(Job::Begin("Change gradient stop colour"));
+                    g.pump(cx);
+                }
+            }
+            Edit::Value(_) => {
+                if let Some((i, j)) = g.effect_picker {
+                    g.effect_controls[i].stops[j].color = entity.read(cx).color.0.map(f64::from);
+                    if let Some(command) = g.effect_controls[i].stop_command(g.host.time(cx)) {
+                        g.queue.push_back(Job::Step(vec![command], true));
+                        g.pump(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            Edit::Finish(commit) => g.effects_finish_colour(*commit, cx),
+            Edit::Sample => (),
+        });
+        self.effect_colour = Some((picker, subscription));
         cx.notify();
     }
-    fn effects_picker_paint(&self, frame: ViewFrame, window: &mut Window, cx: &mut App) {
-        let Some(b) = self.effects_picker_bounds(frame) else {
-            return;
-        };
-        let Some((i, j)) = self.effect_picker else {
-            return;
-        };
-        let color = self.effect_controls[i].stops[j].color;
-        window.paint_quad(
-            PaintQuad::new(b)
-                .corner_radii(px(8.))
-                .background(rgb(self.tokens.colors.floating))
-                .border_widths(1f32)
-                .border_color(rgb(self.tokens.colors.secondary)),
-        );
-        let text = |text: String, at: Point<Pixels>, window: &mut Window, cx: &mut App| {
-            let run = TextRun {
-                len: text.len(),
-                font: window.text_style().font(),
-                color: rgb_to_hsla(rgb(self.tokens.colors.text)),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-                letter_spacing: None,
-            };
-            let line = window
-                .text_system()
-                .shape_line(text.into(), px(11.), &[run]);
-            let _ = line.paint(at, px(16.), TextAlign::Left, None, window, cx);
-        };
-        let hex = format!(
-            "#{:02X}{:02X}{:02X}  {}%",
-            (color[0] * 255.).round() as u8,
-            (color[1] * 255.).round() as u8,
-            (color[2] * 255.).round() as u8,
-            (color[3] * 100.).round() as u32
-        );
-        text(hex, b.origin + point(px(12.), px(8.)), window, cx);
-        for channel in 0..4 {
-            let y = b.origin.y + px(36. + channel as f32 * 24.);
-            text(
-                ["R", "G", "B", "A"][channel].into(),
-                point(b.origin.x + px(10.), y - px(2.)),
-                window,
-                cx,
-            );
-            for n in 0..36 {
-                let mut sample = color;
-                sample[channel] = n as f64 / 35.;
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(b.origin.x + px(28. + n as f32 * 4.), y),
-                        size(px(4.), px(12.)),
-                    ),
-                    stop_rgba(sample),
-                ));
-            }
-            let at = point(
-                b.origin.x + px(28. + color[channel] as f32 * 144.),
-                y + px(6.),
-            );
-            window.paint_quad(
-                PaintQuad::new(Bounds::new(
-                    at - point(px(4.), px(9.)),
-                    size(px(8.), px(18.)),
-                ))
-                .corner_radii(px(3.))
-                .background(rgb(0xffffff))
-                .border_widths(1f32)
-                .border_color(rgb(0x252525)),
-            );
+    pub(super) fn effects_finish_colour(&mut self, commit: bool, cx: &mut Context<Self>) {
+        self.effect_colour = None;
+        self.effect_picker = None;
+        if self.effect_drag.take().is_some_and(|d| d.active) {
+            self.queue.push_back(Job::Finish(commit));
+            self.pump(cx);
         }
+        self.effects_reread(cx);
+        cx.notify();
+    }
+    pub(super) fn effects_picker_element(&self, cx: &App) -> Option<AnyElement> {
+        let (picker, _) = self.effect_colour.as_ref()?;
+        let b = self.effects_picker_bounds(self.host.frame(self.bounds, cx)?)?;
+        Some(
+            deferred(
+                anchored()
+                    .position(b.origin)
+                    .snap_to_window()
+                    .child(picker.clone()),
+            )
+            .priority(3)
+            .into_any_element(),
+        )
+    }
+    #[cfg(test)]
+    pub fn effect_colour_entity(&self) -> Option<Entity<crate::colour_picker::Picker>> {
+        self.effect_colour.as_ref().map(|(p, _)| p.clone())
     }
 }
 
@@ -921,7 +874,7 @@ mod captures {
         image: Arc<Image>,
     }
     impl Render for Scene {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let gizmo = self.gizmo.clone();
 
             div()
@@ -932,6 +885,7 @@ mod captures {
                         .absolute()
                         .size_full(),
                 )
+                .children(self.gizmo.read(cx).effects_picker_element(cx))
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -1039,7 +993,7 @@ mod captures {
             );
             let kernel = actor.handle();
             let window = cx
-                .open_window(size(px(640.), px(360.)), |_, cx| {
+                .open_window(size(px(640.), px(360.)), |window, cx| {
                     let gizmo = cx.new(|cx| {
                         let mut g = GizmoSurface::new(
                             kernel,
@@ -1054,7 +1008,7 @@ mod captures {
                         assert_eq!(g.effect_stop_values().len(), 3);
                         g.effect_stop = Some((0, 1));
                         if radial {
-                            g.effect_picker = Some((0, 1));
+                            g.effects_open_colour(0, 1, window, cx);
                         }
                         g
                     });
@@ -1073,25 +1027,5 @@ mod captures {
                 ))
                 .unwrap();
         }
-    }
-}
-
-#[cfg(test)]
-mod picker_tests {
-    use super::*;
-    #[::core::prelude::v1::test]
-    fn picker_tracks_stop_and_stays_inside_viewer() {
-        assert_eq!(
-            picker_origin([200., 100.], [0., 0., 640., 360.]),
-            [106., 118.]
-        );
-        assert_eq!(
-            picker_origin([630., 350.], [0., 0., 640., 360.]),
-            [452., 184.]
-        );
-        let b = Bounds::new(point(px(10.), px(20.)), size(px(188.), px(148.)));
-        assert_eq!(picker_channel(b, point(px(50.), px(60.))), Some(0));
-        assert_eq!(picker_channel(b, point(px(50.), px(132.))), Some(3));
-        assert_eq!(picker_channel(b, point(px(50.), px(30.))), None);
     }
 }
