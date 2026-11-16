@@ -938,10 +938,9 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409), Settings' as well; in a
+                    // row's value well it is the small size.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -1268,7 +1267,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -1807,6 +1806,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -1837,8 +1840,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -2429,7 +2439,13 @@ impl SurfaceView {
                 .and_then(|m| m.get("rowFloor"))
                 .and_then(Value::as_f64)
                 .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+                .map_or(0., |rows| {
+                    // Rows of a virtual list are its own height.
+                    let row = node
+                        .virtual_window
+                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                    rows as f32 * row
+                });
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -3753,7 +3769,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {

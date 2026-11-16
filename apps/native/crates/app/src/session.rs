@@ -3653,7 +3653,7 @@ impl Controller {
                     cx.notify();
                 }
             },
-            "cancel" | "deselect" if self.importing.is_some() => {
+            "cancelImport" | "cancel" | "deselect" if self.importing.is_some() => {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                 }

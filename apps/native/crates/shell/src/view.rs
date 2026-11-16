@@ -471,16 +471,29 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        self.workspaces
-            .offered()
+        let offered = self.workspaces.offered();
+        let names: Vec<String> = offered
+            .iter()
+            .map(|r| workspace::record_name(r).to_owned())
+            .collect();
+        offered
             .into_iter()
-            .map(|r| {
+            .zip(workspace::told_apart(&names))
+            .map(|(r, name)| {
                 (
                     workspace::record_id(r).unwrap_or_default().to_owned(),
-                    workspace::record_name(r).to_owned(),
+                    name,
                     workspace::is_builtin(r),
                 )
             })
+            .collect()
+    }
+    /// The names of the workspaces there are, as saved.
+    fn workspace_names(&self) -> Vec<String> {
+        self.workspaces
+            .offered()
+            .into_iter()
+            .map(|r| workspace::record_name(r).to_owned())
             .collect()
     }
     /// The active workspace record.
@@ -824,12 +837,16 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow()
-                        .prompt_workspace_name(workspace::record_name(&self.record));
+                    h.borrow().prompt_workspace_name(&workspace::save_name(
+                        workspace::record_name(&self.record),
+                        &self.workspace_names(),
+                    ));
                 }
                 Ok(())
             }
             ("layout", "save") => layout::layout_name(rest).map(|name| {
+                // Never a second workspace of a name already there.
+                let name = workspace::free_name(&name, &self.workspace_names());
                 let mut copy = workspace::write(&self.layout, &self.record);
                 copy["id"] = workspace::new_id().into();
                 copy["name"] = name.clone().into();

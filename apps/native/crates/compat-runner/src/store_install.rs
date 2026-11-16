@@ -1,8 +1,11 @@
-//! Installing a release from the Store. The native installer accepts a release
-//! only with a host-pinned publisher signature over its exact file inventory,
-//! naming the extension, release and version the person chose, and an update
-//! only to a newer version than the one installed; see
-//! docs/native/store-host.md for what the server has to publish.
+//! Installing a release from the Store. With a host-pinned publisher key the
+//! native installer accepts a release only with that key's signature over its
+//! exact file inventory; see docs/native/store-host.md for what the server
+//! has to publish. While the Store signs nothing, a release is installed as
+//! the shipped app installs one: read from the Store origin only, its archive
+//! must hash to the registry's record and its files to the record's git tree.
+//! Either way it must name the extension, release and version the person
+//! chose, and an update must be newer than the one installed.
 use crate::{KernelStoreAdapter, StoreAuthority, net, store_host::STORE_MARKER};
 use pm_runtime_v8::{Error, Result};
 use pm_store_host::artifact::{FileArtifacts, SignedRelease, TrustStore};
@@ -68,9 +71,8 @@ fn dev() -> Option<&'static DevStore> {
     }
 }
 
-/// Whether a new install can succeed. Without a pinned key every one is refused
-/// before download, so the app offers none.
-pub fn available() -> bool {
+/// Whether this build trusts a signing key: releases must then be signed.
+pub fn signed() -> bool {
     !PINNED_KEYS.is_empty() || dev().is_some_and(|dev| dev.key.is_some())
 }
 
@@ -143,7 +145,6 @@ pub fn install_verified(
     archive: &[u8],
     trust: &TrustStore,
 ) -> Result<String> {
-    use pm_store_host::install::StoreKernel;
     let verified = pm_store_host::artifact::verify(
         release,
         archive,
@@ -151,6 +152,20 @@ pub fn install_verified(
         pm_store_host::artifact::Limits::default(),
     )
     .map_err(refusal)?;
+    commit(kernel, profile, namespace, request, &verified)
+}
+/// Commits a verified release through the kernel, then writes exactly its
+/// files, so discovery finds it as it finds any installed extension. One for
+/// another extension, release or version than the request, or not newer than
+/// the release installed now, is refused before anything changes.
+fn commit(
+    kernel: &dyn StoreAuthority,
+    profile: &Path,
+    namespace: &str,
+    request: &Request,
+    verified: &pm_store_host::artifact::VerifiedRelease,
+) -> Result<String> {
+    use pm_store_host::install::StoreKernel;
     let statement = verified.statement();
     if statement.release_id != request.release
         || statement.extension.as_str() != request.extension
@@ -176,7 +191,7 @@ pub fn install_verified(
     // An update replaces the release this app installed before, at its revision.
     let expected = current.map(|state| state.revision);
     let mut artifacts = FileArtifacts::new(profile.join("store-artifacts")).map_err(refusal)?;
-    pm_store_host::install::install(&mut adapter, &mut artifacts, namespace, &verified, expected)
+    pm_store_host::install::install(&mut adapter, &mut artifacts, namespace, verified, expected)
         .map_err(refusal)?;
     let repo = request.repo;
     let id = statement.extension.as_str().to_owned();
@@ -281,15 +296,16 @@ pub fn archive(kernel: &dyn StoreAuthority, profile: &Path, id: &str) -> Result<
 pub struct Source {
     pub origin: &'static str,
     pub trust: TrustStore,
+    /// Releases must carry a trusted signature ([`signed`]); otherwise they
+    /// are admitted by the registry's hashes, as the shipped app does.
+    pub signed: bool,
 }
-/// This build's Store and pins; `None` while no key is pinned.
+/// This build's Store and pins.
 pub fn source() -> Result<Option<Source>> {
-    if !available() {
-        return Ok(None);
-    }
     Ok(Some(Source {
         origin: origin(),
         trust: pinned()?,
+        signed: signed(),
     }))
 }
 
@@ -317,6 +333,9 @@ pub fn install_from(
     }
     let (origin, trust) = (source.origin, &source.trust);
     let base = origin.trim_end_matches('/');
+    if !source.signed {
+        return install_registered(origin, kernel, profile, namespace, request);
+    }
     let envelope = net::get_within(
         origin,
         &format!("{base}/v1/store/releases/{release_id}/signature"),
@@ -350,13 +369,109 @@ pub fn install_from(
     )
 }
 
+/// The shipped app's install of a release the Store does not sign: the
+/// registry's record of it (the person's repository, extension and version),
+/// its owner's publisher id, then the archive, admitted by the record's
+/// hashes ([`pm_store_host::artifact::admit_registry`]).
+fn install_registered(
+    origin: &'static str,
+    kernel: &dyn StoreAuthority,
+    profile: &Path,
+    namespace: &str,
+    request: &Request,
+) -> Result<String> {
+    use pm_store_host::{artifact::RegistryRelease, identity::ExtensionId};
+    let base = origin.trim_end_matches('/');
+    let mismatch = || {
+        Error::Host(
+            "This release isn't the one the Store page offered, so it wasn't installed.".into(),
+        )
+    };
+    let read = |response: pm_runtime_v8::FetchResponse| -> Result<serde_json::Value> {
+        match response.status {
+            200 => serde_json::from_slice(&response.body)
+                .map_err(|_| Error::Invalid("Store release record")),
+            404 => Err(Error::Host(
+                "This release isn't on the Store any more.".into(),
+            )),
+            _ => Err(Error::Host(
+                "Can't reach the Store. Check your connection and try again.".into(),
+            )),
+        }
+    };
+    let release = read(net::get_within(
+        origin,
+        &format!("{base}/v1/store/releases/{}", request.release),
+        1 << 20,
+        30,
+    )?)?;
+    let text = |v: &serde_json::Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
+    if text(&release, "id") != request.release
+        || text(&release, "repoId") != request.repo
+        || text(&release, "version") != request.version
+    {
+        return Err(mismatch());
+    }
+    // The folder is named by the id the registry recorded from the manifest
+    // at publish (a page names its repository's slug, which may differ).
+    let extension = text(&release["manifest"], "id");
+    let request = &Request {
+        extension: &extension,
+        ..*request
+    };
+    // Permissions are decided per publisher: the repository owner's.
+    let versions = read(net::send(
+        pm_runtime_v8::FetchRequest {
+            url: format!("{base}/v1/store/versions"),
+            method: "POST".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: json!({"items":[{"repoId":request.repo,"releaseId":request.release}]})
+                .to_string()
+                .into_bytes(),
+            max_response_bytes: 1 << 20,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        },
+        net::Reach::Origin(origin),
+    )?)?;
+    let owner = &versions["items"][0];
+    if text(owner, "repoId") != request.repo || text(owner, "state") != "ok" {
+        return Err(mismatch());
+    }
+    let record = RegistryRelease {
+        release_id: request.release.to_owned(),
+        extension: ExtensionId::new(request.extension).map_err(|_| mismatch())?,
+        publisher: text(owner, "ownerPublisherId"),
+        tar_sha256: text(&release, "tarSha256"),
+        tree_sha: text(&release, "treeSha"),
+    };
+    let archive = net::get_within(
+        origin,
+        &format!("{base}/v1/store/releases/{}/tar", request.release),
+        MAX_ARCHIVE,
+        120,
+    )?;
+    if archive.status != 200 {
+        return Err(Error::Host("The release archive is unavailable.".into()));
+    }
+    let verified = pm_store_host::artifact::admit_registry(
+        &record,
+        &archive.body,
+        pm_store_host::artifact::Limits::default(),
+    )
+    .map_err(refusal)?;
+    if verified.manifest().version != request.version {
+        return Err(mismatch());
+    }
+    commit(kernel, profile, namespace, request, &verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn a_build_without_keys_has_no_store_to_install_from() {
-        assert!(!available());
-        assert!(source().unwrap().is_none());
+    fn a_build_without_keys_installs_by_the_registry_hashes() {
+        assert!(!super::signed());
+        assert!(!source().unwrap().unwrap().signed);
     }
     fn request<'a>(release: &'a str, version: &'a str) -> Request<'a> {
         Request {
@@ -578,6 +693,7 @@ mod tests {
         let source = Source {
             origin: "http://127.0.0.1:9/",
             trust: TrustStore::default(),
+            signed: true,
         };
         let error = install_from(
             &source,

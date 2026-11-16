@@ -217,7 +217,7 @@ impl CompositionDraft {
     }
     /// The sheet's fields as a draft. Text the person left as it opened keeps
     /// the exact value it shows (a duration of 2206 frames at 30 fps reads
-    /// `73.533` but stays frame-exact); unparseable numbers stay invalid.
+    /// `73.53` but stays frame-exact); unparseable numbers stay invalid.
     pub fn read(&self, text: impl Fn(&str) -> String, background: Option<String>) -> Self {
         let number = |id: &str, original: f64| {
             let typed = text(id);
@@ -338,11 +338,13 @@ fn resolution_labels() -> Vec<String> {
         .collect()
 }
 /// A number as a sheet field shows it: at most three decimals, no trailing zeros.
+/// A number as a field shows it: at most two decimals, none trailing
+/// (`73.53`, `29.97`, `10`). The exact value stays while the text does.
 pub fn number_text(n: f64) -> String {
     if !n.is_finite() {
         return n.to_string();
     }
-    let text = format!("{n:.3}");
+    let text = format!("{n:.2}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
     if text == "-0" {
         "0".into()
