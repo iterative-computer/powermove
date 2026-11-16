@@ -39,6 +39,7 @@ pub struct Picker {
     status: String,
     stops: Vec<FocusHandle>,
     focus_index: usize,
+    draft: Option<(usize, String)>,
     window: AnyWindowHandle,
     menu: Option<bool>,
     menu_index: usize,
@@ -80,6 +81,7 @@ impl Picker {
             status: String::new(),
             stops: (0..23).map(|_| cx.focus_handle().tab_stop(true)).collect(),
             focus_index: 21,
+            draft: None,
             window: window.window_handle(),
             menu: None,
             menu_index: 0,
@@ -117,8 +119,10 @@ impl Picker {
                 field.update(cx, |f, _| f.set_host_navigation(true));
                 p.subscriptions
                     .push(cx.subscribe(&field, move |p, _, event, cx| match event {
-                        TextEvent::Key("focus") | TextEvent::Changed(_) => {
-                            p.focus_index = Self::field_stop(i)
+                        TextEvent::Key("focus") => p.focus_index = Self::field_stop(i),
+                        TextEvent::Changed(text) => {
+                            p.focus_index = Self::field_stop(i);
+                            p.draft = Some((i, text.clone()));
                         }
                         TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown"))
                             if i < 9 =>
@@ -171,10 +175,13 @@ impl Picker {
                                 }
                             }
                         }
-                        TextEvent::Committed(s) => {
+                        TextEvent::Committed(s)
+                            if p.draft.as_ref().is_some_and(|(index, _)| *index == i) =>
+                        {
                             p.input(i, s, cx);
                             if !p.status.is_empty() {
                                 p.status.clear();
+                                p.draft = None;
                                 p.sync_fields(cx);
                             }
                         }
@@ -225,7 +232,8 @@ impl Picker {
         }
         cx.notify();
     }
-    fn copy_row(&self, row: usize, cx: &mut Context<Self>) {
+    fn copy_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.apply_active(cx);
         let mode = if self.p3 {
             ["OKLCH", "OKLab", "P3"][row]
         } else {
@@ -242,12 +250,13 @@ impl Picker {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
     fn apply_active(&mut self, cx: &mut Context<Self>) {
-        if let Some(i) = (0..10).find(|i| Self::field_stop(*i) == self.focus_index) {
-            if let Some(f) = self.fields.get(i) {
-                let text = f.read(cx).editing_text();
-                if text != self.channel_text(i) {
-                    self.input(i, &text, cx);
-                }
+        let pending = self.draft.clone().or_else(|| {
+            let i = (0..10).find(|i| Self::field_stop(*i) == self.focus_index)?;
+            self.fields.get(i).map(|f| (i, f.read(cx).editing_text()))
+        });
+        if let Some((i, text)) = pending {
+            if text != self.channel_text(i) {
+                self.input(i, &text, cx);
             }
         }
     }
@@ -411,6 +420,7 @@ impl Picker {
             None
         };
         if let Some(c) = next {
+            self.draft = None;
             if i == 9 {
                 let text = value.trim().to_lowercase();
                 let inferred = if text.starts_with("color(display-p3") {
@@ -438,7 +448,12 @@ impl Picker {
                 }
             }
             self.status.clear();
-            self.set(c, cx);
+            if c == self.color {
+                self.sync_fields(cx);
+                cx.notify();
+            } else {
+                self.set(c, cx);
+            }
         } else {
             self.status = "Enter a valid color".into();
             cx.notify();
@@ -515,7 +530,12 @@ impl Picker {
         }
     }
     pub fn set(&mut self, c: Color, cx: &mut Context<Self>) {
+        let typed = self.draft.take().is_some();
         if c == self.color {
+            if typed {
+                self.sync_fields(cx);
+                cx.notify();
+            }
             return;
         }
         if !self.active {
@@ -535,6 +555,7 @@ impl Picker {
     }
     /// Invalidate pending sampling before a host removes this view.
     pub fn cancel_pending(&mut self) {
+        self.draft = None;
         self.drag = None;
         self.generation += 1;
         self.sampling = false;
@@ -651,6 +672,7 @@ impl Picker {
                                         Track::Alpha => 6,
                                         Track::Hue => 7,
                                     };
+                                    p.apply_active(cx);
                                     p.stops[i].focus(window, cx);
                                     p.focus_index = i;
                                     p.drag = Some((kind, bounds));
@@ -956,6 +978,7 @@ impl Render for Picker {
                     s.border(px(focus_width)).border_color(rgb(focus_color))
                 })
                 .on_click(cx.listener(move |p, _, _, cx| {
+                    p.apply_active(cx);
                     p.copy_row(row, cx);
                 })),
             );
@@ -988,6 +1011,7 @@ impl Render for Picker {
                     s.border(px(focus_width)).border_color(rgb(focus_color))
                 })
                 .on_click(cx.listener(|p, _, _, cx| {
+                    p.apply_active(cx);
                     p.menu = if p.menu == Some(false) {
                         None
                     } else {
@@ -1098,6 +1122,7 @@ impl Render for Picker {
                                     })
                                     .when(!self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
+                                        p.apply_active(cx);
                                         p.p3 = false;
                                         p.notation = "OKLCH";
                                         p.hue = p.hsv()[0];
@@ -1113,6 +1138,7 @@ impl Render for Picker {
                                     })
                                     .when(self.p3, |d| d.bg(rgb(t.colors.selected_fill)))
                                     .on_click(cx.listener(|p, _, _, cx| {
+                                        p.apply_active(cx);
                                         p.p3 = true;
                                         p.notation = "OKLCH";
                                         p.hue = p.hsv()[0];
@@ -1133,6 +1159,7 @@ impl Render for Picker {
                             s.border(px(focus_width)).border_color(rgb(focus_color))
                         })
                         .on_click(cx.listener(|p, _, _, cx| {
+                            p.apply_active(cx);
                             p.menu = if p.menu == Some(true) {
                                 None
                             } else {
@@ -1153,6 +1180,7 @@ impl Render for Picker {
                             s.border(px(focus_width)).border_color(rgb(focus_color))
                         })
                         .on_click(cx.listener(|p, _, _, cx| {
+                            p.apply_active(cx);
                             p.sampling = true;
                             p.generation += 1;
                             p.status.clear();
@@ -1333,6 +1361,24 @@ mod tests {
                 p.navigate(-1, cx);
                 assert_eq!(p.focus_index, 22);
             })
+        });
+    }
+    #[gpui::test]
+    fn colour_close_applies_typed_draft_after_focus_moves(cx: &mut TestAppContext) {
+        let (picker, mut vcx) = cx.add_window_view(|w, cx| {
+            Picker::new(
+                Color::parse("#FF0000").unwrap(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                w,
+                None,
+                cx,
+            )
+        });
+        picker.update(&mut vcx, |p, cx| {
+            p.draft = Some((9, "#34C759 / 50%".into()));
+            p.focus_index = 4;
+            p.finish(true, cx);
+            assert_eq!(p.color.hex(), "#34C75980");
         });
     }
     #[gpui::test]
