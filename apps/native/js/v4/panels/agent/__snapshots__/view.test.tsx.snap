@@ -715,7 +715,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -2523,7 +2523,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -4331,7 +4331,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -6137,7 +6137,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -9649,7 +9649,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -10987,7 +10987,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -12325,7 +12325,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -14361,7 +14361,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -15826,7 +15826,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -17405,7 +17405,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -17428,7 +17428,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "colors.floating",
           },
           "borderColor": {
-            "token": "colors.hairline",
+            "token": "colors.floating",
           },
           "borderRadius": {
             "token": "metrics.panel_radius",
@@ -18951,7 +18951,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -20776,7 +20776,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -22614,7 +22614,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -24411,7 +24411,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         },
         "style": {
           "background": {
-            "token": "colors.accent_wash",
+            "token": "colors.panel_secondary",
           },
           "borderRadius": {
             "token": "metrics.popover_radius",
@@ -24432,7 +24432,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -24455,7 +24455,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "colors.floating",
           },
           "borderColor": {
-            "token": "colors.hairline",
+            "token": "colors.accent",
           },
           "borderRadius": {
             "token": "metrics.panel_radius",
@@ -25904,7 +25904,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -27450,7 +27450,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -28930,7 +28930,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -30422,7 +30422,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -32262,7 +32262,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -34070,7 +34070,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },
@@ -35878,7 +35878,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.text_padding",
           },
           "padding": {
-            "token": "metrics.gap",
+            "token": "metrics.composer_tray",
           },
         },
       },

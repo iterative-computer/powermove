@@ -282,6 +282,10 @@ const ROLES: &[(&str, &str)] = &[
         "metrics.composer_max_lines",
         "Agent composer grows to this many lines, then scrolls",
     ),
+    (
+        "metrics.composer_tray",
+        "Agent composer's tray around its field",
+    ),
     ("metrics.group_radius", "Settings grouped-form card corner"),
     ("metrics.form_row", "Minimum Settings row height"),
     (

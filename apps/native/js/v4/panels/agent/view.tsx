@@ -1791,15 +1791,15 @@ function Composer({
       role="group"
       label="Message composer"
       state={{ dropTarget: n.dropTarget }}
+      // v1's two surfaces: a tray holding the run options, and inset in it
+      // the field with the draft and its actions.
       style={{
         ...column,
         flexShrink: 0,
         gap: t("metrics.gap"),
-        background: t(
-          n.dropTarget ? "colors.accent_wash" : "colors.panel_secondary",
-        ),
+        background: t("colors.panel_secondary"),
         borderRadius: t("metrics.popover_radius"),
-        padding: t("metrics.gap"),
+        padding: t("metrics.composer_tray"),
         marginLeft: t("metrics.text_padding"),
         marginRight: t("metrics.text_padding"),
         marginBottom: t("metrics.text_padding"),
@@ -1812,8 +1812,17 @@ function Composer({
           gap: t("metrics.gap"),
           background: t("colors.floating"),
           borderRadius: t("metrics.panel_radius"),
+          // Only the field answers focus, with a quiet hairline; a drop
+          // over the composer rings it in the accent. At rest it has no
+          // edge of its own.
           borderWidth: t("metrics.border"),
-          borderColor: t("colors.hairline"),
+          borderColor: t(
+            n.dropTarget
+              ? "colors.accent"
+              : n.keyboardFocus === "composer"
+                ? "colors.hairline"
+                : "colors.floating",
+          ),
           paddingTop: t("metrics.gap"),
           paddingBottom: t("metrics.gap"),
           paddingLeft: t("metrics.gap"),

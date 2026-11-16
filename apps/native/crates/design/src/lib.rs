@@ -366,6 +366,8 @@ pub struct Metrics {
     pub sheet_body_max: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
+    /// The agent composer's tray around its field (v1's 4 pt).
+    pub composer_tray: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -851,6 +853,7 @@ impl Tokens {
                 sheet_width_wide: 600.,
                 sheet_body_max: 440.,
                 composer_max_lines: 10.,
+                composer_tray: space.xs,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,
