@@ -121,6 +121,10 @@ pub struct Host {
     /// This editor's entity while it hosts Settings (its picker lists the
     /// other editors' projects without reading this one, being updated).
     pub(crate) settings_me: Option<gpui::EntityId>,
+    /// Hears the Settings window close however it closes (its close button,
+    /// ⌘W), so a closed window is forgotten and nothing shows it again
+    /// (PM-397).
+    pub(crate) settings_watch: Option<gpui::Subscription>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     /// Projects whose offline clips the person chose to export without, this
@@ -177,6 +181,7 @@ impl Controller {
             self.builtins.settings_chrome.take(),
             std::mem::take(&mut self.builtins.settings_history),
             self.builtins.settings_me.take(),
+            self.builtins.settings_watch.take(),
         );
         self.builtins = Host::default();
         self.builtins.windows = windows;
@@ -184,6 +189,7 @@ impl Controller {
             self.builtins.settings_chrome,
             self.builtins.settings_history,
             self.builtins.settings_me,
+            self.builtins.settings_watch,
         ) = settings;
         self.builtins.agent_carry = carry;
         self.builtins.project = Some(project.clone());
@@ -298,7 +304,12 @@ impl Controller {
                             // asked for before the project arrived) shows its
                             // panel from the new realm, not an empty sheet.
                             // Settings, on the section it was showing.
-                            if v.builtins.windows.contains_key(&id) {
+                            let live = v
+                                .builtins
+                                .windows
+                                .get(&id)
+                                .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
+                            if live {
                                 let _ = match v.builtins.settings_history.current() {
                                     Some(page) if id == "settings" => check.show_section(&id, &page),
                                     _ => check.show(&id),
@@ -1550,6 +1561,16 @@ impl Controller {
                                     window.bounds_changed(cx);
                                 });
                             });
+                        }
+                        if settings {
+                            let owner = cx.entity().downgrade();
+                            v.builtins.settings_watch = Some(crate::settings_window::watch_close(
+                                handle.window_id(),
+                                move |cx| {
+                                    let _ = owner.update(cx, |v, cx| v.settings_closed(cx));
+                                },
+                                cx,
+                            ));
                         }
                         v.builtins.windows.insert(id, handle.into());
                         // The panel learns where it is shown now (the
