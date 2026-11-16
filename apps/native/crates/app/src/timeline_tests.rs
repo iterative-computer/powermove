@@ -593,7 +593,8 @@ fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
         gpui::CursorStyle::ResizeLeftRight
     );
     let key = op_center(&mut s, "key:");
-    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::PointingHand);
+    // The owner's rule: no pointing hand; a key keeps the arrow.
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::Arrow);
     let body = s.at(1, 1.5);
     assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
 }
@@ -3229,4 +3230,98 @@ fn a_clips_menu_names_its_layer_and_offers_the_creation_items(cx: &mut TestAppCo
     });
     s.idle(cx);
     assert_eq!(*s.recorder.commands.borrow(), ["importCaptions", "duplicate"]);
+}
+/// The first key on a property row (opacity revealed), in window space.
+fn property_key(s: &mut Stage, cx: &mut TestAppContext) -> Point<Pixels> {
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:t", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let origin = s.origin();
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let op = frame
+        .ops
+        .iter()
+        .find(|o| o.id.starts_with("key:") && o.id.contains("property"))
+        .expect("a key on the opacity row");
+    origin
+        + point(
+            px((op.bounds.x + op.bounds.width / 2.) as f32),
+            px((op.bounds.y + op.bounds.height / 2.) as f32),
+        )
+}
+/// v1's reach for a key (keyDown: 6 points across): a press 9 points
+/// beside it starts a marquee and moves no key; one within reach takes it.
+#[gpui::test]
+fn a_press_beside_a_key_starts_a_marquee_and_moves_no_key(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 3.]);
+    let key = property_key(&mut s, cx);
+    let before: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    s.drag(cx, key + point(px(9.), px(0.)), key + point(px(49.), px(0.)), Modifiers::none());
+    let after: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_eq!(after, before, "a marquee beside a key moved it");
+    s.drag(cx, key + point(px(4.), px(0.)), key + point(px(44.), px(0.)), Modifiers::none());
+    let moved: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_ne!(moved, before, "a press within reach takes the key");
+}
+/// v1's marks: a hold key is a square, read from what the file stores.
+#[gpui::test]
+fn a_hold_key_draws_as_a_square(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    property_key(&mut s, cx);
+    let shapes = |s: &Stage| -> Vec<&'static str> {
+        let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+        frame
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.id.contains("property"))
+            .map(|o| o.shape)
+            .collect()
+    };
+    assert!(!shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Keyframe(
+                        pm_kernel::KeyframeCommand::SetHold { key_ids: vec![ids[0].clone()], hold: true },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert!(shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+}
+/// v1's marker tooltip: its name, its time and how to remove it.
+#[gpui::test]
+fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("marker.add".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let marker = op_center(&mut s, "marker:");
+    s.vcx.simulate_mouse_move(marker, None, Modifiers::none());
+    s.idle(cx);
+    let tip = s.surface.read_with(&s.vcx, |t, _| t.marker_tip_for_test(marker));
+    let tip = tip.expect("a tooltip over the marker");
+    assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
 }
