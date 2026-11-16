@@ -1006,7 +1006,9 @@ impl Render for NativeControl {
         } else {
             div().w(px(self.width))
         };
-        root.relative().h(px(self.height)).child(
+        root.relative().h(px(self.height))
+            .filter(build.and_then(|b|b.filter).into_iter().collect::<Vec<_>>())
+            .opacity(if build.is_some_and(|b|b.revision.is_none() && b.ready.is_none()){0.}else{1.}).child(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
@@ -1034,8 +1036,7 @@ impl Render for NativeControl {
             .absolute()
             .inset_0(),
         ).children(snapshot.map(|image| {
-            let filters=build.and_then(|b|b.filter).into_iter().collect::<Vec<_>>();
-            div().absolute().inset_0().filter(filters).child(img(image).size_full())
+            div().absolute().inset_0().child(img(image).size_full())
         }))
     }
 }
