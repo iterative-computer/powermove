@@ -64,7 +64,11 @@ fn agent_selection_and_creates_never_change_interface_selection() {
 }
 #[test]
 fn session_stays_bound_when_front_project_changes() {
-    let (root, h, mut s, id) = fixture();
+    let (root, h, actor, mut s, id) = attached_fixture_windows(&[1, 2]);
+    let app = h.lock().unwrap().coedit_host().unwrap();
+    let first = app.claim_placed(1).unwrap();
+    assert_eq!(first.project, id);
+    let document = actor.handle().published(&id).unwrap().snapshot.doc_id;
     let other = h
         .lock()
         .unwrap()
@@ -74,6 +78,16 @@ fn session_stays_bound_when_front_project_changes() {
         .unwrap()
         .to_owned();
     assert_ne!(id, other);
+    let second = app.claim_placed(2).unwrap();
+    assert_eq!(second.project, other);
+    app.activate_window(2);
+    assert_eq!(app.current().unwrap().project, other);
+    assert_eq!(app.window_session(1).unwrap(), first);
+    assert_eq!(app.window_session(2).unwrap(), second);
+    assert_eq!(
+        actor.handle().published(&id).unwrap().snapshot.doc_id,
+        document
+    );
     ok(s.call(
         "apply_commands",
         json!({"commands":[{"type":"add_layer","id":"bound","layerType":"shape","name":"Bound"}]}),
@@ -92,9 +106,14 @@ fn session_stays_bound_when_front_project_changes() {
             .len(),
         0
     );
+    assert_eq!(app.current().unwrap().project, other);
+    assert_eq!(app.window_session(1).unwrap(), first);
+    assert_eq!(app.window_session(2).unwrap(), second);
     s.finish(true).unwrap();
     drop(s);
     drop(h);
+    drop(app);
+    drop(actor);
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -161,6 +180,23 @@ fn attached_fixture() -> (
     McpSession,
     String,
 ) {
+    let (root, host, actor, mut session, id) = attached_fixture_windows(&[]);
+    ok(session.call(
+        "apply_commands",
+        json!({"commands":[{"type":"add_layer","id":"L","layerType":"shape","name":"Synthetic"}]}),
+    ));
+    (root, host, actor, session, id)
+}
+
+fn attached_fixture_windows(
+    windows: &[u64],
+) -> (
+    std::path::PathBuf,
+    Arc<Mutex<Automation>>,
+    pm_kernel::KernelActor,
+    McpSession,
+    String,
+) {
     use pm_kernel::{
         KernelActor, KernelConfig,
         locks::OpenDecision,
@@ -184,6 +220,9 @@ fn attached_fixture() -> (
         ShellReply::Library(OpenDecision::Writable)
     ));
     let app = pm_mcp::app_host::Host::new(actor.handle(), root.clone());
+    for window in windows {
+        let _changed = app.attach_window(*window);
+    }
     let mut host = Automation::attached(app, root.join("exports"));
     let id = host
         .create_project(&json!({"name":"Synthetic held write"}))
@@ -198,10 +237,6 @@ fn attached_fixture() -> (
     let mut session = McpSession::new(host.clone());
     session.set_agent_run("synthetic-grant");
     ok(session.call("start_session", json!({"prompt":"Synthetic hold"})));
-    ok(session.call(
-        "apply_commands",
-        json!({"commands":[{"type":"add_layer","id":"L","layerType":"shape","name":"Synthetic"}]}),
-    ));
     (root, host, actor, session, id)
 }
 #[test]
