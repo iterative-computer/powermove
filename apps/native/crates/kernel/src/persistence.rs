@@ -98,8 +98,16 @@ pub struct LibraryWriter {
     tx: mpsc::Sender<WriteMsg>,
     worker: Option<thread::JoinHandle<()>>,
     _lock: FileLock,
+    /// Writes an open makes (its view state, a format upgrade, a file's
+    /// entry) keep the row's edit time: opening is not an edit (PM-392).
+    keep_time: std::sync::atomic::AtomicBool,
 }
 impl LibraryWriter {
+    /// While on, the rows written keep their edit time (`at`) and still go
+    /// first in recents. Returns what it was, for the caller to put back.
+    pub fn keep_time(&self, on: bool) -> bool {
+        self.keep_time.swap(on, std::sync::atomic::Ordering::SeqCst)
+    }
     /// `profile` is an explicit native/test profile, never inferred from HOME.
     pub fn open(
         profile: &Path,
@@ -165,6 +173,7 @@ impl LibraryWriter {
             tx,
             worker: Some(worker),
             _lock: lock,
+            keep_time: Default::default(),
         })
     }
     pub fn store(&self) -> &LibraryStore {
@@ -341,7 +350,15 @@ impl LibraryWriter {
                 .cloned()
                 .unwrap_or(Value::from("Untitled")),
         );
-        row.insert("at", Value::Number(crate::locks::now_ms() as f64));
+        let kept = self
+            .keep_time
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| row.get("at").and_then(Value::as_f64))
+            .flatten();
+        row.insert(
+            "at",
+            Value::Number(kept.unwrap_or(crate::locks::now_ms() as f64)),
+        );
         for k in ["w", "h"] {
             if let Some(v) = project.get(k) {
                 row.insert(k, v.clone());

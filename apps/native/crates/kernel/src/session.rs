@@ -980,11 +980,21 @@ impl Kernel {
                     self.sessions[&handle.project].destination,
                     Destination::File(_)
                 ) && !self.project(&handle.project).unwrap().store().needs_save();
+                // Nothing edited since it opened or was saved: what the close
+                // writes keeps the row's edit time (PM-392).
+                let edited = self.project(&handle.project).unwrap().store().needs_save();
                 let recovery_copy = if unchanged {
                     self.save_session_meta(&handle.project)?;
                     None
                 } else {
-                    let saved = self.save_session(&handle, None)?;
+                    let kept = (!edited)
+                        .then(|| self.library.as_ref().map(|w| w.keep_time(true)))
+                        .flatten();
+                    let saved = self.save_session(&handle, None);
+                    if let (Some(w), Some(was)) = (&self.library, kept) {
+                        w.keep_time(was);
+                    }
+                    let saved = saved?;
                     let ShellReply::Saved {
                         recovery_copy,
                         displaced,
@@ -2479,6 +2489,29 @@ impl Kernel {
                 journal_id,
             },
         );
+        // What an open writes to the library (view state, a format upgrade,
+        // a file's entry) is not an edit: the row keeps its edit time.
+        let kept = self.library.as_ref().map(|w| w.keep_time(true));
+        let written = self.write_opened_entry(&handle, slot_current, &mut info);
+        if let (Some(w), Some(was)) = (&self.library, kept) {
+            w.keep_time(was);
+        }
+        written?;
+        Ok(ShellReply::Opened {
+            session: handle,
+            info,
+            decision,
+            recovery,
+        })
+    }
+    /// The library entry of a session just opened (`open_session`). On
+    /// failure the session is closed again.
+    fn write_opened_entry(
+        &mut self,
+        handle: &SessionHandle,
+        slot_current: bool,
+        info: &mut OpenInfo,
+    ) -> Result<(), KernelFailure> {
         // A new/copy project gets a rollback-readable slot immediately.
         if slot_current {
             // Reopening a library project rewrites none of it, however large.
@@ -2505,7 +2538,7 @@ impl Kernel {
             self.sessions[&handle.project].destination,
             Destination::Library(_)
         ) {
-            if let Err(e) = self.save_session(&handle, None) {
+            if let Err(e) = self.save_session(handle, None) {
                 self.sessions.remove(&handle.project);
                 self.close(&handle.project);
                 return Err(e);
@@ -2519,12 +2552,7 @@ impl Kernel {
             self.close(&handle.project);
             return Err(e);
         }
-        Ok(ShellReply::Opened {
-            session: handle,
-            info,
-            decision,
-            recovery,
-        })
+        Ok(())
     }
     fn recovery_copy(
         &self,

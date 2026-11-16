@@ -223,6 +223,15 @@ pub fn begin_quit(cx: &mut App) {
     start_quit(cx);
 }
 fn start_quit(cx: &mut App) {
+    // The window session keeps the windows open now and nothing else: the
+    // next launch reopens exactly these (PM-392). Windows keep their
+    // entries as they close for the quit.
+    if let Some(path) = pm_shell::view::session_path() {
+        pm_shell::session::write(
+            &path,
+            pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
+        );
+    }
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     // SIGTERM: nobody is there to answer a Save question. Unsaved work is
