@@ -11,7 +11,7 @@ fn main() {
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace,
         NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
     use pm_shell::settings_window::SettingsChrome;
 
     let mtm = MainThreadMarker::new().expect("runs on the main thread (harness = false)");
@@ -49,6 +49,53 @@ fn main() {
     let items = split.splitViewItems();
     assert_eq!(items.len(), 2);
     assert_eq!(items.objectAtIndex(0).behavior(), NSSplitViewItemBehavior::Sidebar);
+    // The system's own floating sidebar: its glass holds our sidebar view,
+    // the detail runs under it, and the page starts beside it.
+    window.setFrame_display(NSRect::new(NSPoint::new(-20000., -20000.), NSSize::new(820., 640.)), false);
+    if let Some(frame) = window.contentView().and_then(|c| unsafe { c.superview() }) {
+        frame.layoutSubtreeIfNeeded();
+    }
+    if std::env::var_os("PM_DUMP_SIDEBAR").is_some() {
+        // Diagnostic: the views the system put around the sidebar.
+        fn dump(v: &NSView, depth: usize) {
+            let f = v.frame();
+            eprintln!(
+                "{:indent$}{} ({:.0},{:.0} {:.0}x{:.0})",
+                "",
+                v.class().name().to_string_lossy(),
+                f.origin.x,
+                f.origin.y,
+                f.size.width,
+                f.size.height,
+                indent = depth * 2
+            );
+            if depth < 9 {
+                for c in v.subviews().iter() {
+                    dump(&c, depth + 1);
+                }
+            }
+        }
+        if let Some(frame) = window.contentView().and_then(|c| unsafe { c.superview() }) {
+            dump(&frame, 0);
+        }
+    }
+    let sidebar_view = items.objectAtIndex(0).viewController(mtm).view();
+    let mut glass = false;
+    if let Some(class) = objc2::runtime::AnyClass::get(c"NSGlassEffectView") {
+        let mut up = unsafe { sidebar_view.superview() };
+        while let Some(v) = up {
+            glass |= v.isKindOfClass(class);
+            up = unsafe { v.superview() };
+        }
+        assert!(items.objectAtIndex(1).automaticallyAdjustsSafeAreaInsets(), "the detail runs under the sidebar");
+        assert!(glass, "the sidebar is the system's glass");
+        let page = gpui.convertRect_toView(gpui.bounds(), None);
+        assert!(
+            page.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
+            "the page starts beside the sidebar, at {}",
+            page.origin.x
+        );
+    }
 
     // The page's ground is the detail's, never the window's.
     chrome.set_scheme(true, 0x1e1e20);

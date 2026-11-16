@@ -375,11 +375,12 @@ impl SettingsChrome {
             scroll.bottomAnchor().constraintEqualToAnchor(&sidebar.bottomAnchor()),
         ]);
 
-        // The detail: GPUI's view below the toolbar (the safe area).
+        // The detail: GPUI's view in the safe area, below the toolbar and
+        // beside the sidebar; the detail itself runs under both (below).
         gpui.setTranslatesAutoresizingMaskIntoConstraints(false);
         activate(&[
             gpui.topAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().topAnchor()),
-            gpui.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()),
+            gpui.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
             gpui.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
             gpui.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
         ]);
@@ -407,6 +408,11 @@ impl SettingsChrome {
         let detail = NSViewController::new(mtm);
         detail.setView(&content);
         let detail = NSSplitViewItem::splitViewItemWithViewController(&detail);
+        // The system's floating sidebar sits over the detail, which runs
+        // under it (macOS 26 and later): its glass shows the page's ground.
+        if detail.respondsToSelector(sel!(setAutomaticallyAdjustsSafeAreaInsets:)) {
+            detail.setAutomaticallyAdjustsSafeAreaInsets(true);
+        }
         split.addSplitViewItem(&side);
         split.addSplitViewItem(&detail);
         window.setContentViewController(Some(&split));
