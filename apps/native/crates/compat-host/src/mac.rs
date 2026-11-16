@@ -494,8 +494,19 @@ define_class!(
     #[unsafe(super(WKWebView))]
     #[thread_kind=MainThreadOnly]
     #[name="PMCompatWebView"]
+    #[ivars=Rc<Cell<Option<(f64, f64)>>>]
     struct PageView;
     impl PageView {
+        /// Where the page was last pressed (slot points, top-left origin):
+        /// the panel there is the one its caret belongs to (PM-294).
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if let Some(slot) = unsafe { self.superview() } {
+                let local = slot.convertPoint_fromView(event.locationInWindow(), None);
+                self.ivars().set(Some((local.x, slot.bounds().size.height - local.y)));
+            }
+            unsafe { msg_send![super(self), mouseDown: event] }
+        }
         /// WebKit registers for files as it is made, joins a window and
         /// loads: ignored, so the page never takes a Finder drop.
         #[unsafe(method(registerForDraggedTypes:))]
@@ -601,6 +612,14 @@ pub struct MacDomHost {
     bridge: Retained<Bridge>,
     web: Retained<WKWebView>,
     slot: Retained<SlotView>,
+    /// Where the page was last pressed ([`PageView`]), until a present
+    /// names the panel there.
+    pressed: Rc<Cell<Option<(f64, f64)>>>,
+    /// The panels shown and their bodies (`set_bodies`); `None`: unknown,
+    /// a press is judged by the regions alone.
+    bodies: Option<Vec<(String, Rect)>>,
+    /// The panel last pressed, whose field the caret is in.
+    caret_panel: Option<String>,
     activity: Option<Activity>,
     job_count: u32,
     /// Where the page's own content may show, when narrower than the
@@ -708,9 +727,13 @@ impl MacDomHost {
                 .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
+        let pressed: Rc<Cell<Option<(f64, f64)>>> = Rc::default();
         let web: Retained<WKWebView> = unsafe {
-            let page: Retained<PageView> =
-                msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config];
+            let page: Retained<PageView> = msg_send![
+                super(PageView::alloc(mtm).set_ivars(pressed.clone())),
+                initWithFrame: frame,
+                configuration: &*config
+            ];
             Retained::into_super(page)
         };
         unsafe {
@@ -736,6 +759,9 @@ impl MacDomHost {
             applier: format!("{page_bundle}\n{REMOTE_DOM_SHELL}"),
             bridge,
             web,
+            pressed,
+            bodies: None,
+            caret_panel: None,
             slot,
             activity: None,
             job_count: 0,
@@ -988,6 +1014,32 @@ impl MacDomHost {
     }
     /// The colour shown under the page within its regions (the panels'
     /// ground), sRGB red, green, blue and alpha in 0–1.
+    /// The extension panels shown through this page and their bodies, so a
+    /// press is known by its panel: a tab beside it shows in the same body.
+    pub fn set_bodies(&mut self, bodies: Vec<(String, Rect)>) {
+        self.bodies = Some(bodies);
+    }
+    /// Whether the panel last pressed stopped showing (PM-294).
+    fn caret_left(&mut self) -> bool {
+        let Some(bodies) = &self.bodies else {
+            let Some((x, y)) = self.pressed.get() else {
+                return false;
+            };
+            return !match &self.content {
+                Some(content) => content.iter().any(|r| r.contains(x, y)),
+                None => self.shared.panels.borrow().visible().iter().any(|r| r.contains(x, y)),
+            };
+        };
+        if let Some((x, y)) = self.pressed.take() {
+            self.caret_panel = bodies
+                .iter()
+                .find(|(_, r)| r.contains(x, y))
+                .map(|(id, _)| id.clone());
+        }
+        self.caret_panel
+            .as_ref()
+            .is_some_and(|id| !bodies.iter().any(|(shown, _)| shown == id))
+    }
     pub fn set_fill(&mut self, fill: Option<[f64; 4]>) {
         if self.fill != fill {
             self.fill = fill;
@@ -1011,6 +1063,24 @@ impl MacDomHost {
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
+    /// A panel leaving its slot gives the window back the keyboard if the
+    /// shared page holds it: AppKit draws the text input indicator (the
+    /// input-source badge) at a page's caret while the page is first
+    /// responder, so it stayed where a hidden panel's field was (PM-294).
+    /// The window's own view takes the keys again, as after a click there.
+    fn release_keyboard(&self) {
+        let Some(window) = self.web.window() else {
+            return;
+        };
+        let holds = window.firstResponder().is_some_and(|r| {
+            r.downcast_ref::<NSView>()
+                .is_some_and(|v| v.isDescendantOf(&self.web))
+        });
+        if holds {
+            let to = self.slot.editor_view().or_else(|| window.contentView());
+            window.makeFirstResponder(to.as_deref().map(|v| v as &NSResponder));
+        }
+    }
     pub fn present(&mut self, viewport: Rect) -> Result<()> {
         if !viewport.valid() || viewport.x != 0. || viewport.y != 0. {
             return Err(Error::InvalidGeometry);
@@ -1025,6 +1095,16 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
+        // The panel the page's caret is in stopped showing (another tab,
+        // closed, a layout without it): the editor takes the keyboard back,
+        // or keys and the input-source badge stay with a hidden field
+        // (PM-294). A hidden panel is only a body gone; the shared page is
+        // never detached for it, and a tab beside it can have the same body.
+        if self.caret_left() {
+            self.caret_panel = None;
+            self.pressed.set(None);
+            self.release_keyboard();
+        }
         // The fill shows within the regions; the page's content only where
         // its own mask lets it.
         self.slot.setWantsLayer(true);
@@ -1250,6 +1330,7 @@ impl DomPanelHost for MacDomHost {
     }
     fn detach(&mut self, id: PanelId) -> Result<()> {
         self.check(self.generation(), id)?;
+        self.release_keyboard();
         if self.shared.ready.get() {
             self.shared
                 .send(json!({"kind":"slot","panel":id,"slot":Value::Null}))?;
@@ -1262,6 +1343,7 @@ impl DomPanelHost for MacDomHost {
     }
     fn destroy(&mut self, id: PanelId) -> Result<()> {
         self.check(self.generation(), id)?;
+        self.release_keyboard();
         if self.shared.ready.get() {
             self.shared.send(json!({"kind":"destroy","panel":id}))?;
         }
