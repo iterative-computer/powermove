@@ -202,7 +202,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 37] = [
+    const ALL: [Action; 39] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -240,6 +240,8 @@ impl Action {
         Action::Rulers,
         Action::Grid,
         Action::ClearGuides,
+        Action::LockGuides,
+        Action::Snapping,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -1372,6 +1374,11 @@ mod tests {
         }
         assert_eq!(Action::from_tag(-1), None);
         assert_eq!(Action::from_tag(99), None);
+        // Every item View builds carries a tag (the guide toggles had none,
+        // and building the menu panicked at launch).
+        for (_, action) in GUIDE_TOGGLES {
+            assert_eq!(Action::from_tag(action.tag()), Some(action));
+        }
     }
 }
 
