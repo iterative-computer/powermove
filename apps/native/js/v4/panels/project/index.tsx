@@ -671,12 +671,19 @@ export function ProjectView(props: ProjectViewProps) {
     const f = facts(row);
     const hover = !view?.drag && (hovered === itemKey(row.id) || row.focused);
     const actions = hover ? cardActions(row, view!.composition_count) : [];
+    // A linked folder says what its Finder folder is doing, as its card
+    // does; otherwise a folder shows its count.
+    const missing = f.folder?.sync === "NotFound";
     const trailing = f.state?.overlay
       ? f.state.overlay
       : f.folder
-        ? f.folder.items
-          ? String(f.folder.items)
-          : ""
+        ? missing
+          ? "Folder not found"
+          : f.folder.sync === "Syncing"
+            ? "Syncing…"
+            : f.folder.items
+              ? String(f.folder.items)
+              : ""
         : f.duration !== null && f.duration !== undefined
           ? clock(f.duration)
           : "";
@@ -721,7 +728,14 @@ export function ProjectView(props: ProjectViewProps) {
               flexShrink: 0,
               whiteSpace: "nowrap",
               color: token(
-                trailingInk(f.attention ? f.state : null, row.selected),
+                trailingInk(
+                  missing
+                    ? { overlay: trailing, tone: "danger" }
+                    : f.attention
+                      ? f.state
+                      : null,
+                  row.selected,
+                ),
               ),
             }}
           >
