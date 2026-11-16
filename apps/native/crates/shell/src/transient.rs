@@ -13,7 +13,7 @@ pub struct Choice {
     /// Choosing it keeps the menu open (a provider row: its models follow
     /// in the same menu); the owner sends the menu's new rows.
     pub stays: bool,
-    /// Electron offers layer and effect rows only for a nonempty name search.
+    /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
 }
@@ -141,10 +141,11 @@ impl Picker {
                     } else {
                         &c.label
                     };
-                    return (!query.is_empty() && name.to_lowercase().contains(&query))
+                    return ((query.is_empty() && self.recents.contains(&c.command))
+                        || (!query.is_empty() && name.to_lowercase().contains(&query)))
                         .then_some((2, i));
                 }
-                let label = rank(&c.label, &self.query);
+                let label = rank(&c.label, self.query.trim());
                 // Command ids only match literally; subsequences of ids are noise.
                 let command = c.command.to_lowercase().contains(&query).then_some(2);
                 let alias = c
@@ -355,5 +356,33 @@ mod recent_tests {
         assert_eq!(picker.filtered(), vec![1, 0]);
         picker.search("Alpha".into());
         assert_eq!(picker.filtered(), vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod recent_content_tests {
+    use super::*;
+    #[test]
+    fn recent_effects_and_layers_reappear_and_run_without_a_search() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Command", "command"),
+                Choice::new("Effect · Blur", "palette.addEffect:blur").within("Effect").on_search(),
+                Choice::new("Logo", "palette.selectLayer:logo").within("Layer").on_search(),
+                Choice::new("Other", "palette.selectLayer:other").within("Layer").on_search(),
+            ],
+            recents: vec!["palette.selectLayer:missing".into(), "palette.selectLayer:logo".into(), "palette.addEffect:blur".into()],
+            ..Default::default()
+        };
+        for query in ["", "  "] {
+            picker.search(query.into());
+            assert_eq!(picker.filtered(), vec![2, 1, 0]);
+            picker.navigate("down");
+            assert_eq!(picker.navigate("enter").as_deref(), Some("palette.selectLayer:logo"));
+            picker.navigate("down");
+            assert_eq!(picker.navigate("enter").as_deref(), Some("palette.addEffect:blur"));
+        }
+        picker.search("Other".into());
+        assert_eq!(picker.filtered(), vec![3]);
     }
 }
