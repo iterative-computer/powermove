@@ -938,10 +938,9 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409), Settings' as well; in a
+                    // row's value well it is the small size.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -2429,7 +2428,13 @@ impl SurfaceView {
                 .and_then(|m| m.get("rowFloor"))
                 .and_then(Value::as_f64)
                 .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+                .map_or(0., |rows| {
+                    // Rows of a virtual list are its own height.
+                    let row = node
+                        .virtual_window
+                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                    rows as f32 * row
+                });
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {

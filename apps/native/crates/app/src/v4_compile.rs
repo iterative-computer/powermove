@@ -805,13 +805,17 @@ fn compile(
                 .get("itemSize")
                 .and_then(Value::as_f64)
                 .or_else(|| {
-                    (node
+                    // Any metric names the rows' height (a Settings card's
+                    // rows are `metrics.form_row`).
+                    let name = node
                         .props
                         .get("metadata")
                         .and_then(|m| m.get("rowHeightToken"))
-                        .and_then(Value::as_str)
-                        == Some("metrics.row"))
-                    .then_some(t.metrics.row as f64)
+                        .and_then(Value::as_str)?;
+                    name.starts_with("metrics.")
+                        .then(|| table.number(&serde_json::json!({ "token": name })))
+                        .flatten()
+                        .map(f64::from)
                 })?;
             pm_builtins::virtualization::Window::new(
                 count as usize,
