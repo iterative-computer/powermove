@@ -259,7 +259,8 @@
       }
     });
   };
-  new MutationObserver(measureContributions).observe(document.body, {subtree:true,childList:true,attributes:true,characterData:true});
+  // This script runs in the head: the body does not exist yet, the document does.
+  new MutationObserver(measureContributions).observe(document.documentElement, {subtree:true,childList:true,attributes:true,characterData:true});
   document.addEventListener('load', measureContributions, true);
   document.fonts?.ready.then(measureContributions);
   measureContributions();
