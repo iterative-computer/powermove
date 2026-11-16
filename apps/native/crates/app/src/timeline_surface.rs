@@ -4919,11 +4919,12 @@ fn strip_rim(
         };
         window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
     }
-    // Light falls from the top left: a line inside the top and left edges.
+    // Light falls from above: a line inside the top edge, brightest there
+    // and round the top corners (the reference's rim).
     if light.1 > 0. {
         let shadow = BoxShadow {
             color: ink(light),
-            offset: point(px(1.), px(1.)),
+            offset: point(px(0.), px(1.)),
             blur_radius: px(0.5),
             spread_radius: px(0.),
             inset: true,
