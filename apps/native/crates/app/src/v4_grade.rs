@@ -8,6 +8,7 @@ use gpui::{
     Bounds, Context, IntoElement, MouseDownEvent, MouseMoveEvent, Pixels, Point, Styled, Window,
     canvas, point, px,
 };
+use pm_shell::ease;
 use pm_shell::grade::{self, Curve, Graph, Look};
 use pm_surface::Id;
 use serde_json::json;
@@ -45,6 +46,32 @@ pub(super) enum GradeDrag {
         live: Curve,
         leaving: bool,
     },
+    /// An easing curve's handle (0 outgoing, 1 incoming) under the pointer.
+    Ease {
+        graph: ease::Graph,
+        knob: usize,
+        /// The handle where the press began, and where the pointer pressed.
+        from: (f64, f64),
+        at: Point<Pixels>,
+        /// The curve as the hand has it now.
+        live: [f64; 4],
+    },
+}
+
+/// Easing curves: when each last changed (its preview dot runs once from
+/// then), and the curve a drag left until the panel publishes it.
+#[derive(Clone, Default)]
+pub(super) struct EaseState {
+    seen: Rc<RefCell<HashMap<Id, ([f64; 4], std::time::Instant)>>>,
+    pending: Rc<RefCell<HashMap<Id, ([f64; 4], std::time::Instant)>>>,
+}
+/// How long the preview dot takes to run the curve.
+const PREVIEW: f32 = 1.2;
+
+/// The plot inside an easing editor's bounds: inset so the knobs at the
+/// edges show whole, over the span `range` shows.
+fn ease_graph(bounds: Bounds<Pixels>, range: (f64, f64), t: &pm_design::Tokens) -> ease::Graph {
+    ease::Graph::new(graph(bounds, t).area, range)
 }
 
 /// The graph inside a curve editor's bounds: inset so points on its edges
@@ -68,6 +95,9 @@ fn side(kit: &Kit, width: f32, t: &pm_design::Tokens) -> f32 {
     let m = &t.metrics;
     match kit {
         Kit::Curve { .. } => width.clamp(m.curve_editor, m.curve_editor_max),
+        // A little taller than wide: room above and below the square for
+        // handles that overshoot.
+        Kit::Ease { .. } => (width * 1.15).clamp(m.curve_editor, m.curve_editor_max),
         _ => width.clamp(m.grade_wheel, m.grade_wheel_max),
     }
 }
@@ -76,7 +106,15 @@ impl SurfaceView {
     /// The height a drawn grading control takes from the width it was last
     /// laid out at (its least before it has been).
     pub(super) fn grade_height(&self, id: Id, kit: &Kit) -> Option<f32> {
-        if !matches!(kit, Kit::Wheel { .. } | Kit::Curve { .. }) {
+        if !matches!(
+            kit,
+            Kit::Wheel { .. }
+                | Kit::Curve { .. }
+                | Kit::Ease {
+                    thumbnail: false,
+                    ..
+                }
+        ) {
             return None;
         }
         let width = self
@@ -147,6 +185,79 @@ impl SurfaceView {
                     grade::paint_curve(g, &curve, channel, held, leaving, look, &tokens, window);
                 })
             }
+            (
+                Kit::Ease {
+                    curve,
+                    thumbnail: true,
+                },
+                _,
+            ) => {
+                let curve = *curve;
+                Box::new(move |b, window, _| ease::paint_thumbnail(b, &curve, &tokens, window))
+            }
+            (Kit::Ease { curve, .. }, drag) => {
+                let published = *curve;
+                let (curve, held, range) = match drag {
+                    Some(GradeDrag::Ease {
+                        live, knob, graph, ..
+                    }) => (*live, Some(*knob), Some((graph.min, graph.max))),
+                    _ => {
+                        // What a drag left, until the panel publishes it (briefly:
+                        // the panel may have moved on since).
+                        let mut pending = self.ease.pending.borrow_mut();
+                        let left = pending
+                            .get(&id)
+                            .filter(|(left, when)| {
+                                *left != published && when.elapsed().as_secs_f32() < 0.5
+                            })
+                            .map(|(left, _)| *left);
+                        if left.is_none() {
+                            pending.remove(&id);
+                        }
+                        let shown = left.unwrap_or(published);
+                        (shown, None, None)
+                    }
+                };
+                let seen = self.ease.seen.clone();
+                let dragging = held.is_some();
+                Box::new(move |b, window, _| {
+                    // The preview dot runs the curve once after it changes,
+                    // and over and over while a handle is held.
+                    let now = std::time::Instant::now();
+                    let since = {
+                        let mut seen = seen.borrow_mut();
+                        let entry = seen.entry(id).or_insert((curve, now));
+                        if entry.0 != curve {
+                            *entry = (curve, now);
+                        }
+                        now.duration_since(entry.1).as_secs_f32()
+                    };
+                    let dot = if tokens.accessibility.reduce_motion {
+                        None
+                    } else if dragging {
+                        Some(((since % (PREVIEW + 0.4)) / PREVIEW).min(1.) as f64)
+                    } else if since < PREVIEW + 0.4 {
+                        Some((since / PREVIEW).min(1.) as f64)
+                    } else {
+                        None
+                    };
+                    if dot.is_some() {
+                        window.request_animation_frame();
+                    }
+                    let g = ease_graph(b, range.unwrap_or_else(|| ease::range(&curve)), &tokens);
+                    ease::paint_editor(
+                        g,
+                        &curve,
+                        ease::Look {
+                            disabled: look.disabled,
+                            held,
+                            dot,
+                        },
+                        &tokens,
+                        window,
+                    );
+                })
+            }
             _ => return None,
         };
         let kit = kit.clone();
@@ -180,6 +291,48 @@ impl SurfaceView {
         let Some(node) = self.prepared.node(id) else {
             return;
         };
+        // An easing curve's handle: the panel owns the curve, so each move
+        // goes to it as a change (no document gesture).
+        if let Kit::Ease {
+            curve,
+            thumbnail: false,
+        } = node.kit
+        {
+            if node.disabled {
+                return;
+            }
+            let Some(bounds) = self.grade_drawn.borrow().get(&id).copied() else {
+                return;
+            };
+            let t = &self.table.tokens;
+            let shown = self
+                .ease
+                .pending
+                .borrow()
+                .get(&id)
+                .filter(|(_, when)| when.elapsed().as_secs_f32() < 0.5)
+                .map_or(curve, |(left, _)| *left);
+            let g = ease_graph(bounds, ease::range(&shown), t);
+            let Some(knob) = ease::handle_at(&g, &shown, event.position, t.metrics.hit / 2.) else {
+                return;
+            };
+            self.scrub = Some(ScrubDrag {
+                id,
+                start: event.position,
+                number: Default::default(),
+                binding: None,
+                active: false,
+                grade: Some(GradeDrag::Ease {
+                    graph: g,
+                    knob,
+                    from: (shown[knob * 2], shown[knob * 2 + 1]),
+                    at: event.position,
+                    live: shown,
+                }),
+            });
+            cx.notify();
+            return;
+        }
         let Some(binding) = node.binding.clone().filter(|_| !node.local_change) else {
             return;
         };
@@ -215,16 +368,14 @@ impl SurfaceView {
                 neutral,
                 range,
                 ..
-            } => {
-                GradeDrag::Wheel {
-                    from: grade::puck(rgb, neutral),
-                    reach: grade::wheel_reach(grade::wheel_diameter(bounds), &t),
-                    keep: rgb,
-                    neutral,
-                    range,
-                    live: rgb,
-                }
-            }
+            } => GradeDrag::Wheel {
+                from: grade::puck(rgb, neutral),
+                reach: grade::wheel_reach(grade::wheel_diameter(bounds), &t),
+                keep: rgb,
+                neutral,
+                range,
+                live: rgb,
+            },
             Kit::Curve { values, .. } => {
                 let g = graph(bounds, &t);
                 let original = Curve::from_values(&values);
@@ -309,6 +460,47 @@ impl SurfaceView {
 
     /// The pointer moved during a press on a grading control.
     pub(super) fn grade_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // An easing handle follows the pointer from where it was grabbed
+        // (finely with Option, on a twentieth grid with Shift); each move is
+        // the panel's change.
+        if let Some(ScrubDrag {
+            id,
+            grade:
+                Some(GradeDrag::Ease {
+                    graph,
+                    knob,
+                    from,
+                    at,
+                    live,
+                }),
+            ..
+        }) = self.scrub.as_mut()
+        {
+            let here = graph.to_value(event.position);
+            let pressed = graph.to_value(*at);
+            let fine = if event.modifiers.alt { 0.1 } else { 1. };
+            let (x, y) = ease::place(
+                (
+                    from.0 + (here.0 - pressed.0) * fine,
+                    from.1 + (here.1 - pressed.1) * fine,
+                ),
+                (graph.min, graph.max),
+                event.modifiers.shift,
+            );
+            if (live[*knob * 2], live[*knob * 2 + 1]) == (x, y) {
+                return;
+            }
+            live[*knob * 2] = x;
+            live[*knob * 2 + 1] = y;
+            let (id, live) = (*id, *live);
+            self.ease
+                .pending
+                .borrow_mut()
+                .insert(id, (live, std::time::Instant::now()));
+            self.change(id, json!(live), cx);
+            cx.notify();
+            return;
+        }
         let threshold = self.table.tokens.metrics.drag_threshold;
         let off = self.table.tokens.metrics.hit;
         let Some(drag) = &mut self.scrub else {
@@ -372,7 +564,7 @@ impl SurfaceView {
                 *live = next;
                 json!(live.values(rest))
             }
-            None => return,
+            Some(GradeDrag::Ease { .. }) | None => return,
         };
         self.scrub_ops.push_back(ScrubOp::Value(binding, value));
         self.scrub_pump(cx);

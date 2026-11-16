@@ -191,3 +191,43 @@ fn a_properties_diamond_puts_its_property_in_the_graph() {
     );
     actor.shutdown();
 }
+
+#[test]
+fn playback_expression_errors_follow_the_current_frame_and_clear_on_recovery() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut backend = backend(&actor);
+    run(
+        &kernel,
+        Request::new(
+            Caller::native(),
+            pm_kernel::Call::Transact {
+                label: Some("Set Expression".into()),
+                expected_revision: None,
+                body: pm_kernel::WriteBody::Commands(vec![
+                    pm_kernel::commands::properties::PropertyCommand::SetExpression {
+                        layer_id: "a".into(),
+                        channel: "opacity".into(),
+                        expression: Some("time < 1 ? value : 1 / 0".into()),
+                    }
+                    .into(),
+                ]),
+            },
+        ),
+    );
+    backend.native.facts["playing"] = json!(true);
+    backend.native.facts["time"] = json!(0.);
+    assert!(
+        row(&backend.inspector_snapshot().unwrap(), "opacity")["expression"]["error"].is_null()
+    );
+    backend.native.facts["time"] = json!(2.);
+    assert_eq!(
+        row(&backend.inspector_snapshot().unwrap(), "opacity")["expression"]["error"],
+        "Expression did not return a finite value."
+    );
+    backend.native.facts["time"] = json!(0.);
+    assert!(
+        row(&backend.inspector_snapshot().unwrap(), "opacity")["expression"]["error"].is_null()
+    );
+    actor.shutdown();
+}

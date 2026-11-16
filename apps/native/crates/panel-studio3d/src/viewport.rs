@@ -49,6 +49,8 @@ pub struct Scene {
     /// The composition's camera pose (the shot).
     pub shot: Pose,
     pub lens: Lens,
+    /// Perspective lens retained separately from an orthographic shot camera.
+    pub editor_lens: Lens,
     pub width: f64,
     pub height: f64,
     pub items: Vec<Item>,
@@ -80,7 +82,11 @@ fn basis(pose: Pose) -> (Vec3, Vec3, Vec3) {
         r = [1., 0., 0.];
     }
     let r = normalize(r);
-    (f, r, cross(r, f))
+    {
+        let u = cross(r, f);
+        let (s, c) = pose.roll.to_radians().sin_cos();
+        (f, add(mul(r, c), mul(u, s)), add(mul(u, c), mul(r, -s)))
+    }
 }
 impl Eye {
     /// Half the view's vertical extent at unit distance (perspective), or in
@@ -88,7 +94,13 @@ impl Eye {
     fn half(&self) -> f64 {
         match self.lens {
             Lens::Perspective { fov, .. } => (fov.to_radians() / 2.).tan() / self.pose.zoom,
-            Lens::Orthographic { .. } => 3. / self.pose.zoom,
+            Lens::Orthographic { height, .. } => {
+                if self.pose.ortho {
+                    height * 0.5 / self.pose.zoom
+                } else {
+                    3. / self.pose.zoom
+                }
+            }
         }
     }
     fn ortho(&self) -> bool {
@@ -156,7 +168,9 @@ impl Scene {
     pub fn eye(&self, free: Option<Pose>) -> Eye {
         Eye {
             pose: free.unwrap_or(self.shot),
-            lens: self.lens,
+            lens: free.map_or(self.lens, |p| {
+                pm_scene3d::navigation::view_lens(p, self.editor_lens)
+            }),
             width: self.width,
             height: self.height,
         }
@@ -316,6 +330,8 @@ fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> E
     let cam = &r.scene["camera"];
     let n = |k: &str, d: f64| cam["p"][k]["v"].as_f64().unwrap_or(d);
     let pose = Pose {
+        ortho: false,
+        roll: 0.,
         position: r
             .camera_position
             .unwrap_or([n("x", 3.), n("y", 2.), n("z", 6.)]),
@@ -402,6 +418,13 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         width,
         height,
     } = eye_of(&r, &comp);
+    let n = |key: &str, default| r.scene["camera"]["p"][key]["v"].as_f64().unwrap_or(default);
+    let editor_lens = Lens::Perspective {
+        fov: n("fov", 45.),
+        aspect: width / height,
+        near: n("near", 0.01).max(1e-4),
+        far: n("far", 1000.).max(1.),
+    };
     let mut mirror = pm_kernel::QueryMirror::new(p);
     let mut channels = |id: &str, keys: [&str; 3], d: f64| -> Vec3 {
         std::array::from_fn(|i| {
@@ -511,6 +534,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
     Ok(Scene {
         shot,
         lens,
+        editor_lens,
         width,
         height,
         items,
@@ -589,6 +613,8 @@ mod tests {
     fn eye() -> Eye {
         Eye {
             pose: Pose {
+                ortho: false,
+                roll: 0.,
                 position: [0., 0., 10.],
                 target: [0., 0., 0.],
                 zoom: 1.,
@@ -643,16 +669,115 @@ mod tests {
         let scene = Scene {
             shot: e.pose,
             lens: e.lens,
+            editor_lens: e.lens,
             width: 1920.,
             height: 1080.,
             items: vec![item("back", -3.), item("front", 0.)],
             revision: 1,
             time: 0.,
         };
+        for pose in [
+            e.pose,
+            Pose {
+                ortho: true,
+                ..e.pose
+            },
+            Pose {
+                ortho: true,
+                roll: 15.,
+                ..e.pose
+            },
+        ] {
+            let e = scene.eye(Some(pose));
+            let hit = scene.pick(&e.ray([960., 540.])).unwrap();
+            assert_eq!(hit.id, "front");
+            assert!(scene.pick(&e.ray([10., 10.])).is_none());
+        }
         let hit = scene.pick(&e.ray([960., 540.])).unwrap();
         assert_eq!(hit.id, "front");
         assert_eq!(hit.normal, [0., 0., 1.]);
         assert!((hit.point[2] - 0.5).abs() < 1e-9);
         assert!(scene.pick(&e.ray([10., 10.])).is_none());
+    }
+    #[test]
+    fn ortho_picking_projection_and_roll_share_the_same_basis() {
+        let pose = Pose {
+            position: [0., 0., 10.],
+            target: [0.; 3],
+            zoom: 1.,
+            ortho: false,
+            roll: 0.,
+        };
+        let scene = Scene {
+            editor_lens: Lens::Perspective {
+                fov: 45.,
+                aspect: 1.,
+                near: 0.01,
+                far: 1000.,
+            },
+            shot: pose,
+            lens: Lens::Perspective {
+                fov: 45.,
+                aspect: 1.,
+                near: 0.01,
+                far: 1000.,
+            },
+            width: 1000.,
+            height: 1000.,
+            items: vec![],
+            revision: 0,
+            time: 0.,
+        };
+        let p = [1., 1., 0.];
+        let a = scene.eye(Some(pose));
+        let b = scene.eye(Some(Pose {
+            ortho: true,
+            ..pose
+        }));
+        let pa = a.project(p).unwrap().0;
+        let pb = b.project(p).unwrap().0;
+        assert!((pa[0] - pb[0]).abs() < 1e-9 && (pa[1] - pb[1]).abs() < 1e-9);
+        for e in [
+            a,
+            b,
+            scene.eye(Some(Pose {
+                ortho: true,
+                roll: 15.,
+                ..pose
+            })),
+        ] {
+            let px = e.project(p).unwrap().0;
+            let ray = e.ray(px);
+            let t = -ray.origin[2] / ray.dir[2];
+            let hit = add(ray.origin, mul(ray.dir, t));
+            assert!(length(sub(hit, p)) < 1e-9);
+            assert!(e.units_per_pixel(p) > 0.);
+        }
+        let ortho_shot = Scene {
+            lens: Lens::Orthographic {
+                width: 1000.,
+                height: 1000.,
+            },
+            ..scene.clone()
+        };
+        assert!(matches!(
+            ortho_shot.eye(None).lens,
+            Lens::Orthographic { .. }
+        ));
+        assert!(matches!(
+            ortho_shot.eye(Some(pose)).lens,
+            Lens::Perspective { .. }
+        ));
+        let projected = ortho_shot
+            .eye(Some(Pose {
+                ortho: true,
+                ..pose
+            }))
+            .project(p)
+            .unwrap()
+            .0;
+        assert!((projected[0] - pb[0]).abs() < 1e-9 && (projected[1] - pb[1]).abs() < 1e-9);
+        let rolled = scene.eye(Some(Pose { roll: 90., ..pose }));
+        assert!(length(sub(rolled.right_up().0, [0., 1., 0.])) < 1e-9);
     }
 }

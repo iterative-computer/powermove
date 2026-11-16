@@ -16,3 +16,5 @@ mod mac;
 pub use mac::{MacDomHost, SheetCall, SheetGate, StoreDataStores, set_sheet_gate};
 #[cfg(target_os = "macos")]
 pub mod visual;
+
+pub mod native_style;

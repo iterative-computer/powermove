@@ -154,3 +154,53 @@ test("an extension restyling its panel body keeps the shell's placement", async 
   await h.settle();
   expect(root.getAttribute("style")).toContain("left:5px;top:6px");
 });
+
+test("manifest nativeStyle is scoped to its own trusted panel", async () => {
+  const h = harness();
+  const host = new FakeHost();
+  const realm = new CompatRealm({
+    id: "fixture",
+    generation: 1,
+    initial: host.publication(),
+    host,
+    dom: h.shim,
+  });
+  const panels = new CompatPanels(realm.kernel.panels, h.shim.document);
+  try {
+    for (const mode of ["full", "tokens-only", "none"]) {
+      const extension = realm.extension(`synthetic-${mode}`, 3, {
+        manifest: { nativeStyle: mode },
+      });
+      extension.api.panels.register({
+        id: mode,
+        title: mode,
+        build(body: any) {
+          body.append(h.shim.document.createElement("button"));
+        },
+      });
+      panels.open(mode);
+    }
+    await h.settle();
+    const doc = h.page.window.document;
+    expect(doc.documentElement.hasAttribute("data-pm-style")).toBe(false);
+    expect(
+      doc
+        .querySelector('[data-pm-contribution="full"]')
+        ?.getAttribute("data-pm-style"),
+    ).toBeNull();
+    expect(
+      doc
+        .querySelector('[data-pm-contribution="tokens-only"]')
+        ?.getAttribute("data-pm-style"),
+    ).toBe("tokens-only");
+    expect(
+      doc
+        .querySelector('[data-pm-contribution="none"]')
+        ?.getAttribute("data-pm-style"),
+    ).toBe("none");
+  } finally {
+    panels.dispose();
+    realm.dispose();
+    h.close();
+  }
+});

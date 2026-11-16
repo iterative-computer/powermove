@@ -96,7 +96,7 @@ export type Intent =
   | { type: "select"; id: string; meta: boolean; ctrl: boolean; shift: boolean }
   | { type: "navigate"; direction: -1 | 1; shift: boolean }
   | { type: "disclose"; id: string; open: boolean }
-  | { type: "toggle" | "reset" | "remove" | "copy"; id: string }
+  | { type: "toggle" | "reset" | "remove" | "copy" | "duplicate"; id: string }
   | { type: "paste" | "clear" }
   | { type: "reorder"; id: string; direction: -1 | 1 }
   | { type: "drop"; id: string; slot: number }

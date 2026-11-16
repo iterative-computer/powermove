@@ -334,3 +334,73 @@ fn native_popup_choices_share_worker_model_actions() {
     );
     assert_eq!(controller.read().unwrap().chrome.quality, Quality::Half);
 }
+
+#[test]
+fn breadcrumb_projection_and_navigation_use_existing_compositions_only() {
+    let (_actor, controller, viewport) = fixture();
+    let vm = controller.read().unwrap();
+    let mut session = Session::default();
+    let value = session.publish(&vm, viewport).unwrap();
+    let ticket = value.get("ticket").and_then(Value::as_str).unwrap();
+    let graph = value.get("compositions").and_then(Value::as_array).unwrap();
+    assert!(
+        graph
+            .iter()
+            .any(|c| c.get("id").and_then(Value::as_str) == Some("c"))
+    );
+    let plan = session
+        .drive(
+            &vm,
+            &request(ticket, "viewer.composition.open", Value::from("c")),
+            viewport,
+            Caller::native(),
+        )
+        .unwrap();
+    assert!(matches!(plan.effect, Effect::Host(HostAction::OpenComposition(id)) if id == "c"));
+    assert!(
+        session
+            .drive(
+                &vm,
+                &request(ticket, "viewer.composition.open", Value::from("missing")),
+                viewport,
+                Caller::native()
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn breadcrumb_graph_projects_nested_precomp_links() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = parse(r##"{"id":"p","name":"Main","compId":"main","w":100,"h":100,"fps":30,"dur":5,"layers":[{"id":"l","name":"Logo","type":"precomp","from":0,"dur":5,"d":{"comp":"logo","w":100,"h":100},"p":{}}],"assets":{},"comps":{"logo":{"id":"logo","name":"Logo","w":100,"h":100,"fps":30,"dur":5,"layers":[{"id":"s","type":"precomp","from":0,"dur":5,"d":{"comp":"spinner","w":100,"h":100},"p":{}}]},"spinner":{"id":"spinner","name":"Spinner","w":100,"h":100,"fps":30,"dur":5,"layers":[]}}}"##).unwrap();
+    actor
+        .handle()
+        .open("p", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let controller = Controller::new(actor.handle(), "p");
+    let vm = controller.read().unwrap();
+    let viewport = vm
+        .viewport(
+            Size {
+                width: 300.,
+                height: 200.,
+            },
+            8.,
+        )
+        .unwrap();
+    let value = Session::default().publish(&vm, viewport).unwrap();
+    let comps = value.get("compositions").and_then(Value::as_array).unwrap();
+    let parents = |id: &str| {
+        comps
+            .iter()
+            .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap()
+            .get("parents")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(parents("logo"), Value::Array(vec![Value::from("main")]));
+    assert_eq!(parents("spinner"), Value::Array(vec![Value::from("logo")]));
+}

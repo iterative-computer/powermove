@@ -170,6 +170,9 @@ pub enum Route {
     Paste,
 }
 pub fn route(name: &str, args: &[serde_json::Value]) -> Option<Route> {
+    if name == "palette.selectLayer" {
+        return Some(Route::Plan("palette.selectLayer"));
+    }
     if let Some(planned) = PLANNED.iter().find(|p| **p == name) {
         return Some(Route::Plan(planned));
     }
@@ -504,12 +507,17 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
     let row = |label: &str, command: &str, args: serde_json::Value, enabled: bool| json!({"id":command,"label":label,"args":args,"disabled":!enabled});
     let plain = |label: &str, command: &str| row(label, command, json!([]), editable);
     let submenu = |label: &str, children: Vec<serde_json::Value>| json!({"id":"","label":label,"disabled":!editable,"children":children});
-    let mut rows = vec![
+    let mut rows = Vec::new();
+    // v1: Rename… leads, for one layer (↩ opens the same field).
+    if facts.selected.len() == 1 {
+        rows.push(plain("Rename…", "renameLayer"));
+    }
+    rows.extend([
         plain("Duplicate", "duplicate"),
         plain("Group", "groupLayers"),
         plain("Simplify Keyframes", "simplifyKeyframes"),
         plain("Pre-compose…", "precompose"),
-    ];
+    ]);
     if facts.selected.len() == 2 {
         rows.push(row(
             "Use Bottom Layer as Mask",
@@ -638,7 +646,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 51] = [
+pub const PLANNED: [&str; 52] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -655,6 +663,7 @@ pub const PLANNED: [&str; 51] = [
     "distributeLayers",
     "newSolid",
     "new3d",
+    "newCamera",
     "newShape",
     "newAdjustment",
     "newNull",
@@ -1002,6 +1011,13 @@ pub fn command_plan(
 ) -> Option<Plan> {
     let layers = list_layers(published.snapshot.root()?, None);
     let selected = published.selection.layers().to_vec();
+    if name == "palette.selectLayer" {
+        let id = args.first()?.as_str()?;
+        return layers
+            .iter()
+            .any(|l| l.id == id)
+            .then(|| selection_plan(vec![id.to_owned()]));
+    }
     let any = !selected.is_empty();
     let restack = |to| {
         any.then(|| {
@@ -1018,6 +1034,7 @@ pub fn command_plan(
         })
     };
     match name {
+        "newCamera" => command_plan("new3d", &[serde_json::json!("camera")], published, time),
         "new3d" => {
             // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
             // new layer is selected so Properties shows it.
@@ -1648,6 +1665,7 @@ pub fn disabled(
         off.extend(PLANNED.iter().map(|c| (*c).to_owned()));
         off.extend(DOCUMENT.iter().map(|c| (*c).to_owned()));
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
+        off.insert("studio.view".into());
         off.insert("text.editSelected".into());
         return off;
     };
@@ -1670,6 +1688,12 @@ pub fn disabled(
             off.insert(name.to_owned());
         }
     };
+    set(
+        "studio.view",
+        layers
+            .iter()
+            .any(|l| crate::gizmo::is_studio(published, &l.id)),
+    );
     for name in SELECTION {
         set(name, chosen);
     }
@@ -1868,6 +1892,7 @@ pub fn precompose_draft(published: &Published) -> Option<PrecomposeDraft> {
         can_leave,
         leave: false,
         adjust_duration: false,
+        size_to_selection: false,
         open_after: false,
     })
 }
@@ -1901,6 +1926,7 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
                     PrecomposeMode::MoveAll
                 },
                 adjust_duration: draft.adjust_duration && !leave,
+                size_to_selection: draft.size_to_selection && !leave,
                 time,
             }
             .into(),
@@ -1922,3 +1948,56 @@ pub(crate) mod commands_tests;
 #[cfg(test)]
 #[path = "layer_commands_tests.rs"]
 mod tests;
+
+/// Palette scope follows the open composition, including nested compositions.
+pub fn palette_layers(published: &Published) -> Vec<(String, String)> {
+    published
+        .snapshot
+        .root()
+        .map(|root| {
+            list_layers(root, None)
+                .into_iter()
+                .map(|l| (l.id, l.name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Last registered provider wins, just as in the Effects browser.
+pub fn palette_effects(state: &pm_kernel::state::StateSnapshot) -> Vec<(String, String)> {
+    let mut effects = std::collections::BTreeMap::new();
+    for entry in state.registries.get("effects").into_iter().flatten() {
+        effects.insert(
+            entry.id.clone(),
+            entry
+                .definition
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(&entry.id)
+                .to_owned(),
+        );
+    }
+    effects.into_iter().collect()
+}
+/// All selected layers receive the effect together in one undo step.
+pub fn palette_effect_plan(
+    published: &Published,
+    label: &str,
+    mut add: impl FnMut(&str) -> Result<Vec<Command>, String>,
+) -> Result<Option<Plan>, String> {
+    let layers = palette_layers(published);
+    let targets: Vec<_> = published
+        .selection
+        .layers()
+        .iter()
+        .filter(|id| layers.iter().any(|(layer, _)| layer == *id))
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let mut commands = Vec::new();
+    for id in targets {
+        commands.extend(add(id)?);
+    }
+    Ok(Some(plain(&format!("Add {label}"), commands)))
+}

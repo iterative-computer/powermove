@@ -383,6 +383,24 @@ impl Inspector {
         .map_err(eval_error)?;
         Ok(got.node().map(Node::to_value))
     }
+    /// Evaluate at this playhead time and return the evaluator's own diagnostic.
+    pub fn expression_error(
+        &mut self,
+        id: &PropertyId,
+        time: f64,
+    ) -> Result<Option<String>, InspectorError> {
+        let Some(prop) = self.property(id)? else {
+            return Ok(None);
+        };
+        let result = self.query(
+            "expressionRuntimeDiagnostic",
+            &id.layer,
+            Some(&id.path),
+            Some(prop),
+            time,
+        )?;
+        Ok(result.as_str().map(str::to_owned))
+    }
     pub(crate) fn evaluate(&mut self, id: &PropertyId, time: f64) -> Result<Value, InspectorError> {
         if let Some(prop) = self.property(id)? {
             return self.query("evP", &id.layer, Some(&id.path), Some(prop), time);

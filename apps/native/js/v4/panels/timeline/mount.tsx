@@ -22,11 +22,12 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
           await platform("timeline.effect", { kind: "command", name: "open" });
         } else if (
           intent.type === "graphOptions" ||
+          intent.type === "tabContext" ||
           (intent.type === "switch" && intent.name === "parent")
         ) {
           const rows = await command<MenuRow[]>("panel.timeline.menu", intent);
           const choice = await platform("contextMenu", rows);
-          const row = rows.find((r) => r.id === choice);
+          const row = rows.find((r) => r?.id === choice);
           if (row) await command("panel.timeline", row.intent);
         } else await command("panel.timeline", intent);
       },
