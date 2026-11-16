@@ -418,9 +418,12 @@ enum Dispute {
     /// Its registry answered a question with another face: why, and the
     /// job's question (to name its font and text).
     Differ(String, Option<pm_text::answers::Query>),
-    /// Its fonts are not the ones the job was asked to draw with any more
-    /// (or it has no registry): nothing can be compared.
+    /// It could not compare (no registry, a question it did not answer):
+    /// what did not answer.
     Moved(String),
+    /// The app's fonts changed since the job was asked: the fonts on this
+    /// Mac changed ([`FONTS_CHANGED`]), nothing left to compare.
+    Changed,
 }
 /// What the child sends the parent, one line each on its stdout.
 #[derive(Serialize, Deserialize)]
@@ -1619,6 +1622,10 @@ impl Faces {
                 *self.uncompared.lock().unwrap() = Some(why.clone());
                 Err(why)
             }
+            // Said as the fonts on this Mac changing (`FONTS_CHANGED`).
+            Ok(Err(Dispute::Changed)) => {
+                Err("the app's fonts changed since the job was asked".into())
+            }
             Err(_) => {
                 let why = "the app did not answer the export's font check".to_owned();
                 *self.uncompared.lock().unwrap() = Some(why.clone());
@@ -1824,10 +1831,7 @@ fn faces_agree(
 ) -> std::result::Result<(), Dispute> {
     let broker = font_broker()
         .ok_or_else(|| Dispute::Moved("the app has no font registry to compare with".into()))?;
-    let moved = || {
-        (Some(broker.generation()) != faces_of)
-            .then(|| Dispute::Moved("the app's fonts changed since the job was asked".into()))
-    };
+    let moved = || (Some(broker.generation()) != faces_of).then_some(Dispute::Changed);
     if let Some(moved) = moved() {
         return Err(moved);
     }
