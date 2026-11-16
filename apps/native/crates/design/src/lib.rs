@@ -276,6 +276,9 @@ pub struct Metrics {
     /// sheet however wide the window (the original app's 608 pt column with
     /// cards hanging 14 pt past it).
     pub settings_column: f32,
+    /// The project's poster in Settings › Project's header card (16:9).
+    pub settings_poster_width: f32,
+    pub settings_poster_height: f32,
     /// Greatest width of the Store's content column (the original app's
     /// 960 pt), centred in its sheet.
     pub store_column: f32,
@@ -797,6 +800,8 @@ impl Tokens {
                 settings_height: 520.,
                 settings_sidebar: 200.,
                 settings_column: 680.,
+                settings_poster_width: 96.,
+                settings_poster_height: 54.,
                 store_column: 960.,
                 menu_inset: 12.,
                 menu_row: 30.,

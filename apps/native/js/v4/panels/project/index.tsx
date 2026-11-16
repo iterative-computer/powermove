@@ -205,11 +205,17 @@ export function ProjectView(props: ProjectViewProps) {
   };
   const invoke = (command: import("./contract").Command) =>
     input({ Invoke: command });
+  // Escape's clear is the panel's own change to the text: it replaces what
+  // the field holds even while it is typed in (an echo of the typing leaves
+  // the field's committed value behind, so a plain "" might change nothing).
+  const [clears, setClears] = useState(0);
   const searchEscape = (event: SurfaceEvent) => {
     if (event.key !== "Escape" || event.composing) return;
     event.stopPropagation();
-    if (query) filter("");
-    else setSearchOpen(false);
+    if (query) {
+      filter("");
+      setClears(clears + 1);
+    } else setSearchOpen(false);
   };
   const pointer = (
     row: Row,
@@ -755,7 +761,8 @@ export function ProjectView(props: ProjectViewProps) {
             title="Search media"
             value={query}
             metadata={{
-              hostValue: Math.max(hostFilter.current, view.host_filter),
+              hostValue:
+                Math.max(hostFilter.current, view.host_filter) * 65536 + clears,
               placeholder: "Search",
               search: true,
             }}

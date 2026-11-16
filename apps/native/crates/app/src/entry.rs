@@ -378,6 +378,18 @@ pub fn editors(cx: &App) -> Vec<Entity<Controller>> {
         .unwrap_or_default()
 }
 
+/// Every open editor's controller with its window.
+pub fn editor_windows(cx: &App) -> Vec<(Entity<Controller>, AnyWindowHandle)> {
+    cx.try_global::<Entries>()
+        .map(|e| {
+            e.editors
+                .iter()
+                .filter_map(|(e, w)| Some((e.upgrade()?, *w)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The new window's opening, taken once by the window factory.
 pub fn take_for_new_window(cx: &mut App) -> Option<Pending> {
     cx.default_global::<Entries>().next_window.pop_front()
