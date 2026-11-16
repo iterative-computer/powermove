@@ -323,6 +323,11 @@ impl Realm {
     pub fn culprit(&self, execution: u64) -> Option<String> {
         self.inner.control.culprit.get(execution)
     }
+    /// Where `execution` was when the watchdog looked: its innermost frames
+    /// (`function (script:line) < …`).
+    pub fn culprit_place(&self, execution: u64) -> Option<String> {
+        self.inner.control.culprit.place(execution)
+    }
     pub fn stop(&self, execution: u64) -> bool {
         let active = self.inner.control.active.lock().unwrap();
         if let Some(active) = active.as_ref().filter(|a| a.id == execution) {

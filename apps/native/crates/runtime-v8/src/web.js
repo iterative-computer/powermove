@@ -365,9 +365,9 @@
     pump(now, completed, next) {
       if (!next) pending = [...completed.map(c => ['fetch', c]), ...[...timers].filter(([, t]) => t.due <= now).map(([id]) => ['timer', id])];
       const ran = new Set();
-      const as = list => { tags.clear(); enter(list); if (list) for (const tag of list) ran.add(tag); };
+      const as = list => { tags.clear(); enter(list); if (list) for (const tag of list) ran.add(tag); __task(list ? list.join('\n') : ''); };
       pumping = true;
-      try { while (pending.length && !deliver(now, pending.shift(), as)); } finally { pumping = false; tags.clear(); enter(ran); }
+      try { while (pending.length && !deliver(now, pending.shift(), as)); } finally { pumping = false; tags.clear(); enter(ran); __task(''); }
       return pending.length > 0;
     }
   });

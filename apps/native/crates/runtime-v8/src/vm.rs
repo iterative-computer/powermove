@@ -138,6 +138,9 @@ pub(crate) struct NativeState {
     /// takes each once with `__body(id)` as one ArrayBuffer.
     pub bodies: HashMap<u64, Vec<u8>>,
     blocked: Arc<Blocked>,
+    /// The loads the running task belongs to (`__work`'s tags: the
+    /// extensions whose timers, fetches or host answers started it).
+    task: Vec<String>,
 }
 /// Time the running task spent blocked in synchronous engine calls (the
 /// kernel channel, the engine, a base raster): the watchdog counts JS time
@@ -173,17 +176,24 @@ impl Blocked {
 /// The extension a stack capture found running one execution.
 #[derive(Clone, Default)]
 pub(crate) struct Culprit(Arc<(Mutex<Option<Found>>, std::sync::Condvar)>);
-/// One execution and the extension found running it.
-type Found = (u64, Option<String>);
+/// One execution, the extension found running it, and where it was (its
+/// innermost frames).
+type Found = (u64, Option<String>, Option<String>);
 impl Culprit {
     pub(crate) fn get(&self, execution: u64) -> Option<String> {
         match &*self.0.0.lock().unwrap() {
-            Some((id, owner)) if *id == execution => owner.clone(),
+            Some((id, owner, _)) if *id == execution => owner.clone(),
             _ => None,
         }
     }
-    fn found(&self, execution: u64, owner: Option<String>) {
-        *self.0.0.lock().unwrap() = Some((execution, owner));
+    pub(crate) fn place(&self, execution: u64) -> Option<String> {
+        match &*self.0.0.lock().unwrap() {
+            Some((id, _, place)) if *id == execution => place.clone(),
+            _ => None,
+        }
+    }
+    fn found(&self, execution: u64, owner: Option<String>, place: Option<String>) {
+        *self.0.0.lock().unwrap() = Some((execution, owner, place));
         self.0.1.notify_all();
     }
 }
@@ -210,7 +220,7 @@ pub(crate) fn capture_culprit(handle: &v8::IsolateHandle, slot: &Culprit, execut
     let (found, captured) = &*slot.0;
     let _ = captured
         .wait_timeout_while(found.lock().unwrap(), Duration::from_millis(250), |found| {
-            found.as_ref().is_none_or(|(id, _)| *id != execution)
+            found.as_ref().is_none_or(|(id, _, _)| *id != execution)
         })
         .unwrap();
 }
@@ -220,26 +230,49 @@ unsafe extern "C" fn capture_stack(mut raw: v8::UnsafeRawIsolatePtr, data: *mut 
     // V8 invokes this with the isolate entered, on its currently locked owner.
     let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
     let Some(MainContext(context)) = isolate.get_slot::<MainContext>().cloned() else {
-        capture.slot.found(capture.execution, None);
+        capture.slot.found(capture.execution, None, None);
         return;
     };
+    // The loads the task belongs to: whose task it is when no extension's
+    // code is on the stack (a timer's callback made with `new Function`,
+    // the host's own code working for it).
+    let started_by = isolate
+        .get_slot::<Native>()
+        .and_then(|n| n.0.lock().unwrap().task.first().cloned());
     v8::scope!(let hs, isolate);
     let context = v8::Local::new(hs, &context);
     let s = &mut v8::ContextScope::new(hs, context);
     let mut owner = None;
+    let mut place = Vec::new();
     if let Some(trace) = v8::StackTrace::current_stack_trace(s, 64) {
         for index in 0..trace.get_frame_count() {
-            let name = trace
-                .get_frame(s, index)
-                .and_then(|frame| frame.get_script_name(s))
+            let Some(frame) = trace.get_frame(s, index) else {
+                continue;
+            };
+            let script = frame
+                .get_script_name(s)
                 .map(|name| name.to_rust_string_lossy(s));
-            if let Some(id) = name.as_deref().and_then(extension_of_module) {
+            if place.len() < 3 {
+                let function = frame
+                    .get_function_name(s)
+                    .map(|name| name.to_rust_string_lossy(s))
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "anonymous".into());
+                let script = script.as_deref().filter(|s| !s.is_empty()).unwrap_or("host");
+                place.push(format!("{function} ({script}:{})", frame.get_line_number()));
+            }
+            if owner.is_none()
+                && let Some(id) = script.as_deref().and_then(extension_of_module)
+            {
                 owner = Some(id.to_owned());
+            }
+            if owner.is_some() && place.len() >= 3 {
                 break;
             }
         }
     }
-    capture.slot.found(capture.execution, owner);
+    let place = (!place.is_empty()).then(|| place.join(" < "));
+    capture.slot.found(capture.execution, owner.or(started_by), place);
 }
 /// `pmext://<id>/<generation>/<file>`: the extension a module belongs to.
 pub(crate) fn extension_of_module(url: &str) -> Option<&str> {
@@ -457,6 +490,15 @@ pub(crate) fn throw(s: &mut v8::PinScope, msg: &str) {
     let msg = v8::String::new(s, msg).unwrap();
     let error = v8::Exception::type_error(s, msg);
     s.throw_exception(error);
+}
+/// `__task(tags)`: the loads the task starting now belongs to, one per line
+/// (empty: none), for the watchdog to say whose task ran away.
+fn task(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, _: v8::ReturnValue) {
+    let tags = a.get(0).to_rust_string_lossy(s);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let mut n = state.lock().unwrap();
+    n.task.clear();
+    n.task.extend(tags.lines().filter(|t| !t.is_empty()).take(8).map(str::to_owned));
 }
 fn now(s: &mut v8::PinScope, _: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let elapsed = s
@@ -1055,6 +1097,7 @@ impl Vm {
             sync_calls: 0,
             bodies: HashMap::new(),
             blocked: Arc::default(),
+            task: Vec::new(),
         }));
         isolate.set_slot(Native(native_state.clone()));
         crate::modules::install(&mut isolate);
@@ -1065,6 +1108,7 @@ impl Vm {
             for (name, function) in [
                 ("__host", v8::Function::new(cs, native).unwrap()),
                 ("__now", v8::Function::new(cs, now).unwrap()),
+                ("__task", v8::Function::new(cs, task).unwrap()),
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
                 ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
                 ("__fetch", v8::Function::new(cs, fetch_op).unwrap()),
