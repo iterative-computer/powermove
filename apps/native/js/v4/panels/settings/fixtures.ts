@@ -90,4 +90,5 @@ export const bindings = {
   search: "test-lease.search",
   extensionSearch: "test-lease.extension-search",
   extensionType: "test-lease.extension-type",
+  commandSearch: "test-lease.command-search",
 };

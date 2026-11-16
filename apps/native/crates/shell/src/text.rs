@@ -215,6 +215,53 @@ impl TextField {
     pub fn set_unit(&mut self, unit: Option<SharedString>) {
         self.unit = unit;
     }
+    /// A form number field's stepper (Frame Rate).
+    pub fn set_stepper(&mut self, on: bool) {
+        self.slot.set_stepper(on);
+    }
+    /// A form's field (Settings): AppKit's bordered field is the whole
+    /// control, shown at all times; the unit stands beside it.
+    fn render_form(&mut self, window: &mut Window) -> AnyElement {
+        let slot = self.slot.clone();
+        let layer = self.layer.clone();
+        let t = &self.tokens;
+        let rect = |b: Bounds<Pixels>| {
+            NSRect::new(
+                NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
+                NSSize::new(f32::from(b.size.width) as f64, f32::from(b.size.height) as f64),
+            )
+        };
+        let _ = window;
+        div()
+            .id("native-text")
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(t.space.xs))
+            .text_size(px(t.typography.body))
+            .font_family(pm_design::TEXT_FONT)
+            .child(
+                div().relative().flex_1().min_w(px(0.)).h(px(t.metrics.field)).child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let mask = window.content_mask().bounds;
+                            let (bounds, mask) = layer.painted(bounds, mask, window);
+                            slot.stage(rect(bounds), rect(mask));
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                ),
+            )
+            .children(self.unit.clone().map(|unit| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(t.colors.secondary))
+                    .child(unit)
+            }))
+            .into_any_element()
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);
@@ -316,6 +363,9 @@ const MONO_ADVANCE: f32 = 0.602;
 const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
+            return self.render_form(window);
+        }
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
@@ -477,5 +527,6 @@ impl Render for TextField {
                 .absolute()
                 .inset_0(),
             )
+            .into_any_element()
     }
 }

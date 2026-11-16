@@ -230,6 +230,8 @@ fn win(id: u64, tab: Option<u64>) -> WindowState {
         project: format!("p{id}"),
         workspace: "design".into(),
         tab_group: tab,
+        tab_index: 0,
+        pages: Vec::new(),
         fullscreen: false,
     }
 }
@@ -395,7 +397,7 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
     // Workspace and panel menus exist (HIG placement), and v1's tab items
     // (Open Projects In: Tabs, the default). The system's own tab bar stays
     // hidden behind the toolbar's tabs: no Show Tab Bar.
-    for c in ["newTab", "mergeAllWindows:", "nextTab", "moveTabToNewWindow", "panels", "workspaces"] {
+    for c in ["newTab", "mergeAllWindows", "nextTab", "moveTabToNewWindow", "panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");
     }
     assert!(all.iter().all(|i| i.command != "toggleTabBar:"));

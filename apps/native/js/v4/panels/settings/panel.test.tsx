@@ -232,6 +232,45 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
       model.show("shortcuts");
     },
   ],
+  [
+    // The command taking a key was given one another command has: its row
+    // asks before moving it.
+    "shortcuts-asked",
+    (model) => {
+      const row = (id: string, label: string, keys: string[], patch = {}) => ({
+        id,
+        menu: "Layer",
+        label,
+        keys,
+        chords: [],
+        changed: false,
+        fixed: false,
+        recording: false,
+        ...patch,
+      });
+      model.publish({
+        ...model.publication,
+        revision: 2,
+        shortcuts: {
+          preset: "premiere-pro",
+          changed: false,
+          rows: [
+            row("rippleTrimIn", "Ripple Trim In Point to Playhead", ["Q"]),
+            row("extendEdit", "Extend Edit to Playhead", ["E"], {
+              recording: true,
+              asked: {
+                keys: "Q",
+                other: "Ripple Trim In Point to Playhead",
+                menu: false,
+              },
+            }),
+          ],
+          conflicts: [],
+        },
+      });
+      model.show("shortcuts");
+    },
+  ],
 ];
 for (const [state, prepare] of stateCases)
   test(`${state}: six-op tree snapshot passes the real Rust wire and kit validators`, async () => {
@@ -338,8 +377,9 @@ test("leased native preference control writes through the model and v4 host, not
   });
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
-  const appearance = find(root, "Appearance", "pop-up-button");
-  await event(root, appearance.id, "change", { value: "dark" });
+  // Appearance is a short exclusive choice: a segmented control.
+  const appearance = find(root, "Appearance", "segmented-control");
+  await event(root, find(root, "Dark", "segment").id, "click");
   await Promise.resolve();
   await f.host.getSetting("themeMode");
   expect(f.settings.get("themeMode")).toBe("dark");
@@ -630,4 +670,46 @@ test("the installed extensions take their rows' height (PM-386): every row up to
     root.dispose();
     f.model.dispose();
   }
+});
+test("every command on Shortcuts arrives in commits the host's 1 MiB argument quota accepts", async () => {
+  const { model } = fixture();
+  model.show();
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    id: `c${i}`,
+    menu: ["Layer", "Edit", "View", "Playback"][i % 4]!,
+    label: `Command ${i}`,
+    keys: ["⌘⇧K"],
+    chords: [],
+    changed: false,
+    fixed: false,
+    recording: false,
+  }));
+  model.publish({
+    ...model.publication,
+    revision: 2,
+    shortcuts: { preset: "premiere-pro", changed: false, rows, conflicts: [] },
+  });
+  model.show("shortcuts");
+  const { root, commits } = recorder();
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    await root.render(<SettingsPanel model={model} bindings={bindings} />);
+    await root.flush();
+  };
+  await settle();
+  // Searching and clearing the search brings every command back the same
+  // way (each re-render had re-sent every row's style).
+  await model.search("Command 1");
+  await settle();
+  await model.search("");
+  await settle();
+  const sizes = commits.map((c) => JSON.stringify(c).length);
+  expect(Math.max(...sizes)).toBeLessThan(1024 * 1024);
+  const groups = root
+    .inspect()
+    .nodes.filter((n) => String(n.props.id ?? "").startsWith("settings.shortcut."));
+  expect(groups).toHaveLength(400);
+  root.dispose();
+  model.dispose();
 });
