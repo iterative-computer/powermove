@@ -2079,6 +2079,7 @@ impl Controller {
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 let _ = host.set_content_regions(content);
+                host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill.get()));
                 // The ground is the panels': the viewer's stage shows the
                 // viewer through the page, never under a panel's tint.

@@ -462,6 +462,12 @@ pub struct TimelineSurface {
     /// event): a skim starts only when the pointer moves from there, never
     /// from a scroll or a move event that did not move it.
     pointer: Option<Point<Pixels>>,
+    /// The playhead's time when the pointer last moved the skimmer: with no
+    /// pointer motion since, a skim goes on (a scroll, a move event that did
+    /// not move it) only while the viewer still shows it and the playhead
+    /// has not moved (a seek, a click, playback put the viewer back on the
+    /// playhead's frame).
+    skim_playhead: Option<f64>,
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
@@ -542,6 +548,7 @@ impl TimelineSurface {
             told: None,
             skimmer: None,
             pointer: None,
+            skim_playhead: None,
             hover_clip: None,
             activation: None,
             media_over: None,
@@ -2994,9 +3001,16 @@ impl TimelineSurface {
     }
     /// A skim showing moves to the time now under the pointer (`x`).
     fn reskim(&mut self, x: f64, cx: &mut Context<Self>) {
-        if self.skimmer.is_some() {
+        if self.skim_live(cx) {
             self.skim_to(x, cx);
         }
+    }
+    /// Whether the skim the pointer last moved is still what the viewer
+    /// shows (see `skim_playhead`).
+    fn skim_live(&self, cx: &App) -> bool {
+        self.skimmer.is_some()
+            && self.delegate.skimmer_shown(cx)
+            && self.skim_playhead == Some(self.delegate.time(cx))
     }
     fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
         if at.is_none() && self.hover_clip.take().is_some() {
@@ -3106,7 +3120,10 @@ impl TimelineSurface {
         let moved = self.pointer != Some(position);
         self.pointer = Some(position);
         let (x, y) = self.local(position);
-        if moved || self.skimmer.is_some() {
+        if moved {
+            self.skim_to(x, cx);
+            self.skim_playhead = Some(self.delegate.time(cx));
+        } else if self.skim_live(cx) {
             self.skim_to(x, cx);
         }
         let hovered = self.clip_at(x, y)
