@@ -7100,6 +7100,91 @@ fn embedded_media_in_a_copy_survives_removal_of_the_original_file() {
         count
     );
 }
+/// A project of this library whose backing file (with its embedded media)
+/// is not here opens as itself and keeps naming that file through a close
+/// and a save: when the file is back, its media connect again, and the edit
+/// made meanwhile is kept (Sol review of PM-421).
+#[test]
+fn an_unavailable_backing_file_stays_named_and_its_media_connect_again() {
+    let dir = common::TempDir::new("offline-media");
+    let file = dir.path("external.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let _lock = lock_project(&user_lock_root(), &file).unwrap();
+    let profile = dir.path("native");
+    let mut k = kernel(&profile);
+    // The external file is locked by another app: the project opens as a
+    // copy whose embedded media are in a backing file of this library.
+    let h = open(&mut k, "P", SessionSource::File(file.clone()));
+    let count = k.project("P").unwrap().store().media().len();
+    assert!(count > 0, "the fixture has embedded media");
+    k.shell(ShellCall::Close(h)).unwrap();
+    drop(k);
+    let slot = LibraryStore::open(&profile).projects().unwrap()[0].id.clone();
+    let backing_of = || {
+        LibraryStore::open(&profile)
+            .read(&format!("projectMeta.{slot}"))
+            .unwrap()
+            .and_then(|m| m.get("file")?.get("path")?.as_str().map(std::path::PathBuf::from))
+    };
+    let backing = backing_of().expect("the copy names its backing file");
+    assert!(backing.is_file());
+    let away = dir.path("away.pmv");
+    fs::rename(&backing, &away).unwrap();
+    let library = |slot: &str| SessionSource::Library {
+        profile: profile.clone(),
+        project: slot.into(),
+    };
+    let rename = |k: &mut Kernel, id: &str, name: &str| {
+        let a = k
+            .handle(
+                id,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some("Rename".into()),
+                        body: WriteBody::Commands(vec![
+                            commands::comps::CompCommand::Set {
+                                patch: Box::new(commands::comps::CompPatch {
+                                    name: Some(name.into()),
+                                    ..Default::default()
+                                }),
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .unwrap()
+            .reply
+            .unwrap();
+        assert!(matches!(a.reply, Reply::Applied { changed: true, .. }));
+    };
+    let mut k = kernel(&profile);
+    // Opened while its file is away, closed: still named.
+    let h = open(&mut k, &slot, library(&slot));
+    let before = LibraryStore::open(&profile).projects().unwrap().len();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a close keeps the file named");
+    // Edited and saved while it is away: still named, no entry made.
+    let h = open(&mut k, &slot, library(&slot));
+    rename(&mut k, &slot, "Edited while away");
+    k.shell(ShellCall::Save(h.clone())).unwrap();
+    k.shell(ShellCall::Close(h)).unwrap();
+    k.durability_barrier().unwrap();
+    assert_eq!(backing_of().as_ref(), Some(&backing), "a save keeps the file named");
+    assert_eq!(LibraryStore::open(&profile).projects().unwrap().len(), before);
+    drop(k);
+    // The file is back: its media connect again, with the edit.
+    fs::rename(&away, &backing).unwrap();
+    let mut k = kernel(&profile);
+    open(&mut k, &slot, library(&slot));
+    let store = k.project(&slot).unwrap().store();
+    assert_eq!(store.media().len(), count, "its embedded media connect again");
+    let name = store.root().unwrap().get("name").unwrap().to_value();
+    assert_eq!(name.as_str(), Some("Edited while away"));
+}
 #[test]
 fn creating_an_existing_project_id_is_refused_without_changing_the_slot() {
     let dir = common::TempDir::new("create-collision");

@@ -1371,12 +1371,14 @@ fn offline_file(root: &Path) -> Value {
     meta.insert("file", Value::Object(file));
     Value::Object(meta)
 }
-/// Quit compaction folds in only work that replays onto its project opened
-/// as itself; anything else is left in its journal for the next open's
-/// question, and no entry is made on its own (acceptance run 16: a quit made
-/// "— Recovered" and "— Native" entries for a project killed earlier).
+/// A quit folds in nothing the person did not choose: work a forced quit
+/// left in a project no window has open stays in its journal, untouched, and
+/// the next open asks (Recover question), whether it would replay cleanly,
+/// its file is gone, or its saved project changed under it; no entry is made
+/// (acceptance run 16, Sol review). Work the person recovered and kept open
+/// is saved by the quit, and the next open asks nothing.
 #[test]
-fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
+fn a_quit_folds_in_nothing_the_person_did_not_choose() {
     let library = |root: &Path| pm_kernel::library::LibraryStore::open(root);
     let rows = |root: &Path| {
         library(root)
@@ -1424,50 +1426,19 @@ fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
         }
         root
     };
-    let quit = |root: &Path| {
-        let mut k = kernel(root);
-        k.shell(ShellCall::PrepareQuit).unwrap();
-    };
-
-    // Work that replays onto the project as itself is folded in.
-    let root = killed("quit-folds");
-    quit(&root.0);
-    assert_eq!(rows(&root.0), vec![("film".to_owned(), "Base".to_owned())]);
-    let mut k = kernel(&root.0);
-    let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
-        panic!("folded work asks nothing");
-    };
-    assert_eq!(width(&k, &session.project), 640.);
-    drop(k);
-
-    // Its file is gone: it is still a project of this library, and its
-    // work is folded into it, as itself; no entry is made.
-    let root = killed("quit-offline");
-    {
-        let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
-            .unwrap();
-        w.set("projectMeta.film", offline_file(&root.0)).unwrap();
-        w.flush().unwrap();
-    }
-    quit(&root.0);
-    assert_eq!(rows(&root.0), vec![("film".to_owned(), "Base".to_owned())]);
-    let mut k = kernel(&root.0);
-    let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
-        panic!("folded work asks nothing");
-    };
-    assert_eq!(width(&k, &session.project), 640.);
-    drop(k);
-
-    // Its saved project changed under the work (it would go to a recovered
-    // copy): the quit leaves it, and the next open asks.
-    for (case, change) in [("quit-base-changed", "body")] {
+    let journals = |root: &Path| journal::sessions(&root.join("journals/film"));
+    for (case, change) in [
+        ("quit-clean", ""),
+        ("quit-offline", "file"),
+        ("quit-base-changed", "body"),
+    ] {
         let root = killed(case);
         {
             let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
                 .unwrap();
             if change == "file" {
                 w.set("projectMeta.film", offline_file(&root.0)).unwrap();
-            } else {
+            } else if change == "body" {
                 let mut p = value();
                 let m = p.as_object_mut().unwrap();
                 m.insert("id", Value::from("film"));
@@ -1477,15 +1448,35 @@ fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
             }
             w.flush().unwrap();
         }
-        let before = rows(&root.0);
-        quit(&root.0);
-        assert_eq!(rows(&root.0), before, "{case}: no entry made on its own");
+        let before = (rows(&root.0), journals(&root.0));
+        assert!(!before.1.is_empty(), "{case}: work left");
+        kernel(&root.0).shell(ShellCall::PrepareQuit).unwrap();
+        assert_eq!((rows(&root.0), journals(&root.0)), before, "{case}: left untouched");
         let mut k = kernel(&root.0);
         assert!(
             matches!(prepare(&mut k, &root.0), ShellReply::RecoveryRequired { .. }),
             "{case}: the next open asks"
         );
     }
+    // Recovered by the person and kept open: the quit saves it.
+    let root = killed("quit-accepted");
+    let mut k = kernel(&root.0);
+    let ShellReply::RecoveryRequired { ticket, .. } = prepare(&mut k, &root.0) else {
+        panic!("not asked");
+    };
+    k.shell(ShellCall::DecideRecovery {
+        ticket,
+        decision: RecoveryDecision::Recover,
+    })
+    .unwrap();
+    k.shell(ShellCall::PrepareQuit).unwrap();
+    drop(k);
+    let mut k = kernel(&root.0);
+    let ShellReply::Opened { session, .. } = prepare(&mut k, &root.0) else {
+        panic!("accepted work asks again");
+    };
+    assert_eq!(width(&k, &session.project), 640.);
+    assert_eq!(rows(&root.0), vec![("film".to_owned(), "Base".to_owned())]);
 }
 
 /// Opening a library project whose file is gone, from Home or as a launch
@@ -1571,11 +1562,138 @@ fn an_offline_project_opens_as_itself_and_an_earlier_copy_is_reopened() {
         pm_model::json::to_canonical_string(&Value::from(store.to_string_lossy().into_owned())),
     ))
     .unwrap();
-    save("copyold", record);
+    // The copy holds work of its own (wider: 700), as an edited copy does.
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        let mut p = value();
+        let m = p.as_object_mut().unwrap();
+        m.insert("id", Value::from("copyold"));
+        m.insert("w", Value::from(700.));
+        w.save_project("copyold", p, Value::Null, Value::Null, record).unwrap();
+        w.flush().unwrap();
+    }
     let before = ids();
     let mut k = kernel(&root.0);
     for (round, profile) in [root.0.clone(), store.clone()].into_iter().enumerate() {
         assert_eq!(open(&mut k, round, &profile, "film"), "copyold", "round {round}: its copy");
         assert_eq!(ids(), before, "round {round}: no entry made");
+    }
+    // Edited in that copy and killed: the next open of the project asks, and
+    // Recover brings the work back in the same copy.
+    let film = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "film".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "film".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let ShellReply::Opened { session, .. } = film(&mut k) else {
+        panic!("not opened");
+    };
+    assert_eq!(width(&k, &session.project), 700., "the copy's own work");
+    widen(&mut k, &session.project, 800.);
+    k.durability_barrier().unwrap();
+    drop(k);
+    let mut k = kernel(&root.0);
+    let ShellReply::RecoveryRequired { ticket, .. } = film(&mut k) else {
+        panic!("the copy's unsaved work was not offered");
+    };
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .unwrap()
+    else {
+        panic!("not opened");
+    };
+    assert_eq!(width(&k, &session.project), 800.);
+    assert!(matches!(
+        k.session_metadata(&session.project).unwrap().destination,
+        SessionDestination::Library(slot) if slot == "copyold"
+    ));
+    assert_eq!(ids(), before, "recovered in the copy, no entry made");
+}
+
+/// A project saved to its own file has no library body: when the file is
+/// gone, work a forced quit left is offered by the Recover question like any
+/// other, never turned into an entry or set aside before the person
+/// chooses; Discard sets it aside, Recover makes the one recovered copy
+/// (Sol review of PM-405).
+#[test]
+fn a_file_entry_whose_file_is_gone_asks_before_recovering_its_work() {
+    for decision in [RecoveryDecision::Discard, RecoveryDecision::Recover] {
+        let root = TempDir::new(&format!("file-gone-{decision:?}"));
+        let path = root.path("Film.pmv");
+        {
+            let mut k = kernel(&root.0);
+            let mut project = value();
+            project.as_object_mut().unwrap().insert("id", Value::from("film"));
+            let ShellReply::Opened { session, .. } = k
+                .shell(ShellCall::PrepareOpen {
+                    id: "film".into(),
+                    source: SessionSource::New(project),
+                    electron_profile: None,
+                })
+                .unwrap()
+            else {
+                panic!("not opened");
+            };
+            k.shell(ShellCall::SaveAs {
+                session: session.clone(),
+                path: path.clone(),
+                replace: false,
+            })
+            .unwrap();
+            widen(&mut k, &session.project, 640.);
+            k.durability_barrier().unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+        let ids = || {
+            pm_kernel::library::LibraryStore::open(&root.0)
+                .projects()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        let journals = || journal::sessions(&root.path("journals/film"));
+        let before = (ids(), journals());
+        assert!(!before.1.is_empty(), "work left");
+        let mut k = kernel(&root.0);
+        let reply = k
+            .shell(ShellCall::PrepareOpen {
+                id: "film".into(),
+                source: SessionSource::Library {
+                    profile: root.0.clone(),
+                    project: "film".into(),
+                },
+                electron_profile: None,
+            })
+            .unwrap();
+        let ShellReply::RecoveryRequired { ticket, .. } = reply else {
+            panic!("{decision:?}: not asked: {reply:?}");
+        };
+        assert_eq!((ids(), journals()), before, "asking changes nothing");
+        let decided = k.shell(ShellCall::DecideRecovery { ticket, decision });
+        match decision {
+            RecoveryDecision::Discard => {
+                assert!(decided.is_err(), "nothing opens without its file");
+                assert_eq!(ids(), before.0, "Discard makes no entry");
+                assert!(journals().is_empty(), "Discard sets the work aside");
+            }
+            _ => {
+                let Ok(ShellReply::Opened { session, .. }) = decided else {
+                    panic!("Recover did not open: {decided:?}");
+                };
+                assert_eq!(width(&k, &session.project), 640.);
+                assert_eq!(ids().len(), before.0.len() + 1, "the one recovered copy");
+            }
+        }
     }
 }
