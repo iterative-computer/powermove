@@ -370,8 +370,10 @@ fn menu_project() -> serde_json::Value {
         ),
         locked,
         keyed,
+        layer("p", "precomp", json!({"comp":"c2","w":64,"h":64})),
     ]);
     project["assets"] = json!({"A":{"id":"A","name":"A","kind":"video","dur":100}});
+    project["comps"] = json!({"c2":{"id":"c2","name":"Inner","w":64,"h":64,"fps":30,"dur":2,"bg":"#000000","layers":[]}});
     project
 }
 fn labels(rows: &[serde_json::Value]) -> Vec<String> {
@@ -439,11 +441,11 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         [
             "Rename…",
             "Duplicate",
-            "Group",
-            "Simplify Keyframes",
+            "Group Layers",
             "Pre-compose…",
+            "-",
             "Move to Group",
-            "Parent",
+            "Link Layers",
             "Timing",
             "-",
             "Hide",
@@ -478,25 +480,35 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         ]
     );
     // A parent can be any layer that would not make a cycle; never itself.
-    let parents = child_labels(&menu(&desk, "a", 1.), "Parent");
+    let parents = child_labels(&menu(&desk, "a", 1.), "Link Layers");
     assert_eq!(parents[0], "None");
     assert!(parents.contains(&"b".to_owned()) && !parents.contains(&"a".to_owned()));
 
-    // Two layers: the lower can be the upper's matte.
+    // Two layers: a title says how many; the lower can be the upper's matte.
     desk.select(&["a", "b"]);
-    assert_eq!(labels(&menu(&desk, "a", 1.))[4], "Use Bottom Layer as Mask");
+    let two = labels(&menu(&desk, "a", 1.));
+    assert_eq!(two[0], "2 Layers");
+    assert_eq!(two[4], "Use Bottom Layer as Mask");
+    assert_eq!(two[5], "-");
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
     // One layer: Rename… leads (v1).
-    assert_eq!(labels(&menu(&desk, "t", 1.))[5], "Split Text into Layers");
+    assert_eq!(labels(&menu(&desk, "t", 1.))[4], "Split Text into Layers");
     assert_eq!(
         child_labels(&menu(&desk, "t", 1.), "Split Text into Layers"),
         ["By Word", "By Character", "By Line"]
     );
-    // A group ungroups and has no timing of its own.
+    // A group ungroups, right after Group Layers, and has no timing of its own.
     desk.select(&["g"]);
     let group = labels(&menu(&desk, "g", 1.));
-    assert!(group.contains(&"Ungroup".to_owned()) && !group.contains(&"Timing".to_owned()));
+    assert_eq!(group[2..4], ["Group Layers", "Ungroup Layers"]);
+    assert!(!group.contains(&"Timing".to_owned()));
+    // One pre-comp releases into its layers and can rasterize continuously.
+    desk.select(&["p"]);
+    let precomp = labels(&menu(&desk, "p", 1.));
+    assert_eq!(precomp[3..5], ["Pre-compose…", "Release Pre-comp"]);
+    let raster = precomp.iter().position(|l| l == "Continuously Rasterize");
+    assert_eq!(raster, Some(precomp.len() - 3), "{precomp:?}");
     // A video that carries its soundtrack.
     desk.select(&["v"]);
     let video = labels(&menu(&desk, "v", 1.));
@@ -513,11 +525,11 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         [
             "(Rename…)",
             "(Duplicate)",
-            "(Group)",
-            "(Simplify Keyframes)",
+            "(Group Layers)",
             "(Pre-compose…)",
+            "-",
             "(Move to Group)",
-            "(Parent)",
+            "(Link Layers)",
             "(Timing)",
             "-",
             "(Hide)",
@@ -569,11 +581,11 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
             );
         },
     );
-    step("a", &["Parent", "b"], "Parent Layers", &|| {
+    step("a", &["Link Layers", "b"], "Parent Layers", &|| {
         assert_eq!(text("a", "parent").as_deref(), Some("b"));
     });
-    assert!(!child_labels(&menu(&desk, "b", 1.), "Parent").contains(&"a".to_owned()));
-    step("a", &["Parent", "None"], "Remove Parent", &|| {
+    assert!(!child_labels(&menu(&desk, "b", 1.), "Link Layers").contains(&"a".to_owned()));
+    step("a", &["Link Layers", "None"], "Remove Parent", &|| {
         assert_eq!(text("a", "parent"), None);
     });
     step("a", &["Move to Group", "g"], "Move to Group", &|| {
@@ -631,14 +643,18 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     desk.select(&["keyed"]);
     let keys = || crate::layer_commands::key_count(&desk.published(), &["keyed".to_owned()]);
     assert_eq!(keys(), 5);
-    step(
-        "keyed",
-        &["Simplify Keyframes"],
-        "Simplify Keyframes",
-        &|| {
-            assert_eq!(keys(), 4, "the key in the middle of the hold goes");
-        },
+    // Not a layer-menu row in v1 (its toast and the menu bar offer it).
+    assert!(!labels(&menu(&desk, "keyed", 1.)).contains(&"Simplify Keyframes".to_owned()));
+    let before = desk.document();
+    desk.run("simplifyKeyframes", &[], 1.);
+    assert_eq!(keys(), 4, "the key in the middle of the hold goes");
+    assert_eq!(
+        desk.published().history.undo_label.as_deref(),
+        Some("Simplify Keyframes")
     );
+    desk.undo();
+    assert_eq!(desk.document(), before, "undo Simplify Keyframes");
+    desk.redo();
 
     desk.select(&["v"]);
     step("v", &["Mute Audio"], "Mute Audio", &|| {
