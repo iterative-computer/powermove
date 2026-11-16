@@ -498,7 +498,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("nextTab"),
                 m("previousTab"),
                 Item::command("Move Tab to New Window", "moveTabToNewWindow", ""),
-                Item::role("Merge All Windows", "mergeAllWindows:", ""),
+                // The app's own: AppKit's merges nothing for windows that
+                // never tab on their own (`editor_window_tabbing`).
+                Item::command("Merge All Windows", "mergeAllWindows", ""),
                 Item::role("Show All Tabs", "toggleTabOverview:", ""),
                 sep(),
                 Item::command("Store", "store", ""),

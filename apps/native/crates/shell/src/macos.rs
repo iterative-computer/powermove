@@ -152,9 +152,10 @@ pub fn tokens() -> Tokens {
 /// that was in front in front again. With no session, one new window.
 fn restore_session(cx: &mut App) {
     let mut front = None;
-    let plan = view::session_path()
-        .filter(|p| p.exists())
-        .and_then(|p| match session::Session::load(&p) {
+    let path = view::session_path().filter(|p| p.exists());
+    let plan = path
+        .as_ref()
+        .and_then(|p| match session::Session::load(p) {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("Window session could not be restored: {e}");
@@ -162,14 +163,27 @@ fn restore_session(cx: &mut App) {
             }
         })
         .map(|s| {
-            front = s.key;
-            if crate::tabs_mode() {
-                s.restore_plan_tabs(keeps_windows())
-            } else {
-                s.restore_plan(keeps_windows())
-            }
+            let plan = s.launch_plan(crate::tabs_mode(), keeps_windows());
+            front = s.key.filter(|k| plan.iter().any(|w| w.id == *k));
+            plan
         })
         .unwrap_or_default();
+    // The file holds what this launch reopens and nothing older: entries an
+    // earlier build left behind go (PM-392). Queued before any window
+    // writes its own state.
+    if let Some(path) = &path
+        && !plan.is_empty()
+    {
+        session::write(
+            path,
+            session::Change::Replace(session::Session {
+                version: 1,
+                windows: plan.clone(),
+                key: front,
+                complete: true,
+            }),
+        );
+    }
     if plan.is_empty() {
         open_editor_window(cx, true, None, None);
         return;
@@ -268,6 +282,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {
                 let h = host.borrow();
