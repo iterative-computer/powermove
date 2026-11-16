@@ -1969,3 +1969,57 @@ fn a_rail_is_as_wide_as_its_widest_name_in_a_narrow_dock(cx: &mut TestAppContext
         "the widest name sets the rail's width in a 160 pt row: {long:?}"
     );
 }
+
+/// The shell shows a panel's header through a cached view, which lays its
+/// element out as a root of its own. Alone in its row the header still takes
+/// the row's width, so groups meant to share it (the viewer bar's) do: the
+/// trailing group's pop-up stands at the row's end, and nothing in the
+/// leading group is drawn over it (PM-463).
+#[gpui::test]
+fn a_header_alone_in_its_row_takes_the_rows_width(cx: &mut TestAppContext) {
+    struct Row(Entity<crate::v4_view::HeaderView>, #[allow(dead_code)] Entity<SurfaceView>);
+    impl Render for Row {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(600.))
+                .h(px(40.))
+                .flex()
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .child(self.0.clone().cached(StyleRefinement::default().w_full())),
+                )
+        }
+    }
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"display":"flex","flexDirection":"column"}}), &[]);
+    let group = |id: &str, end: bool| {
+        json!({"id": id, "style": {"display":"flex","flexDirection":"row","flexGrow":1,
+            "flexBasis":{"token":"metrics.value_column"},
+            "justifyContent": if end { "end" } else { "start" }}})
+    };
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id":"bar","data-pm-slot":"header","style":{"display":"flex","flexDirection":"row","height":28}}),
+        &[],
+    ));
+    ops.extend(node_ops(3, 2, "div", group("lead", false), &[]));
+    ops.extend(node_ops(4, 2, "div", group("trail", true), &[]));
+    ops.extend(node_ops(5, 4, "div", json!({"id":"pop","style":{"width":40,"height":16}}), &[]));
+    let first = synthetic(&rig, ops);
+    cx.executor().allow_parking();
+    let runtime = rig.runtime.clone();
+    let (_row, mut vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx));
+        let header = cx.new(|cx| crate::v4_view::HeaderView::new(view.clone(), cx));
+        Row(header, view)
+    });
+    vcx.simulate_resize(size(px(800.), px(200.)));
+    vcx.run_until_parked();
+    let pop = bounds(&mut vcx, "pop");
+    assert!(pop.right() > px(590.), "the trailing pop-up stands at the row's end: {pop:?}");
+}
