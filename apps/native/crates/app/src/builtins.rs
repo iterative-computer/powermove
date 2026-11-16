@@ -134,6 +134,9 @@ pub struct Host {
     /// toolbar's Agent item among them), so that same press's toggle does
     /// not open it again.
     agent_dismissed: Option<std::time::Instant>,
+    /// Select part of the screen is up: the popover stepped aside for it and
+    /// is not dismissed by the editor taking key meanwhile.
+    agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
     /// The Settings window's AppKit chrome while this editor hosts it, and
@@ -1391,6 +1394,9 @@ impl Controller {
     /// (anywhere outside the popover) closes it; another window taking key
     /// (Settings, a file picker, another app) leaves it open.
     fn agent_resigned(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.agent_picking {
+            return;
+        }
         let editor = self.close_window;
         if agent_dismisses(self.agent_open(cx), editor.is_some() && cx.active_window() == editor) {
             self.close_agent(cx);
@@ -2010,6 +2016,7 @@ impl Controller {
                         }
                         popover.orderOut(None);
                     }
+                    self.builtins.agent_picking = popover.is_some();
                     let picked = pm_shell::region_pick::pick(&editor);
                     // The overlay takes the pointer from here: no layer stays
                     // outlined under it, nor after.
@@ -2021,6 +2028,7 @@ impl Controller {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
                             let _ = this.update(cx, |v, cx| {
+                                v.builtins.agent_picking = false;
                                 if let Some(rect) = picked {
                                     v.attach_region(rect, window, cx);
                                 }
