@@ -513,7 +513,7 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn panels_loading(&self, cx: &App) -> bool {
         let v = self.0.read(cx);
-        v.extensions.host.as_ref().is_some_and(|host| !host.is_ready())
+        v.extensions.host.as_ref().is_some_and(|host| !host.publication().settled)
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
