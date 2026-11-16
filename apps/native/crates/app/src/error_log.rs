@@ -33,7 +33,6 @@ const RUNNING: &str = "app.session.running";
 
 #[derive(Clone, Debug)]
 pub struct Entry {
-    pub level: Level,
     pub at: SystemTime,
     pub source: String,
     pub message: String,
@@ -63,7 +62,6 @@ impl Log {
             return;
         }
         self.entries.push(Entry {
-            level: Level::Error,
             at: SystemTime::now(),
             source: source.into(),
             message: message.into(),
@@ -167,7 +165,6 @@ fn worker(profile: &Path, rx: mpsc::Receiver<Persist>, rows: async_channel::Send
         .unwrap_or_default()
         .into_iter()
         .map(|row| Entry {
-            level: row.level,
             at: UNIX_EPOCH + Duration::from_millis(row.at_ms),
             source: row.code.replace('-', " "),
             message: row.text,

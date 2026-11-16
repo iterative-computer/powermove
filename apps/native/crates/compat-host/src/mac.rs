@@ -1088,19 +1088,6 @@ impl MacDomHost {
         );
         refuse_drags(&self.web);
     }
-    /// Shell rectangles the shared document shows through this frame.
-    pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
-        if regions.len() > 256 || regions.iter().any(|r| !r.valid()) {
-            return Err(Error::InvalidGeometry);
-        }
-        let mut panels = self.shared.panels.borrow_mut();
-        if panels.regions.as_ref() != Some(&regions) || panels.fill_regions.is_some() {
-            panels.regions = Some(regions);
-            panels.fill_regions = None;
-            self.shared.geometry_dirty.set(true);
-        }
-        Ok(())
-    }
     /// Show panel bodies on their ground while keeping overlay regions transparent.
     /// The viewer stage shares the page, but must never inherit the panel fill.
     pub fn set_regions_with_transparent_overlays(
