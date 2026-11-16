@@ -69,6 +69,23 @@ pub fn expected_catalog() -> Value {
             .expect("existing main tool");
         *base = overlay.clone();
     }
+    // Composition tools take an optional `compositionId` (additive: never
+    // required, so a call without it keeps main's meaning).
+    let compositions: Value = serde_json::from_str(include_str!(
+        "../data/fixtures/composition-native-catalog.json"
+    ))
+    .expect("pinned native composition contract");
+    for name in compositions["tools"].as_array().unwrap() {
+        let base = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == *name)
+            .expect("existing main tool");
+        let schema = &mut base["inputSchema"];
+        assert!(schema["properties"].get("compositionId").is_none());
+        schema["properties"]["compositionId"] = compositions["property"].clone();
+    }
     catalog
 }
 pub fn declarations() -> &'static Value {

@@ -390,16 +390,16 @@ mod tests {
 
     fn db_with_bundled_fonts() -> Database {
         let mut db = Database::new();
-        db.load_font_data(gpui_fonts::IBM_PLEX.to_vec());
-        db.load_font_data(gpui_fonts::LILEX.to_vec());
+        db.load_font_data(include_bytes!("../test-fixtures/IBMPlexSans-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../test-fixtures/Lilex-Regular.ttf").to_vec());
         db
     }
 
     #[test]
     fn text_with_split_glyph_clusters_in_mixed_fonts_does_not_panic() {
         let mut db = Database::new();
-        db.load_font_data(gpui_fonts::IBM_PLEX.to_vec());
-        db.load_font_data(gpui_fonts::LILEX.to_vec());
+        db.load_font_data(include_bytes!("../test-fixtures/IBMPlexSans-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../test-fixtures/Lilex-Regular.ttf").to_vec());
         let options = usvg::Options {
             fontdb: std::sync::Arc::new(db),
             ..Default::default()

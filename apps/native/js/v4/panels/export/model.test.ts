@@ -269,7 +269,7 @@ test("preset save is guarded, acknowledged, app-wide and never includes destinat
   await f.model.choosePreset("fixture-preset-1");
   expect(f.model.options.format).toBe("mp4");
 });
-test("both export shortcuts, Esc settings-only, Return preset-only and command-period progress cancel", async () => {
+test("both export shortcuts, Return preset-only, and Escape or command-period cancels the progress", async () => {
   const f = fixture();
   expect(await f.model.key("e", true)).toBe(true);
   expect(f.model.open).toBe(true);
@@ -289,10 +289,16 @@ test("both export shortcuts, Esc settings-only, Return preset-only and command-p
   ]);
   await f.model.key("Enter");
   expect(f.model.state.run.phase).toBe("preparing");
-  expect(await f.model.key("Escape")).toBe(false);
-  expect(f.model.open).toBe(true);
-  await f.model.key(".", true);
-  expect(f.model.open).toBe(false);
+  expect(await f.model.key("Escape")).toBe(true);
+  expect(commands(f)).toContain("export.cancel");
+});
+test("command-period cancels the progress too", async () => {
+  const f = fixture();
+  await f.model.show();
+  await f.model.key("Enter");
+  expect(f.model.state.run.phase).toBe("preparing");
+  expect(await f.model.key(".", true)).toBe(true);
+  expect(commands(f)).toContain("export.cancel");
 });
 test("subscriptions accept real host publications and reject stale/retired generations", async () => {
   const f = fixture();
