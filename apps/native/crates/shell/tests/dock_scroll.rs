@@ -281,6 +281,8 @@ fn native_keyboard_panel_navigation_reveals_last_panel() {
             })
             .unwrap();
         cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, _| window.activate()).unwrap();
+        cx.run_until_parked();
         // Move through the actual native panel focus handles, one rendered frame each.
         let mut reached_last = false;
         for _ in 0..20 {
