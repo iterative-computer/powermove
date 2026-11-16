@@ -2,11 +2,11 @@
 //! trim grip. A strip is a slab of tinted glass on the solid timeline canvas,
 //! derived from the layer's hue for the appearance it stands in.
 //!
-//! On the dark canvas (`Tokens::strip`): glass, lit from above. A
+//! On the dark canvas (`Tokens::strip`): glass, as the owner's reference. A
 //! translucent, saturated slab (the timeline's grid and the row behind show
-//! through) whose top is its lightest and whose foot is deeper, a 1 px rim
-//! of light in its own hue inside the edge instead of an outline, light
-//! falling on the top and left edges at rest, and semibold names (3:1, large-bold text) in a
+//! through) deeper at its top and more luminous toward its foot, a 1 px rim
+//! of light in its own hue inside the edge instead of an outline, brightest
+//! along the top and its corners, and semibold names (3:1, large-bold text) in a
 //! pale tint of the hue, or a deep shade where a tint cannot hold that and
 //! on yellow and orange, whose slabs are the reference's bright amber. As
 //! bright and saturated as the owner's reference: each hue as vivid as sRGB
@@ -218,10 +218,11 @@ impl Tokens {
             (true, true) => 0.06,
             (true, false) => 0.26,
         };
-        // Lit from above: the top is the slab's lightest, the foot deeper.
-        let (top, foot) = if light_hue { (0.76, 0.64) } else { (0.62, 0.48) };
-        let lit = oklch_fit(top + lift, vivid * 0.9, hue);
-        let body = oklch_fit(foot + lift, vivid, hue);
+        // As the reference's slab: deep and saturated at the top, more
+        // luminous toward the foot (the light hues the reference's amber).
+        let (top, foot) = if light_hue { (0.64, 0.74) } else { (0.5, 0.62) };
+        let lit = oklch_fit(top + lift, vivid, hue);
+        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
         let under_label = under(body);
