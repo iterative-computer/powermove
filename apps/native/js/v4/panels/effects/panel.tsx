@@ -147,7 +147,6 @@ export function EffectsPanel({
               ...hitStyle,
               flexGrow: 0,
               flexShrink: 0,
-              flexBasis: "auto",
               fontSize: token("typography.body"),
               minWidth: token("metrics.label_column"),
               paddingLeft: token("metrics.gap"),
