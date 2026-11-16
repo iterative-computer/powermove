@@ -71,10 +71,16 @@ pub struct Controller {
     /// index, when it says), the panels showing their ghost, and when each
     /// panel's real content replaced its ghost (it fades in).
     pub(crate) ghost_aspect: Option<f32>,
-    /// The project's Home poster, shown in the opening viewer's frame until
-    /// the viewer draws: the first picture waits for the open and for the
-    /// extensions the project draws with (PM-384).
+    /// The picture the viewer last showed for the opening project (or its
+    /// Home poster), in the opening viewer's frame until the viewer is
+    /// bound, then over the viewer until its first frame (`viewer_poster`):
+    /// the first picture waits for the open and for the extensions the
+    /// project draws with (PM-384).
     pub(crate) ghost_poster: Option<std::path::PathBuf>,
+    /// The picture the opening project's viewer stands in with until its
+    /// first real frame (`playback::Placeholder`); taken when its viewer is
+    /// bound.
+    pub(crate) viewer_poster: Option<std::path::PathBuf>,
     pub(crate) ghosted: std::collections::HashSet<String>,
     pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
@@ -878,6 +884,7 @@ impl Controller {
             opening_name: None,
             ghost_aspect: None,
             ghost_poster: None,
+            viewer_poster: None,
             ghosted: Default::default(),
             revealed: Default::default(),
             settling: None,
@@ -1855,11 +1862,16 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        // Its Home poster stands in the opening viewer, where one was kept.
-        self.ghost_poster = Some(
+        // The picture the viewer last showed stands in the opening viewer
+        // until the project's first real frame; Home's poster where none
+        // was kept.
+        self.ghost_poster = [
+            crate::poster::last_frame_files(&self.profile, &open_id).0,
             crate::poster::files(&self.profile.join("caches/thumbnails"), &open_id).0,
-        )
-        .filter(|poster| poster.is_file());
+        ]
+        .into_iter()
+        .find(|poster| poster.is_file());
+        self.viewer_poster = self.ghost_poster.clone();
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -2864,6 +2876,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
+                        v.store_last_frame(None, cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
