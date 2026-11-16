@@ -86,6 +86,8 @@ export interface Row {
   unit?: string;
   min?: number;
   max?: number;
+  /** Decimal places a number shows (a duration: two, as every field shows one). */
+  precision?: number;
   disabled?: boolean;
   busy?: boolean;
   error?: string;
@@ -245,7 +247,11 @@ export function projectRows(): Row[] {
       max: 240,
       unit: "fps",
     },
-    { ...row("duration", "Composition", "Duration", "number"), unit: "s" },
+    {
+      ...row("duration", "Composition", "Duration", "number"),
+      unit: "s",
+      precision: 2,
+    },
     row(
       "background",
       "Composition",
@@ -422,12 +428,15 @@ export function accountRows(): Row[] {
     },
   ];
 }
+// What an extension is, in the order the list shows them (v1.3.2's groups).
 export const extensionTypes = [
   "All Types",
   "Effects",
+  "Panels",
+  "Appearance",
   "Layer Types",
+  "Media",
   "Editor Tools",
-  "Themes",
-  "Commands",
+  "Other",
 ] as const;
 export type ExtensionType = (typeof extensionTypes)[number];

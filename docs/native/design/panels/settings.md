@@ -134,7 +134,9 @@ state: `Download` button / determinate progress ring + `Cancel` / `Installed`
 
 Description: `Manage extensions and turn them on or off.`
 A filter row (`Filter extensions` search field + pop-up `All Types`, `Effects`,
-`Layer Types`, `Editor Tools`, `Themes`, `Commands`), then the list: rows with
+`Panels`, `Appearance`, `Layer Types`, `Media`, `Editor Tools`, `Other`: v1.3.2's
+groups, an extension placed by what it contributes, its content before a companion
+panel or command), then the list, like kinds together in that order: rows with
 icon (`m.row` square, `m.control_radius`), name `t.body`, type + source
 `t.minimum` `c.muted` (`Built in`, `Installed`, `AI-created`, `Custom`),
 trailing switch (enabled). Click a row → detail pane **in place** (the list

@@ -192,6 +192,67 @@ fn undo_title_for_field(item: &NSMenuItem, name: &str, sheet: bool) {
         }
     });
 }
+/// The Edit menu's Undo and Redo named by the front project's history
+/// ("Undo New Solid"; the plain verb, dimmed, when there is none). Under a
+/// sheet the items belong to its field: the names are kept until it closes
+/// rather than written over the field's (an export publishes all along).
+pub fn history_titles(undo: Option<&str>, redo: Option<&str>) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(root) = app.mainMenu() else { return };
+    let sheet = sheet_up();
+    for top in root.itemArray() {
+        if top.title().to_string() != "Edit" {
+            continue;
+        }
+        let Some(menu) = top.submenu() else { continue };
+        let rows = [("contextUndo", "Undo", undo), ("contextRedo", "Redo", redo)];
+        for (index, (name, verb, label)) in rows.into_iter().enumerate() {
+            let title = label.map_or(verb.to_owned(), |l| format!("{verb} {l}"));
+            PROJECT_TITLES.with(|t| {
+                let mut t = t.borrow_mut();
+                if sheet {
+                    t.insert(name.to_owned(), title.clone());
+                } else {
+                    t.remove(name);
+                }
+            });
+            if sheet {
+                continue;
+            }
+            if let Some(item) = menu.itemAtIndex(index as isize) {
+                item.setTitle(&NSString::from_str(&title));
+                item.setEnabled(label.is_some());
+            }
+        }
+    }
+}
+/// Under a sheet, its field's Undo or Redo only when the field has one to
+/// make; an item that cannot act shows dimmed. Other commands are not asked.
+fn field_can(name: &str) -> bool {
+    let redo = match name {
+        "contextUndo" => false,
+        "contextRedo" => true,
+        _ => return true,
+    };
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    app.keyWindow()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| {
+            // SAFETY: NSResponder's undoManager, and NSUndoManager's
+            // canUndo/canRedo, read on the main thread.
+            let manager: Option<Retained<AnyObject>> = unsafe { msg_send![&*r, undoManager] };
+            manager.is_some_and(|m| unsafe {
+                if redo {
+                    msg_send![&*m, canRedo]
+                } else {
+                    msg_send![&*m, canUndo]
+                }
+            })
+        })
+}
 /// Whether a text field in the key window is being edited (a sheet's name
 /// field): its own Undo, Cut, Copy and Paste then have something to act on.
 fn key_field_editing() -> bool {
@@ -753,7 +814,8 @@ define_class!(
                 // (HIG); the app's own and its fields' Edit commands stay.
                 let sheet = sheet_up();
                 undo_title_for_field(item, name, sheet);
-                let beside = !sheet || menu::runs_beside_sheet(name, key_field_editing());
+                let beside = !sheet
+                    || (menu::runs_beside_sheet(name, key_field_editing()) && field_can(name));
                 // Menus that dim by state (`STATEFUL_MENUS`); the others only
                 // for a sheet.
                 // SAFETY: the item's own menu, read on the main thread.
