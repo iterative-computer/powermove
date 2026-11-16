@@ -74,6 +74,7 @@ export class CompatPanels {
     root.setAttribute("style", panelStyle(this.rects.get(id) ?? null));
     // The body is the extension's to style, as in the shipped app's panel body.
     const body = this.document.createElement("div");
+    body.setAttribute("data-pm-panel-body", "");
     body.setAttribute(
       "style",
       "position:relative;width:100%;height:100%;box-sizing:border-box;overflow:auto",
