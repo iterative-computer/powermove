@@ -2492,8 +2492,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A playing frame drawn here (not read from either cache).
                 if t.gpu_ok && !t.cache_hit && t.disk != 2 && f.spec.moment == Moment::Playing {
                     let cost = (t.completed - t.worker_start) * 1000.;
-                    r.auto
-                        .record_play(cost, r.content_frame * 1000., f.spec.scale);
+                    // The GPU's own work: from the render's submission to the
+                    // present pass (any wait for the frame before is in it).
+                    let gpu = ((t.gpu_start - t.render_submitted) * 1000.).max(0.);
+                    r.auto.record_play(
+                        cost,
+                        gpu,
+                        r.content_frame * 1000.,
+                        f.spec.scale,
+                        t.completed,
+                    );
                 }
                 // Frames skipped between two played ones at normal speed
                 // didn't play in real time: background rendering renders
