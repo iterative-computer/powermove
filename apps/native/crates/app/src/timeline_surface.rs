@@ -413,6 +413,7 @@ pub struct TimelineSurface {
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
     focused: bool,
+    snap_guide: Option<f64>,
     /// The graph on screen; its value range may be held (`steady_graph`).
     graph: Option<Arc<Graph>>,
     /// The latest graph over its own fitted range, for Fit Selected Curves.
