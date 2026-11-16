@@ -6,7 +6,7 @@ import {
   type EventDetail,
 } from "../../src";
 import { fixture, initial } from "./fixtures";
-import { ExportSheet } from "./panel";
+import { ExportSheet, workAreaLabel } from "./panel";
 import type { ExportSnapshot } from "./model";
 import { replay } from "./wire";
 
@@ -699,5 +699,28 @@ test("project-file exports keep one queue below the current export block", async
     ),
   ).toHaveLength(1);
   check(replay(f.commits));
+  await f.root.dispose();
+});
+
+test("Work area says what it exports: the whole composition until it is narrowed, else its span", async () => {
+  const at = (workArea: [number, number] | null, hasWorkArea = true) =>
+    workAreaLabel({ hasWorkArea, workArea, duration: 73.5 });
+  expect(at([0, 73.5])).toBe("Work area · whole composition");
+  expect(at([0, 10])).toBe("Work area · 0–10 s");
+  expect(at([2.5, 12.04])).toBe("Work area · 2.5–12.04 s");
+  expect(at(null, false)).toBe("Work area · not set");
+  expect(workAreaLabel({ hasWorkArea: true })).toBe("Work area");
+  const seed = initial();
+  seed.project!.workArea = [0, 10];
+  seed.project!.duration = 10;
+  const f = await mounted(seed);
+  const options = named(f.root, "export.range").props.options as {
+    v: string;
+    label: string;
+  }[];
+  expect(options.map((o) => o.label)).toEqual([
+    "Work area · whole composition",
+    "Full composition",
+  ]);
   await f.root.dispose();
 });

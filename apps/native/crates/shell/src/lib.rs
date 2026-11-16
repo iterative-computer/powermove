@@ -1,5 +1,18 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
 pub mod agent_launcher;
+/// Settings › General › "Open projects in": Tabs (the default, owner and
+/// co-founder 2026-11-14) or Separate windows (one project per window). The
+/// app sets it from the setting at launch and whenever it changes; the next
+/// project opened follows it.
+static TABS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Projects open as tabs of the window in use (else each in a window of its own).
+pub fn tabs_mode() -> bool {
+    TABS_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Sets the mode for the projects opened from now on.
+pub fn set_tabs_mode(tabs: bool) {
+    TABS_MODE.store(tabs, std::sync::atomic::Ordering::Relaxed);
+}
 pub mod agent_menu;
 pub mod area;
 #[cfg(target_os = "macos")]
@@ -19,12 +32,16 @@ pub mod menu;
 #[cfg(target_os = "macos")]
 pub mod motion;
 #[cfg(target_os = "macos")]
+pub mod layer_stage;
+#[cfg(target_os = "macos")]
 mod native;
 #[cfg(target_os = "macos")]
 pub mod native_control;
 #[cfg(target_os = "macos")]
 pub mod scopes;
 pub mod session;
+#[cfg(target_os = "macos")]
+pub mod settings_window;
 #[cfg(target_os = "macos")]
 pub mod symbol;
 #[cfg(target_os = "macos")]
@@ -46,12 +63,13 @@ pub use macos::{
     run_with_device, smoke, tokens,
 };
 #[cfg(target_os = "macos")]
-pub use native::{AgentStatus,
+pub use native::{
     ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    check_view3d, document_subtitle, native_color, one_project_per_window, opens_in_place,
+    check_view3d, document_subtitle, native_color, opens_in_place,
     popover_frame, project_menu_entries, request_close, resize_from_top, send_menu_command,
     set_viewer_preference, sidebar_frame, system_accent, viewer_preference, viewer_slot,
     viewer_window, window_backdrop, zoom_limit,
+    apply_tabs_mode, editor_window_tabbing,
 };
 
 #[cfg(all(test, target_os = "macos"))]

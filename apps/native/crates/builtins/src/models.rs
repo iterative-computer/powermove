@@ -79,6 +79,10 @@ pub(crate) struct Models {
     pub show_missing: bool,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub export_probe_stamp: String,
+    /// The Export sheet is open (PM-376): only then does its subscription
+    /// plan the export and check the encoders, which opened audio decoders
+    /// and held the panels' thread half a second on every edit and undo.
+    pub export_open: bool,
     timeline_job: Option<TimelineJob>,
     pub(crate) timeline_effect_pending: usize,
     pub(crate) timeline_effect_result: Option<Result<(), String>>,
@@ -149,6 +153,7 @@ impl Models {
             show_missing: false,
             originals: Default::default(),
             export_probe_stamp: String::new(),
+            export_open: false,
         })
     }
 }
@@ -859,7 +864,9 @@ impl Backend {
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.
-            "shortcuts":self.native.facts["shortcuts"]});
+            "shortcuts":self.native.facts["shortcuts"],
+            // Settings › Project's header (poster, path, the projects open).
+            "header":self.native.facts["settingsHeader"]});
         let shortcut_rows = self.shortcut_rows()?;
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(speech_rows.iter().cloned());
@@ -947,7 +954,7 @@ impl Backend {
             return self.viewer_snapshot().map(Some);
         }
         if channels == Some(&["export".to_owned()][..]) {
-            return self.export_snapshot().map(Some);
+            return self.export_publication().map(Some);
         }
         if self.panel_id == "inspector" && matches!(query, Query::Evaluated) && channels.is_none() {
             return self.inspector_snapshot().map(Some);
@@ -1313,7 +1320,44 @@ impl Backend {
         // refuses it: the person changed the project meanwhile).
         drop(self.kernel.call(&self.identity.project, request));
     }
+    /// The Export sheet's projection as its subscription publishes it, on
+    /// every document change: planned (summary, audio, captions, 3D
+    /// estimate, encoder checks) only while the sheet is open; closed, the
+    /// toolbar's Export button needs the project and the run alone.
+    pub(crate) fn export_publication(&mut self) -> Result<Value, String> {
+        if matches!(
+            self.native.export["run"]["phase"].as_str(),
+            Some("done" | "cancelled")
+        ) {
+            self.native.export_open = false;
+        }
+        let planned = self.native.export_open;
+        self.export_projection(planned)
+    }
+    /// The Export sheet's whole projection, planned (its commands, and the
+    /// sheet as it opens).
     pub(crate) fn export_snapshot(&mut self) -> Result<Value, String> {
+        self.export_projection(true)
+    }
+    /// The saved render presets the sheet lists.
+    fn export_presets(&self) -> Value {
+        json!(
+            self.kernel
+                .state()
+                .settings
+                .get("renderPresets")
+                .map(wire)
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p["archived"] != true
+                    && p["id"].is_string()
+                    && p["name"].is_string()
+                    && crate::delivery::options(&p["options"]).is_ok())
+                .collect::<Vec<_>>()
+        )
+    }
+    fn export_projection(&mut self, planned: bool) -> Result<Value, String> {
         self.sync()?;
         let p = self.published().ok_or("closed")?;
         let root = p.snapshot.root().ok_or("closed")?;
@@ -1411,8 +1455,48 @@ impl Backend {
         // Settings saved before a field existed show its default in the sheet.
         self.native.export["options"] =
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
+        if !planned {
+            // Closed: the project's own facts stay current; what a plan says
+            // (audio, captions, summary, 3D) is the last plan's, and an
+            // unchecked encoder says so until the sheet opens and checks.
+            let work_area = comp
+                .get("work")
+                .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+            let last = &self.native.export["project"];
+            let same = last["id"].as_str() == Some(p.project.as_str());
+            let kept = |key: &str, default: Value| {
+                if same { last[key].clone() } else { default }
+            };
+            let project = json!({"id":p.project,"name":name,"width":width,"height":height,
+                "hasAudio":kept("hasAudio", json!(false)),"captionLayers":kept("captionLayers", json!(0)),
+                "hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),
+                "duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),
+                "summary":kept("summary", json!(""))});
+            let studio = kept("studio", Value::Null);
+            self.native.export["project"] = project;
+            if !studio.is_null() {
+                self.native.export["project"]["studio"] = studio;
+            }
+            for format in crate::delivery::FORMATS {
+                if !self.native.export["capabilities"][*format].is_object() {
+                    self.native.export["capabilities"][*format] =
+                        json!({"available":false,"reason":"Checking…"});
+                }
+            }
+            if !self.native.export["capabilities"]["json"].is_object() {
+                self.native.export["capabilities"]["json"] =
+                    json!({"available":false,"reason":"Checking…"});
+            }
+            self.native.export["presets"] = self.export_presets();
+            return Ok(self.native.export.clone());
+        }
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
+        // The work area's span names what "Work area" exports: a composition's
+        // work area starts as its whole length.
+        let work_area = comp
+            .get("work")
+            .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         if let Some((_, label)) =
@@ -1518,21 +1602,7 @@ impl Backend {
                 self.native.export["project"]["studio"]["preset"] = json!(preset);
             }
         }
-        self.native.export["presets"] = json!(
-            self.kernel
-                .state()
-                .settings
-                .get("renderPresets")
-                .map(wire)
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|p| p["archived"] != true
-                    && p["id"].is_string()
-                    && p["name"].is_string()
-                    && crate::delivery::options(&p["options"]).is_ok())
-                .collect::<Vec<_>>()
-        );
+        self.native.export["presets"] = self.export_presets();
         #[cfg(target_os = "macos")]
         {
             let key = format!(
@@ -2097,6 +2167,8 @@ impl Backend {
                 let options: pm_promedia::export_panel::Options =
                     crate::delivery::options(&args["options"])?;
                 options.validate()?;
+                // The sheet plans as it opens and as its settings change.
+                self.native.export_open = true;
                 self.native.export["options"] = args["options"].clone();
                 self.command_reply(command)?
             }
@@ -2122,6 +2194,7 @@ impl Backend {
                 self.export_snapshot()?
             }
             "export.reveal" | "export.dismiss" => {
+                self.native.export_open = command == "export.reveal";
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }
@@ -2202,7 +2275,11 @@ pub(crate) fn project_edit_request(
 fn profile_key(key: &str) -> bool {
     matches!(
         key,
-        "themeMode" | "previewMemoryMiB" | "autoDownloadCloudMedia" | "restoreWindows"
+        "themeMode"
+            | "previewMemoryMiB"
+            | "autoDownloadCloudMedia"
+            | "restoreWindows"
+            | "openProjectsIn"
     )
 }
 

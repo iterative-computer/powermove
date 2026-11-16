@@ -5,7 +5,7 @@
  * and draws it with the native kit and pm-design tokens.
  */
 import { Component, createContext, type ComponentChildren } from "preact";
-import { useContext, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useContext, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { citationLabel, quoteSelection, type Citation } from "./citations";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
@@ -146,8 +146,8 @@ export function elapsed(ms: number) {
 // ── Prose ────────────────────────────────────────────────────────────────
 
 const CitationContext = createContext<{
-  s: Snapshot;
-  send: Send;
+  threadId: string;
+  cite: (q: Citation) => void;
   jump?: Citation & { nonce: number };
   reveal: (q: Citation) => void;
 } | null>(null);
@@ -165,14 +165,11 @@ function QuoteSource({
   const context = useContext(CitationContext);
   const [selection, setSelection] = useState<Citation | null>(null);
   const [anchor, setAnchor] = useState({ x: 0, y: 0 });
-  useLayoutEffect(() => setSelection(null), [id, context?.s.threadId]);
+  useLayoutEffect(() => setSelection(null), [id, context?.threadId]);
   if (!context) return <Prose text={text} style={style} code={code} />;
   const cite = () => {
     if (selection) {
-      context.send({
-        type: "citations",
-        citations: [...(context.s.draft.citations ?? []), selection],
-      });
+      context.cite(selection);
       setSelection(null);
     }
   };
@@ -186,7 +183,7 @@ function QuoteSource({
         label: "Transcript text",
         tabIndex: 0,
         metadata: {
-          quoteSource: `${context.s.threadId}:${id}`,
+          quoteSource: `${context.threadId}:${id}`,
           ...(context.jump?.messageId === id
             ? {
                 revealQuote: [
@@ -2523,27 +2520,19 @@ export function AgentView({
       at: n.presentation,
       count: presentation.current.count + 1,
     };
-  if (!n.visible) return null;
-  const local: Local = {
-    open,
-    toggle: (key, value) => setOpen({ ...open, [key]: value }),
-    typed,
-    type: (key, text) => setTyped({ ...typed, [key]: text }),
-  };
-  const working = s.runId !== null;
-  const connected = n.connection === "connected";
-  const empty = s.rows.count === 0 && !working;
-  // While the connection is still being checked, what was shown stays
-  // (the original keeps setup and composer from flashing).
-  const gate = !connected && !working && n.connection !== "checking";
-  // Nothing to keep yet: the connection is the whole panel.
-  const setup = gate && empty && !s.draft.text && !s.attachments.length;
-  const popover = n.presentation === "popover";
-  const citationContext = {
-    s,
-    send,
+  // Stream updates must not republish historical prose through context.
+  // Stable callbacks read current draft/rows at the moment of the action.
+  const latestCitationState = useRef({ s, send, open });
+  latestCitationState.current = { s, send, open };
+  const citationContext = useMemo(() => ({
+    threadId: s.threadId,
+    cite: (q: Citation) => {
+      const { s, send } = latestCitationState.current;
+      send({ type: "citations", citations: [...(s.draft.citations ?? []), q] });
+    },
     jump,
     reveal: (q: Citation) => {
+      const { s, open } = latestCitationState.current;
       const expanded = { ...open };
       for (const entry of entries(s)) {
         const items =
@@ -2576,7 +2565,23 @@ export function AgentView({
       if (jumpTimer.current !== undefined) clearTimeout(jumpTimer.current);
       jumpTimer.current = setTimeout(() => setJump(undefined), 1200);
     },
+  }), [s.threadId, jump]);
+  if (!n.visible) return null;
+  const local: Local = {
+    open,
+    toggle: (key, value) => setOpen({ ...open, [key]: value }),
+    typed,
+    type: (key, text) => setTyped({ ...typed, [key]: text }),
   };
+  const working = s.runId !== null;
+  const connected = n.connection === "connected";
+  const empty = s.rows.count === 0 && !working;
+  // While the connection is still being checked, what was shown stays
+  // (the original keeps setup and composer from flashing).
+  const gate = !connected && !working && n.connection !== "checking";
+  // Nothing to keep yet: the connection is the whole panel.
+  const setup = gate && empty && !s.draft.text && !s.attachments.length;
+  const popover = n.presentation === "popover";
   const content = (
     <div
       id="agent-panel"

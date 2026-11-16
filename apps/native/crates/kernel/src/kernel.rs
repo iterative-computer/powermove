@@ -265,7 +265,7 @@ impl Kernel {
             .sessions
             .get(id)
             .and_then(|s| match &s.destination {
-                crate::session::Destination::Library(id) => Some(id.as_str()),
+                crate::session::Destination::Library(_) => Some(s.journal_id.as_str()),
                 _ => None,
             })
             .unwrap_or(id);
@@ -812,6 +812,16 @@ impl Kernel {
 
     pub(crate) fn rebase_journal(&mut self, id: &str) -> Result<(), KernelFailure> {
         let dir = self.project_dir(id);
+        // The save is durable where this project's next open reads it (its
+        // file, or the slot it opened from): the new session can start from
+        // that base and checkpoint at its first change. A save to a copy the
+        // next open does not read (the project opens as a copy each time)
+        // is not that base: checkpoint now, continuing from the session
+        // before it until the checkpoint lands (PM-360).
+        let base_is_read_back = self.sessions.get(id).is_none_or(|s| match &s.destination {
+            crate::session::Destination::Library(slot) => *slot == s.journal_id,
+            _ => true,
+        });
         let library_hash = if let Some(crate::session::Session {
             destination: crate::session::Destination::Library(slot),
             ..
@@ -862,8 +872,17 @@ impl Kernel {
                 old.push(j.dir().to_path_buf());
             }
             // Called after the save is durable: the base holds this state.
-            let j = Journal::create(d, &dir, id, &hash, state, old, true, Vec::new())
-                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+            let j = Journal::create(
+                d,
+                &dir,
+                id,
+                &hash,
+                state,
+                old,
+                base_is_read_back,
+                Vec::new(),
+            )
+            .map_err(|e| KernelFailure::Journal(e.to_string()))?;
             slot.journal = Some(j);
         }
         slot.base_hash = hash;

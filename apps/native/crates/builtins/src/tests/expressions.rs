@@ -203,5 +203,30 @@ fn playback_expression_errors_follow_the_current_frame_and_clear_on_recovery() {
     assert!(
         row(&backend.inspector_snapshot().unwrap(), "opacity")["expression"]["error"].is_null()
     );
+}
+
+/// v1's ChannelRow: a property keyed from its diamond in Properties is the
+/// one the Timeline's graph plots (it fell back to the layer's first animated
+/// property, often Opacity).
+#[test]
+fn a_properties_diamond_puts_its_property_in_the_graph() {
+    let actor = actor();
+    let mut backend = backend(&actor);
+    backend.inspector_snapshot().unwrap();
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.inspector",
+            &json!({"type":"key","row":"position","removeAnimation":false}),
+        )
+        .unwrap();
+    let sent = std::mem::take(&mut backend.native.platform);
+    assert!(
+        sent.contains(&(
+            "command".to_owned(),
+            json!({"name":"timeline.focusGraph","args":["a","position.x"]})
+        )),
+        "{sent:?}"
+    );
     actor.shutdown();
 }

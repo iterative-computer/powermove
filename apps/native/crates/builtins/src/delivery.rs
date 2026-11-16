@@ -445,6 +445,9 @@ pub fn portable_capability(snapshot: &Snapshot, originals: &BTreeMap<String, Pat
 /// Actual worker-side planner + encoder initialization, never an OS-name flag.
 /// No frames are fabricated or delivered; codec-init failure remains unavailable.
 #[cfg(target_os = "macos")]
+/// The encoders [`capabilities`] checks (the portable project is `json`).
+pub const FORMATS: &[&str] = &["prores", "mp4", "webm", "png", "still"];
+
 pub fn capabilities(
     snapshot: &Snapshot,
     options: &Options,

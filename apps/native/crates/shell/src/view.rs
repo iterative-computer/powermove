@@ -1265,8 +1265,11 @@ impl Editor {
             "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
-            // One project per window: a new tab is a new window.
-            "newTab" => crate::open_editor(cx),
+            // Tabs mode: a new tab of this window; else a new window.
+            "newTab" => crate::open_editor_tab(cx, self.window_id),
+            // The window's tab group changed (a tab joined): the session
+            // records it.
+            "persistSession" => self.persist_session(),
             "deselect" | "cancel" => {
                 if self.gesture.is_some() {
                     self.cancel_gesture(cx);
@@ -3400,20 +3403,17 @@ impl Render for Editor {
                             .id("drop-frame")
                             .rounded(px(m.panel_radius))
                             .border(px(m.drop_stroke))
-                            .border_color(rgb(c.accent)),
+                            .border_color(rgb(c.separator)),
                     );
                 }
-                // Where the panel lands: a light wash of the accent inside a
-                // 2 pt accent outline, so the panels it would cover stay in
-                // view (an opaque wash hid them while their hosted controls
-                // showed).
+                // A quiet landing outline and neutral wash keep the destination readable.
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
                         .rounded(px(m.panel_radius))
                         .border(px(m.drop_stroke))
-                        .border_color(rgb(c.accent))
-                        .bg(tint(c.accent, t.translucency.selected)),
+                        .border_color(rgb(c.separator))
+                        .bg(tint(c.text, t.translucency.selected)),
                 );
                 // Joining a stack: a tab marks its place in the header.
                 if let (DropTarget::Tab { index, .. }, Some((d, g, r))) = (p.target, target) {
@@ -4245,7 +4245,11 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use gpui::{Modifiers, MouseButton, point, px};
-        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        // Exercise input recovery at rest, independently of layout animation.
+        let tokens = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility {
+            reduce_motion: true,
+            ..Default::default()
+        });
         let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
         cx.run_until_parked();
         let none = Modifiers::none();
@@ -4298,6 +4302,15 @@ mod tests {
         // 2. Again, and the next thing is a press on a splitter: the panel
         // lands first and the press starts the splitter's own drag.
         let landed = view.read_with(cx, |v, _| v.layout.clone());
+        // New content floors may place Effects below the side viewport.
+        // Reveal its header before starting another real pointer drag.
+        view.update(cx, |v, cx| {
+            let (dock, _, _) = v.layout.find("fxbrowser").unwrap();
+            let id = v.layout.docks[dock].id.clone();
+            v.scroll_dock(&id, f32::MAX);
+            cx.notify();
+        });
+        cx.run_until_parked();
         let from = view.read_with(cx, |v, _| header(v, "fxbrowser"));
         // Onto the left dock's middle: it joins that stack.
         let left = view.read_with(cx, |v, _| v.geometry.panels[0].rect);

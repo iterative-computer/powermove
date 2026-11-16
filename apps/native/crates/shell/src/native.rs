@@ -39,6 +39,11 @@ thread_local! {
     static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
     /// AppKit window number → session window id.
     static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
+    /// Each editor window's open pages (Settings, the Store): a tab strip
+    /// shows the pages of every window in its group.
+    static PAGES:RefCell<HashMap<isize,Vec<(String,String)>>>=RefCell::new(HashMap::new());
+    /// Editor windows that show no project (Home alone): never a project tab.
+    static HOME_WINDOWS:RefCell<std::collections::HashSet<isize>>=RefCell::new(Default::default());
     /// Menu delegates must outlive their menus (NSMenu.delegate is weak).
     static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
     /// The context menu being tracked, so a test driver can cancel it.
@@ -499,18 +504,21 @@ define_class!(
     struct Target;
 
     impl Target {
-        #[unsafe(method(coedit:))]
-        fn coedit(&self, sender: &NSButton) {
-            let name=match sender.tag() {1=>"agent.undoTurn",2=>"agent.pause",3=>"agent.stop",_=>"agent.steer"};
-            self.send(Command{name:name.into(),args:vec![],token:None});
-        }
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
-                if name == "settings" {
+                // ⌘, or ⌘W with Settings in front closes Settings, never
+                // the project behind it (it is known by its identifier: its
+                // title is the section's name).
+                if matches!(
+                    name.as_str(),
+                    "settings" | "closeTab" | "closeWindow" | "closeProject"
+                ) {
                     let app = NSApplication::sharedApplication(self.mtm());
-                    if let Some(w) = app.keyWindow() && w.title().to_string() == "Settings" {
+                    if let Some(w) = app.keyWindow()
+                        && crate::settings_window::is_settings(&w)
+                    {
                         w.performClose(None);
                         return;
                     }
@@ -579,13 +587,26 @@ define_class!(
         /// the project, as Home does. The tag is its place among the pages.
         #[unsafe(method(selectPage:))]
         fn select_page(&self, sender: &AnyObject) {
-            let index: isize = unsafe { msg_send![sender, tag] };
-            self.send(Command { name: format!("showPage:{index}"), args: vec![], token: None });
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            match foreign_page(tag) {
+                // Another tab's page: that tab comes forward and shows it.
+                Some((number, index)) => {
+                    let app = NSApplication::sharedApplication(self.mtm());
+                    if let Some(window) = app.windowWithWindowNumber(number) {
+                        select_window_tab(&window);
+                    }
+                    route(number, format!("showPage:{index}"));
+                }
+                None => self.send(Command { name: format!("showPage:{tag}"), args: vec![], token: None }),
+            }
         }
         #[unsafe(method(closePage:))]
         fn close_page(&self, sender: &AnyObject) {
-            let index: isize = unsafe { msg_send![sender, tag] };
-            self.send(Command { name: format!("closePage:{index}"), args: vec![], token: None });
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            match foreign_page(tag) {
+                Some((number, index)) => route(number, format!("closePage:{index}")),
+                None => self.send(Command { name: format!("closePage:{tag}"), args: vec![], token: None }),
+            }
         }
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, sender: &AnyObject) {
@@ -628,7 +649,7 @@ define_class!(
             let number: isize = unsafe { msg_send![sender, tag] };
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
-                window.moveTabToNewWindow(None);
+                detach_tab(&window);
             }
         }
         #[unsafe(method(newTab:))]
@@ -721,12 +742,50 @@ impl Target {
         }
     }
 }
-/// One project per window (owner decision, 2026-11-14): an editor window is
-/// never a tab of another, whatever the system's tab preference, so a window
-/// showing Home never stands in a tab bar as a "Home" tab (H3).
-pub fn one_project_per_window(window: &NSWindow) {
-    window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
+/// Editor windows share one tab identity (`tab_windows`, Merge All Windows).
+const EDITOR_TABBING: &str = "com.powermove.native.editor";
+/// An editor window never becomes a tab on the system's own initiative, in
+/// either mode: in Tabs mode the app puts a project's window in the tab group
+/// of the window in use (`join_tab_group`, an explicit `addTabbedWindow`,
+/// which the setting does not stop), so a window showing Home never stands in
+/// a tab bar as a "Home" tab (H3); in Separate windows mode nothing joins.
+pub fn editor_window_tabbing(window: &NSWindow) {
+    window.setTabbingIdentifier(&NSString::from_str(EDITOR_TABBING));
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+}
+/// The "Open projects in" setting changed. The next project opened follows
+/// it; windows already open: switching to Separate windows gives every tab a
+/// window of its own (none closes), switching to Tabs leaves separate windows
+/// as they are (Window ▸ Merge All Windows joins them).
+pub fn apply_tabs_mode(tabs: bool) {
+    crate::set_tabs_mode(tabs);
+    if tabs {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().to_vec() {
+        if window.tabbingIdentifier().to_string() != EDITOR_TABBING {
+            continue;
+        }
+        let group = tab_windows(&window);
+        // The windows the tabs become cascade from the first, so each one
+        // shows instead of lying exactly over it.
+        let mut at = window.cascadeTopLeftFromPoint(NSPoint::ZERO);
+        for other in group.iter().skip(1) {
+            // A tab with no project (Home alone, never shown as a tab) goes;
+            // a project's tab becomes its own window.
+            if HOME_WINDOWS.with(|h| h.borrow().contains(&other.windowNumber())) {
+                request_close(other);
+            } else {
+                detach_tab(other);
+                at = other.cascadeTopLeftFromPoint(at);
+                route(other.windowNumber(), "persistSession".into());
+            }
+        }
+    }
 }
 fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     let mtm = MainThreadMarker::new().unwrap();
@@ -745,6 +804,12 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    // Every tab of the group draws the strip again and records its group in
+    // the session (a relaunch brings the tabs back together).
+    for tab in tab_windows(&lead) {
+        route(tab.windowNumber(), "syncTabs".into());
+        route(tab.windowNumber(), "persistSession".into());
+    }
     hide_system_tab_bar(&lead);
     hide_system_tab_bar(window);
     if app.isActive() {
@@ -938,33 +1003,6 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
-define_class!(
-    #[unsafe(super(NSView))]
-    #[thread_kind=MainThreadOnly]
-    #[name="PMCoeditPresence"]
-    struct CoeditPresence;
-    impl CoeditPresence {
-        #[unsafe(method(updateTrackingAreas))]
-        fn tracking(&self) {
-            for area in self.trackingAreas().to_vec() {self.removeTrackingArea(&area);}
-            let area=unsafe {NSTrackingArea::initWithRect_options_owner_userInfo(
-                <NSTrackingArea as objc2::AllocAnyThread>::alloc(),self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited|NSTrackingAreaOptions::ActiveAlways|NSTrackingAreaOptions::InVisibleRect,
-                Some(self),None)};
-            self.addTrackingArea(&area);
-        }
-        #[unsafe(method(mouseEntered:))]
-        fn entered(&self,_:&NSEvent) {
-            let buttons=self.subviews().to_vec();
-            let done=buttons.first().and_then(|v|v.downcast_ref::<NSButton>()).is_some_and(|b|b.tag()==1);
-            if !done {for button in buttons.iter().skip(1) {button.setHidden(false);}}
-        }
-        #[unsafe(method(mouseExited:))]
-        fn exited(&self,_:&NSEvent) {
-            for button in self.subviews().to_vec().iter().skip(1) {button.setHidden(true);}
-        }
-    }
-);
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -1275,6 +1313,11 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         f.origin.x + f.size.width - width
     });
     let start = down.locationInWindow().x;
+    let start_y = down.locationInWindow().y;
+    // Dragged this far above or below the strip, the tab tears off: let go
+    // there, its project gets a window of its own at the pointer, as the
+    // system's tab bar does.
+    let mut torn = false;
     let glide = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
     // The others in their order with a gap where the dragged tab would land.
     let settle = |target: usize, dragged: Option<f64>| {
@@ -1339,8 +1382,13 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             break button.mouse_inRect(local, button.bounds());
         }
         let by = at.x - start;
+        let off = (at.y - start_y).abs() > TAB_TEAR && tabs.len() > 1;
+        if off != torn {
+            torn = off;
+            tab.setAlphaValue(if torn { 0.45 } else { 1. });
+        }
         if !dragging {
-            if tabs.len() < 2 || by.abs() < TAB_DRAG_SLOP {
+            if tabs.len() < 2 || (by.abs() < TAB_DRAG_SLOP && !torn) {
                 continue;
             }
             dragging = true;
@@ -1377,6 +1425,24 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
                 let _: bool =
                     msg_send![button, sendAction: button.action(), to: button.target().as_deref()];
             }
+        }
+        return;
+    }
+    if torn {
+        // Off the strip: the tab's window leaves the group and stands where
+        // the pointer let go, its title bar under the pointer.
+        settle(index, None);
+        carry(false);
+        tab.setAlphaValue(1.);
+        if let Some(layer) = tab.layer() {
+            layer.setZPosition(0.);
+        }
+        let app = NSApplication::sharedApplication(window.mtm());
+        if let Some(moved) = app.windowWithWindowNumber(button.tag()) {
+            let at = NSEvent::mouseLocation();
+            detach_tab(&moved);
+            moved.setFrameTopLeftPoint(NSPoint::new(at.x - 80., at.y + 12.));
+            gpui_macos::child_window::present(&moved, true);
         }
         return;
     }
@@ -1489,6 +1555,55 @@ fn review_drag(strip: &NSView, number: isize, right: bool, hold: f64, press: boo
     let down = event(NSEventType::LeftMouseDown, from.x);
     after(0.05, Box::new(move || button.mouseDown(&down)));
 }
+/// The widest any tab may be for `natural` widths, each held to it, to fit
+/// `room` with the gaps between them: `TAB_MAX` while everything fits, else
+/// the long titles narrow together and the short ones keep their width.
+fn tab_cap(natural: &[f64], room: f64) -> f64 {
+    let mut sorted: Vec<f64> = natural.iter().map(|n| n.min(TAB_MAX)).collect();
+    sorted.sort_by(f64::total_cmp);
+    let mut left = room - sorted.len().saturating_sub(1) as f64 * TAB_GAP;
+    for (i, n) in sorted.iter().enumerate() {
+        let rest = (sorted.len() - i) as f64;
+        if n * rest > left {
+            return (left / rest).floor();
+        }
+        left -= n;
+    }
+    TAB_MAX
+}
+/// The tabs the strip shows: where the run starts in the group, the width of
+/// each tab in it, and whether the rest go to the pull-down. A tab is as
+/// wide as its title asks, up to `TAB_MAX`; short of room the long ones
+/// narrow together down to `TAB_MIN`; past that the strip shows the run that
+/// holds the selected tab, widened to fill what the pull-down leaves.
+fn tab_layout(natural: &[f64], selected: usize, room: f64) -> (usize, Vec<f64>, bool) {
+    let count = natural.len();
+    if count == 0 {
+        return (0, vec![], false);
+    }
+    let selected = selected.min(count - 1);
+    let held = |cap: f64, run: &[f64]| run.iter().map(|n| n.min(cap)).collect::<Vec<_>>();
+    let cap = tab_cap(natural, room);
+    if cap >= TAB_MIN || count == 1 {
+        return (0, held(cap.max(TAB_MIN), natural), false);
+    }
+    let room = room - TAB_MORE;
+    let least = held(TAB_MIN, natural);
+    let fits = |from: usize, to: usize| {
+        least[from..=to].iter().sum::<f64>() + (to - from) as f64 * TAB_GAP <= room
+    };
+    // The run slides only as far as it must to hold the selected tab.
+    let mut start = 0;
+    while start < selected && !fits(start, selected) {
+        start += 1;
+    }
+    let mut end = selected;
+    while end + 1 < count && fits(start, end + 1) {
+        end += 1;
+    }
+    let run = &natural[start..=end];
+    (start, held(tab_cap(run, room).max(TAB_MIN), run), true)
+}
 /// Hides AppKit's own tab bar in `window`'s title bar. The project tabs are
 /// drawn in the toolbar from the same tab group; the system's row under the
 /// toolbar would show them a second time and push the editor down. The bar
@@ -1548,6 +1663,30 @@ fn tab_windows(window: &NSWindow) -> Vec<Retained<NSWindow>> {
             vec![unsafe { Retained::retain(window as *const _ as *mut NSWindow).unwrap() }]
         })
 }
+/// Shows the tab `by` places after `window`'s in its group (wrapping). The
+/// group's own selection, not AppKit's Show Next Tab, which does nothing for
+/// windows that never tab on their own (`editor_window_tabbing`).
+fn select_tab(window: &NSWindow, by: isize) {
+    let group = tab_windows(window);
+    let Some(at) = group
+        .iter()
+        .position(|w| w.windowNumber() == window.windowNumber())
+    else {
+        return;
+    };
+    let count = group.len() as isize;
+    if count < 2 {
+        return;
+    }
+    let next = &group[((at as isize + by).rem_euclid(count)) as usize];
+    unsafe {
+        let tab_group: *mut AnyObject = msg_send![window, tabGroup];
+        if !tab_group.is_null() {
+            let _: () = msg_send![tab_group, setSelectedWindow: &**next];
+        }
+    }
+    gpui_macos::child_window::present(next, true);
+}
 /// Asks `window` to close on the next turn of the run loop, as its close
 /// button does. Never `performClose` directly: inside a GPUI update the
 /// should-close handler cannot run, so the window would close without its
@@ -1563,6 +1702,127 @@ pub fn request_close(window: &NSWindow) {
     }
 }
 /// Moves `window` `by` places along its tab group and keeps it selected.
+/// A page cell's tag: its place among its window's pages, or (negative) the
+/// window it belongs to and that place, when it is another tab's page.
+fn page_tag(number: isize, index: usize, own: bool) -> isize {
+    if own {
+        index as isize
+    } else {
+        -(number * 32 + index as isize) - 1
+    }
+}
+/// The window and place of another tab's page cell (`page_tag`).
+fn foreign_page(tag: isize) -> Option<(isize, usize)> {
+    (tag < 0).then(|| {
+        let v = -tag - 1;
+        (v / 32, (v % 32) as usize)
+    })
+}
+/// A command to the editor window `number` (its own command queue).
+fn route(number: isize, name: String) {
+    ROUTES.with(|r| {
+        if let Some(tx) = r.borrow().get(&number) {
+            let _ = tx.try_send(Command { name, args: vec![], token: None });
+        }
+    });
+}
+/// After a relaunch: the window with session id `id` (the one that was in
+/// front) comes forward, its tab the one its group shows.
+pub fn bring_session_window(id: u64) {
+    let number = WINDOW_IDS.with(|m| m.borrow().iter().find(|(_, v)| **v == id).map(|(n, _)| *n));
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(window) = number.and_then(|n| app.windowWithWindowNumber(n)) else {
+        return;
+    };
+    if app.isActive() {
+        select_window_tab(&window);
+        return;
+    }
+    // Launched in the background: `present` would send it to the back.
+    // It goes just above the app's own front window (never above another
+    // app's) and is key when the app comes forward.
+    unsafe {
+        let group: *mut AnyObject = msg_send![&*window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: &*window];
+        }
+    }
+    let front = app
+        .orderedWindows()
+        .to_vec()
+        .into_iter()
+        .find(|w| w.isVisible() && w.windowNumber() != window.windowNumber());
+    if let Some(front) = front {
+        window.orderWindow_relativeTo(NSWindowOrderingMode::Above, front.windowNumber());
+    }
+    window.makeKeyWindow();
+}
+/// Brings `window`'s tab forward in its group.
+fn select_window_tab(window: &NSWindow) {
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, setSelectedWindow: window];
+        }
+    }
+    gpui_macos::child_window::present(window, true);
+}
+/// Whether another tab's different title starts and ends as `title` does, so
+/// cutting both in the middle would show the same text.
+fn alike_ends(title: &str, tabs: &[Tab]) -> bool {
+    const ENDS: usize = 8;
+    let ends = |t: &str| {
+        let chars: Vec<char> = t.chars().collect();
+        let n = chars.len();
+        (
+            chars[..ENDS.min(n)].iter().collect::<String>(),
+            chars[n.saturating_sub(ENDS)..].iter().collect::<String>(),
+        )
+    };
+    let mine = ends(title);
+    tabs.iter()
+        .any(|t| t.title != title && ends(&t.title) == mine)
+}
+/// What a tab shows when its name would read like another tab's however it
+/// is cut (copies: "Accept — Recovered — Native", "Accept — Native"): the
+/// name from the word where the two part, after an ellipsis, so the part
+/// that tells them apart is what shows. `None`: the name as it is.
+fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
+    if !alike_ends(title, tabs) {
+        return None;
+    }
+    let chars: Vec<char> = title.chars().collect();
+    let shared = tabs
+        .iter()
+        .filter(|t| t.title != title && alike_ends(&t.title, tabs))
+        .map(|t| chars.iter().zip(t.title.chars()).take_while(|(a, b)| **a == *b).count())
+        .max()?;
+    // Back to the start of the word where they part.
+    let start = chars[..shared.min(chars.len())]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |i| i + 1);
+    (start > 0).then(|| format!("…{}", chars[start..].iter().collect::<String>()))
+}
+/// Takes `window` out of its tab group into a window of its own (Move Tab to
+/// New Window, a tab torn off the strip, Separate Windows chosen). The
+/// group's own removal: AppKit's Move Tab to New Window does nothing for
+/// windows that never tab on their own (`editor_window_tabbing`).
+fn detach_tab(window: &NSWindow) {
+    if tab_windows(window).len() < 2 {
+        return;
+    }
+    unsafe {
+        let group: *mut AnyObject = msg_send![window, tabGroup];
+        if !group.is_null() {
+            let _: () = msg_send![group, removeWindow: window];
+        }
+    }
+    gpui_macos::child_window::present(window, false);
+}
 fn move_tab(window: &NSWindow, by: isize) {
     let windows = tab_windows(window);
     let Some(at) = windows
@@ -1586,6 +1846,10 @@ fn move_tab(window: &NSWindow, by: isize) {
     }
     hide_system_tab_bar(window);
 }
+/// Widest a project tab grows; its title truncates in the middle.
+const TAB_MAX: f64 = 180.;
+/// How far above or below the strip a dragged tab tears off into a window.
+const TAB_TEAR: f64 = 36.;
 /// Narrowest a long title's tab gets: enough of a name to tell projects apart.
 const TAB_MIN: f64 = 96.;
 /// Between the strip's cells.
@@ -1605,6 +1869,9 @@ const TAB_CLOSE: f64 = 16.;
 const TAB_CLOSE_PAD: f64 = 8.;
 const TAB_CLOSE_SLIDE: f64 = 6.;
 const TAB_FADE: f64 = 14.;
+/// The pull-down that lists every project once they no longer fit: a cell
+/// of the control height and the gap after it.
+const TAB_MORE: f64 = 32.;
 /// Where the strip starts before the toolbar has laid it out (after the
 /// window buttons), the tools' width before they exist, and the clear space
 /// kept between the strip and the tools.
@@ -1637,9 +1904,7 @@ define_class!(
         }
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
-            let mut ids = toolbar_ids().to_vec();
-            ids.push(NSString::from_str("agentPresence"));
-            NSArray::from_retained_slice(&ids)
+            toolbar_ids()
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _: &NSToolbar, id: &NSString, _: bool) -> Option<Retained<NSToolbarItem>> {
@@ -1801,51 +2066,6 @@ impl ToolbarDelegate {
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
         }
-        if name == "agentPresence" {
-            let view: Retained<CoeditPresence> = unsafe {
-                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
-            };
-            let view: Retained<NSView> = Retained::into_super(view);
-            view.setWantsLayer(true);
-            if let Some(layer) = view.layer() {
-                layer.setCornerRadius(t.metrics.capsule_radius as f64);
-                layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
-            }
-            for (tag, title, x, width) in [
-                (0, "Agent working", 4., 194.),
-                (2, "Ⅱ", 200., 22.),
-                (3, "■", 224., 22.),
-            ] {
-                let button = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(title),
-                        Some(target),
-                        Some(sel!(coedit:)),
-                        mtm,
-                    )
-                };
-                button.setTag(tag);
-                if tag != 0 {
-                    button.setHidden(true);
-                    button.setToolTip(Some(&NSString::from_str(if tag == 2 {
-                        "Pause or Resume Agent"
-                    } else {
-                        "Stop Agent"
-                    })));
-                    button.setAccessibilityLabel(Some(&NSString::from_str(if tag == 2 {
-                        "Pause or Resume Agent"
-                    } else {
-                        "Stop Agent"
-                    })));
-                }
-                button.setBordered(false);
-                button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, 24.)));
-                view.addSubview(&button);
-            }
-            item.setView(Some(&view));
-            item.setLabel(&NSString::from_str("Agent presence"));
-            return Some(item);
-        }
         if name == "add" {
             let item = objc2_app_kit::NSMenuToolbarItem::initWithItemIdentifier(
                 objc2_app_kit::NSMenuToolbarItem::alloc(mtm),
@@ -1936,353 +2156,6 @@ impl Host {
             return;
         };
         button.publish(snapshot, self.tokens.clone());
-    }
-}
-/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
-/// idle, working (an accent ring turns around the glyph) or needing an
-/// answer (an accent dot; it wins over the ring), with background runs.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct AgentStatus {
-    pub working: bool,
-    pub attention: bool,
-    /// `m:ss` of the run in view, for the tooltip.
-    pub elapsed: Option<String>,
-    pub background: usize,
-    pub progress: Option<String>,
-    pub paused: bool,
-    pub held: bool,
-}
-impl AgentStatus {
-    pub fn tooltip(&self) -> String {
-        if self.attention {
-            "Agent needs your answer".into()
-        } else if self.working {
-            match &self.elapsed {
-                Some(e) => format!("Agent is working · {e}"),
-                None => "Agent is working".into(),
-            }
-        } else {
-            "Ask the Agent".into()
-        }
-    }
-}
-/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
-/// quarter ring at `turn` (working), or with a dot at its top trailing
-/// corner (attention). Idle is the plain template symbol.
-fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
-    let glyph = toolbar_symbol("sparkles", "Agent", t);
-    if !status.working && !status.attention {
-        return glyph;
-    }
-    let size = t.metrics.symbol_toolbar as f64 + 8.;
-    let accent = t.colors.accent;
-    let (working, attention) = (status.working && !status.attention, status.attention);
-    let dot = t.metrics.status_dot as f64;
-    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
-        let inner = glyph.size();
-        let at = NSRect::new(
-            NSPoint::new(
-                (rect.size.width - inner.width) / 2.,
-                (rect.size.height - inner.height) / 2.,
-            ),
-            inner,
-        );
-        glyph.drawInRect(at);
-        // The glyph in accent ink.
-        native_color(accent).set();
-        NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
-        if working {
-            let path = NSBezierPath::bezierPath();
-            let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
-            let start = 90. - turn * 360.;
-            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
-                centre,
-                rect.size.width / 2. - 1.,
-                start,
-                start - 270.,
-                true,
-            );
-            path.setLineWidth(1.5);
-            native_color(accent).setStroke();
-            path.stroke();
-        }
-        if attention {
-            let r = NSRect::new(
-                NSPoint::new(rect.size.width - dot, rect.size.height - dot),
-                NSSize::new(dot, dot),
-            );
-            native_color(accent).setFill();
-            NSBezierPath::bezierPathWithOvalInRect(r).fill();
-        }
-        objc2::runtime::Bool::YES
-    });
-    let image =
-        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
-    image.setAccessibilityDescription(Some(&NSString::from_str("Agent")));
-    image
-}
-fn agent_window_title(project: &str, running: bool) -> String {
-    if running {
-        format!("● {project}")
-    } else {
-        project.to_owned()
-    }
-}
-fn title_agent_dot(t: &Tokens) -> Retained<NSImage> {
-    let palette = t.sketch();
-    let light = t.scheme == Scheme::Light;
-    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
-        let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-            NSPoint::new(2., 2.),
-            NSSize::new(4., 4.),
-        ));
-        native_color(palette.core).setFill();
-        path.fill();
-        if light {
-            native_color(palette.ink).setStroke();
-            path.setLineWidth(1.);
-            path.stroke();
-        }
-        objc2::runtime::Bool::YES
-    });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(8., 8.), false, &draw)
-}
-#[cfg(test)]
-mod coedit_window_presence_tests {
-    use super::agent_window_title;
-    #[test]
-    fn window_menu_presence_is_static_and_preserves_the_project_name() {
-        assert_eq!(agent_window_title("Lettering", true), "● Lettering");
-        assert_eq!(agent_window_title("Lettering", false), "Lettering");
-    }
-}
-fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSImage> {
-    let palette = t.sketch();
-    let paused = status.paused;
-    let reduced = t.accessibility.reduce_motion;
-    let muted = t.colors.muted;
-    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
-        let breath = if reduced || paused {
-            0.5
-        } else {
-            0.5 + 0.5 * (phase * std::f64::consts::TAU * 0.5).sin()
-        };
-        if !reduced && !paused {
-            native_color(palette.halo)
-                .colorWithAlphaComponent(0.16 + 0.10 * breath)
-                .setFill();
-            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(0., 0.),
-                NSSize::new(14., 14.),
-            ))
-            .fill();
-        }
-        let radius = if reduced || paused {
-            1.5
-        } else {
-            2.2 + 0.6 * (breath - 0.5)
-        };
-        native_color(if paused { muted } else { palette.core }).setFill();
-        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-            NSPoint::new(7. - radius, 7. - radius),
-            NSSize::new(radius * 2., radius * 2.),
-        ))
-        .fill();
-        objc2::runtime::Bool::YES
-    });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(14., 14.), false, &draw)
-}
-impl Host {
-    pub fn agent_effect_frames(&self) -> u64 {
-        self.agent_effect_frames.get()
-    }
-    fn set_agent_presence(&mut self, status: &AgentStatus) {
-        let was_working = self.agent_status.working;
-        let existing = self
-            ._toolbar
-            .items()
-            .iter()
-            .position(|i| i.itemIdentifier().to_string() == "agentPresence");
-        if status.working && existing.is_none() {
-            let index = self
-                ._toolbar
-                .items()
-                .iter()
-                .position(|i| i.itemIdentifier().to_string() == "agent")
-                .unwrap_or(0);
-            self._toolbar
-                .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index as isize);
-        }
-        if status.working && !was_working {
-            self.agent_presence_generation
-                .set(self.agent_presence_generation.get() + 1);
-        }
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
-        else {
-            return;
-        };
-        if let Some(view) = item.view() {
-            let buttons = view.subviews().to_vec();
-            if let Some(button) = buttons.first() {
-                let text = if !status.working {
-                    "Done · Undo".to_owned()
-                } else if status.paused {
-                    "Paused · ⇧⌘. to resume".to_owned()
-                } else if status.held {
-                    "Waiting for you to finish".to_owned()
-                } else {
-                    format!(
-                        "• {}",
-                        status.progress.as_deref().unwrap_or("Agent working")
-                    )
-                };
-                let text: String = text.chars().take(38).collect();
-                let old: Retained<NSString> = unsafe { msg_send![&**button, title] };
-                if old.to_string() != text {
-                    let _: () =
-                        unsafe { msg_send![&**button,setTitle:&*NSString::from_str(&text)] };
-                }
-                let _: () =
-                    unsafe { msg_send![&**button,setTag:if status.working {0isize}else{1isize}] };
-            }
-            if !status.working {
-                for button in buttons.iter().skip(1) {
-                    button.setHidden(true);
-                }
-            }
-        }
-        if !status.working && was_working {
-            let toolbar = self._toolbar.clone();
-            let generation = self.agent_presence_generation.clone();
-            let version = generation.get();
-            let step =
-                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    if generation.get() != version {
-                        return;
-                    }
-                    if let Some(index) = toolbar
-                        .items()
-                        .iter()
-                        .position(|i| i.itemIdentifier().to_string() == "agentPresence")
-                    {
-                        toolbar.removeItemAtIndex(index as isize);
-                    }
-                });
-            let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
-            };
-            unsafe {
-                objc2_foundation::NSRunLoop::mainRunLoop()
-                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
-            }
-        }
-    }
-
-    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
-    /// turning ring while working, still under Reduce Motion; a dot when it
-    /// needs an answer) and its tooltip.
-    pub fn set_agent_status(&mut self, status: AgentStatus) {
-        if status == self.agent_status {
-            return;
-        }
-        if status.working != self.agent_status.working {
-            let title = self.document.borrow().0.clone();
-            self.window
-                .setTitle(&NSString::from_str(&agent_window_title(
-                    &title,
-                    status.working,
-                )));
-            self.sync_tabs();
-        }
-        self.set_agent_presence(&status);
-
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
-        let tokens = self.tokens.clone();
-        let presence = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
-            .and_then(|i| i.view())
-            .and_then(|v| v.subviews().to_vec().into_iter().next())
-            .and_then(|v| v.downcast::<NSButton>().ok());
-        if status.progress != self.agent_status.progress {
-            if let Some(timer) = self.agent_timer.take() {
-                timer.invalidate();
-            }
-        }
-        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
-        let visual_changed = status.working != self.agent_status.working
-            || status.attention != self.agent_status.attention
-            || status.paused != self.agent_status.paused
-            || status.held != self.agent_status.held;
-        let turning = status.working
-            && !status.attention
-            && !status.paused
-            && !status.held
-            && !tokens.accessibility.reduce_motion;
-        if !turning {
-            if let Some(timer) = self.agent_timer.take() {
-                timer.invalidate();
-            }
-            if visual_changed {
-                item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
-                if let Some(button) = &presence {
-                    button.setImage(Some(&presence_light(&status, 0., &tokens)));
-                }
-            }
-        } else if self.agent_timer.is_none() {
-            let started = std::time::Instant::now();
-            let shown = status.clone();
-            let item = item.clone();
-            let frame_count = self.agent_effect_frames.clone();
-            let step =
-                block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    frame_count.set(frame_count.get() + 1);
-                    let elapsed = started.elapsed().as_secs_f64();
-                    if elapsed >= 12. {
-                        item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
-                        if let Some(button) = &presence {
-                            button.setImage(Some(&presence_light(&shown, 0., &tokens)));
-                        }
-                        // Keep the invalidated timer in agent_timer until the
-                        // run ends: elapsed text updates must not restart it.
-                        unsafe {
-                            timer.as_ref().invalidate();
-                        }
-                        return;
-                    }
-                    let turn = elapsed % 1.;
-                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
-                    if let Some(button) = &presence {
-                        button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
-                    }
-                });
-            let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
-                    1. / 20.,
-                    true,
-                    &step,
-                )
-            };
-            unsafe {
-                objc2_foundation::NSRunLoop::mainRunLoop()
-                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
-            }
-            self.agent_timer = Some(timer);
-        }
-        self.agent_status = status;
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -2386,6 +2259,10 @@ pub struct Host {
     pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
+    /// The keyboard moved the focus (Tab) since the last press of a button:
+    /// a focused control then takes Space and Return; after a click, Space
+    /// is the editor's (play), as in Electron.
+    pub keyboard_navigated: Cell<bool>,
     pub canvas_focus: Cell<bool>,
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
@@ -2398,12 +2275,6 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
-    /// What the toolbar's Agent item shows, and the timer that turns its
-    /// working ring.
-    agent_status: AgentStatus,
-    agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
-    agent_presence_generation: Rc<Cell<u64>>,
-    agent_effect_frames: Rc<Cell<u64>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2519,7 +2390,7 @@ impl Host {
         window.makeFirstResponder(Some(&gpui));
         window.setTitle(&NSString::from_str("Untitled"));
         window.setSubtitle(&NSString::from_str(""));
-        one_project_per_window(&window);
+        editor_window_tabbing(&window);
         // Frames, tabs and workspaces restore from the shell session (multiple
         // windows); AppKit's autosave name is one-per-window and would collide.
         window.setRestorable(false);
@@ -2593,6 +2464,7 @@ impl Host {
             viewer_tiles: Rc::default(),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
+            keyboard_navigated: Cell::new(false),
             canvas_focus: Cell::new(false),
             flowchart: None,
             layer,
@@ -2602,10 +2474,6 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
-            agent_status: AgentStatus::default(),
-            agent_timer: None,
-            agent_presence_generation: Rc::new(Cell::new(0)),
-            agent_effect_frames: Rc::new(Cell::new(0)),
             _delegate: delegate,
             _target: target,
             observer: None,
@@ -2681,6 +2549,13 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // Every release of the button is told to the session, which
+                    // ends a pointer gesture whose own view never heard it (it
+                    // was drawn again, or covered, while held).
+                    if e.r#type() == NSEventType::LeftMouseUp {
+                        host.borrow().send_command("pointerReleased", vec![]);
+                        return event.as_ptr();
+                    }
                     let (palette, fields, window, splitter_focus, gpui) = {
                         let h = host.borrow();
                         (
@@ -2695,6 +2570,7 @@ impl Host {
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        host.borrow().keyboard_navigated.set(false);
                         // A press on the window's own content (a timeline, a
                         // canvas, a list), not on a hosted control or inside
                         // an extension panel, takes the keyboard back from a
@@ -2833,6 +2709,23 @@ impl Host {
                     }
                     let chord = chord(e);
                     if e.r#type() == NSEventType::KeyDown {
+                        // ⌃Tab shows the next project tab, as in v1 (M029,
+                        // M030), when the window has tabs; else, like ⌃F6, it
+                        // moves between panels.
+                        if matches!(chord.as_str(), "ctrl+tab" | "ctrl+shift+tab")
+                            && crate::tabs_mode()
+                            && tab_windows(&window).len() > 1
+                        {
+                            host.borrow().send_command(
+                                if chord.contains("shift") {
+                                    "previousTab"
+                                } else {
+                                    "nextTab"
+                                },
+                                vec![],
+                            );
+                            return std::ptr::null_mut();
+                        }
                         if matches!(
                             chord.as_str(),
                             "ctrl+f6" | "ctrl+shift+f6" | "ctrl+tab" | "ctrl+shift+tab"
@@ -2858,6 +2751,7 @@ impl Host {
                             && !canvas_tab
                         {
                             let h = host.borrow();
+                            h.keyboard_navigated.set(true);
                             let reverse = chord == "shift+tab";
                             if !h.advance_toolbar(reverse) {
                                 let native = responder.as_ref().is_some_and(|r| {
@@ -2889,6 +2783,7 @@ impl Host {
                         &chord,
                         field,
                         host.borrow().keyboard_control_focus.get(),
+                        host.borrow().keyboard_navigated.get(),
                         splitter_focus,
                         control,
                     ) {
@@ -2927,6 +2822,7 @@ impl Host {
                 NSEventMask::KeyDown
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
+                    | NSEventMask::LeftMouseUp
                     | NSEventMask::RightMouseDown,
                 &handler,
             )
@@ -3199,6 +3095,13 @@ impl Host {
     }
     /// Window title, toolbar title and subtitle (`document_subtitle`), the
     /// close-button edited dot and the proxy icon.
+    /// The window shows no project (Home alone): titled Home, and never a
+    /// project tab. A project's own metadata (`set_document_metadata`) ends it.
+    pub fn set_home_title(&self) {
+        self.set_document_metadata("Home", "", false, None);
+        HOME_WINDOWS.with(|h| h.borrow_mut().insert(self.window.windowNumber()));
+        self.sync_tabs();
+    }
     pub fn set_document_metadata(
         &self,
         title: &str,
@@ -3206,11 +3109,17 @@ impl Host {
         edited: bool,
         path: Option<&std::path::Path>,
     ) {
-        self.window
-            .setTitle(&NSString::from_str(&agent_window_title(
-                title,
-                self.agent_status.working,
-            )));
+        let was_home = HOME_WINDOWS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
+        // A tab that showed only Home now holds a project: the group's other
+        // strips show its tab.
+        if was_home {
+            for tab in tab_windows(&self.window) {
+                if tab.windowNumber() != self.window.windowNumber() {
+                    route(tab.windowNumber(), "syncTabs".into());
+                }
+            }
+        }
+        self.window.setTitle(&NSString::from_str(title));
         self.window.setDocumentEdited(edited);
         self.window.setSubtitle(&NSString::from_str(subtitle));
         let url = path.map(|p| {
@@ -3220,11 +3129,428 @@ impl Host {
         *self.document.borrow_mut() = (title.into(), subtitle.into());
         self.sync_tabs();
     }
+    /// The bar's leading strip, by the "Open projects in" setting: project
+    /// tabs (`sync_tab_strip`) or the one project's name (`sync_project_bar`).
+    pub fn sync_tabs(&self) {
+        if crate::tabs_mode() {
+            self.sync_tab_strip()
+        } else {
+            self.sync_project_bar()
+        }
+    }
+    /// Tabs mode (the default): the toolbar's tabs are the windows of this
+    /// window's tab group (a lone window is one tab), then New Project.
+    /// AppKit's own tab bar stays hidden; the group remains the model, so a
+    /// tab is selected, closed and moved to its own window exactly as before.
+    /// Rebuilt only when the group, a title, an edited state or the selection
+    /// changes.
+    fn sync_tab_strip(&self) {
+        let own = self.window.windowNumber();
+        let group = tab_windows(&self.window);
+        // Every tab's open pages, this window's first: Settings or the Store
+        // opened in one tab stays in the strip whichever tab shows.
+        let mut page_cells: Vec<(isize, usize, String, bool)> = vec![];
+        {
+            let own_pages = self.pages.borrow();
+            for (i, (_, title)) in own_pages.0.iter().enumerate() {
+                page_cells.push((own, i, title.clone(), own_pages.1 == Some(i)));
+            }
+        }
+        for w in &group {
+            let number = w.windowNumber();
+            if number == own {
+                continue;
+            }
+            PAGES.with(|p| {
+                for (i, (_, title)) in p.borrow().get(&number).into_iter().flatten().enumerate() {
+                    page_cells.push((number, i, title.clone(), false));
+                }
+            });
+        }
+        // A window with no project is Home, not a project: it is never a tab
+        // (no "Home" tab beside the home button, H3).
+        let group: Vec<_> = group
+            .into_iter()
+            .filter(|w| !HOME_WINDOWS.with(|h| h.borrow().contains(&w.windowNumber())))
+            .collect();
+        if group.len() > 1 {
+            hide_system_tab_bar(&self.window);
+        }
+        let selected = unsafe {
+            let tab_group: *mut AnyObject = msg_send![&*self.window, tabGroup];
+            let window: *mut NSWindow = if tab_group.is_null() {
+                std::ptr::null_mut()
+            } else {
+                msg_send![tab_group, selectedWindow]
+            };
+            window.as_ref().map_or(own, |w| w.windowNumber())
+        };
+        let tabs: Vec<Tab> = group
+            .iter()
+            .map(|w| Tab {
+                window: w.windowNumber(),
+                title: w.title().to_string(),
+                edited: w.isDocumentEdited(),
+                // On Home or a page the lit item is that: no project tab is.
+                selected: !self.aside() && (group.len() == 1 || w.windowNumber() == selected),
+            })
+            .collect();
+        let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
+        let height = t.metrics.control as f64;
+        // The tools stay in the middle of the bar however many projects are
+        // open: the tabs have what lies between the strip's leading edge and
+        // the tools, less Home and New Project.
+        let leading = self
+            .tabs
+            .convertRect_toView(self.tabs.bounds(), None)
+            .origin
+            .x;
+        let tools = self
+            ._toolbar
+            .items()
+            .to_vec()
+            .iter()
+            .find(|item| item.itemIdentifier().to_string() == "tools")
+            .and_then(|item| item.view())
+            .map_or(0., |view| view.frame().size.width);
+        let room = (self.window.frame().size.width / 2.
+            - (tools.max(TAB_TOOLS) / 2. + TAB_CLEAR)
+            - leading.max(TAB_LEADING)
+            - 2. * (height + TAB_GAP))
+            .max(TAB_MIN)
+            .floor();
+        // The strip redraws when a page opens, closes or shows as well.
+        let mut marked = tabs.clone();
+        marked.extend(page_cells.iter().map(|(number, i, title, selected)| Tab {
+            window: -1 - (number * 32 + *i as isize),
+            title: title.clone(),
+            edited: false,
+            selected: *selected,
+        }));
+        if *self.tabs_shown.borrow() == (marked.clone(), room) {
+            return;
+        }
+        for view in self.tabs.subviews().to_vec() {
+            view.removeFromSuperview();
+        }
+        let glyph = |name: &str, label: &str, points: f64| {
+            let config =
+                NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
+                    NSFontWeightMedium
+                });
+            let image = symbol(name, label);
+            image.imageWithSymbolConfiguration(&config).unwrap_or(image)
+        };
+        let item = |title: &str, action: objc2::runtime::Sel, tag: isize| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(""),
+                )
+            };
+            unsafe { item.setTarget(Some(target)) };
+            item.setTag(tag);
+            item
+        };
+        // A cell that is not a tab stands in a holder: the strip's own
+        // children are its tabs only (the order a drag reads).
+        let square = NSSize::new(height, height);
+        let holder = |x: f64, width: f64| {
+            let view = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)),
+            );
+            self.tabs.addSubview(&view);
+            view
+        };
+        // Home, the strip's first cell: a quiet glyph.
+        holder(0., height).addSubview(&self._delegate.ivars().home);
+        // A title in one size and weight whatever its state, so a tab is as
+        // wide showing as not. A label keeps `LABEL_PAD` clear inside each
+        // end of its frame.
+        const LABEL_PAD: f64 = 2.;
+        let lead = |tab: &Tab| {
+            TAB_PAD
+                + if tab.edited {
+                    TAB_DOT + TAB_DOT_GAP
+                } else {
+                    0.
+                }
+        };
+        let labels: Vec<(Retained<NSTextField>, NSSize)> = tabs
+            .iter()
+            .map(|tab| {
+                let distinct = distinct_title(&tab.title, &tabs);
+                let label = NSTextField::labelWithString(
+                    &NSString::from_str(distinct.as_deref().unwrap_or(&tab.title)),
+                    mtm,
+                );
+                label.setFont(Some(&NSFont::systemFontOfSize_weight(
+                    t.typography.title as f64,
+                    unsafe { NSFontWeightRegular },
+                )));
+                // Cut in the middle, so a name's start and end both stay;
+                // where that would read like another tab's name, the name
+                // from where they part, cut at its end (`distinct_title`).
+                label.setLineBreakMode(if distinct.is_some() {
+                    NSLineBreakMode::ByTruncatingTail
+                } else {
+                    NSLineBreakMode::ByTruncatingMiddle
+                });
+                label.setAccessibilityElement(false);
+                let natural = label.fittingSize();
+                (label, natural)
+            })
+            .collect();
+        let natural: Vec<f64> = tabs
+            .iter()
+            .zip(&labels)
+            .map(|(tab, (_, size))| (lead(tab) + size.width - 2. * LABEL_PAD + TAB_PAD).ceil())
+            .collect();
+        // With more projects than fit at the narrowest width, the strip
+        // shows the run that holds the selected one and a pull-down lists
+        // them all.
+        let selected = tabs.iter().position(|t| t.selected).unwrap_or(0);
+        let (start, widths, overflow) = tab_layout(&natural, selected, room);
+        let mut x = height + TAB_GAP;
+        for ((tab, (label, size)), width) in tabs.iter().zip(&labels).skip(start).zip(widths) {
+            let title = NSString::from_str(&tab.title);
+            let button: Retained<TabButton> = unsafe {
+                msg_send![
+                    TabButton::class(),
+                    buttonWithTitle: &*title,
+                    target: &**target,
+                    action: sel!(selectTab:)
+                ]
+            };
+            // The button is the whole cell and draws nothing: the cell
+            // draws the fill, the label the title.
+            button.setTransparent(true);
+            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+            button.setTag(tab.window);
+            button.setToolTip(Some(&title));
+            button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab")));
+            button.setAccessibilitySelected(tab.selected);
+            // Right-click: the tab's own menu (reorder, detach, close).
+            let menu = NSMenu::new(mtm);
+            menu.addItem(&item("Close Tab", sel!(closeTab:), tab.window));
+            menu.addItem(&item("Close Other Tabs", sel!(closeOtherTabs:), tab.window));
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            menu.addItem(&item("Move Tab Left", sel!(moveTabLeft:), tab.window));
+            menu.addItem(&item("Move Tab Right", sel!(moveTabRight:), tab.window));
+            menu.addItem(&item(
+                "Move Tab to New Window",
+                sel!(moveTabOut:),
+                tab.window,
+            ));
+            unsafe { button.setMenu(Some(&menu)) };
+            // The title starts on the tab's inset (after the edited dot)
+            // and is cut in the middle when the tab is narrower than it, so
+            // the start and the end of a name both stay.
+            let from = lead(tab) - LABEL_PAD;
+            label.setFrame(NSRect::new(
+                NSPoint::new(from, ((height - size.height) / 2.).floor()),
+                NSSize::new(
+                    (width - from - TAB_PAD + LABEL_PAD).min(size.width),
+                    size.height,
+                ),
+            ));
+            // Its end fades out under the close button: a mask, so the
+            // title never moves.
+            let fade = CAGradientLayer::new();
+            let (ink, clear) = (
+                mask_stop(&NSColor::blackColor()),
+                mask_stop(&NSColor::clearColor()),
+            );
+            unsafe {
+                fade.setColors(Some(&NSArray::from_retained_slice(&[
+                    ink.clone(),
+                    ink,
+                    clear.clone(),
+                    clear,
+                ])));
+            }
+            fade.setStartPoint(NSPoint::new(0., 0.5));
+            fade.setEndPoint(NSPoint::new(1., 0.5));
+            fade.setFrame(NSRect::new(NSPoint::ZERO, label.frame().size));
+            label.setWantsLayer(true);
+            if let Some(layer) = label.layer() {
+                unsafe { layer.setMask(Some(&fade)) };
+            }
+            let close = unsafe {
+                NSButton::buttonWithImage_target_action(
+                    &glyph("xmark", "Close Project", 8.5),
+                    Some(target),
+                    Some(sel!(closeTab:)),
+                    mtm,
+                )
+            };
+            close.setBordered(false);
+            close.setTag(tab.window);
+            close.setToolTip(Some(&NSString::from_str("Close Project")));
+            close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab.close")));
+            close.setFrame(NSRect::new(
+                NSPoint::new(width - TAB_CLOSE_PAD - TAB_CLOSE, (height - TAB_CLOSE) / 2.),
+                NSSize::new(TAB_CLOSE, TAB_CLOSE),
+            ));
+            let view = TabView::new(
+                mtm,
+                NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, height)),
+                Retained::into_super(Retained::into_super(label.clone())),
+                Some(close.clone()),
+                Some(fade),
+                tab.edited,
+                tab.selected,
+            );
+            view.addSubview(label);
+            view.addSubview(&button);
+            view.addSubview(&close);
+            self.tabs.addSubview(&view);
+            view.reveal(false, false);
+            view.restyle();
+            x += width + TAB_GAP;
+        }
+        // The open pages after the projects: a cell each, as a tab (its
+        // title, its close button), in a holder of its own so a drag along
+        // the strip reads the project tabs only.
+        for (number, index, title, selected) in &page_cells {
+            let (index, selected) = (*index, *selected);
+            let label = NSTextField::labelWithString(&NSString::from_str(title), mtm);
+            label.setFont(Some(&NSFont::systemFontOfSize_weight(
+                t.typography.title as f64,
+                unsafe { NSFontWeightRegular },
+            )));
+            label.setAccessibilityElement(false);
+            let size = label.fittingSize();
+            let width = (TAB_PAD + size.width - 2. * LABEL_PAD + TAB_PAD + TAB_CLOSE).ceil();
+            let name = NSString::from_str(title);
+            let button: Retained<TabButton> = unsafe {
+                msg_send![
+                    TabButton::class(),
+                    buttonWithTitle: &*name,
+                    target: &**target,
+                    action: sel!(selectPage:)
+                ]
+            };
+            button.setTransparent(true);
+            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+            button.setTag(page_tag(*number, index, *number == own));
+            button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page")));
+            button.setAccessibilitySelected(selected);
+            label.setFrame(NSRect::new(
+                NSPoint::new(TAB_PAD - LABEL_PAD, ((height - size.height) / 2.).floor()),
+                size,
+            ));
+            let close = unsafe {
+                NSButton::buttonWithImage_target_action(
+                    &glyph("xmark", &format!("Close {title}"), 8.5),
+                    Some(target),
+                    Some(sel!(closePage:)),
+                    mtm,
+                )
+            };
+            close.setBordered(false);
+            close.setTag(page_tag(*number, index, *number == own));
+            close.setToolTip(Some(&NSString::from_str(&format!("Close {title}"))));
+            close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page.close")));
+            close.setFrame(NSRect::new(
+                NSPoint::new(width - TAB_CLOSE_PAD - TAB_CLOSE, (height - TAB_CLOSE) / 2.),
+                NSSize::new(TAB_CLOSE, TAB_CLOSE),
+            ));
+            let view = TabView::new(
+                mtm,
+                NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
+                Retained::into_super(Retained::into_super(label.clone())),
+                Some(close.clone()),
+                None,
+                false,
+                selected,
+            );
+            view.addSubview(&label);
+            view.addSubview(&button);
+            view.addSubview(&close);
+            holder(x, width).addSubview(&view);
+            view.reveal(false, false);
+            view.restyle();
+            x += width + TAB_GAP;
+        }
+        // The strip's own buttons after the last tab: every project (once
+        // they no longer fit), then a new one. Each is a quiet glyph in a
+        // cell of its own, so the pointer finds the strip's fill under it.
+        let tool = |button: &NSButton, x: f64| {
+            button.setFrame(NSRect::new(NSPoint::ZERO, square));
+            let cell = TabView::new(
+                mtm,
+                NSRect::new(NSPoint::ZERO, square),
+                Retained::into_super(Retained::into_super(objc2::Message::retain(button))),
+                None,
+                None,
+                false,
+                false,
+            );
+            cell.addSubview(button);
+            cell.restyle();
+            holder(x, height).addSubview(&cell);
+        };
+        if overflow {
+            let more = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, square),
+                true,
+            );
+            more.setBordered(false);
+            more.addItemWithTitle(&NSString::from_str(""));
+            // The glyph stands in the middle of the target, in place of the
+            // pull-down's own arrow at its edge.
+            if let Some(cell) = more
+                .cell()
+                .and_then(|c| c.downcast::<NSPopUpButtonCell>().ok())
+            {
+                cell.setArrowPosition(NSPopUpArrowPosition::NoArrow);
+            }
+            if let Some(face) = more.itemAtIndex(0) {
+                face.setImage(Some(&glyph("chevron.down", "All Projects", 10.)));
+            }
+            more.setImagePosition(NSCellImagePosition::ImageOnly);
+            if let Some(menu) = more.menu() {
+                for tab in &tabs {
+                    let row = item(&tab.title, sel!(selectTab:), tab.window);
+                    row.setState(if tab.selected {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                    menu.addItem(&row);
+                }
+            }
+            more.setToolTip(Some(&NSString::from_str("All Projects")));
+            more.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tabs.all")));
+            tool(&more, x);
+            x += height + TAB_GAP;
+        }
+        let add = unsafe {
+            NSButton::buttonWithImage_target_action(
+                &glyph("plus", "New Project", 12.),
+                Some(target),
+                Some(sel!(newTab:)),
+                mtm,
+            )
+        };
+        add.setBordered(false);
+        add.setButtonType(NSButtonType::MomentaryChange);
+        add.setToolTip(Some(&NSString::from_str("New Project")));
+        add.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.newProject")));
+        tool(&add, x);
+        self.tabs_width.setConstant(x + height);
+        *self.tabs_shown.borrow_mut() = (marked, room);
+    }
     /// The bar's leading strip: Home, then the name of what the window shows
-    /// (one project per window, no tabs): the project with its menu and its
+    /// (Separate windows: one project per window): the project with its menu and its
     /// state under it, or a page's name. Rebuilt only when the name, the
     /// state, Recent or the room beside the tools change.
-    pub fn sync_tabs(&self) {
+    fn sync_project_bar(&self) {
         let own = self.window.windowNumber();
         let group = tab_windows(&self.window);
         if group.len() > 1 {
@@ -3338,9 +3664,6 @@ impl Host {
         holder(0., height).addSubview(&self._delegate.ivars().home);
         let mut x = height + TAB_GAP;
         if let Some((name, sub, menu)) = title {
-            let agent = name.starts_with("● ");
-            let name = name.strip_prefix("● ").unwrap_or(&name).to_owned();
-            let dot_room = if agent { 10. } else { 0. };
             // A label keeps `LABEL_PAD` clear inside each end of its frame.
             const LABEL_PAD: f64 = 2.;
             const CHEVRON: f64 = 9.;
@@ -3368,13 +3691,12 @@ impl Host {
                 .as_ref()
                 .map_or(NSSize::new(0., 0.), |l| l.fittingSize());
             let chevron_room = if menu { CHEVRON + TAB_DOT_GAP } else { 0. };
-            let text = name_size.width.max(sub_size.width) - 2. * LABEL_PAD + dot_room;
+            let text = name_size.width.max(sub_size.width) - 2. * LABEL_PAD;
             // The name truncates before it would reach the tools.
             let width = (TAB_PAD + text + chevron_room + TAB_PAD)
                 .ceil()
                 .min(room.max(TAB_MIN));
-            let text_room =
-                (width - 2. * TAB_PAD - chevron_room + 2. * LABEL_PAD - dot_room).max(0.);
+            let text_room = (width - 2. * TAB_PAD - chevron_room + 2. * LABEL_PAD).max(0.);
             // One line centred; two lines (name, state) share the height.
             let lines = name_size.height + sub_size.height;
             let top = ((height - lines) / 2.).floor();
@@ -3387,7 +3709,7 @@ impl Host {
                 }
             };
             name_label.setFrame(NSRect::new(
-                NSPoint::new(TAB_PAD - LABEL_PAD + dot_room, at(top, name_size.height)),
+                NSPoint::new(TAB_PAD - LABEL_PAD, at(top, name_size.height)),
                 NSSize::new(text_room.min(name_size.width), name_size.height),
             ));
             let cell = NSView::initWithFrame(
@@ -3395,19 +3717,10 @@ impl Host {
                 NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
             );
             cell.addSubview(&name_label);
-            if agent {
-                let dot = NSImageView::imageViewWithImage(&title_agent_dot(t), mtm);
-                dot.setFrame(NSRect::new(
-                    NSPoint::new(TAB_PAD - 2., at(top + (name_size.height - 8.) / 2., 8.)),
-                    NSSize::new(8., 8.),
-                ));
-                dot.setAccessibilityLabel(Some(&NSString::from_str("Agent running")));
-                cell.addSubview(&dot);
-            }
             if let Some(label) = &sub_label {
                 label.setFrame(NSRect::new(
                     NSPoint::new(
-                        TAB_PAD - LABEL_PAD + dot_room,
+                        TAB_PAD - LABEL_PAD,
                         at(top + name_size.height, sub_size.height),
                     ),
                     NSSize::new(text_room.min(sub_size.width), sub_size.height),
@@ -3485,8 +3798,16 @@ impl Host {
         if *self.pages.borrow() == next {
             return;
         }
+        let own = self.window.windowNumber();
+        PAGES.with(|p| p.borrow_mut().insert(own, next.0.clone()));
         *self.pages.borrow_mut() = next;
         self.restyle_aside();
+        // The other tabs of the group show this window's pages too.
+        for other in tab_windows(&self.window) {
+            if other.windowNumber() != own {
+                route(other.windowNumber(), "syncTabs".into());
+            }
+        }
     }
     /// Which page shows (`None`: the project or Home).
     pub fn shown_page(&self) -> Option<String> {
@@ -3527,19 +3848,6 @@ impl Host {
             // The tabs stay, as in v1's title bar on Home.
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
                 item.setHidden(aside);
-            }
-            // The gear reads pressed while Settings is the tab showing, and
-            // says what a press does.
-            if name == "settings" {
-                let shown = self.shown_page().as_deref() == Some("settings");
-                let (sym, label) = if shown {
-                    ("gearshape.fill", "Close Settings")
-                } else {
-                    ("gearshape", "Open Settings")
-                };
-                item.setImage(Some(&toolbar_symbol(sym, "Settings", &self.tokens)));
-                item.setToolTip(Some(&NSString::from_str(label)));
-                item.setLabel(&NSString::from_str(label));
             }
         }
     }
@@ -3785,7 +4093,7 @@ impl Host {
                 if action.starts_with("hold") { 4. } else { 0.3 },
                 action == "press",
             ),
-            "out" => window.moveTabToNewWindow(None),
+            "out" => detach_tab(&window),
             // Every other editor window joins this one's group again, as
             // dragging its tab back in (or Window ▸ Merge All Windows) does.
             "merge" => {
@@ -4634,17 +4942,10 @@ impl Host {
         match name {
             "quit" => app.terminate(None),
             "closeWindow" | "closeTab" => request_close(&self.window),
-            "nextTab" => unsafe {
-                let _: () = msg_send![&*self.window,selectNextTab:std::ptr::null::<AnyObject>()];
-            },
-            "previousTab" => unsafe {
-                let _: () =
-                    msg_send![&*self.window,selectPreviousTab:std::ptr::null::<AnyObject>()];
-            },
-            "moveTabToNewWindow" => unsafe {
-                let _: () =
-                    msg_send![&*self.window,moveTabToNewWindow:std::ptr::null::<AnyObject>()];
-            },
+            "syncTabs" => self.sync_tabs(),
+            "nextTab" => select_tab(&self.window, 1),
+            "previousTab" => select_tab(&self.window, -1),
+            "moveTabToNewWindow" => detach_tab(&self.window),
             "blurField" => {
                 let Some(editor) = self
                     .window
@@ -4747,6 +5048,7 @@ fn passes_straight(
     chord: &str,
     editing_text: bool,
     control_focus: bool,
+    keyboard_navigated: bool,
     splitter_focus: bool,
     control: bool,
 ) -> bool {
@@ -4754,7 +5056,10 @@ fn passes_straight(
         return false;
     }
     let control_key = matches!(chord, "enter" | "space" | "up" | "down" | "left" | "right");
-    control_focus && control_key
+    // A control the keyboard moved to (Tab) presses with Space; one a
+    // click left focused (in the viewer, on a layer) keeps Return and the
+    // arrows and leaves Space to Play.
+    control_focus && (keyboard_navigated && control_key || control_keeps(chord))
         // A control a click left the keyboard with keeps Return and the
         // arrows; Space plays (`control_keeps`).
         || control && control_keeps(chord)
@@ -6157,9 +6462,7 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
-            if self.anchor.is_none() {
-                save_palette_recent(&mut self.model.recents, &name);
-            }
+            if self.anchor.is_none() { save_palette_recent(&mut self.model.recents, &name); }
             let (command, args) = menu::split_palette_command(&name);
             let _ = self.sender.try_send(Command {
                 name: command.to_owned(),
@@ -6845,20 +7148,127 @@ mod viewer_window_tests {
 }
 
 #[cfg(test)]
+mod tab_layout_tests {
+    use super::{TAB_GAP, TAB_MAX, TAB_MIN, TAB_MORE, tab_layout};
+
+    fn span(widths: &[f64]) -> f64 {
+        widths.iter().sum::<f64>() + (widths.len() - 1) as f64 * TAB_GAP
+    }
+
+    #[test]
+    fn tabs_with_room_are_as_wide_as_their_titles_ask() {
+        assert_eq!(
+            tab_layout(&[90., 120., 60.], 1, 600.),
+            (0, vec![90., 120., 60.], false)
+        );
+        // A long name is held to the widest a tab grows.
+        assert_eq!(tab_layout(&[400.], 0, 600.), (0, vec![TAB_MAX], false));
+    }
+
+    #[test]
+    fn long_titles_narrow_together_and_short_ones_keep_their_width() {
+        let room = 520.;
+        let (start, widths, overflow) = tab_layout(&[180., 180., 60., 180.], 2, room);
+        assert_eq!((start, overflow), (0, false));
+        assert_eq!(widths[2], 60.);
+        assert!(widths[0] < TAB_MAX && widths[0] >= TAB_MIN);
+        assert_eq!((widths[0], widths[1]), (widths[1], widths[3]));
+        assert!(span(&widths) <= room && span(&widths) > room - 4.);
+    }
+
+    #[test]
+    fn more_projects_than_fit_show_the_run_that_holds_the_selected_one() {
+        let (room, natural) = (366., [150.; 11]);
+        for selected in [0, 5, 10] {
+            let (start, widths, overflow) = tab_layout(&natural, selected, room);
+            assert!(overflow);
+            assert!((start..start + widths.len()).contains(&selected));
+            assert!(start + widths.len() <= 11);
+            assert!(widths.iter().all(|w| *w >= TAB_MIN));
+            assert!(
+                span(&widths) <= room - TAB_MORE,
+                "the pull-down has its place"
+            );
+            assert!(
+                span(&widths) > room - TAB_MORE - widths.len() as f64,
+                "the run fills what the pull-down leaves"
+            );
+        }
+        // The run slides only as far as it must: the selected tab is its last.
+        let (start, widths, _) = tab_layout(&natural, 5, room);
+        assert_eq!(start + widths.len(), 6);
+    }
+
+    #[test]
+    fn the_pull_down_appears_only_when_the_narrowest_tabs_do_not_fit() {
+        let fits = span(&[TAB_MIN; 4]);
+        assert!(!tab_layout(&[200.; 4], 0, fits).2);
+        assert!(tab_layout(&[200.; 5], 0, fits).2);
+        // Short titles need no pull-down in the same room.
+        assert!(!tab_layout(&[70.; 5], 0, fits).2);
+    }
+
+    #[test]
+    fn copies_that_would_read_alike_cut_at_the_end() {
+        use super::{Tab, alike_ends, distinct_title};
+        let tab = |title: &str| Tab {
+            window: 0,
+            title: title.into(),
+            edited: false,
+            selected: false,
+        };
+        let tabs = [
+            tab("Accept — Recovered — Native"),
+            tab("Accept — Native"),
+            tab("Paper"),
+        ];
+        assert!(alike_ends("Accept — Recovered — Native", &tabs));
+        assert!(alike_ends("Accept — Native", &tabs));
+        assert!(!alike_ends("Paper", &tabs));
+        // The same name twice is not told apart by cutting: middle as ever.
+        assert!(!alike_ends("Paper", &[tab("Paper"), tab("Paper")]));
+        // What shows: each from the word where they part.
+        assert_eq!(
+            distinct_title("Accept — Recovered — Native", &tabs).as_deref(),
+            Some("…Recovered — Native")
+        );
+        assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
+        assert_eq!(distinct_title("Paper", &tabs), None);
+        let runs = [
+            tab("Accept - acceptance run eleven copy one - Native"),
+            tab("Accept - acceptance run eleven copy two - Native"),
+        ];
+        assert_eq!(
+            distinct_title(&runs[1].title, &runs).as_deref(),
+            Some("…two - Native")
+        );
+    }
+
+    #[test]
+    fn one_tab_in_no_room_is_still_a_tab() {
+        assert_eq!(tab_layout(&[150.], 0, 10.), (0, vec![TAB_MIN], false));
+    }
+}
+#[cfg(test)]
 mod key_order_tests {
     use super::passes_straight;
     /// Return, Space and the arrows go straight to a focused control or
     /// divider, but never past the queue while text is being edited.
     #[test]
     fn keys_typed_into_text_never_skip_the_queue() {
-        assert!(passes_straight("space", false, true, false, false));
-        assert!(passes_straight("enter", false, false, false, true));
+        assert!(passes_straight("space", false, true, true, false, false));
+        assert!(passes_straight("enter", false, false, false, false, true));
         // A clicked control leaves Space to the editor (play).
-        assert!(!passes_straight("space", false, false, false, true));
-        assert!(passes_straight("left", false, false, true, false));
-        assert!(!passes_straight("a", false, true, false, false));
+        assert!(!passes_straight("space", false, false, false, false, true));
+        // Focus a click left in the viewer or on a layer: Space plays, the
+        // arrows and Return stay with what has the focus.
+        assert!(!passes_straight("space", false, true, false, false, false));
+        assert!(passes_straight("up", false, true, false, false, false));
+        assert!(passes_straight("enter", false, true, false, false, false));
+        assert!(passes_straight("left", false, false, false, true, false));
+        assert!(!passes_straight("a", false, true, true, false, false));
         for key in ["space", "enter", "up", "left"] {
-            assert!(!passes_straight(key, true, true, true, true), "{key}");
+            assert!(!passes_straight(key, true, true, true, true, true), "{key}");
         }
     }
 }
@@ -6976,11 +7386,7 @@ mod sidebar_rect_tests {
 }
 
 fn toolbar_click_command(command: &str, double_click: bool) -> &str {
-    if command == "toolAnchor" && double_click {
-        "centerAnchor"
-    } else {
-        command
-    }
+    if command == "toolAnchor" && double_click { "centerAnchor" } else { command }
 }
 
 #[cfg(test)]
@@ -6999,38 +7405,26 @@ mod anchor_toolbar_tests {
 
 fn load_palette_recents() -> Vec<String> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-    defaults
-        .stringForKey(&NSString::from_str("PowermovePaletteRecents"))
+    defaults.stringForKey(&NSString::from_str("PowermovePaletteRecents"))
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value.to_string()).ok())
-        .map(|mut ids| {
-            ids.truncate(8);
-            ids
-        })
-        .unwrap_or_default()
+        .map(|mut ids| { ids.truncate(8); ids }).unwrap_or_default()
 }
 fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     crate::transient::remember_command(recents, command);
     let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
     // NSString is a property-list value accepted by NSUserDefaults.
-    unsafe {
-        objc2_foundation::NSUserDefaults::standardUserDefaults()
-            .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
-    }
+    unsafe { objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents")); }
 }
 
 /// Viewer preferences share the shell's native application settings store.
 pub fn viewer_preference(key: &str, default: bool) -> bool {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = NSString::from_str(key);
-    if defaults.objectForKey(&key).is_none() {
-        default
-    } else {
-        defaults.boolForKey(&key)
-    }
+    if defaults.objectForKey(&key).is_none() { default } else { defaults.boolForKey(&key) }
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
-    objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .setBool_forKey(value, &NSString::from_str(key));
+    objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
 }
 
 #[cfg(test)]

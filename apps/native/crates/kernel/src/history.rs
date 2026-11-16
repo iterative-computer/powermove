@@ -1003,59 +1003,6 @@ impl History {
         ))
     }
 
-    /// Squash only contiguous records owned by a turn, preserving every
-    /// foreign record in place. Redo histories and expired marks are refused.
-    pub(crate) fn squash_segments(
-        &mut self,
-        mark: &HistoryMark,
-        owned: &std::collections::HashSet<u64>,
-        label: &str,
-    ) -> Option<Vec<u64>> {
-        let base = match mark.top_id {
-            None => 0,
-            Some(id) => self.entries.iter().position(|r| r.id == id)? + 1,
-        };
-        if self.cursor != self.entries.len() || base > self.cursor {
-            return None;
-        }
-        let mut result = self.entries[..base].to_vec();
-        let mut ids = Vec::new();
-        let mut at = base;
-        while at < self.entries.len() {
-            if !owned.contains(&self.entries[at].id) || !self.entries[at].is_document() {
-                result.push(self.entries[at].clone());
-                at += 1;
-                continue;
-            }
-            let start = at;
-            while at < self.entries.len()
-                && owned.contains(&self.entries[at].id)
-                && self.entries[at].is_document()
-            {
-                at += 1;
-            }
-            let mut segment = History::with_limits(usize::MAX, usize::MAX);
-            segment.entries = self.entries[start..at].to_vec();
-            segment.cursor = segment.entries.len();
-            segment.total_bytes = segment.entries.iter().map(|r| r.bytes).sum();
-            let name = if ids.is_empty() {
-                label.to_owned()
-            } else {
-                format!("{label} (cont.)")
-            };
-            let id = segment.squash_since(&HistoryMark { top_id: None }, &name)?;
-            ids.push(id);
-            result.extend(segment.entries);
-        }
-        if ids.is_empty() {
-            return None;
-        }
-        self.entries = result;
-        self.cursor = self.entries.len();
-        self.total_bytes = self.entries.iter().map(|r| r.bytes).sum();
-        Some(ids)
-    }
-
     /// Identity of the undo history a save writes: equal for this history
     /// and the one a file it saved opens with (the steps `to_saved()` keeps,
     /// their labels and forms, and how many are applied). Each step's form
