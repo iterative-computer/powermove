@@ -230,8 +230,37 @@ fn win(id: u64, tab: Option<u64>) -> WindowState {
         project: format!("p{id}"),
         workspace: "design".into(),
         tab_group: tab,
+        tab_index: 0,
+        pages: Vec::new(),
         fullscreen: false,
     }
+}
+
+/// Tabs mode: a session comes back with its tab groups as they were, each
+/// group's leader before its members (it must be open for them to join).
+#[test]
+fn tabs_mode_restores_tab_groups_leaders_first() {
+    let mut s = Session::default();
+    s.upsert(win(2, Some(1)));
+    s.upsert(win(1, None));
+    s.upsert(win(3, None));
+    s.upsert(win(4, Some(1)));
+    s.key = Some(4);
+    let plan = s.restore_plan_tabs(true);
+    let ids: Vec<u64> = plan.iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 4);
+    let at = |id| ids.iter().position(|i| *i == id).unwrap();
+    assert!(at(1) < at(2) && at(1) < at(4), "{ids:?}");
+    assert_eq!(plan[at(2)].tab_group, Some(1));
+    assert_eq!(plan[at(4)].tab_group, Some(1));
+    assert_eq!(plan[at(3)].tab_group, None);
+    // "Close windows when quitting": the key window with its tabs.
+    let one = s.restore_plan_tabs(false);
+    assert_eq!(one.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 2, 4]);
+    let mut lone = s.clone();
+    lone.key = Some(3);
+    let one = lone.restore_plan_tabs(false);
+    assert_eq!((one.len(), one[0].id, one[0].tab_group), (1, 3, None));
 }
 
 #[test]
@@ -365,14 +394,13 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         let item = all.iter().find(|i| i.command == command).unwrap();
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
-    // Workspace and panel menus exist (HIG placement). One project per
-    // window: no window tabs, so no tab items at all.
-    for c in ["toggleTabBar:", "newTab", "mergeAllWindows:", "nextTab", "moveTabToNewWindow"] {
-        assert!(all.iter().all(|i| i.command != c), "{c}");
-    }
-    for c in ["panels", "workspaces"] {
+    // Workspace and panel menus exist (HIG placement), and v1's tab items
+    // (Open Projects In: Tabs, the default). The system's own tab bar stays
+    // hidden behind the toolbar's tabs: no Show Tab Bar.
+    for c in ["newTab", "mergeAllWindows", "nextTab", "moveTabToNewWindow", "panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");
     }
+    assert!(all.iter().all(|i| i.command != "toggleTabBar:"));
 }
 
 #[test]

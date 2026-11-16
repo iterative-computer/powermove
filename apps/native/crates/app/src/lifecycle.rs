@@ -232,6 +232,15 @@ pub fn begin_quit(cx: &mut App) {
     start_quit(cx);
 }
 fn start_quit(cx: &mut App) {
+    // The window session keeps the windows open now and nothing else: the
+    // next launch reopens exactly these (PM-392). Windows keep their
+    // entries as they close for the quit.
+    if let Some(path) = pm_shell::view::session_path() {
+        pm_shell::session::write(
+            &path,
+            pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
+        );
+    }
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
@@ -449,6 +458,7 @@ fn ask_session_failed(error: &str, cx: &mut App) {
 fn finish_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
     let host = cx.global::<QuitCoordinator>().host.clone();
+    let signal = cx.global::<QuitCoordinator>().terminating;
     for weak in cx.global::<QuitCoordinator>().controllers.clone() {
         let _ = weak.update(cx, |v, cx| {
             v.closing_note = Some("Quitting: writing the project library…".into());
@@ -465,7 +475,7 @@ fn finish_quit(cx: &mut App) {
         }
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
-            crate::error_log::session_ended().await;
+            crate::error_log::session_ended(signal).await;
         }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
@@ -902,8 +912,14 @@ impl Controller {
             return;
         }
         if intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating {
-            // Close saves the project and completes its durability barrier.
-            // No unattended Save/Dont Save sheet may hold SIGTERM open.
+            // SIGTERM (logout, shutdown, a script): nobody can answer a Save
+            // question, and the file is never written without the person's
+            // choice. The window lets go of its project without closing it:
+            // the quit then leaves its unsaved work in the journal and the
+            // file as saved (`ShellCall::PrepareQuit` defers it), and the
+            // next open offers the work, as after a crash.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
             self.complete_close(intent, cx);
             return;
         }
@@ -1357,24 +1373,43 @@ mod tests {
         actor.shutdown();
     }
 
+    /// SIGTERM never writes over the person's file: the window lets go of
+    /// its project unclosed, the quit defers it, the file is as saved and
+    /// the next launch's open of it offers the unsaved work.
     #[test]
-    fn unattended_quit_saves_open_dirty_project_before_releasing_library() {
+    fn an_unattended_quit_leaves_the_file_and_the_next_launch_offers_the_work() {
         let (dir, actor, session) = fixture();
         let k = actor.handle();
         let file = dir.path().join("unattended.pmv");
-        answer(&k, ShellCall::SaveAs {
-            session: session.clone(), path: file.clone(), replace: false,
-        });
-        let before = std::fs::read(&file).unwrap();
+        answer(
+            &k,
+            ShellCall::SaveAs {
+                session,
+                path: file.clone(),
+                replace: false,
+            },
+        );
+        let saved = std::fs::read(&file).unwrap();
         edit(&k);
         assert!(k.published("test").unwrap().dirty);
-        // The unattended controller uses Close, which saves and fsyncs,
-        // instead of archiving a rejected edit or waiting for a sheet.
-        expect_closed(k.shell(ShellCall::Close(session)).wait()).unwrap();
-        assert_ne!(std::fs::read(&file).unwrap(), before);
-        assert!(matches!(answer(&k, ShellCall::PrepareQuit), ShellReply::Compacted { .. }));
+        // The quit's steps once the window let go without a Close.
+        assert!(matches!(
+            answer(&k, ShellCall::PrepareQuit),
+            ShellReply::Compacted { .. }
+        ));
         answer(&k, ShellCall::ReleaseLibrary);
         actor.shutdown();
+        assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
+        // The next launch: the work is there to offer.
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
     }
 
     fn edit(k: &KernelHandle) {
@@ -1636,6 +1671,40 @@ mod tests {
             p.unwrap().history.can_undo,
             "the finished edit is one undo step"
         );
+        actor.shutdown();
+    }
+    /// Save with an edit left open (a drag whose release never ended it):
+    /// the kernel refuses it as it is; finished first, as Cmd-S now does,
+    /// the save goes through and keeps the edit.
+    #[test]
+    fn a_save_finishes_an_edit_left_open_and_keeps_it() {
+        let (_dir, actor, session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Scale".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let refused = k.shell(ShellCall::Save(session.clone())).wait().unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| crate::surfaces::documents::WriteFailure::of(&format!("{e:?}"))
+                    == crate::surfaces::documents::WriteFailure::EditOpen),
+            "{refused:?}"
+        );
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        answer(&k, ShellCall::Save(session));
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none() && !p.dirty, "saved");
+        assert!(p.history.can_undo, "the edit is kept, one undo step");
         actor.shutdown();
     }
     /// Undo with an edit left open (a move whose drag never sent its end):

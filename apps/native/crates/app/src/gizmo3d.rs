@@ -695,11 +695,28 @@ impl GizmoSurface {
     pub fn studio_active(&self) -> bool {
         self.studio.active()
     }
+    /// Navigating from camera view (a middle or ⌥ drag, the Hand or Zoom
+    /// tool, the view keys, Frame) leaves it for the editor view from where
+    /// the camera stands, as Blender with Lock Camera to View off: the
+    /// authored camera never moves and no undo step is made (PM-367). Only
+    /// the camera tools (Orbit, Pan, Zoom) and its properties change it.
+    fn studio_leave_camera(&mut self, cx: &mut Context<Self>) {
+        if self.studio.free_look || self.studio.cam_nav.is_some() {
+            return;
+        }
+        let Some(shot) = self.studio.scene.as_ref().map(|s| s.shot) else {
+            return;
+        };
+        self.studio.free = Some(shot);
+        self.studio_go_free(cx);
+        self.studio_push_view(cx);
+    }
     /// Frame (F): Free View fits the selection, or everything.
     pub fn studio_frame(&mut self, cx: &mut Context<Self>) {
         let Some(scene) = self.studio.scene.clone() else {
             return;
         };
+        self.studio_leave_camera(cx);
         let from = self.studio.view().unwrap_or(scene.shot);
         let framing = Scene {
             lens: if self.studio.free_look && self.studio.cam_nav.is_none() {
@@ -880,6 +897,7 @@ impl GizmoSurface {
             }
             _ => return,
         };
+        self.studio_leave_camera(cx);
         let Some(start) = self.studio_nav_start(cx) else {
             return;
         };
@@ -1537,6 +1555,9 @@ impl GizmoSurface {
             }
         };
         if let Some(mode) = nav {
+            if middle || alt || view_tool.is_some() {
+                self.studio_leave_camera(cx);
+            }
             let Some(start) = self.studio_nav_start(cx) else {
                 return false;
             };
@@ -2299,6 +2320,11 @@ impl GizmoSurface {
         if self.studio.fly.is_some() || self.studio.nav.is_some() {
             return true;
         }
+        // Camera view: a scroll navigates the view (the viewer's own zoom and
+        // pan), never the authored camera (PM-367).
+        if !self.studio.free_look && self.studio.cam_nav.is_none() {
+            return false;
+        }
         let m = event.modifiers;
         let frame = self.host.frame(self.bounds, cx);
         let Some(start) = self.studio_nav_start(cx) else {
@@ -2359,13 +2385,17 @@ impl GizmoSurface {
         self.studio_nav_set(pose, true, cx);
         true
     }
-    /// Pinching zooms (Blender's trackpad zoom), the camera in camera view.
+    /// Pinching zooms the editor view (Blender's trackpad zoom); in camera
+    /// view the viewer zooms, never the authored camera (PM-367).
     pub(crate) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
         let Some(scene) = self.studio.scene.clone() else {
             return false;
         };
         if self.studio.fly.is_some() || self.studio.nav.is_some() {
             return true;
+        }
+        if !self.studio.free_look && self.studio.cam_nav.is_none() {
+            return false;
         }
         let Some(start) = self.studio_nav_start(cx) else {
             return true;

@@ -182,6 +182,11 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
     if value.is_null() || (matches!(key, "flexGrow" | "flexShrink") && value.is_number()) {
         return true;
     }
+    // A zero least size is structural, not a visual value: the item may
+    // shrink below its content, which then wraps or truncates.
+    if matches!(key, "minWidth" | "minHeight") && value.as_f64() == Some(0.) {
+        return true;
+    }
     // Only structural keywords are literal. Strings like "22px", hex colours,
     // font names and numeric strings are never accepted as visual values.
     let categorical = match key {

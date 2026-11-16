@@ -25,6 +25,39 @@ pub fn oklch(lightness: f32, chroma: f32, hue: f32) -> u32 {
     })
 }
 
+/// [`oklch`] with the chroma lowered as far as it must be for the colour to
+/// lie inside sRGB, so a vivid hue keeps its hue instead of being clipped
+/// channel by channel.
+pub fn oklch_fit(lightness: f32, chroma: f32, hue: f32) -> u32 {
+    let inside = |c: f32| {
+        let (b, a) = hue.to_radians().sin_cos();
+        let (a, b) = (a * c, b * c);
+        let l = (lightness + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+        let m = (lightness - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+        let s = (lightness - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+        [
+            4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+            -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+            -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+        ]
+        .iter()
+        .all(|v| (-0.000_5..=1.000_5).contains(v))
+    };
+    if inside(chroma) {
+        return oklch(lightness, chroma, hue);
+    }
+    let (mut lo, mut hi) = (0., chroma.max(0.));
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.;
+        if inside(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    oklch(lightness, lo, hue)
+}
+
 /// (lightness, chroma, hue in degrees) of an opaque 0xRRGGBB.
 pub fn to_oklch(rgb: u32) -> (f32, f32, f32) {
     let [r, g, b] = [16, 8, 0].map(|shift| {

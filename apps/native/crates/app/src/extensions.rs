@@ -136,6 +136,8 @@ pub struct Extensions {
     pub(crate) overrides: Option<crate::raster_overrides::Overrides>,
     /// The document whose captures carry this window's definitions.
     doc_id: Option<u64>,
+    /// The project the host was started for.
+    project: Option<String>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
@@ -230,6 +232,7 @@ impl Default for Extensions {
             host: None,
             overrides: None,
             doc_id: None,
+            project: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
             data_stores: StoreDataStores::default(),
@@ -495,7 +498,7 @@ impl Controller {
     }
     /// A fresh extension state for this window. Resource generations keep
     /// counting up, so the viewer takes the next definitions as newer.
-    fn reset_extensions(&mut self) {
+    pub(crate) fn reset_extensions(&mut self) {
         let generation = self.extensions.resources.generation;
         self.extensions = Extensions::default();
         self.extensions.resources = Arc::new(ResourceSnapshot {
@@ -506,15 +509,54 @@ impl Controller {
         self.apply_extension_resources();
     }
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        // Started when the open was chosen (PM-384): its realm and bundle
+        // were made while the project opened; it now learns the document.
+        if let Some(project) = &project
+            && self.extensions.host.is_some()
+            && self.extensions.project.as_deref() == Some(project.as_str())
+        {
+            self.extensions_document(project);
+            self.wire_effect_desk();
+            self.sync_viewport();
+            return;
+        }
+        let Some(project) = project else {
+            // The window mounts while its project still opens: the
+            // extensions started for that open stay (PM-384).
+            if self.opening_name.is_some() && self.extensions.project.is_some() {
+                return;
+            }
+            let mut shell = self.host.borrow_mut();
+            shell.native_present = None;
+            shell.native_accessibility = vec![];
+            drop(shell);
+            self.reset_extensions();
+            return;
+        };
+        self.start_extensions_for(project, cx);
+    }
+    /// The document of the window's project, once the project has opened:
+    /// its captures and exports wait for this window's extensions.
+    fn extensions_document(&mut self, project: &str) {
+        if self.extensions.doc_id.is_some() {
+            return;
+        }
+        let Some(doc_id) = self.kernel.published(project).map(|p| p.snapshot.doc_id) else {
+            return;
+        };
+        self.extensions.doc_id = Some(doc_id);
+        crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+    }
+    /// Starts the extensions of `project`, even before its open finished
+    /// (the realm waits for the project's first publication to stage it).
+    pub(crate) fn start_extensions_for(&mut self, project: String, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
         shell.native_accessibility = vec![];
         drop(shell);
         self.reset_extensions();
-        let Some(session) = &self.session else {
-            return;
-        };
-        let project = session.project.clone();
+        let project_name = project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
         let doc_id = self.kernel.published(&project).map(|p| p.snapshot.doc_id);
@@ -555,6 +597,7 @@ impl Controller {
         }
         self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
+        self.extensions.project = Some(project_name);
         self.wire_effect_desk();
         self.sync_viewport();
         cx.spawn(async move |this, cx| {
@@ -1925,16 +1968,22 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
-        // Exports and explicit background review launches keep WebKit working
-        // while the editor is occluded; neither activates or parks the window.
+        // An export's page is never shown: it runs for its job in a window of
+        // its own, whatever the editor's window does. In the editor's, a window
+        // behind others or hidden held the page back (its answers came 3 to 7
+        // times slower and the export took 2 to 4 times as long as in front).
+        // An explicit background review launch keeps WebKit working while the
+        // editor is occluded, in the editor's window.
+        let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
             && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
-        if (key.starts_with(EXPORT_PAGE) || background_review) && host.begin_background_job(false).is_err() {
+        if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
-        let shell = self.host.borrow();
-        host.install_below(&shell.native_container(), &shell.gpui);
-        drop(shell);
+        if !exporting {
+            let shell = self.host.borrow();
+            host.install_below(&shell.native_container(), &shell.gpui);
+        }
         drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions
@@ -2007,6 +2056,7 @@ impl Controller {
                 }
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 let _ = host.set_content_regions(content);
+                host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill.get()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(

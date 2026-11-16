@@ -445,6 +445,31 @@ fn gpui_owns_focus(state: &State) -> bool {
 /// NSWindow key status alone is insufficient: an embedded native view may own
 /// the first responder in that same key window. Sync after the responder action
 /// unwinds, since an AccessKit action can still hold its consumer tree borrowed.
+/// The view holding `window`'s adapter: its content view, or GPUI's view's
+/// parent when a split view hosts that parent (Settings).
+pub(crate) fn adapter_host(window: &AnyObject) -> usize {
+    let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+    if has_adapter(content as usize) {
+        return content as usize;
+    }
+    VIEWS.with(|views| {
+        views
+            .borrow()
+            .iter()
+            .find(|(_, state)| {
+                state.upgrade().is_some_and(|state| {
+                    state.borrow().content.window().is_some_and(|w| {
+                        std::ptr::eq(
+                            Retained::as_ptr(&w).cast::<AnyObject>(),
+                            window as *const AnyObject,
+                        )
+                    })
+                })
+            })
+            .map_or(content as usize, |(key, _)| *key)
+    })
+}
+
 pub(crate) fn responder_changed(content: usize) {
     dispatch2::DispatchQueue::main().exec_async(move || {
         let state = VIEWS.with(|views| views.borrow().get(&content).and_then(Weak::upgrade));

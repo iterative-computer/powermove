@@ -934,6 +934,47 @@ fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
 }
 
 #[test]
+fn the_export_sheet_knows_the_work_area_it_would_export() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "export-work".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let kernel = actor.handle();
+    let mut export = data::Backend::new(kernel.clone(), identity, "export", false).unwrap();
+    let project = export.export_snapshot().unwrap()["project"].clone();
+    assert_eq!(project["duration"], json!(10.0), "{project}");
+    assert_eq!(project["workArea"], Value::Null, "{project}");
+    let seen = kernel.published("synthetic").unwrap().revision();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Set Work Area".into()),
+                    expected_revision: Some(seen),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::SetWorkArea {
+                            comp: None,
+                            start: Some(2.0),
+                            end: Some(5.0),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let project = export.export_snapshot().unwrap()["project"].clone();
+    assert_eq!(project["hasWorkArea"], json!(true), "{project}");
+    assert_eq!(project["workArea"], json!([2.0, 5.0]), "{project}");
+}
+
+#[test]
 fn the_export_sheet_opens_on_the_projects_output() {
     let actor = actor();
     let kernel = actor.handle();
@@ -2216,25 +2257,12 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     let mut panels = Builtins::new(kernel.clone(), "P", || {}).unwrap();
     finish(panels.mount("settings").unwrap());
     finish(panels.show("settings").unwrap());
-    // Settings shows one section per page: open Memory from the sidebar.
-    let first = panels.take_publications().pop().unwrap();
-    let nav = first
-        .surface
-        .nodes()
-        .values()
-        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("settings.nav.memory"))
-        .unwrap()
-        .id;
+    // Settings shows one section per page: open Memory from the window's
+    // sidebar (AppKit's, which acts on the panel).
+    panels.take_publications();
     finish(
         panels
-            .event(
-                "settings",
-                first.generation,
-                first.surface.revision(),
-                nav,
-                "click",
-                EventDetail::default(),
-            )
+            .panel_act("settings", &json!({ "select": "memory" }))
             .unwrap(),
     );
     let publication = panels.take_publications().pop().unwrap();
@@ -5608,6 +5636,74 @@ fn parent_and_track_matte_rows_carry_only_the_current_layer() {
     );
 }
 
+/// PM-376: the Export sheet's subscription, published on every document
+/// change, plans the export and checks the encoders only while the sheet is
+/// open; closed, the project's own facts stay current and the last plan's
+/// figures are kept, so an edit or an undo no longer waits for a plan.
+#[test]
+fn the_export_subscription_plans_only_while_the_sheet_is_open() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-closed".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["capabilities"]["mp4"]["reason"], "Checking…");
+    assert_eq!(closed["project"]["summary"], "");
+    assert!(closed["project"]["id"].is_string());
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    let open = sheet.export_publication().unwrap();
+    assert_eq!(open["project"]["summary"], "300 frames · 10 s · 640×360");
+    assert_ne!(open["capabilities"]["mp4"]["reason"], "Checking…");
+    sheet.native_command("export.dismiss", &json!({})).unwrap();
+    let p = kernel.published("synthetic").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Composition Settings".into()),
+                    expected_revision: Some(p.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                width: Some(1280.0),
+                                height: Some(720.0),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let closed = sheet.export_publication().unwrap();
+    assert_eq!(closed["project"]["width"], 1280);
+    assert_eq!(closed["project"]["summary"], "300 frames · 10 s · 640×360");
+    // Opened again, it plans the project as it is now.
+    sheet
+        .native_command("export.plan", &json!({"options": closed["options"]}))
+        .unwrap();
+    assert_eq!(
+        sheet.export_publication().unwrap()["project"]["summary"],
+        "300 frames · 10 s · 1280×720"
+    );
+}
+
 /// The Easing panel, as the app mounts it, offers v1's actions on the
 /// selected keyframes; a preset, Easy Ease, an interpolation and a custom
 /// curve each ease them as one Undo step, and nothing changes with no
@@ -5780,7 +5876,6 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
         assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
     }
 }
-
 #[test]
 fn composition_tab_closing_preserves_the_last_tab() {
     let actor = actor();
@@ -5827,7 +5922,6 @@ fn composition_tab_closing_preserves_the_last_tab() {
             .any(|(_, action)| action["kind"] == "compositionSettings" && action["id"] == "c")
     );
 }
-
 #[test]
 fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs() {
     let actor = actor();

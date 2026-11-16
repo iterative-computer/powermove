@@ -252,7 +252,7 @@ impl Editor {
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
-            self.tokens = crate::theme::tokens(
+            let tokens = crate::theme::tokens(
                 match window.appearance() {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark => {
                         pm_design::Scheme::Dark
@@ -261,6 +261,12 @@ impl Editor {
                 },
                 crate::native::settings(),
             );
+            // A window's appearance is reported more often than it changes:
+            // the same look rebuilds nothing (PM-400).
+            if tokens == self.tokens {
+                return;
+            }
+            self.tokens = tokens;
             if let Some(h) = &self.host {
                 h.borrow_mut().update_tokens(self.tokens.clone());
             }
@@ -475,6 +481,8 @@ impl Editor {
             project: self.project.clone(),
             workspace: self.layout.workspace.clone(),
             tab_group: host.tab_leader(),
+            tab_index: host.tab_index(),
+            pages: host.page_ids(),
             fullscreen: host.is_fullscreen(),
         })
     }
@@ -1120,8 +1128,11 @@ impl Editor {
             "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
-            // One project per window: a new tab is a new window.
-            "newTab" => crate::open_editor(cx),
+            // Tabs mode: a new tab of this window; else a new window.
+            "newTab" => crate::open_editor_tab(cx, self.window_id),
+            // The window's tab group changed (a tab joined): the session
+            // records it.
+            "persistSession" => self.persist_session(),
             "deselect" | "cancel" => {
                 if self.gesture.is_some() {
                     self.cancel_gesture(cx);
@@ -2545,6 +2556,10 @@ impl Render for Editor {
             if collapsed {
                 root = root.child(panel);
                 continue;
+            }
+            if let (Some(i), Some(f)) = (self.integration.clone(), self.panel_focus.get(&id)) {
+                let focused = f.contains_focused(w, cx);
+                i.panel_focused(&id, focused, cx);
             }
             let content = self
                 .integration

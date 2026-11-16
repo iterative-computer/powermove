@@ -472,14 +472,15 @@ mod cancel_tests {
         for (w, h, expected) in [
             (3840, 2160, (1920, 1080)),
             (3840, 1080, (1920, 540)),
-            (2160, 3840, (608, 1080)),
+            // Portrait fits the portrait HD box (recipe 5): the same pixels.
+            (2160, 3840, (1080, 1920)),
             (640, 360, (640, 360)),
         ] {
             let recipe =
                 ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false)
                     .unwrap();
             assert_eq!((recipe.width, recipe.height), expected);
-            assert!(recipe.width <= 1920 && recipe.height <= 1080);
+            assert!(u64::from(recipe.width) * u64::from(recipe.height) <= 1920 * 1080);
         }
     }
     use super::*;

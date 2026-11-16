@@ -164,6 +164,8 @@ export interface Mounted {
   publish?(): void;
   /** A command from outside the panel changed its model: show it again. */
   refresh?(): Promise<unknown>;
+  /** Something done in the panel's native chrome (Settings' sidebar). */
+  act?(intent: Json): Promise<unknown>;
 }
 
 /** Mounts a built-in panel into its window: the same entry a fork of it uses. */

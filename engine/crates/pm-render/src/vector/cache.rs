@@ -984,6 +984,7 @@ impl VectorCache {
             return Ok(e.view.clone());
         }
         pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
+        let _span = pm_perf::Span::new(pm_perf::Counter::VectorMicros);
         let (texture, bytes) = match source {
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, encoder, scene, *rect, precision)?
@@ -1196,6 +1197,7 @@ impl VectorCache {
         sources: &[&VectorSource],
         precision: Precision,
     ) -> usize {
+        let _span = pm_perf::Span::new(pm_perf::Counter::VectorMicros);
         if !self.batching || sources.len() < 2 {
             return 0;
         }
