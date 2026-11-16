@@ -915,10 +915,11 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the
                     // bezel. `quiet` is the borderless title in the
                     // secondary ink, for an option bar under a composer.
-                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
+                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet" | "pulldown"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
                     well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
+                    pull: crate::v4_compile::variant(node) == Some("pulldown"),
                     tint: None,
                     symbol: None,
                     // `data-pm-variant="glass"`: a segmented control in the
