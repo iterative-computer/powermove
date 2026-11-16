@@ -299,13 +299,49 @@ pub fn holder(map: &Keymap, id: &str, chord: &str) -> Option<(String, String, bo
                         && keymap::from_accelerator(&e.accelerator).as_deref() == Some(chord)
                 })
                 .map(|e| (e.command, vec![]))
-        })?;
+        });
+    // The menu bar's own items (Minimize, Hide, Quit) never give theirs up.
+    let Some(held) = held else {
+        let role = menu::menus()
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .find(|i| {
+                i.role.is_some() && keymap::from_accelerator(&i.chord).as_deref() == Some(chord)
+            })?;
+        return Some((role.command, role.label, true));
+    };
     let other = row_id(&held.0, &held.1);
     let label = commands(&table)
         .into_iter()
         .find(|e| e.1 == other)
-        .map_or_else(|| held.0.clone(), |e| e.2);
+        .map(|e| e.2)
+        // A menu item with no row of its own (Quit) goes by its menu name.
+        .or_else(|| {
+            menu::equivalents()
+                .into_iter()
+                .find(|e| e.command == held.0)
+                .map(|e| e.label)
+        })
+        .unwrap_or_else(|| held.0.clone());
     Some((other, label, menu::is_fixed(&held.0)))
+}
+/// Keys macOS answers before any app sees them (switching apps, Spotlight,
+/// Force Quit, Lock Screen, screenshots, cycling windows): never recorded.
+fn reserved(chord: &str) -> bool {
+    [
+        "Command-Tab",
+        "Command-Shift-Tab",
+        "Command-Space",
+        "Command-Option-Escape",
+        "Control-Command-Q",
+        "Command-Shift-3",
+        "Command-Shift-4",
+        "Command-Shift-5",
+        "Command-`",
+    ]
+    .iter()
+    .filter_map(|keys| keymap::normalize(keys))
+    .any(|keys| keys == chord)
 }
 /// Whether the person gave `command` (no arguments) keys of their own.
 fn changed(map: &Keymap, command: &str) -> bool {
@@ -334,6 +370,12 @@ pub fn recorded(map: Keymap, id: &str, chord: &str, asked: Option<&str>) -> Reco
     let Some(chord) = keymap::normalize(chord) else {
         return Recorded::Error(format!("{chord} cannot be a shortcut."));
     };
+    if reserved(&chord) {
+        return Recorded::Error(format!(
+            "macOS uses {} itself. Type another.",
+            menu::glyphs(&chord)
+        ));
+    }
     let Some((other, _, menu_owned)) = holder(&map, id, &chord) else {
         return match assign(map, id, vec![chord]) {
             Ok(next) => Recorded::Store(next),
@@ -720,7 +762,23 @@ mod tests {
         };
         keymap::set_user(&map.bindings);
         assert_eq!(menu_chord("save").as_deref(), Some(""));
-        assert!(assign(map, "quit", vec!["cmd+k".into()]).is_err());
+        assert!(assign(map.clone(), "quit", vec!["cmd+k".into()]).is_err());
+        // Keys macOS takes first are refused; the menu bar's own (Minimize)
+        // ask and never move.
+        for taken in ["cmd+tab", "cmd+space", "cmd+shift+3"] {
+            let chord = keymap::normalize(&taken.replace('+', "-")).unwrap_or(taken.into());
+            assert!(
+                matches!(
+                    recorded(map.clone(), "newWindow", &chord, None),
+                    Recorded::Error(_)
+                ),
+                "{taken}"
+            );
+        }
+        assert!(matches!(
+            recorded(map.clone(), "newWindow", "cmd+m", Some("cmd+m")),
+            Recorded::Ask { .. }
+        ));
         keymap::set_user(&[]);
         assert_eq!(menu_chord("save").as_deref(), Some("CommandOrControl+S"));
     }
