@@ -1912,6 +1912,7 @@ impl Controller {
             tokens.scheme == pm_design::Scheme::Dark,
             tokens.accessibility.increase_contrast,
             tokens.accessibility.reduce_transparency,
+            tokens.metrics.inset,
         );
         let page_span = crate::diag::span("extensions.page");
         let created = match &session {

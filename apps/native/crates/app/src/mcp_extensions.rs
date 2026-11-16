@@ -80,7 +80,12 @@ impl Page {
             Trust::Trusted,
             feedback.clone(),
             stores,
-            &pm_compat_runner::page_bundle(false, false, false),
+            &pm_compat_runner::page_bundle(
+                false,
+                false,
+                false,
+                pm_shell::theme::tokens(pm_design::Scheme::Light, Default::default()).metrics.inset,
+            ),
         )?;
         web.create(PanelSpec {
             id: PANEL,

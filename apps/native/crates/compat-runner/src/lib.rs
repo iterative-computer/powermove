@@ -41,7 +41,12 @@ pub const PAGE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/page.js"))
 /// v1–3 panels style themselves with them (`--tx`, `--bg-field`, `--line`, …);
 /// in Electron they came from the app's own stylesheet. The editions are
 /// generated from pm-design's tokens.
-pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: bool) -> String {
+pub fn page_bundle(
+    dark: bool,
+    increase_contrast: bool,
+    reduce_transparency: bool,
+    panel_inset: f32,
+) -> String {
     macro_rules! edition {
         ($name:literal) => {
             include_str!(concat!("../../../js/themes/editions/v1/", $name))
@@ -60,7 +65,10 @@ pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: boo
     let scheme = if dark { "dark" } else { "light" };
     // The theme's variables, then the kit's look for plain controls an
     // extension leaves to the browser (zero specificity: its own rules win).
-    let css = format!("{css}\n{}", include_str!("extension-base.css"));
+    let css = format!(
+        "{css}\n:root{{--pm-inset:{panel_inset}px;}}\n{}",
+        include_str!("extension-base.css"),
+    );
     format!(
         "{PAGE_BUNDLE}\n(()=>{{const s=document.createElement('style');s.textContent={};document.head.prepend(s);document.documentElement.dataset.theme={};}})();",
         serde_json::to_string(&css).expect("CSS is a string"),
@@ -1968,7 +1976,8 @@ mod page_style_tests {
         for dark in [false, true] {
             for contrast in [false, true] {
                 for solid in [false, true] {
-                    let page = super::page_bundle(dark, contrast, solid);
+                    let page = super::page_bundle(dark, contrast, solid, 12.);
+                    assert!(page.contains("--pm-inset:12px"));
                     let base = page.find("select.sel").expect("base stylesheet");
                     let theme = page.find("--bg-field").expect("theme variables");
                     assert!(theme < base, "the theme comes first");
