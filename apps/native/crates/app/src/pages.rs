@@ -130,7 +130,7 @@ impl Controller {
         }
         true
     }
-    fn sync_pages(&self) {
+    pub(crate) fn sync_pages(&self) {
         let (cells, shown) = self.pages.strip();
         self.host.borrow().set_pages(cells, shown);
     }

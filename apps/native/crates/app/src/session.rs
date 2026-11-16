@@ -1023,6 +1023,16 @@ impl Controller {
     /// General › Reopen Last Project on Launch is on (v1's `restoreWindows`,
     /// on unless turned off).
     fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        // The pages open in this window's strip at the last quit open again,
+        // behind the project.
+        let pages = std::mem::take(&mut self.host.borrow_mut().restored_pages);
+        if !pages.is_empty() {
+            for page in &pages {
+                self.pages.open(page);
+            }
+            self.pages.leave();
+            self.sync_pages();
+        }
         let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
             return;
         };

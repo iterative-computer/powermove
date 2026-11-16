@@ -25,6 +25,13 @@ pub struct WindowState {
     /// Id of the first window of the native tab group this window belongs to.
     #[serde(default)]
     pub tab_group: Option<u64>,
+    /// Its place in that group's strip: a relaunch puts the tabs back in
+    /// this order (opening order is not the strip's after a reorder).
+    #[serde(default)]
+    pub tab_index: usize,
+    /// The pages (Settings, the Store) open in its strip.
+    #[serde(default)]
+    pub pages: Vec<String>,
     #[serde(default)]
     pub fullscreen: bool,
 }
@@ -169,7 +176,9 @@ impl Session {
                 w.tab_group = None;
             }
         }
-        list.sort_by_key(|w| w.tab_group.is_some());
+        // Leaders first, then each group's tabs in their strip's order (a
+        // tab joins at its group's end).
+        list.sort_by_key(|w| (w.tab_group.is_some(), w.tab_index));
         list
     }
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -382,6 +391,8 @@ mod writer_tests {
             project: "p".into(),
             workspace: "design".into(),
             tab_group: None,
+            tab_index: 0,
+            pages: Vec::new(),
             fullscreen: false,
         }
     }
@@ -443,6 +454,8 @@ mod upgrade_tests {
             project: project.into(),
             workspace: "design".into(),
             tab_group,
+            tab_index: 0,
+            pages: Vec::new(),
             fullscreen: false,
         }
     }
@@ -514,5 +527,31 @@ mod upgrade_tests {
         // A round trip keeps the mark.
         let back: Session = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert!(back.complete);
+    }
+}
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    #[test]
+    fn tabs_come_back_in_their_strips_order_whatever_order_they_opened_in() {
+        let tab = |id: u64, group: Option<u64>, index: usize| WindowState {
+            id,
+            frame: [10., 10., 800., 600.],
+            project: format!("p{id}"),
+            workspace: "design".into(),
+            tab_group: group,
+            tab_index: index,
+            pages: Vec::new(),
+            fullscreen: false,
+        };
+        // Opened 1, 2, 3, 4; the strip was then reordered to 1, 4, 2, 3.
+        let s = Session {
+            version: 1,
+            windows: vec![tab(1, None, 0), tab(2, Some(1), 2), tab(3, Some(1), 3), tab(4, Some(1), 1)],
+            key: Some(4),
+            complete: true,
+        };
+        let plan = s.launch_plan(true, true);
+        assert_eq!(plan.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 4, 2, 3]);
     }
 }

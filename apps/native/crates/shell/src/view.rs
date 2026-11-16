@@ -475,6 +475,8 @@ impl Editor {
             project: self.project.clone(),
             workspace: self.layout.workspace.clone(),
             tab_group: host.tab_leader(),
+            tab_index: host.tab_index(),
+            pages: host.page_ids(),
             fullscreen: host.is_fullscreen(),
         })
     }

@@ -282,6 +282,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {
                 let h = host.borrow();

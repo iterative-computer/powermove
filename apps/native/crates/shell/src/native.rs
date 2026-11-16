@@ -743,6 +743,8 @@ pub fn editor_window_tabbing(window: &NSWindow) {
 pub fn apply_tabs_mode(tabs: bool) {
     crate::set_tabs_mode(tabs);
     if tabs {
+        // Back to Tabs: the separate windows become tabs of the one in use.
+        merge_all_windows(None);
         return;
     }
     let Some(mtm) = MainThreadMarker::new() else {
@@ -770,6 +772,100 @@ pub fn apply_tabs_mode(tabs: bool) {
         }
     }
 }
+/// `window` (one tab, out of any group it was in) joins `into`'s tab group
+/// at its end, so a group put back together keeps its order. The tabs of
+/// both groups draw their strips again and record their group and place in
+/// the session.
+fn add_tab(into: &NSWindow, window: &NSWindow) {
+    if tab_windows(into)
+        .iter()
+        .any(|t| t.windowNumber() == window.windowNumber())
+    {
+        return;
+    }
+    let left: Vec<isize> = tab_windows(window)
+        .iter()
+        .map(|t| t.windowNumber())
+        .filter(|n| *n != window.windowNumber())
+        .collect();
+    let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
+        Retained::retain(into as *const _ as *mut NSWindow).unwrap()
+    });
+    last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
+    hide_system_tab_bar(window);
+    hide_system_tab_bar(into);
+    let numbers: Vec<isize> = tab_windows(into)
+        .iter()
+        .map(|t| t.windowNumber())
+        .chain(left)
+        .collect();
+    for number in numbers {
+        route(number, "syncTabs".into());
+        route(number, "persistSession".into());
+    }
+}
+/// The editor window whose tab strip (its toolbar) lies under `at` (screen
+/// coordinates), topmost first, outside `from`'s own tab group.
+fn strip_under(at: NSPoint, from: &NSWindow) -> Option<Retained<NSWindow>> {
+    let app = NSApplication::sharedApplication(from.mtm());
+    let own: Vec<isize> = tab_windows(from).iter().map(|t| t.windowNumber()).collect();
+    app.orderedWindows().to_vec().into_iter().find(|w| {
+        let f = w.frame();
+        w.isVisible()
+            && !own.contains(&w.windowNumber())
+            && ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber()))
+            && at.x >= f.origin.x
+            && at.x <= f.origin.x + f.size.width
+            && at.y <= f.origin.y + f.size.height
+            && at.y >= f.origin.y + f.size.height - STRIP_REACH
+    })
+}
+/// Window ▸ Merge All Windows, and Tabs chosen again: every editor window
+/// becomes a tab of `into`'s group (else the key editor window's), in the
+/// order the windows stand. A window showing only Home closes instead, as
+/// it never stands as a tab. Tabs mode only.
+pub fn merge_all_windows(into: Option<&NSWindow>) {
+    if !crate::tabs_mode() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let editor = |w: &NSWindow| ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber()));
+    let ordered: Vec<Retained<NSWindow>> = app
+        .orderedWindows()
+        .to_vec()
+        .into_iter()
+        .filter(|w| editor(w) && w.isVisible())
+        .collect();
+    let target = into
+        .map(|w| unsafe { Retained::retain(w as *const _ as *mut NSWindow).unwrap() })
+        .or_else(|| app.keyWindow().filter(|w| editor(w)))
+        .or_else(|| ordered.first().cloned());
+    let Some(target) = target else {
+        return;
+    };
+    let home = |w: &NSWindow| HOME_WINDOWS.with(|h| h.borrow().contains(&w.windowNumber()));
+    for window in &ordered {
+        if tab_windows(&target)
+            .iter()
+            .any(|t| t.windowNumber() == window.windowNumber())
+        {
+            continue;
+        }
+        if home(window) && tab_windows(window).len() == 1 {
+            request_close(window);
+            continue;
+        }
+        for tab in tab_windows(window) {
+            add_tab(&target, &tab);
+        }
+    }
+    if app.isActive() {
+        gpui_macos::child_window::present(&target, true);
+    }
+}
 fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     let mtm = MainThreadMarker::new().unwrap();
     let number = WINDOW_IDS.with(|m| {
@@ -786,15 +882,7 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     if lead.windowNumber() == window.windowNumber() {
         return false;
     }
-    lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
-    // Every tab of the group draws the strip again and records its group in
-    // the session (a relaunch brings the tabs back together).
-    for tab in tab_windows(&lead) {
-        route(tab.windowNumber(), "syncTabs".into());
-        route(tab.windowNumber(), "persistSession".into());
-    }
-    hide_system_tab_bar(&lead);
-    hide_system_tab_bar(window);
+    add_tab(&lead, window);
     if app.isActive() {
         gpui_macos::child_window::present(window, true);
     } else {
@@ -1020,6 +1108,8 @@ struct Tab {
     title: String,
     edited: bool,
     selected: bool,
+    /// The project's file, when it has one (the window's represented URL).
+    file: Option<String>,
 }
 struct TabIvars {
     /// A project tab's close button, at the trailing end under the pointer.
@@ -1328,6 +1418,8 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
     // there, its project gets a window of its own at the pointer, as the
     // system's tab bar does.
     let mut torn = false;
+    // Over another window's strip: let go there, the tab joins that window.
+    let mut joining: Option<Retained<NSWindow>> = None;
     let glide = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
     // The others in their order with a gap where the dragged tab would land.
     let settle = |target: usize, dragged: Option<f64>| {
@@ -1393,12 +1485,16 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         }
         let by = at.x - start;
         let off = (at.y - start_y).abs() > TAB_TEAR && tabs.len() > 1;
-        if off != torn {
-            torn = off;
+        joining = ((at.y - start_y).abs() > TAB_TEAR || by.abs() > TAB_DRAG_SLOP)
+            .then(|| strip_under(NSEvent::mouseLocation(), &window))
+            .flatten();
+        let lifted = off || joining.is_some();
+        if lifted != torn {
+            torn = lifted;
             tab.setAlphaValue(if torn { 0.45 } else { 1. });
         }
         if !dragging {
-            if tabs.len() < 2 || (by.abs() < TAB_DRAG_SLOP && !torn) {
+            if by.abs() < TAB_DRAG_SLOP && !torn {
                 continue;
             }
             dragging = true;
@@ -1440,7 +1536,8 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
     }
     if torn {
         // Off the strip: the tab's window leaves the group and stands where
-        // the pointer let go, its title bar under the pointer.
+        // the pointer let go, its title bar under the pointer; let go on
+        // another window's strip, it joins that window's tabs.
         settle(index, None);
         carry(false);
         tab.setAlphaValue(1.);
@@ -1448,6 +1545,16 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             layer.setZPosition(0.);
         }
         let app = NSApplication::sharedApplication(window.mtm());
+        if let (Some(into), Some(moved)) = (&joining, app.windowWithWindowNumber(button.tag()))
+            && crate::tabs_mode()
+        {
+            add_tab(into, &moved);
+            select_window_tab(&moved);
+            return;
+        }
+        if tabs.len() < 2 {
+            return;
+        }
         if let Some(moved) = app.windowWithWindowNumber(button.tag()) {
             let at = NSEvent::mouseLocation();
             detach_tab(&moved);
@@ -1788,6 +1895,62 @@ fn alike_ends(title: &str, tabs: &[Tab]) -> bool {
 /// is cut (copies: "Accept — Recovered — Native", "Accept — Native"): the
 /// name from the word where the two part, after an ellipsis, so the part
 /// that tells them apart is what shows. `None`: the name as it is.
+/// What a tab's cell says, and whether it is cut at its end (else in the
+/// middle). Names that read alike show from where they part; a name another
+/// tab has exactly leads with what tells the two apart: its file's name, or
+/// the folder it is in when the file names are the same too.
+fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
+    if let Some(distinct) = distinct_title(&tab.title, tabs) {
+        return (distinct, true);
+    }
+    let twins: Vec<&Tab> = tabs
+        .iter()
+        .filter(|t| t.window != tab.window && t.title == tab.title)
+        .collect();
+    if twins.is_empty() {
+        return (tab.title.clone(), false);
+    }
+    fn path(t: &Tab) -> Option<&std::path::Path> {
+        t.file.as_deref().map(std::path::Path::new)
+    }
+    let stem = |t: &Tab| {
+        path(t)
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+    };
+    let folder = |t: &Tab| {
+        path(t)
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+    };
+    let hint = match stem(tab) {
+        Some(own) if twins.iter().all(|t| stem(t).as_deref() != Some(own.as_str())) => Some(own),
+        _ => folder(tab).filter(|own| {
+            twins
+                .iter()
+                .all(|t| folder(t).as_deref() != Some(own.as_str()))
+        }),
+    };
+    match hint {
+        Some(hint) => (format!("{hint} · {}", tab.title), true),
+        None => (tab.title.clone(), false),
+    }
+}
+/// A tab's tooltip: its whole name, and where its file is.
+fn tab_tooltip(tab: &Tab) -> String {
+    match &tab.file {
+        Some(file) => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let shown = match file.strip_prefix(&home) {
+                Some(rest) if !home.is_empty() => format!("~{rest}"),
+                _ => file.clone(),
+            };
+            format!("{}\n{shown}", tab.title)
+        }
+        None => tab.title.clone(),
+    }
+}
 fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
     if !alike_ends(title, tabs) {
         return None;
@@ -1843,11 +2006,19 @@ fn move_tab(window: &NSWindow, by: isize) {
         let _: () = msg_send![group, setSelectedWindow: window];
     }
     hide_system_tab_bar(window);
+    // Every tab's place (and the group's first tab) changed: the session
+    // records the order a relaunch puts them back in.
+    for tab in tab_windows(window) {
+        route(tab.windowNumber(), "persistSession".into());
+    }
 }
 /// Widest a project tab grows; its title truncates in the middle.
 const TAB_MAX: f64 = 180.;
 /// How far above or below the strip a dragged tab tears off into a window.
 const TAB_TEAR: f64 = 36.;
+/// How far down from a window's top edge its tab strip takes a dropped tab:
+/// the toolbar's height.
+const STRIP_REACH: f64 = 52.;
 /// Narrowest a long title's tab gets: enough of a name to tell projects apart.
 const TAB_MIN: f64 = 96.;
 /// Between the strip's cells.
@@ -2390,6 +2561,9 @@ pub struct Host {
     /// The project this window showed when the app last ran, and whether the
     /// system keeps documents open across quits (NSQuitAlwaysKeepsWindows).
     pub restored_project: Option<(String, bool)>,
+    /// The pages (Settings, the Store) open in this window's strip at the
+    /// last quit, which open again behind the project.
+    pub restored_pages: Vec<String>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -2576,6 +2750,7 @@ impl Host {
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
+            restored_pages: Vec::new(),
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             definition: RefCell::new(None),
@@ -3254,6 +3429,10 @@ impl Host {
                 edited: w.isDocumentEdited(),
                 // On Home or a page the lit item is that: no project tab is.
                 selected: !self.aside() && (group.len() == 1 || w.windowNumber() == selected),
+                file: w
+                    .representedURL()
+                    .and_then(|url| url.path())
+                    .map(|path| path.to_string()),
             })
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
@@ -3287,6 +3466,7 @@ impl Host {
             title: title.clone(),
             edited: false,
             selected: *selected,
+            file: None,
         }));
         if *self.tabs_shown.borrow() == (marked.clone(), room) {
             return;
@@ -3343,11 +3523,8 @@ impl Host {
         let labels: Vec<(Retained<NSTextField>, NSSize)> = tabs
             .iter()
             .map(|tab| {
-                let distinct = distinct_title(&tab.title, &tabs);
-                let label = NSTextField::labelWithString(
-                    &NSString::from_str(distinct.as_deref().unwrap_or(&tab.title)),
-                    mtm,
-                );
+                let (shown, cut_end) = tab_label(tab, &tabs);
+                let label = NSTextField::labelWithString(&NSString::from_str(&shown), mtm);
                 label.setFont(Some(&NSFont::systemFontOfSize_weight(
                     t.typography.title as f64,
                     unsafe { NSFontWeightRegular },
@@ -3355,7 +3532,7 @@ impl Host {
                 // Cut in the middle, so a name's start and end both stay;
                 // where that would read like another tab's name, the name
                 // from where they part, cut at its end (`distinct_title`).
-                label.setLineBreakMode(if distinct.is_some() {
+                label.setLineBreakMode(if cut_end {
                     NSLineBreakMode::ByTruncatingTail
                 } else {
                     NSLineBreakMode::ByTruncatingMiddle
@@ -3391,7 +3568,7 @@ impl Host {
             button.setTransparent(true);
             button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
             button.setTag(tab.window);
-            button.setToolTip(Some(&title));
+            button.setToolTip(Some(&NSString::from_str(&tab_tooltip(tab))));
             button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab")));
             button.setAccessibilitySelected(tab.selected);
             // Right-click: the tab's own menu (reorder, detach, close).
@@ -3634,6 +3811,10 @@ impl Host {
                 edited: w.isDocumentEdited(),
                 // On Home or a page the lit item is that: no project tab is.
                 selected: !self.aside() && (group.len() == 1 || w.windowNumber() == selected),
+                file: w
+                    .representedURL()
+                    .and_then(|url| url.path())
+                    .map(|path| path.to_string()),
             })
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
@@ -3688,6 +3869,7 @@ impl Host {
                 title: format!("{name}\n{sub}"),
                 edited: !sub.is_empty(),
                 selected: *menu,
+                file: None,
             })
             .collect();
         marked.extend(recent.iter().enumerate().map(|(i, (id, name))| Tab {
@@ -3695,6 +3877,7 @@ impl Host {
             title: format!("{id}\n{name}"),
             edited: false,
             selected: false,
+            file: None,
         }));
         if *self.tabs_shown.borrow() == (marked.clone(), room) {
             return;
@@ -3846,6 +4029,8 @@ impl Host {
         let own = self.window.windowNumber();
         PAGES.with(|p| p.borrow_mut().insert(own, next.0.clone()));
         *self.pages.borrow_mut() = next;
+        // The session records which pages are open (a relaunch opens them).
+        route(own, "persistSession".into());
         self.restyle_aside();
         // The other tabs of the group show this window's pages too.
         for other in tab_windows(&self.window) {
@@ -4444,6 +4629,17 @@ impl Host {
     }
     /// Session id of the first window in this window's native tab group, if this
     /// window is a non-leading tab.
+    /// The pages open in this window's strip, by id.
+    pub fn page_ids(&self) -> Vec<String> {
+        self.pages.borrow().0.iter().map(|(id, _)| id.clone()).collect()
+    }
+    /// This window's place in its tab group's strip (0 when alone).
+    pub fn tab_index(&self) -> usize {
+        tab_windows(&self.window)
+            .iter()
+            .position(|w| w.windowNumber() == self.window.windowNumber())
+            .unwrap_or(0)
+    }
     pub fn tab_leader(&self) -> Option<u64> {
         let tabs = self.window.tabbedWindows()?;
         let first = tabs.to_vec().into_iter().next()?;
@@ -4841,6 +5037,7 @@ impl Host {
             "nextTab" => select_tab(&self.window, 1),
             "previousTab" => select_tab(&self.window, -1),
             "moveTabToNewWindow" => detach_tab(&self.window),
+            "mergeAllWindows" => merge_all_windows(Some(&self.window)),
             "blurField" => {
                 let Some(editor) = self
                     .window
@@ -7056,12 +7253,13 @@ mod tab_layout_tests {
 
     #[test]
     fn copies_that_would_read_alike_cut_at_the_end() {
-        use super::{Tab, alike_ends, distinct_title};
+        use super::{Tab, alike_ends, distinct_title, tab_label, tab_tooltip};
         let tab = |title: &str| Tab {
             window: 0,
             title: title.into(),
             edited: false,
             selected: false,
+            file: None,
         };
         let tabs = [
             tab("Accept — Recovered — Native"),
@@ -7080,6 +7278,24 @@ mod tab_layout_tests {
         );
         assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
         assert_eq!(distinct_title("Paper", &tabs), None);
+        // The same name twice: each leads with its file's name, or its
+        // folder's when the file names match too; the tooltip says where.
+        let twin = |window: isize, file: &str| Tab {
+            window,
+            title: "Run6 — Native — Native".into(),
+            edited: false,
+            selected: false,
+            file: Some(file.into()),
+        };
+        let twins = [twin(1, "/p/a/Run6.pmv"), twin(2, "/p/b/Run6 copy.pmv")];
+        assert_eq!(
+            tab_label(&twins[1], &twins),
+            ("Run6 copy · Run6 — Native — Native".into(), true)
+        );
+        let twins = [twin(1, "/p/a/Run6.pmv"), twin(2, "/p/b/Run6.pmv")];
+        assert_eq!(tab_label(&twins[0], &twins).0, "a · Run6 — Native — Native");
+        assert!(tab_tooltip(&twins[1]).ends_with("\n/p/b/Run6.pmv"));
+        assert_eq!(tab_label(&tabs[2], &tabs), ("Paper".into(), false));
         let runs = [
             tab("Accept - acceptance run eleven copy one - Native"),
             tab("Accept - acceptance run eleven copy two - Native"),
