@@ -72,6 +72,11 @@ globalThis.__storeCheck = {
       });
     globalThis.__powermove_runtime = StoreCompat.runtimeModules;
     StoreCompat.report = StoreCompat.sandboxReporter(rpc);
+    this.nativeStyle = ["tokens-only", "none"].includes(
+      init.manifest?.nativeStyle,
+    )
+      ? init.manifest.nativeStyle
+      : "full";
     this.api = StoreCompat.createSandboxAPI(rpc, init);
     this.control = StoreCompat.sandboxControl(this.api);
     return true;
@@ -105,6 +110,8 @@ globalThis.__storeCheck = {
     if (!definition) return;
     const root = this.dom.document.createElement("section");
     root.setAttribute("data-pm-contribution", id);
+    if (this.nativeStyle !== "full")
+      root.setAttribute("data-pm-style", this.nativeStyle);
     this.dom.document.body.append(root);
     let cleanup;
     if (definition.component) {

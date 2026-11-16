@@ -554,6 +554,7 @@ impl Inspector {
                     "solo" => patch.solo = Some(boolean(&value)?),
                     "threeD" => patch.three_d = Some(boolean(&value)?),
                     "scaleLinked" => patch.scale_linked = Some(boolean(&value)?),
+                    "separateDimensions" => patch.separate_dimensions = Some(boolean(&value)?),
                     "motionBlur" => patch.motion_blur = Some(boolean(&value)?),
                     "continuousRaster" => patch.continuous_raster = Some(boolean(&value)?),
                     "color" => patch.color = Some(string(&value)?),

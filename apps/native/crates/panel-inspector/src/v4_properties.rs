@@ -31,6 +31,8 @@ pub enum V4Action {
     Expression(Option<String>),
     Reset(Option<Value>),
     LinkScale,
+    SeparateDimensions,
+    Ease(String),
     ShowGraph,
 }
 #[derive(Debug)]
@@ -179,6 +181,31 @@ impl V4Adapter {
                 true,
             )?));
         }
+        if action == V4Action::SeparateDimensions {
+            if !ids
+                .iter()
+                .all(|id| matches!(id.path.as_str(), "position.x" | "position.y" | "position.z"))
+            {
+                return Err(InspectorError::InvalidInput);
+            }
+            let layer = &ids[0].layer;
+            let separate = model
+                .layer(layer)?
+                .get("separateDimensions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            return model
+                .set(
+                    caller,
+                    Binding::Layer {
+                        layer: layer.clone(),
+                        field: "separateDimensions".into(),
+                    },
+                    (!separate).into(),
+                    time,
+                )
+                .map(|request| V4Plan::Request(Box::new(request)));
+        }
         if action == V4Action::LinkScale {
             if !ids
                 .iter()
@@ -230,9 +257,12 @@ impl V4Adapter {
                 ids.extend(animated);
                 PropertyAction::Stopwatch
             }
+            V4Action::Ease(preset) => PropertyAction::Ease(preset),
             V4Action::Expression(value) => PropertyAction::Expression(value),
             V4Action::Reset(value) => PropertyAction::Reset(value),
-            V4Action::ShowGraph | V4Action::LinkScale => unreachable!(),
+            V4Action::ShowGraph | V4Action::LinkScale | V4Action::SeparateDimensions => {
+                unreachable!()
+            }
         };
         model
             .property_action(caller, &ids, property_action, time)

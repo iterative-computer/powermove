@@ -158,6 +158,14 @@ impl Catalog {
             Edit::DeleteFolder { id } => {
                 let folder = self.folders.get(&id).ok_or(Error::MissingItem)?;
                 let parent = folder.parent.as_deref();
+                if folder.link.is_some() {
+                    let descendants: Vec<_> = self.folders.keys().filter(|candidate| self.path(Some(candidate)).iter().any(|f| f.id == id)).cloned().collect();
+                    for child in descendants {
+                        if let Some(value) = ensure_map(&mut next, "assetFolders").get_mut(&child) {
+                            if let Some(map) = value.as_object_mut() { map.remove("link"); }
+                        }
+                    }
+                }
                 for (_, a) in ensure_map(&mut next, "assets").iter_mut() {
                     if text(a, "folder") == Some(&id) {
                         set_folder(a, "folder", parent)?;

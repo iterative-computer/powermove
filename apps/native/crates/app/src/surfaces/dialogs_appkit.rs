@@ -54,12 +54,14 @@ impl PrecomposeTarget {
         let result = match id {
             "leave" | "move" => {
                 sheet.controls["adjust"].setEnabled(!on("leave"));
+                sheet.controls["size"].setEnabled(!on("leave"));
                 return;
             }
             "confirm" => Some(PrecomposeDraft {
                 name: sheet.fields["name"].stringValue().to_string(),
                 leave: on("leave"),
                 adjust_duration: on("adjust"),
+                size_to_selection: on("size"),
                 open_after: on("open"),
                 ..state.draft.clone()
             }),
@@ -118,6 +120,7 @@ pub fn precompose_sheet(
     }
     for (id, value) in [
         ("adjust", draft.adjust_duration),
+        ("size", draft.size_to_selection),
         ("open", draft.open_after),
     ] {
         let field = field(id);

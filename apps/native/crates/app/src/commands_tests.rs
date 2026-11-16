@@ -853,3 +853,13 @@ fn the_graph_merges_its_curves_into_one_and_fits_the_time_scale_to_their_keys(
         assert!(rows.iter().any(|(m, _, l)| *m == "View" && l == label));
     }
 }
+
+#[gpui::test]
+fn camera_command_creates_one_selects_and_undoes(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    run(&mut s, cx, "newCamera", &[]);
+    assert_eq!(layers(&s).len(), 2);
+    assert_eq!(selected(&s).len(), 1);
+    undo(&mut s, cx);
+    assert_eq!(layers(&s).len(), 1);
+}

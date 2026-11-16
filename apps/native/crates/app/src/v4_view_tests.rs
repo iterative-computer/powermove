@@ -367,7 +367,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 34);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -396,6 +396,9 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 props["value"] = json!([2., 0., 0., 1., 1.]);
                 props["binding"] = json!("curve");
                 props["metadata"] = json!({"pmKit":{"channel":1}});
+            }
+            "ease-curve" | "ease-thumbnail" => {
+                props["value"] = json!([0.42, 0., 0.58, 1.]);
             }
             _ => {}
         }
@@ -1709,4 +1712,50 @@ fn a_press_focuses_the_item_it_lands_in(cx: &mut TestAppContext) {
     // The card (tabIndex -1, no control) is not a focus target here; its
     // list is, and the panel's model knows which card was pressed.
     assert_eq!(focused, Some(1), "the list holding the pressed card");
+}
+
+/// The viewer's native picture changes independently of its panel tree. A shell
+/// reveal must repaint its overlay instead of retaining the loading-era paint.
+#[gpui::test]
+fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestAppContext) {
+    struct RevealingPanel {
+        child: Entity<SurfaceView>,
+        panel: &'static str,
+        opacity: f32,
+    }
+    impl Render for RevealingPanel {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().opacity(self.opacity)
+                .child(crate::builtins::fixed_body_view(self.panel, &self.child))
+        }
+    }
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    for panel in ["viewer", "timeline"] {
+        let surface = synthetic(&rig, node_ops(
+            1, 0, "div", json!({"style":{"width":60,"height":60}}), &[],
+        ));
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| RevealingPanel {
+            child: cx.new(|cx| SurfaceView::new(
+                runtime, surface, tokens(), Default::default(), window, cx,
+            )),
+            panel,
+            opacity: 0.25,
+        });
+        let mut vcx = vcx.clone();
+        vcx.run_until_parked();
+        let child = root.read_with(&vcx, |v, _| v.child.clone());
+        let first = child.read_with(&vcx, |v, _| v.renders);
+        for opacity in [0.5, 1.0] {
+            root.update(&mut vcx, |v, cx| { v.opacity = opacity; cx.notify(); });
+            vcx.run_until_parked();
+        }
+        let after = child.read_with(&vcx, |v, _| v.renders);
+        if panel == "viewer" {
+            assert!(after > first, "the viewer retained its loading-era overlay paint");
+        } else {
+            assert_eq!(after, first, "timeline paint should remain reusable");
+        }
+    }
 }

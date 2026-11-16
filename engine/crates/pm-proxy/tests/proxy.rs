@@ -73,12 +73,23 @@ fn recipe_key_and_store_survive_relink_and_reopen() {
 }
 
 #[test]
-fn disk_guard_uses_larger_of_20_gib_and_ten_percent() {
+fn disk_guard_reserves_five_gib_or_one_percent_plus_job_output() {
     let gib = 1u64 << 30;
-    assert!(!disk_guard(19 * gib, 100 * gib));
-    assert!(disk_guard(20 * gib, 100 * gib));
-    assert!(!disk_guard(29 * gib, 300 * gib));
-    assert!(disk_guard(30 * gib, 300 * gib));
+    assert!(!disk_guard(5 * gib - 1, 460 * gib));
+    assert!(disk_guard(5 * gib, 460 * gib));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        8 * gib - 1,
+        460 * gib,
+        3 * gib
+    ));
+    assert!(pm_proxy::disk_guard_for_job(8 * gib, 460 * gib, 3 * gib));
+    assert!(!disk_guard(9 * gib, 1000 * gib));
+    assert!(disk_guard(10 * gib, 1000 * gib));
 }
 
 #[test]
@@ -647,7 +658,7 @@ use pm_proxy::{GenerationControl, GenerationRequest, generate_with_disk_probe};
 
 #[cfg(all(target_os = "macos", feature = "generation"))]
 /// These codec tests are not about the disk guard (`disk_pause.rs` and
-/// `disk_guard_uses_larger_of_20_gib_and_ten_percent` are): a fixed quota
+/// `disk_guard_reserves_five_gib_or_one_percent_plus_job_output` are): a fixed quota
 /// keeps them independent of the shared build machine's free space.
 fn test_quota(_: &std::path::Path) -> pm_proxy::Result<(u64, u64)> {
     Ok((40 << 30, 100 << 30))
@@ -680,4 +691,143 @@ fn machine_profile_uses_injected_power_and_propagates_probe_failures() {
     assert!(pm_proxy::probe_machine_profile_with(dir.path(), 4.0, &Failed).is_err());
     assert!(pm_proxy::probe_machine_profile_with(dir.path(), f64::NAN, &Probe(false)).is_err());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[cfg(all(target_os = "macos", feature = "generation"))]
+#[test]
+fn webm_preview_preserves_alpha_samples() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let codec_dir = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh"));
+    let ffmpeg = codec_dir.join("bin/ffmpeg");
+    let ffprobe = codec_dir.join("bin/ffprobe");
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("alpha.webm");
+    let built = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red@0.5:s=128x72:r=24:d=0.5,format=yuva420p",
+            "-c:v",
+            "libvpx-vp9",
+            "-lossless",
+            "1",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let hash = blake3::hash(&fs::read(&source).unwrap())
+        .to_hex()
+        .to_string();
+    let store = ProxyStore::open(temp.path().join("store")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let output = generate_with_disk_probe(
+        GenerationRequest {
+            source: &source,
+            source_hash: &hash,
+            format: ProxyFormat::Hevc10,
+            size: ProxySize::Half,
+            ffmpeg: &ffmpeg,
+            ffprobe: &ffprobe,
+            store: &store,
+            control: GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &TEST_QUOTA,
+    )
+    .unwrap();
+    assert_eq!(output.stored.recipe.codec(), "prores_4444");
+    assert!(output.stored.recipe.source_has_alpha);
+    let decoded = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&output.stored.path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "alphaextract,format=gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        decoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    assert!(!decoded.stdout.is_empty());
+    assert!(
+        decoded.stdout.iter().all(|&a| (120..=136).contains(&a)),
+        "the half-transparent WebM must not become opaque"
+    );
+}
+
+#[test]
+fn portrait_hd_preview_fits_the_portrait_composition() {
+    let recipe = |w, h| {
+        ProxyRecipe::new(ProxyFormat::ProResProxy, ProxySize::P1080, w, h, 8, false).unwrap()
+    };
+    let portrait = recipe(2160, 3840);
+    assert_eq!((portrait.width, portrait.height), (1080, 1920));
+    let landscape = recipe(3840, 2160);
+    assert_eq!((landscape.width, landscape.height), (1920, 1080));
+    let small = recipe(540, 960);
+    assert_eq!((small.width, small.height), (540, 960));
+}
+
+#[test]
+fn output_estimate_accounts_for_codec_and_long_compressed_clips() {
+    let gib = 1u64 << 30;
+    let opaque = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        3840,
+        2160,
+        8,
+        false,
+    )
+    .unwrap();
+    let alpha = ProxyRecipe::new(
+        ProxyFormat::ProResProxy,
+        ProxySize::P1080,
+        2160,
+        3840,
+        8,
+        true,
+    )
+    .unwrap();
+    let long_output = pm_proxy::estimated_output_bytes(&opaque, 30 * 3600);
+    assert!(
+        pm_proxy::disk_guard_for_job(100 * gib, 460 * gib, long_output),
+        "an hour of compressed HD proxy footage must not reserve raw RGBA storage"
+    );
+    let alpha_output = pm_proxy::estimated_output_bytes(&alpha, 162);
+    assert!(alpha_output > pm_proxy::estimated_output_bytes(&opaque, 162));
+    assert!(pm_proxy::disk_guard_for_job(
+        193 * gib / 10,
+        460 * gib,
+        alpha_output
+    ));
+    assert!(!pm_proxy::disk_guard_for_job(
+        5 * gib,
+        460 * gib,
+        alpha_output
+    ));
 }

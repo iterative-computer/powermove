@@ -16,6 +16,8 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
+#[path = "fly.rs"]
+pub mod fly;
 #[path = "gizmo3d.rs"]
 pub mod studio3d;
 #[path = "viewer_rulers.rs"]
@@ -327,6 +329,11 @@ pub struct GizmoSurface {
     hover_next: Option<Press>,
     /// ⌘/Ctrl held at the last pointer move: the hover reaches the leaf.
     hover_deep: bool,
+    /// ⌥ held: the Zoom tool zooms out (its cursor says so).
+    hover_alt: bool,
+    /// Where the pointer last hovered, to re-read the cursor when ⌥ changes.
+    hover_at: Option<Point<Pixels>>,
+    modifier_subscription: Option<Subscription>,
     studio: studio3d::State,
     kernel: KernelHandle,
     project: String,
@@ -352,7 +359,10 @@ pub struct GizmoSurface {
     space_panned: bool,
     /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
     rulers: viewer_rulers::Rulers,
+    snapping_enabled: bool,
     cursor: CursorStyle,
+    /// Holds the keyboard while flying, so held keys report their release.
+    focus: Option<FocusHandle>,
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
     sketch: Option<Sketch>,
@@ -594,6 +604,9 @@ impl GizmoSurface {
             hover_out: false,
             hover_next: None,
             hover_deep: false,
+            hover_alt: false,
+            hover_at: None,
+            modifier_subscription: None,
             studio: Default::default(),
             kernel,
             project,
@@ -613,8 +626,10 @@ impl GizmoSurface {
             panning: None,
             space_hand: false,
             space_panned: false,
-            rulers: Default::default(),
+            rulers: viewer_rulers::Rulers { guides_locked: pm_shell::viewer_preference("PowermoveGuidesLocked", false), ..Default::default() },
+            snapping_enabled: pm_shell::viewer_preference("PowermoveViewerSnapping", true),
             cursor: CursorStyle::Arrow,
+            focus: None,
             refreshing: false,
             sketch: None,
             text_sketch: None,
@@ -718,13 +733,34 @@ impl GizmoSurface {
                         ui("studioLook"),
                         ui("studioAxes"),
                         (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
+                        // The viewer's 2D/3D choice is remembered per composition.
+                        {
+                            let comp = p.snapshot.render_comp();
+                            let kept = p
+                                .ui_state
+                                .viewer
+                                .get("studioLookByComp")
+                                .and_then(|m| m.get(&comp))
+                                .and_then(pm_model::Value::as_str)
+                                .map(str::to_owned);
+                            (comp, kept)
+                        },
                     ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look, axes, (kind, add, aim)) =
-                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None, None)));
+                    let (poses, scene, selected, tool, look, axes, (kind, add, aim), (comp, kept)) =
+                        read.unwrap_or((
+                            vec![],
+                            None,
+                            vec![],
+                            None,
+                            None,
+                            None,
+                            (None, None, None),
+                            (String::new(), None),
+                        ));
                     s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
@@ -739,17 +775,50 @@ impl GizmoSurface {
                         s.poses = Arc::new(poses);
                     }
                     let had = s.studio.scene.is_some();
+                    // Flight belongs to the composition it began in. Stop its
+                    // timer and shortcut capture before adopting another scene.
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) || scene.is_none() {
+                        s.studio_fly_end(false, cx);
+                    }
                     let published = look.as_deref() == Some("free");
                     // A look this viewer wrote holds until it is published.
-                    let free_look = match s.studio.look_pending {
+                    let mut free_look = match s.studio.look_pending {
                         Some(mine) if mine != published => mine,
                         _ => {
                             s.studio.look_pending = None;
                             published
                         }
                     };
+                    // Another composition: its own 2D/3D choice (2D unless it
+                    // was left in 3D), from its own shot.
+                    let mut adopt = None;
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) {
+                        if s.studio.comp.is_some() && !s.studio.busy() {
+                            let want = kept.as_deref() == Some("free");
+                            s.studio.free = None;
+                            if want != free_look {
+                                free_look = want;
+                                s.studio.look_pending = Some(want);
+                                adopt = Some(want);
+                            }
+                        }
+                        s.studio.comp = Some(comp);
+                    }
+                    if scene.is_none() {
+                        free_look = false;
+                        s.studio.look_pending = None;
+                        if published || kept.as_deref() == Some("free") {
+                            adopt = Some(false);
+                        }
+                    }
                     let changed_look = free_look != s.studio.free_look;
                     s.studio.scene = scene.map(Arc::new);
+                    if let Some(want) = adopt {
+                        if want && s.studio.free.is_none() {
+                            s.studio.free = s.studio.scene.as_ref().map(|sc| sc.shot);
+                        }
+                        s.studio_ui("studioLook", if want { "free" } else { "camera" }, cx);
+                    }
                     s.studio.selected = selected;
                     s.studio.tool = studio3d::Tool::parse(tool.as_deref());
                     if !s.studio.busy() {
@@ -846,10 +915,34 @@ impl GizmoSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// Whether a Blender key of View ▸ 3D in `group` belongs to the viewer
+    /// (PM-367): the composition shows Studio 3D layers, the viewer has the
+    /// keyboard (`canvas`, or the gizmos' own focus), and for the view keys
+    /// the 3D side of 2D | 3D is showing. Otherwise the key goes on to its
+    /// next meaning; the menus and the bar still run the command.
+    pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
+        let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        focused
+            && self.studio.active()
+            && match group {
+                "look" | "fly" => true,
+                _ => self.studio.free_look,
+            }
+    }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
         self.rulers.shown = shown;
         self.rulers.grid = grid;
+        cx.notify();
+    }
+    pub fn toggle_snapping(&mut self, cx: &mut Context<Self>) {
+        self.snapping_enabled = !self.snapping_enabled;
+        pm_shell::set_viewer_preference("PowermoveViewerSnapping", self.snapping_enabled);
+        cx.notify();
+    }
+    pub fn toggle_guides_locked(&mut self, cx: &mut Context<Self>) {
+        self.rulers.toggle_locked();
+        pm_shell::set_viewer_preference("PowermoveGuidesLocked", self.rulers.guides_locked);
         cx.notify();
     }
     /// View ▸ Clear Guides.
@@ -889,11 +982,16 @@ impl GizmoSurface {
     }
     /// Panning with the middle button, whatever the tool.
     fn on_middle(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // A 3D composition's middle button navigates the scene (Blender).
+        if self.studio.active() {
+            return;
+        }
         self.panning = Some(event.position);
         self.set_cursor(CursorStyle::ClosedHand, cx);
     }
     /// The cursor promises what a press here does.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.hover_at = Some(position);
         if self.rulers.shown && self.rulers.pointer != Some(position) {
             self.rulers.pointer = Some(position);
             cx.notify();
@@ -943,25 +1041,56 @@ impl GizmoSurface {
         } else {
             self.unhover(cx);
         }
+        // viewer.ts updateStageCursor: each tool's own cursor; with Select,
+        // a handle's resize or rotate cursor, and move inside the selection.
         let cursor = match tool {
             _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
-            Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
+            Tool::Zoom if self.hover_alt => CursorStyle::ZoomOut,
+            Tool::Zoom => CursorStyle::ZoomIn,
+            Tool::Rotate => CursorStyle::Rotate,
+            Tool::Anchor | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
             Tool::Select if self.studio_cursor(at, frame).is_some() => {
                 self.studio_cursor(at, frame).unwrap()
             }
-            _ => match self.handle_at(at, frame.scale) {
-                Some(Hit::Handle(index)) => self
-                    .handle_pose()
-                    .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
-                _ => CursorStyle::Arrow,
-            },
+            _ => self.select_cursor(at, frame.scale),
         };
         if cursor != self.cursor {
             self.cursor = cursor;
             cx.notify();
+        }
+    }
+    /// The Select tool's cursor at `at` (composition pixels).
+    fn select_cursor(&self, at: [f64; 2], scale: f64) -> CursorStyle {
+        match self.handle_at(at, scale) {
+            Some(Hit::Handle(index)) => self
+                .handle_pose()
+                .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
+            Some(Hit::Rotate) => CursorStyle::Rotate,
+            Some(_) => CursorStyle::Arrow,
+            // Inside a layer's box or the selection's common box, a drag moves.
+            None if self.transformable()
+                && (self.poses.iter().any(|p| inside(&p.corners, at))
+                    || self.handle_pose().is_some_and(|p| inside(&p.corners, at))) =>
+            {
+                CursorStyle::Move
+            }
+            None => CursorStyle::Arrow,
+        }
+    }
+    /// ⌥ pressed or released over the viewer: the Zoom tool's cursor flips.
+    fn on_modifiers(&mut self, alt: bool, cx: &mut Context<Self>) {
+        if alt == self.hover_alt {
+            return;
+        }
+        self.hover_alt = alt;
+        if self.drag.is_none()
+            && self.host.tool(cx) == Tool::Zoom
+            && let Some(at) = self.hover_at
+        {
+            self.hover(at, cx);
         }
     }
     fn unhover(&mut self, cx: &mut Context<Self>) {
@@ -1036,6 +1165,11 @@ impl GizmoSurface {
             .map(|(i, _)| Hit::Handle(i))
     }
     fn on_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a click keeps the flight (Blender's Fly).
+        if self.studio_flying() {
+            self.studio_fly_end(true, cx);
+            return;
+        }
         // Along the viewer's edges the dividers' grab reaches over it: a
         // press there resizes, it never takes a handle (PM-289).
         if on_divider_reach(self.bounds, event.position, &self.tokens) {
@@ -1212,6 +1346,11 @@ impl GizmoSurface {
     /// Secondary press: selects what is under the pointer, locked layers
     /// included, then opens the shared layer menu on it.
     fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a right-click cancels and returns to where it began.
+        if self.studio_flying() {
+            self.studio_fly_end(false, cx);
+            return;
+        }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
@@ -1366,6 +1505,16 @@ impl GizmoSurface {
         .detach();
     }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        // Flying: the wheel changes speed, a notch (or ~20 pt) a step.
+        if self.studio_flying() {
+            let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
+            let notches = match event.delta {
+                ScrollDelta::Lines(l) => l.y as f64,
+                ScrollDelta::Pixels(_) => dy / 20.,
+            };
+            self.studio_fly_scroll(notches);
+            return;
+        }
         if self.studio_wheel(event, line, cx) {
             return;
         }
@@ -1392,6 +1541,10 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.studio_flying() {
+            self.studio_fly_pointer(event.position);
+            return;
+        }
         if self.rulers.dragging.is_some()
             && let Some(frame) = self.host.frame(self.bounds, cx)
             && self.rulers_move(event.position, frame)
@@ -1432,6 +1585,7 @@ impl GizmoSurface {
         }
         if self.drag.is_none() {
             self.hover_deep = event.modifiers.platform || event.modifiers.control;
+            self.hover_alt = event.modifiers.alt;
             if self.bounds.contains(&event.position) {
                 self.hover(event.position, cx);
             } else {
@@ -1501,7 +1655,7 @@ impl GizmoSurface {
         let mods = Mods {
             shift: event.modifiers.shift,
             alt: event.modifiers.alt,
-            snap: event.modifiers.platform || event.modifiers.control,
+            snap: snapping_suspended(self.snapping_enabled, event.modifiers.platform || event.modifiers.control),
         };
         // Moves align with the composition and other layers; Command
         // bypasses, and a Shift-locked axis stays put.
@@ -1514,9 +1668,10 @@ impl GizmoSurface {
             let delta = locked_delta(origin, at, mods.shift);
             let axes = [!mods.shift || delta[0] != 0., !mods.shift || delta[1] != 0.];
             let moving = snap::box_points(&drag.poses, delta);
-            let result = snap::snap(
+            let result = snap::snap_with_rulers(
                 &moving,
                 &points,
+                &self.rulers.guides,
                 snap::DISTANCE / frame.scale.max(0.02),
                 axes,
             );
@@ -1728,6 +1883,10 @@ impl GizmoSurface {
     }
     pub fn controls(&self) -> bool {
         self.controls
+    }
+    #[cfg(test)]
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
     }
     #[cfg(test)]
     pub fn gesture_active(&self) -> bool {
@@ -2611,14 +2770,35 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
     lines
 }
 impl Render for GizmoSurface {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.modifier_subscription.is_none() {
+            // A hovered viewer need not own keyboard focus. A window observer
+            // keeps Alt-release cursor updates independent of the focus path.
+            self.modifier_subscription = Some(cx.observe_window_modifiers(window, |s, window, cx| {
+                if s.bounds.contains(&window.mouse_position()) {
+                    s.on_modifiers(window.modifiers().alt, cx);
+                }
+            }));
+        }
         let this = cx.entity().downgrade();
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        // Flying holds the keyboard so a released key stops its move.
+        if self.studio_flying() && !focus.is_focused(window) {
+            window.focus(&focus, cx);
+        }
         // Media held over the viewer: an accent ring where it will land.
         let accent = rgb(self.tokens.colors.accent);
         let ring = px(self.tokens.metrics.border * 2.);
         div()
             .id("viewer-gizmos")
             .size_full()
+            .track_focus(&focus)
+            .on_key_up(cx.listener(|s, event: &KeyUpEvent, _, cx| {
+                s.studio_fly_key(&event.keystroke, false, cx);
+            }))
+            .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, _| {
+                s.studio_fly_modifiers(event.modifiers);
+            }))
             .cursor(self.cursor)
             .on_drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style.border(ring).border_color(accent)
@@ -2682,6 +2862,11 @@ impl Render for GizmoSurface {
             .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
                 s.on_wheel(event, window.line_height(), cx);
             }))
+            .on_modifiers_changed(
+                cx.listener(|s, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    s.on_modifiers(event.modifiers.alt, cx);
+                }),
+            )
             .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
                 if s.studio_pinch(event.delta as f64, cx) {
                     return;
@@ -2811,6 +2996,18 @@ pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
     })
 }
 
+fn snapping_suspended(enabled: bool, command_held: bool) -> bool { !enabled || command_held }
+#[cfg(test)]
+mod snapping_toggle_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn toggle_and_temporary_suspend_compose() {
+        assert!(!snapping_suspended(true, false));
+        assert!(snapping_suspended(true, true));
+        assert!(snapping_suspended(false, false));
+        assert!(snapping_suspended(false, true));
+    }
+}
 /// Whether `at` lies in the band along the viewer's edges that the dividers
 /// beside it take (their grab reaches `splitter_reach` into each side).
 fn on_divider_reach(bounds: Bounds<Pixels>, at: Point<Pixels>, t: &pm_design::Tokens) -> bool {

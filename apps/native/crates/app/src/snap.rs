@@ -84,10 +84,32 @@ pub fn snap(
     threshold: f64,
     axes: [bool; 2],
 ) -> ([f64; 2], Vec<Guide>) {
+    snap_with_rulers(moving, targets, &[], threshold, axes)
+}
+/// Ruler guides are targets on their own axis only. Their feedback endpoint
+/// stays at the ruler origin so moving along a guide does not repeat haptics.
+pub fn snap_with_rulers(
+    moving: &[[f64; 2]],
+    targets: &[[f64; 2]],
+    rulers: &[crate::gizmo::viewer_rulers::RulerGuide],
+    threshold: f64,
+    axes: [bool; 2],
+) -> ([f64; 2], Vec<Guide>) {
     let best = |axis: usize| {
         let mut best: Option<(f64, f64, [f64; 2], [f64; 2])> = None;
         for &m in moving {
-            for &t in targets {
+            let ruler_targets = rulers.iter().filter_map(|guide| {
+                let guide_axis = match guide.axis {
+                    crate::gizmo::viewer_rulers::Axis::Vertical => 0,
+                    crate::gizmo::viewer_rulers::Axis::Horizontal => 1,
+                };
+                (guide_axis == axis && guide.at.is_finite()).then(|| {
+                    let mut point = [0., 0.];
+                    point[axis] = guide.at;
+                    point
+                })
+            });
+            for t in targets.iter().copied().chain(ruler_targets) {
                 let offset = t[axis] - m[axis];
                 let distance = offset.abs();
                 let cross = (t[1 - axis] - m[1 - axis]).abs();
@@ -165,5 +187,76 @@ mod tests {
         assert_eq!(offset, [3., 0.]);
         let (offset, _) = super::snap(&moving, &targets, 2., [true, true]);
         assert_eq!(offset, [0., 0.]);
+    }
+}
+
+#[cfg(test)]
+mod ruler_snap_tests {
+    use super::{DISTANCE, snap_with_rulers};
+    use crate::gizmo::viewer_rulers::{Axis, RulerGuide};
+    #[test]
+    fn ruler_guides_snap_only_their_own_axis() {
+        let rulers = [RulerGuide {
+            axis: Axis::Vertical,
+            at: 14.,
+        }];
+        let (delta, guides) = snap_with_rulers(&[[10., 13.]], &[], &rulers, DISTANCE, [true, true]);
+        assert_eq!(delta, [4., 0.]);
+        assert_eq!(guides, vec![([14., 13.], [14., 0.])]);
+        let (_, moved) = snap_with_rulers(&[[10., 20.]], &[], &rulers, DISTANCE, [true, true]);
+        assert_eq!(
+            guides[0].1, moved[0].1,
+            "staying on a guide keeps its haptic target"
+        );
+    }
+    #[test]
+    fn guides_use_eight_screen_points_at_each_zoom() {
+        for zoom in [0.25, 1., 4.] {
+            let threshold = DISTANCE / zoom;
+            let guide = [RulerGuide {
+                axis: Axis::Horizontal,
+                at: threshold,
+            }];
+            assert_eq!(
+                snap_with_rulers(&[[0., 0.]], &[], &guide, threshold, [true, true]).0,
+                [0., threshold]
+            );
+            let outside = [RulerGuide {
+                axis: Axis::Horizontal,
+                at: threshold + 0.01,
+            }];
+            assert_eq!(
+                snap_with_rulers(&[[0., 0.]], &[], &outside, threshold, [true, true]).0,
+                [0., 0.]
+            );
+        }
+    }
+    #[test]
+    fn locked_axes_do_not_snap_and_nearest_target_wins() {
+        let rulers = [
+            RulerGuide {
+                axis: Axis::Vertical,
+                at: 14.,
+            },
+            RulerGuide {
+                axis: Axis::Horizontal,
+                at: 15.,
+            },
+        ];
+        assert_eq!(
+            snap_with_rulers(&[[10., 10.]], &[], &rulers, DISTANCE, [false, true]).0,
+            [0., 5.]
+        );
+        assert_eq!(
+            snap_with_rulers(
+                &[[10., 10.]],
+                &[[12., 30.]],
+                &rulers,
+                DISTANCE,
+                [true, true]
+            )
+            .0,
+            [2., 5.]
+        );
     }
 }
