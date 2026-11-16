@@ -143,7 +143,7 @@ impl Picker {
                     };
                     return ((query.is_empty() && self.recents.contains(&c.command))
                         || (!query.is_empty() && name.to_lowercase().contains(&query)))
-                        .then_some((2, i));
+                    .then_some((2, i));
                 }
                 let label = rank(&c.label, self.query.trim());
                 // Command ids only match literally; subsequences of ids are noise.
@@ -175,7 +175,12 @@ impl Picker {
         ranked.sort_by_key(|&(r, i)| (best[self.choices[i].category.as_str()], r, i));
         let mut indices: Vec<_> = ranked.into_iter().map(|(_, i)| i).collect();
         if self.query.trim().is_empty() {
-            indices.sort_by_key(|&i| self.recents.iter().position(|id| id == &self.choices[i].command).unwrap_or(usize::MAX));
+            indices.sort_by_key(|&i| {
+                self.recents
+                    .iter()
+                    .position(|id| id == &self.choices[i].command)
+                    .unwrap_or(usize::MAX)
+            });
         }
         indices
     }
@@ -348,11 +353,17 @@ mod recent_tests {
     #[test]
     fn recents_are_unique_capped_and_first_only_for_empty_search() {
         let mut recents = vec![];
-        for i in 0..10 { remember_command(&mut recents, &i.to_string()); }
+        for i in 0..10 {
+            remember_command(&mut recents, &i.to_string());
+        }
         remember_command(&mut recents, "8");
         assert_eq!(recents.len(), 8);
         assert_eq!(&recents[..2], &["8", "9"]);
-        let mut picker = Picker { choices: vec![Choice::new("Alpha", "a"), Choice::new("Beta", "8")], recents, ..Default::default() };
+        let mut picker = Picker {
+            choices: vec![Choice::new("Alpha", "a"), Choice::new("Beta", "8")],
+            recents,
+            ..Default::default()
+        };
         assert_eq!(picker.filtered(), vec![1, 0]);
         picker.search("Alpha".into());
         assert_eq!(picker.filtered(), vec![0]);
@@ -367,20 +378,36 @@ mod recent_content_tests {
         let mut picker = Picker {
             choices: vec![
                 Choice::new("Command", "command"),
-                Choice::new("Effect · Blur", "palette.addEffect:blur").within("Effect").on_search(),
-                Choice::new("Logo", "palette.selectLayer:logo").within("Layer").on_search(),
-                Choice::new("Other", "palette.selectLayer:other").within("Layer").on_search(),
+                Choice::new("Effect · Blur", "palette.addEffect:blur")
+                    .within("Effect")
+                    .on_search(),
+                Choice::new("Logo", "palette.selectLayer:logo")
+                    .within("Layer")
+                    .on_search(),
+                Choice::new("Other", "palette.selectLayer:other")
+                    .within("Layer")
+                    .on_search(),
             ],
-            recents: vec!["palette.selectLayer:missing".into(), "palette.selectLayer:logo".into(), "palette.addEffect:blur".into()],
+            recents: vec![
+                "palette.selectLayer:missing".into(),
+                "palette.selectLayer:logo".into(),
+                "palette.addEffect:blur".into(),
+            ],
             ..Default::default()
         };
         for query in ["", "  "] {
             picker.search(query.into());
             assert_eq!(picker.filtered(), vec![2, 1, 0]);
             picker.navigate("down");
-            assert_eq!(picker.navigate("enter").as_deref(), Some("palette.selectLayer:logo"));
+            assert_eq!(
+                picker.navigate("enter").as_deref(),
+                Some("palette.selectLayer:logo")
+            );
             picker.navigate("down");
-            assert_eq!(picker.navigate("enter").as_deref(), Some("palette.addEffect:blur"));
+            assert_eq!(
+                picker.navigate("enter").as_deref(),
+                Some("palette.addEffect:blur")
+            );
         }
         picker.search("Other".into());
         assert_eq!(picker.filtered(), vec![3]);
