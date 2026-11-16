@@ -1970,12 +1970,7 @@ impl Controller {
         let sent = self.extensions.sent.clone();
         // The panels' ground under the page (`translucency.panel` over the
         // window's material, as the shell paints a panel).
-        let fill = {
-            let t = &shell.tokens;
-            let c = t.colors.panel;
-            let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
-            [channel(16), channel(8), channel(0), f64::from(t.translucency.panel)]
-        };
+        let fill = shell.tokens.panel_backing();
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();

@@ -1079,6 +1079,22 @@ impl Tokens {
     }
     /// Window ground as (colour, alpha): the `ground` tint over the blur, or
     /// the solid `window` colour under Reduce Transparency.
+    /// The panel over the window ground, for a transparent native page below
+    /// the shell. This is the same two layers a built-in panel paints.
+    pub fn panel_backing(&self) -> [f64; 4] {
+        let (ground, ground_alpha) = self.ground();
+        let ground_alpha = f64::from(ground_alpha);
+        let panel_alpha = f64::from(self.translucency.panel);
+        let alpha = panel_alpha + ground_alpha * (1. - panel_alpha);
+        if alpha == 0. { return [0.; 4]; }
+        let channel = |shift: u32| {
+            let panel = f64::from((self.colors.panel >> shift) & 255) / 255.;
+            let ground = f64::from((ground >> shift) & 255) / 255.;
+            (panel * panel_alpha + ground * ground_alpha * (1. - panel_alpha)) / alpha
+        };
+        [channel(16), channel(8), channel(0), alpha]
+    }
+
     pub fn ground(&self) -> (u32, f32) {
         if self.translucent() {
             (self.translucency.ground, self.translucency.window)
@@ -1118,4 +1134,31 @@ pub mod workspace {
     pub const DEFAULT_RIGHT: f32 = 300.;
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
+}
+
+#[cfg(test)]
+mod native_panel_frame_tests {
+    use super::*;
+    #[test]
+    fn native_panel_backing_matches_the_builtin_two_layer_surface() {
+        for scheme in [Scheme::Light, Scheme::Dark] {
+            let t = Tokens::new(scheme, Accessibility::default());
+            let backing = t.panel_backing();
+            let (ground, ga) = t.ground();
+            let pa = f64::from(t.translucency.panel);
+            for underneath in [0., 0.5, 1.] {
+                for (i, shift) in [16, 8, 0].into_iter().enumerate() {
+                    let g = f64::from((ground >> shift) & 255) / 255.;
+                    let p = f64::from((t.colors.panel >> shift) & 255) / 255.;
+                    let builtin = p * pa + (g * f64::from(ga) + underneath * (1. - f64::from(ga))) * (1. - pa);
+                    let extension = backing[i] * backing[3] + underneath * (1. - backing[3]);
+                    assert!((builtin - extension).abs() < 1e-12);
+                }
+            }
+            if let Ok(dir) = std::env::var("PM_FRAME_CAPTURE_DIR") {
+                std::fs::write(std::path::Path::new(&dir).join(format!("{:?}-surface.json", scheme)),
+                    serde_json::to_string_pretty(&serde_json::json!({"surface": backing, "panel": t.colors.panel, "panel_alpha": t.translucency.panel, "radius": t.metrics.panel_radius, "padding": t.metrics.inset, "header": t.metrics.header})).unwrap()).unwrap();
+            }
+        }
+    }
 }

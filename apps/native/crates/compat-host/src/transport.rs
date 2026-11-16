@@ -145,7 +145,7 @@ pub(crate) fn page(
 ) -> String {
     let cfg = json!({"base":base,"generation":generation});
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}[data-pm-contribution]{{background:var(--bg-panel,Canvas)}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}::-webkit-scrollbar{{width:9px;height:9px}}::-webkit-scrollbar-thumb{{background:color-mix(in srgb,CanvasText 28%,transparent);border-radius:6px;border:2px solid transparent;background-clip:padding-box}}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{{background:transparent}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}[data-pm-contribution],[data-pm-panel-body]{{background:transparent!important;border:0!important;border-radius:0!important;box-shadow:none!important;margin:0!important}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}::-webkit-scrollbar{{width:9px;height:9px}}::-webkit-scrollbar-thumb{{background:color-mix(in srgb,CanvasText 28%,transparent);border-radius:6px;border:2px solid transparent;background-clip:padding-box}}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{{background:transparent}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
         csp(nonce, trust),
         nonce,
         cfg,
@@ -253,6 +253,19 @@ mod tests {
     #[test]
     fn debug_redacts_capability() {
         assert!(!format!("{:?}", channel()).contains("test-capability"));
+    }
+    #[test]
+    fn native_panel_frame_is_transparent_without_a_second_border() {
+        let h = page(
+            "pmcompat://host/test/",
+            "test-nonce",
+            1,
+            "",
+            &Trust::Trusted,
+        );
+        assert!(h.contains("html,body{margin:0;background:transparent"));
+        assert!(h.contains("[data-pm-contribution],[data-pm-panel-body]{background:transparent!important;border:0!important;border-radius:0!important"));
+        assert!(!h.contains("background:var(--bg-panel"));
     }
     #[test]
     fn only_the_nonced_bundle_runs_and_it_connects_only_to_its_channel() {
