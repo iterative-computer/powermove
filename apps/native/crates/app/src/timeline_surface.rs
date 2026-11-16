@@ -5233,3 +5233,42 @@ pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
 pub(crate) fn empty_new_menu() -> serde_json::Value {
     serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
 }
+
+/// v1's `dragGraphTransform`: a grip scales the selected keys about the
+/// opposite edge or corner, or about the centre with ⌘; the grabbed edge
+/// follows the pointer from where it was.
+#[cfg(test)]
+mod transform_box_tests {
+    use super::TransformBox;
+    use pm_panel_timeline::graph_render::GRIPS;
+    fn grip(name: &str) -> usize {
+        GRIPS.iter().position(|g| *g == name).unwrap()
+    }
+    /// Keys from 1 s to 3 s, valued 0 to 1.
+    fn on(name: &str, centred: bool) -> TransformBox {
+        TransformBox {
+            t0: 1.,
+            t1: 3.,
+            v0: 0.,
+            v1: 1.,
+            grip: grip(name),
+            centred,
+        }
+    }
+    #[test]
+    fn the_transform_box_scales_about_the_opposite_edge_or_the_centre() {
+        // East: time about the west edge; values stay.
+        assert_eq!(on("e", false).anchor().0, 1.);
+        assert_eq!(on("e", false).scales(2., 9.), (2., 1.));
+        // North-west: both, about the south-east corner (north holds the
+        // highest value).
+        assert_eq!(on("nw", false).anchor(), (3., 0.));
+        assert_eq!(on("nw", false).scales(1., -0.5), (0.5, 0.5));
+        // ⌘: about the centre.
+        assert_eq!(on("e", true).anchor(), (2., 0.5));
+        assert_eq!(on("e", true).scales(1., 0.), (2., 1.));
+        // A side grip leaves the other axis alone.
+        assert_eq!(on("n", false).scales(5., 1.).0, 1.);
+    }
+}
+

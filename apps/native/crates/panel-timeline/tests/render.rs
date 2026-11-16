@@ -833,3 +833,133 @@ fn both_ends_of_a_strip_trim_five_points_in() {
         }
     }
 }
+
+/// Two Bézier keys of Position X (1 s at 0, 3 s at 1), both selected or not;
+/// in the Speed Graph or the Value Graph.
+fn graph(selected: bool, speed: bool) -> pm_panel_timeline::graph_render::Graph {
+    use pm_panel_timeline::graph_render::*;
+    let a = Point {
+        seconds: 1.,
+        value: 0.,
+    };
+    let b = Point {
+        seconds: 3.,
+        value: 1.,
+    };
+    let key = |id: &str, point: Point, handles| GraphPoint {
+        id: id.into(),
+        point,
+        selected,
+        shape: KeyShape::Bezier,
+        handles,
+        active_handle: None,
+    };
+    let mut g = Graph::new(
+        vec![Curve {
+            id: "a:position.x".into(),
+            name: "X Position".into(),
+            color: tokens().graph_curve("position.x", 0),
+            focused: true,
+            segments: vec![Segment {
+                from: a,
+                to: b,
+                controls: Some([
+                    Point {
+                        seconds: 1.5,
+                        value: 0.,
+                    },
+                    Point {
+                        seconds: 2.5,
+                        value: 1.,
+                    },
+                ]),
+            }],
+            points: vec![
+                key(
+                    "k1",
+                    a,
+                    vec![(
+                        EaseSide::Out,
+                        Point {
+                            seconds: 1.5,
+                            value: 0.,
+                        },
+                    )],
+                ),
+                key("k2", b, vec![]),
+            ],
+        }],
+        -0.22,
+        1.22,
+    )
+    .unwrap();
+    g.speed = speed;
+    g
+}
+
+/// v1's transform box (`graphSelectionBounds`, `graphTransformHandles`):
+/// it frames two or more selected keys 8 points off them, its eight grips
+/// are taken within their reach (the nearest), and the Speed Graph frames
+/// the keys without scaling them. The drag's scaling is
+/// `timeline_surface::transform_box_tests`.
+#[test]
+fn the_transform_box_frames_two_selected_keys_and_scales_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    assert!(graph(false, false).selection_box(v, area).is_none());
+    let g = graph(true, false);
+    let b = g.selection_box(v, area).unwrap();
+    // It stands 8 points off the keys.
+    let left = v.layer_column + (1. - v.scroll_time) * v.pps;
+    assert!((b.x - (left - 8.)).abs() < 1e-9, "{b:?}");
+    assert!(g.transformable());
+    assert_eq!(g.selected_span(), Some((1., 3., 0., 1.)));
+    // Each grip is taken within its reach, the nearest; nothing else is.
+    for (i, (x, y)) in grips(b).into_iter().enumerate() {
+        assert_eq!(grip_at(b, x + 4., y), Some(i), "{}", GRIPS[i]);
+    }
+    let (x, y) = grips(b)[3];
+    assert_eq!(GRIPS[3], "e");
+    assert_eq!(grip_at(b, x + 7., y), None);
+    // The Speed Graph frames the keys but does not scale them.
+    let speed = graph(true, true);
+    assert!(speed.selection_box(v, area).is_some());
+    assert!(!speed.transformable());
+}
+
+/// v1's playhead marks (`drawGraphPlayheadValues`): each curve's value at
+/// the playhead, held before and after its keys and eased between, in the
+/// curve's ink beside a dot on it; none near the layer column or the edge.
+#[test]
+fn the_playhead_marks_each_curve_with_its_value_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    let g = graph(false, false);
+    let curve = &g.curves()[0];
+    // Held before and after the keys; on the eased segment between.
+    assert_eq!(curve.value_at(0.), Some(0.));
+    assert_eq!(curve.value_at(9.), Some(1.));
+    let mid = curve.value_at(2.).unwrap();
+    assert!((mid - 0.5).abs() < 1e-6, "{mid}");
+    let early = curve.value_at(1.25).unwrap();
+    assert!(early > 0. && early < 0.25, "{early}");
+    // A head on the plot: a dot on the curve in its ink, the value beside it.
+    let time = v.scroll_time + 200. / v.pps;
+    let marks = g.playhead_marks(v, area, time, &t);
+    assert_eq!(marks.len(), 1);
+    let m = &marks[0];
+    assert_eq!(m.color, t.graph_curve("position.x", 0));
+    assert_eq!(m.text, value_text(curve.value_at(time).unwrap(), 2));
+    assert!(
+        (m.label.unwrap() - (m.y - 7.).clamp(area.y + 10., area.y + area.height - 3.)).abs()
+            < 1e-9
+    );
+    // None within 35 points of the layer column or 40 of the right edge.
+    let at = |x: f64| v.scroll_time + (x - v.layer_column) / v.pps;
+    assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
+    assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
+}
