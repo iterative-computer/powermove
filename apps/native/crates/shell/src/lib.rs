@@ -12,6 +12,7 @@ pub fn tabs_mode() -> bool {
 pub fn set_tabs_mode(tabs: bool) {
     TABS_MODE.store(tabs, std::sync::atomic::Ordering::Relaxed);
 }
+pub mod input;
 pub mod agent_menu;
 #[cfg(target_os = "macos")]
 pub mod ease;
