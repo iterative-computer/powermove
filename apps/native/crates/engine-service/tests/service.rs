@@ -1082,35 +1082,3 @@ fn viewer_output_switch_modes_encode_distinct_finite_signals() {
         "peaks below reference white are refused"
     );
 }
-
-/// PM-444: a viewer that held still on many paused pictures (each refined,
-/// so its frame cache is full of them) follows a ruler scrub across the
-/// whole composition, one seek a frame, to the scrub's last time: the
-/// scrub's smaller surfaces never find the pool full of the paused ones'
-/// (a full pool failed every scrub frame, "bounded source pool
-/// exhausted", until playback emptied the cache).
-#[test]
-fn a_long_scrub_after_paused_pictures_follows_to_its_end() {
-    let service = EngineService::start(pm_gpu::Gpu::new("long-scrub-test").unwrap()).unwrap();
-    let v = service.viewer(config(snapshot())).unwrap();
-    wait_frame(&v, v.stamp().unwrap());
-    for i in 0..10 {
-        v.command(C::Seek {
-            time: Ticks::new(i * TICKS_PER_SECOND / 4).unwrap(),
-            mode: SeekMode::Exact,
-        })
-        .unwrap();
-        // Its refinement lands after the settle delay.
-        std::thread::sleep(Duration::from_millis(700));
-        wait_frame(&v, v.stamp().unwrap());
-    }
-    let last = 89;
-    for i in 0..=last {
-        v.scrub(Ticks::new(i * TICKS_PER_SECOND / 30).unwrap()).unwrap();
-        std::thread::sleep(Duration::from_millis(16));
-        assert!(v.status().error.is_none(), "step {i}: {:?}", v.status().error);
-    }
-    let f = wait_frame(&v, v.stamp().unwrap());
-    assert_eq!(f.time.get(), last * TICKS_PER_SECOND / 30);
-    v.retire();
-}

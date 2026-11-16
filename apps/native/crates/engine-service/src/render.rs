@@ -2242,7 +2242,11 @@ impl Engine {
         Ok(match free {
             Some(s) => s,
             None => {
-                anyhow::ensure!(self.pool.len() < POOL_BOUND, "bounded source pool exhausted");
+                anyhow::ensure!(
+                    self.pool.len() < POOL_BOUND,
+                    "bounded source pool exhausted ({})",
+                    self.pool_holders()
+                );
                 let s = Arc::new(ExportedSurface::create(
                     &self.gpu.device,
                     &SurfaceRequest {
@@ -2254,6 +2258,48 @@ impl Engine {
                 s
             }
         })
+    }
+    /// Who holds the pool's surfaces, for the error that says it is full:
+    /// cached, shown, settled, read ahead, and elsewhere (frames in flight,
+    /// a viewer's report of the frame it presented).
+    fn pool_holders(&self) -> String {
+        let held_by = |s: &Arc<ExportedSurface>| {
+            if self.cache.iter().any(|c| Arc::ptr_eq(&c.surface, s)) {
+                0
+            } else if self.showing.iter().any(|(_, c)| Arc::ptr_eq(&c.surface, s)) {
+                1
+            } else if self.settled.as_ref().is_some_and(|c| Arc::ptr_eq(&c.surface, s)) {
+                2
+            } else if self.disk_next.as_ref().is_some_and(|d| Arc::ptr_eq(&d.surface, s)) {
+                3
+            } else {
+                4
+            }
+        };
+        let mut counts = [0; 5];
+        for s in &self.pool {
+            counts[held_by(s)] += 1;
+        }
+        let sizes = self.pool.iter().fold(Vec::<(Size, usize)>::new(), |mut v, s| {
+            match v.iter_mut().find(|(size, _)| *size == s.size) {
+                Some((_, n)) => *n += 1,
+                None => v.push((s.size, 1)),
+            }
+            v
+        });
+        let sizes: Vec<String> = sizes
+            .iter()
+            .map(|(s, n)| format!("{n} at {}×{}", s.width, s.height))
+            .collect();
+        format!(
+            "{} cached, {} shown, {} settled, {} read ahead, {} elsewhere; {}",
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            sizes.join(", ")
+        )
     }
     /// Asks for a paused viewer's settled picture (`spec`: the final
     /// picture of its time, [`FrameSpec::final_picture`]): drawn off this
@@ -3424,7 +3470,20 @@ mod playback_pool_tests {
         }
         assert!(reported.is_some());
         assert!(engine.pool.len() <= POOL_BOUND);
-        drop(held);
+        drop((held, flights, reported));
+        // A pool full of frames in flight, none cached, is full: the error
+        // says what holds it.
+        engine.cache.clear();
+        let flying: Vec<_> = (0..POOL_BOUND).map(|_| engine.cache_surface(small).unwrap()).collect();
+        let Err(error) = engine.cache_surface(large) else {
+            panic!("a full pool gave a surface")
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("0 cached") && error.contains(&format!("{POOL_BOUND} elsewhere")),
+            "{error}"
+        );
+        drop(flying);
     }
 
     #[test]
