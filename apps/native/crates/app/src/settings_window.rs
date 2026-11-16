@@ -195,9 +195,19 @@ impl Controller {
             return Value::Null;
         };
         let id = &session.project;
+        // Its Home poster, else the picture its viewer last showed (kept
+        // for every project opened here), else none.
         let (file, _) = crate::poster::files(&self.profile.join("caches").join("thumbnails"), id);
-        let poster = file.exists().then(|| {
-            let key = format!("settings/poster/{id}");
+        let (last, _) = crate::poster::last_frame_files(&self.profile, id);
+        let poster = [file, last].into_iter().find(|f| f.exists()).map(|file| {
+            // Its key names the file it shows: a picture written since is a
+            // new key, never the cached one.
+            let stamp = std::fs::metadata(&file)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis());
+            let key = format!("settings/poster/{id}/{stamp}");
             crate::media_thumbs::register(&key, file);
             key
         });
