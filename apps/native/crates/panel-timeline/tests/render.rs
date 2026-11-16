@@ -991,3 +991,27 @@ fn the_playhead_marks_each_curve_with_its_value_as_v1() {
     assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
     assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
 }
+
+#[test]
+fn electron_snap_guide_is_yellow_dashed_and_clipped() {
+    use pm_panel_timeline::render::{Viewport, snap_guide};
+    let v = Viewport {
+        width: 600.,
+        height: 300.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 100.,
+        layer_column: 100.,
+    };
+    assert!(snap_guide(v, 24., None).is_empty());
+    assert!(snap_guide(v, 24., Some(10.)).is_empty());
+    let ops = snap_guide(v, 24., Some(2.));
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].bounds.x, 300.);
+    assert_eq!(ops[0].color, 0xe7c84b);
+    assert_eq!(ops[0].stroke, 1.5);
+    assert_eq!(ops[0].detail["dash"], serde_json::json!([3., 3.]));
+    assert!(ops.iter().all(|op| op.clip.is_some()));
+    assert_eq!(ops[1].bounds.width, 8.);
+    assert_eq!(ops[1].bounds.height, 7.);
+}

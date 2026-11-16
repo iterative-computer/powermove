@@ -2856,3 +2856,201 @@ fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
     assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
     assert_eq!(focused(&s), Some(true));
 }
+
+#[gpui::test]
+fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let from = s.at(0, 1.);
+    let to = from + point(px(60.), px(0.));
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let before = s.rig.kernel.published(PROJECT).unwrap();
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let during = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(during.revision(), before.revision());
+    assert_eq!(during.history.entries, before.history.entries);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .iter()
+            .any(Option::is_some)
+    );
+    let frame = s.surface.read_with(&s.vcx, |s, _| s.frame().unwrap());
+    let clip = frame.ops.iter().find(|op| op.id == "clip:l0").unwrap();
+    assert!(clip.detail["from"].as_f64().unwrap() > 0.);
+    // This is the surface's Escape handler; it also clears the viewer input.
+    s.surface.update(&mut s.vcx, |s, cx| assert!(s.cancel(cx)));
+    s.idle(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let from = s.at(0, 1.);
+    s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
+    assert!(s.start_of("l0") > 0.);
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries + 1);
+    assert!(
+        s.recorder
+            .timing_previews
+            .borrow()
+            .last()
+            .unwrap()
+            .is_none()
+    );
+    s.undo(cx);
+    assert_eq!(s.start_of("l0"), 0.);
+}
+
+#[gpui::test]
+fn work_area_cancel_restores_duration_without_refitting_ruler(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
+    s.idle(cx);
+    let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+        (
+            t.frame().unwrap().viewport,
+            t.model().index.work,
+            t.model().index.duration,
+            t.time_mapping(),
+        )
+    });
+    let origin = s.origin();
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    let x_of = |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+    s.vcx.simulate_mouse_down(
+        point(x_of(before[1]) - px(2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(
+        point(x_of(duration + 2.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    s.surface
+        .read_with(&s.vcx, |t, _| assert!(t.model().index.duration > duration));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert_eq!(t.time_mapping(), mapping);
+        assert_eq!(t.model().index.work, before);
+        assert_eq!(t.model().index.duration, duration);
+    });
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
+}
+
+#[gpui::test]
+fn work_area_stream_keeps_ruler_mapping_and_tracks_pointer_through_extension(
+    cx: &mut TestAppContext,
+) {
+    for zoom_in in [false, true] {
+        for end in [false, true] {
+            let mut project: serde_json::Value =
+                serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+            project["work"] = serde_json::json!([1., 3.]);
+            let mut s = stage_project(cx, project.to_string());
+            s.surface.update(&mut s.vcx, |t, cx| {
+                t.fit_time(cx);
+                if zoom_in {
+                    t.command("timeline.zoomIn", 0., None, false, cx);
+                }
+            });
+            s.idle(cx);
+            let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
+                (
+                    t.frame().unwrap().viewport,
+                    t.model().index.work,
+                    t.model().index.duration,
+                    t.time_mapping(),
+                )
+            });
+            let origin = s.origin();
+            let y = origin.y + px(tokens().metrics.ruler / 2.);
+            let x_of =
+                |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
+            let edge = before[usize::from(end)];
+            // Start within the generous hit zone rather than on its center.
+            let from = point(x_of(edge) + px(if end { -4. } else { 4. }), y);
+            s.vcx
+                .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            let mut previous = edge;
+            let mut peak = duration;
+            let times: Vec<f64> = if end {
+                // Slow, fast, beyond comp end, then back to its interior.
+                vec![
+                    3.2, 3.21, 3.3, 3.4, 4., 6., 9., 11., 14., 14., 14., 12., 10., 8., 6., 4.,
+                ]
+            } else {
+                vec![
+                    1.2, 1.21, 1.3, 1.4, 1.8, 2., 2.2, 2.5, 2.7, 2.9, 2.9, 2.7, 2.4, 2., 1.8, 1.5,
+                ]
+            };
+            let mut previous_time = edge;
+            for &time in &times {
+                let at = point(x_of(time), y);
+                s.vcx
+                    .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+                s.idle(cx);
+                s.surface.read_with(&s.vcx, |t, _| {
+                    assert_eq!(t.time_mapping(), mapping, "ruler changed at {time}");
+                    let actual = t.model().index.work[usize::from(end)];
+                    let expected = pm_panel_timeline::frame(time, t.model().index.fps);
+                    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+                    if time >= previous_time {
+                        assert!(actual >= previous);
+                    } else {
+                        assert!(actual <= previous);
+                    }
+                    previous = actual;
+                    previous_time = time;
+                    peak = peak.max(actual);
+                    assert_eq!(t.model().index.duration, if end { peak } else { duration });
+                });
+            }
+            let to = point(x_of(*times.last().unwrap()), y);
+            // Queue the last pointer and release together: the pending writer
+            // sample must retain the mapping after the UI gesture becomes idle.
+            s.vcx
+                .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+            s.vcx
+                .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+            s.idle(cx);
+            s.surface
+                .read_with(&s.vcx, |t, _| assert_eq!(t.time_mapping(), mapping));
+            assert!(s.recorder.seeks.borrow().is_empty());
+            assert!(
+                s.recorder
+                    .timing_previews
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none)
+            );
+            assert!(s.recorder.reports.borrow().is_empty());
+            assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
+            s.undo(cx);
+            s.surface.read_with(&s.vcx, |t, _| {
+                assert_eq!(t.model().index.work, before);
+                assert_eq!(t.model().index.duration, duration);
+            });
+        }
+    }
+}
