@@ -183,7 +183,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   expect(switches.children.length).toBe(5);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
-  for (const name of ["lock"])
+  for (const name of ["shy", "solo", "lock"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
   // Every column holds a switch's width (a hit target), drawn or not.
   for (const slot of switches.children)
@@ -587,19 +587,5 @@ test("effect headings validate without editable controls and static layers hide 
   expect(byId(root, `timeline:disclosure:${staticLayer.id}`)).toBeUndefined();
   expect(byId(root, `timeline:heading:${heading.id}`).props.label).toBe("Blur");
   for (const result of replay(commits)) expect(result.accepted).toBe(true);
-  await root.dispose();
-});
-
- test("selected rows use accent only while Timeline is focused", async () => {
-  const { root } = recorder();
-  await root.render(<TimelinePanel frame={frame({window:{total:1,first:0,rows:[{...layer(),selected:true}]}})} send={() => {}} />);
-  const selected = () => byId(root, "timeline:row:layer:headline").props.style;
-  expect(selected()).toMatchObject({background:{token:"colors.fill_strong"}});
-  await drive(root,"timeline:tracks","focus");
-  expect(selected()).toMatchObject({background:{token:"colors.timeline_selected"}});
-  await drive(root,"timeline:tracks","blur",{value:"viewer"});
-  expect(selected()).toMatchObject({background:{token:"colors.fill_strong"}});
-  expect(byId(root,"timeline:shy:layer:headline")).toBeDefined();
-  expect(byId(root,"timeline:solo:layer:headline")).toBeDefined();
   await root.dispose();
 });

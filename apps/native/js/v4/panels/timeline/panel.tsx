@@ -1,5 +1,4 @@
-import { createContext } from "preact";
-import { useContext, useEffect, useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { memo } from "../../src/memo";
 import type { ComponentChildren } from "preact";
 import * as UI from "../../src/components";
@@ -14,8 +13,6 @@ import type {
 } from "./model";
 import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
-
-const TimelineFocused = createContext(false);
 
 type Send = (intent: Intent) => void;
 const t = UI.token;
@@ -852,7 +849,6 @@ const TimelineRow = memo(
     key?: string;
   }) {
     const [hover, setHover] = useState(false);
-    const timelineFocused = useContext(TimelineFocused);
     if (published.kind === "heading")
       return (
         <div
@@ -1028,14 +1024,9 @@ export function TimelinePanel({
   frame: TimelineFrame;
   send: Send;
 }) {
-  const [focused, setFocused] = useState(false);
   return (
-    <TimelineFocused.Provider value={focused}>
     <div
       id="timeline"
-      onPointerDownCapture={() => setFocused(true)}
-      onFocus={() => setFocused(true)}
-      onBlur={(event) => setFocused(typeof event.value === "string" && event.value.startsWith("timeline"))}
       label="Timeline"
       role="group"
       metadata={{
@@ -1225,7 +1216,6 @@ export function TimelinePanel({
         </>
       )}
     </div>
-    </TimelineFocused.Provider>
   );
 }
 

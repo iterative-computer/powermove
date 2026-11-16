@@ -741,7 +741,7 @@ impl SurfaceView {
         // Glyph actions deliver focus to their row as well as pointer hover.
         // Text fields and AppKit form controls keep their existing lifecycle.
         for (&id, handle) in &self.focus {
-            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) && !surface.node(id).is_some_and(|node| node.props.get("id").and_then(Value::as_str) == Some("timeline:tracks")) { continue; }
+            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) { continue; }
             let mut at = Some(id);
             let mut interested = false;
             while let Some(target) = at {
