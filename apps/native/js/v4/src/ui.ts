@@ -3,6 +3,7 @@ import { h, type ComponentChildren } from "preact";
 import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "./jsx-runtime";
 import { Label } from "./label";
+import { ColourWell } from "./components";
 import type { Json, SurfaceEvent } from "./protocol";
 // The v1-3 control math, frozen at the tagged revision: v4 fields parse and
 // convert exactly as the controls users already know.
@@ -64,7 +65,7 @@ export function PointField(props: PointFieldProps) {
   });
 }
 export function ColorField(props: ControlProps & { value: string }) {
-  return field("color", "button", props);
+  return h(ColourWell, props);
 }
 export function FillField(props: ControlProps) {
   return field("fill", "button", props);

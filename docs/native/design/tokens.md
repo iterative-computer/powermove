@@ -78,6 +78,10 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
+| `metrics.color_picker_plane_height` | Height of the colour saturation plane and vertical tracks | 256 | 256 | 256 | 256 |
+| `metrics.color_picker_plane_width` | Width of the colour saturation and brightness plane | 230 | 230 | 230 | 230 |
+| `metrics.color_picker_track` | Width of the colour hue and opacity tracks | 14 | 14 | 14 | 14 |
+| `metrics.color_picker_width` | Width of the shared anchored colour picker | 535 | 535 | 535 | 535 |
 | `metrics.column_least` | Narrowest side column | 200 | 200 | 200 | 200 |
 | `metrics.column_most` | Widest side column | 760 | 760 | 760 | 760 |
 | `metrics.comp_tab_close` | Composition tab close button width | 16 | 16 | 16 | 16 |

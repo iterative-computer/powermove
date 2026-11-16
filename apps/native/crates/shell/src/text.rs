@@ -235,6 +235,9 @@ impl TextField {
     pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
         self.slot.accessibility_item()
     }
+    /// Dialog-owned navigation; normal text slots retain their existing policy.
+    pub fn set_label(&self, label: &str) {self.slot.set_label(label);}
+    pub fn set_host_navigation(&self, enabled: bool) {self.slot.set_host_navigation(enabled);}
     pub fn value(&self) -> &str {
         &self.value
     }

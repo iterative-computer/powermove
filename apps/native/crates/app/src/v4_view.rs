@@ -26,6 +26,7 @@ pub mod agent;
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
     pub outline: Rc<Outline>,
+    pub sample_color: Rc<RefCell<Option<crate::colour_picker::SampleSource>>>,
     /// The window's latest publication: what host-listed pop-up rows
     /// (`HostRows`) are read from when a menu opens.
     pub published: Rc<RefCell<Option<Arc<pm_kernel::Published>>>>,
@@ -191,6 +192,7 @@ pub struct SurfaceView {
     quote_selection: Rc<RefCell<crate::v4_quote::Selection>>,
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
+    colour: Option<(Id, Entity<crate::colour_picker::Picker>, Subscription)>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
@@ -326,6 +328,7 @@ impl SurfaceView {
             natives,
             quote_selection: Default::default(),
             fields: BTreeMap::new(),
+            colour: None,
             controls: BTreeMap::new(),
             cull: Default::default(),
             row_sources: HashMap::new(),
@@ -523,7 +526,7 @@ impl SurfaceView {
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
             self.wheel_finish(false, cx);
-            self.restart();
+            self.restart(cx);
         }
         let quote_owner = self.quote_selection.borrow().owner;
         if let Some(owner) = quote_owner {
@@ -570,7 +573,8 @@ impl SurfaceView {
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
-    fn restart(&mut self) {
+    fn restart(&mut self, cx:&mut Context<Self>) {
+        if let Some((_,picker,_))=self.colour.take() {picker.update(cx,|p,_|p.cancel_pending());}
         self.quote_selection = Default::default();
         self.disclosures.clear();
         self.sent_ranges.clear();
@@ -592,6 +596,11 @@ impl SurfaceView {
         self.announce_statuses(window);
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
+        if self.colour.as_ref().is_some_and(|(id,_,_)| !live(id) || self.leases.get(id) != prepared.node(*id).map(|n| &n.binding)) {
+            if let Some((_,picker,_))=self.colour.take() {picker.update(cx,|p,_|p.cancel_pending());}
+            if self.scrub_busy || self.scrub_gesture.is_some() || !self.scrub_ops.is_empty() {self.scrub_ops.push_back(ScrubOp::Finish(false));self.scrub_pump(cx);}
+        }
+
         self.controls.retain(|id, _| live(id));
         if self.pressed.is_some_and(|id| !live(&id)) {
             self.pressed = None;
@@ -1875,6 +1884,68 @@ impl SurfaceView {
             self.run(ticket, cx);
         }
     }
+    fn open_colour(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        if self.colour.is_some() || self.scrub.is_some() || self.scrub_busy {
+            return;
+        }
+        use crate::{
+            colour_model::Color,
+            colour_picker::{Edit, Picker},
+        };
+        let Some(node) = self.publication.surface.node(id) else {
+            return;
+        };
+        let binding = node
+            .props
+            .get("binding")
+            .and_then(Value::as_str)
+            .map(SharedString::from);
+        let binding = binding.filter(|_| !node.listeners.contains_key("change"));
+        let initial = node.props.get("value").cloned().unwrap_or(json!("#808080"));
+        let color = node
+            .props
+            .get("value")
+            .and_then(Value::as_str)
+            .and_then(|text|Color::parse_draft(text,"Hex",1.))
+            .unwrap_or(Color([0.5, 0.5, 0.5, 1.]));
+        let tokens = self.table.tokens.clone();
+        let source = self.natives.sample_color.borrow().clone();
+        let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
+        let subscription = cx.subscribe(&picker, move |v, _, edit, cx| match edit {
+            Edit::Begin if binding.is_some() => {
+                v.scrub_ops.push_back(ScrubOp::Begin);
+                v.scrub_pump(cx);
+            }
+            Edit::Value(color) => {
+                if let Some(binding) = &binding {
+                    v.scrub_ops
+                        .push_back(ScrubOp::Value(binding.clone(), json!(color)));
+                    v.scrub_pump(cx);
+                } else {
+                    v.change(id, json!(color), cx);
+                }
+            }
+            Edit::Finish(commit) => {
+                if !commit && binding.is_none() {v.change(id,initial.clone(),cx);}
+                if v.scrub_busy || v.scrub_gesture.is_some() || !v.scrub_ops.is_empty() {
+                    v.scrub_ops.push_back(ScrubOp::Finish(*commit));
+                    v.scrub_pump(cx);
+                }
+                v.colour = None;
+                let focus = v.focus.get(&id).cloned();
+                if let Some(focus) = focus {
+                    let handle = v.window;
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, w, cx| focus.focus(w, cx));
+                    });
+                }
+                cx.notify();
+            }
+            Edit::Begin | Edit::Sample => {}
+        });
+        self.colour = Some((id, picker, subscription));
+        cx.notify();
+    }
     fn activate(
         &mut self,
         id: Id,
@@ -1923,22 +1994,7 @@ impl SurfaceView {
                 });
             }
             Some(Component::ColourWell) => {
-                let initial = node
-                    .props
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .and_then(crate::sheets::hex_colour);
-                let owner = cx.entity().downgrade();
-                let binding = node.props.get("binding").cloned();
-                crate::colour_panel::menu(window, initial, cx, move |colour, cx| {
-                    let _ = owner.update(cx, |v, cx| {
-                        // The panel can outlive the row: its lease must still be this one.
-                        let current = v.publication.surface.node(id);
-                        if current.and_then(|n| n.props.get("binding")) == binding.as_ref() {
-                            v.change(id, json!(colour), cx);
-                        }
-                    });
-                });
+                self.open_colour(id, window, cx);
             }
             _ => self.send(id, "click", detail, cx),
         }
@@ -2273,7 +2329,7 @@ impl SurfaceView {
                     },
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() {
+                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() && v.colour.is_none() {
                     v.scrub_gesture = None;
                     v.scrub_shown = None;
                 }
@@ -4424,6 +4480,7 @@ impl Render for SurfaceView {
         self.presence = presence;
         self.motion.frame(window);
         self.plan_cull(window, cx);
+        let viewport = window.viewport_size();
         let t = &self.table.tokens;
         let root = div().relative().w_full();
         let root = if self.grows {
@@ -4456,6 +4513,22 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.colour.as_ref().map(|(id, picker, _)| {
+                let bounds = self.anchors.borrow().get(id).copied().unwrap_or_default();
+                let width=px(t.metrics.color_picker_width);
+                let height=px(t.metrics.color_picker_plane_height+t.metrics.control+2.*t.space.md+t.space.sm);
+                let margin=px(t.space.lg);let gap=px(t.space.sm);
+                let x=(bounds.origin.x+bounds.size.width-width).max(margin).min((viewport.width-width-margin).max(margin));
+                let below=bounds.origin.y+bounds.size.height+gap;
+                let y=if below+height<=viewport.height-margin {below}else{(bounds.origin.y-gap-height).max(margin)};
+                deferred(
+                    anchored()
+                        .position(point(x,y))
+                        .snap_to_window()
+                        .child(picker.clone()),
+                )
+                .priority(3)
+            }))
             .children(self.cull.outer_mark())
     }
 }
@@ -4889,6 +4962,116 @@ mod tests {
         assert_eq!(
             drag.data["public.file-url"],
             json!(["/a b/clip.mov", "/c.png"])
+        );
+    }
+    /// The shared picker uses the same keyframe-aware binding as the Properties row.
+    #[gpui::test]
+    fn colour_picker_live_preview_commits_one_undo_and_keys_animated_color(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::v4_view_tests::{PROJECT, project_json, publication, rig_project, settle, window};
+        use pm_surface::kit::Component;
+        use serde_json::Value;
+        use std::time::Duration;
+        let project=project_json(1).replace("\"w\":100,\"h\":100", "\"w\":100,\"h\":100,\"color\":{\"v\":\"#FF0000\",\"kf\":[{\"t\":0,\"v\":\"#FF0000\"},{\"t\":2,\"v\":\"#0000FF\"}]}");
+        let rig = rig_project("inspector", &project);
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Layers {
+                        ids: vec!["l0".into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        rig.runtime.update_facts(json!({"time":1.,"playing":false}));
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+        vcx.run_until_parked();
+        let before = rig.kernel.published(PROJECT).unwrap().history.entries;
+        let original = rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value();
+        let picker = vcx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                let id = v
+                    .publication
+                    .surface
+                    .nodes()
+                    .values()
+                    .find(|n| Component::of(n) == Some(Component::ColourWell))
+                    .expect("Properties colour field")
+                    .id;
+                v.open_colour(id, window, cx);
+                v.colour.as_ref().unwrap().1.clone()
+            })
+        });
+        picker.update(&mut vcx, |p, cx| {
+            p.input_numeric(6, "127.5", cx);
+            p.input_numeric(7, "63.75", cx);
+            p.input_numeric(8, "191.25", cx);
+        });
+        settle(&mut vcx, |cx| {
+            view.read_with(cx, |v, _| v.scrub_gesture.is_some() && !v.scrub_busy && v.scrub_ops.is_empty())
+        });
+        assert_eq!(
+            rig.kernel.published(PROJECT).unwrap().history.entries,
+            before,
+            "live preview has no separate undo entries"
+        );
+        picker.update(&mut vcx, |p, cx| p.finish(true, cx));
+        settle(&mut vcx, |cx| {
+            view.read_with(cx, |v, _| v.colour.is_none() && !v.scrub_busy && v.scrub_ops.is_empty())
+        });
+        let published = rig.kernel.published(PROJECT).unwrap();
+        assert_eq!(published.history.entries, before + 1);
+        let root = published.snapshot.root().unwrap();
+        let location = pm_kernel::model::find_layer(root, "l0").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &location).unwrap().to_value();
+        let json: Value = serde_json::from_str(&pm_model::json::to_canonical_string(&layer)).unwrap();
+        let keys = json["d"]["color"]["kf"]
+            .as_array()
+            .expect("animated color");
+        assert!(
+            keys.iter()
+                .any(|k| k["t"].as_f64() == Some(1.) && k["v"] == json!("#8040BF")),
+            "{keys:?}"
+        );
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rig.kernel
+                .published(PROJECT)
+                .unwrap()
+                .snapshot
+                .root()
+                .unwrap()
+                .to_value(),
+            original
         );
     }
 }

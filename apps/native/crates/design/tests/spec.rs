@@ -245,6 +245,11 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("metrics.hit", "Minimum pointer target"),
     ("metrics.popover_width", "Default popover width"),
+    ("metrics.color_picker_plane_height", "Height of the colour saturation plane and vertical tracks"),
+    ("metrics.color_picker_plane_width", "Width of the colour saturation and brightness plane"),
+    ("metrics.color_picker_track", "Width of the colour hue and opacity tracks"),
+    ("metrics.color_picker_width", "Width of the shared anchored colour picker"),
+
     (
         "metrics.popover_radius",
         "Corner of popovers Powermove frames itself (agent popover)",
