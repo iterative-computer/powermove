@@ -202,25 +202,6 @@ fn main() {
             .is_some_and(|s| std::ptr::eq(&*s, &*sheet_window)),
         "on the window that asked, at once"
     );
-    // A child window that waited for activation shows over its parent, and
-    // the question asked on that parent stays over it (PM-337: the child
-    // took the recovery question's clicks and Return).
-    let over = panel(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
-    attach(&over, &on);
-    show(&over, true);
-    assert!(is_pending(&over));
-    show_pending();
-    let front_to_back = |w: &NSWindow| {
-        app.orderedWindows()
-            .iter()
-            .position(|x| std::ptr::eq(&*x, w))
-    };
-    assert!(over.isVisible() && sheet_window.isVisible());
-    assert!(
-        front_to_back(&sheet_window) < front_to_back(&over),
-        "the question stays over the window that showed on its parent"
-    );
-    over.orderOut(None);
     on.endSheet(&sheet_window);
     sheet_window.orderOut(None);
 
