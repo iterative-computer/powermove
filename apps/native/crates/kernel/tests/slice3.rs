@@ -530,8 +530,10 @@ fn failed_save_completion_clears_flight_and_retains_dirty_journal() {
     assert_eq!(fs::read(root.path("exists.pmv")).unwrap(), b"keep");
     k.shell(ShellCall::Close(s)).unwrap();
 }
+/// A deferred close saves nothing, and a quit folds in nothing the person
+/// did not choose: the slot stays as saved, and the next open asks.
 #[test]
-fn defer_close_does_not_save_and_quit_compacts_releases_locks() {
+fn defer_close_does_not_save_and_quit_leaves_its_work_for_the_recover_question() {
     let root = common::TempDir::new("defer");
     let mut k = kernel(&root.0);
     let s = new(&mut k);
@@ -540,13 +542,20 @@ fn defer_close_does_not_save_and_quit_compacts_releases_locks() {
     k.shell(ShellCall::DeferClose(s)).unwrap();
     assert_eq!(fs::read(root.path("store/project.p.json")).unwrap(), before);
     k.shell(ShellCall::PrepareQuit).unwrap();
-    let p = LibraryStore::open(&root.0).load("p").unwrap().unwrap();
-    let mut reopened = Kernel::new(Default::default());
-    reopened.open("p", OpenSource::Library(p)).unwrap();
-    assert_eq!(
-        common::opacity_of(reopened.project("p").unwrap().store(), "l"),
-        Some(25.)
-    );
+    assert_eq!(fs::read(root.path("store/project.p.json")).unwrap(), before);
+    drop(k);
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "p".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "p".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    assert!(matches!(reply, ShellReply::RecoveryRequired { .. }), "{reply:?}");
 }
 #[test]
 fn local_storage_exact_strings_origin_isolation_delete_and_restart() {
