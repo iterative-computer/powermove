@@ -30,8 +30,10 @@ impl State {
     /// not, and on macOS 27 a control's first layout builds its SwiftUI
     /// graph (a millisecond or more each): a list of a few hundred rows made
     /// them all at once though only those on screen were ever shown.
+    /// It joins GPUI's view's parent: the window's content view, or the
+    /// detail view of a split view hosting GPUI's view (P-EMBED).
     fn attach(&self) {
-        if let Some(content) = self.gpui.window().and_then(|w| w.contentView()) {
+        if let Some(content) = unsafe { self.gpui.superview() } {
             content.addSubview_positioned_relativeTo(
                 &self.wrapper,
                 NSWindowOrderingMode::Above,
@@ -59,12 +61,16 @@ impl State {
             ((bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height) - y)
                 .max(0.),
         );
-        let h = self
-            .gpui
-            .window()
-            .and_then(|w| w.contentView())
-            .map_or(0., |v| v.bounds().size.height);
-        let frame = NSRect::new(NSPoint::new(x, h - y - visible.height), visible);
+        // In GPUI's view's parent (the window's content view, or the detail
+        // view of a split view that hosts GPUI's view), from GPUI's frame.
+        let g = self.gpui.frame();
+        let frame = NSRect::new(
+            NSPoint::new(
+                g.origin.x + x,
+                g.origin.y + g.size.height - y - visible.height,
+            ),
+            visible,
+        );
         let local = NSRect::new(
             NSPoint::new(
                 bounds.origin.x - x,
