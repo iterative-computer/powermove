@@ -65,6 +65,13 @@ fn quit_waits_for(
         CloseState::Dirty | CloseState::Clean => None,
     }
 }
+/// Whether a window lets go of its project for a quit signal instead of
+/// holding the quit: one that would ask the person something (`Busy` once
+/// [`quit_waits_for`] has nothing to wait for). Work that ends on its own
+/// (a save, an open) is still waited for.
+fn lets_go_unattended(state: CloseState, terminating: bool) -> bool {
+    terminating && state == CloseState::Busy
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -92,6 +99,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    pm_shell::session::set_quitting(false);
     crate::diag::line(serde_json::json!({"quit":"cancelled"}));
     crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
@@ -240,7 +248,11 @@ fn start_quit(cx: &mut App) {
             &path,
             pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
         );
+        if let Some(front) = pm_shell::front_window_id() {
+            pm_shell::session::write(&path, pm_shell::session::Change::Front(front));
+        }
     }
+    pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
@@ -890,6 +902,19 @@ impl Controller {
             .detach();
             return;
         }
+        if intent == Intent::Quit
+            && lets_go_unattended(state, cx.global::<QuitCoordinator>().terminating)
+        {
+            // A quit signal at a window asking a question (a recovery choice,
+            // an edit left open): nobody can answer it, and refusing would
+            // keep the app running through a logout. The window lets go as
+            // after a crash: the journal keeps the work, nothing is saved,
+            // and the next launch asks again.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
         if quit_now_here
             && let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
         {
@@ -1229,6 +1254,13 @@ mod tests {
         // A recovery choice or an alert on screen, an open edit, a stopped
         // project, and a window that can simply close.
         assert_eq!(quit_waits_for(Busy, true, true, false), None);
+        // A quit signal never stops at a question nobody can answer; a
+        // person's Quit still does, and nothing else lets go.
+        assert!(lets_go_unattended(Busy, true));
+        assert!(!lets_go_unattended(Busy, false));
+        for state in [Saving, Clean, Dirty, Stopped] {
+            assert!(!lets_go_unattended(state, true), "{state:?}");
+        }
         assert_eq!(quit_waits_for(Busy, false, false, false), None);
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);
