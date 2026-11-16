@@ -998,7 +998,26 @@ impl Drop for ExportHandle {
 }
 /// Host binary calls this before initializing GPUI if --engine-job is present.
 /// No window, Node, file transport or mutable kernel authority is created.
+/// A job ends when the app that started it is gone (a quit, a crash, a
+/// signal): it is reparented, and nothing would read what it renders. The
+/// quit's own teardown runs no drops, so it cannot stop a job itself.
+fn end_with_parent() {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    let _ = std::thread::Builder::new()
+        .name("pm-job-parent".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                // SAFETY: as above.
+                if unsafe { libc::getppid() } != parent {
+                    std::process::exit(0);
+                }
+            }
+        });
+}
 pub fn run_child() -> Result<()> {
+    end_with_parent();
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()
