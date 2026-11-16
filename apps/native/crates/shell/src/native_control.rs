@@ -307,12 +307,13 @@ impl BuildPixels {
         let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
         let key=(revision,frame);if self.key==Some(key){return false;}
         native.setFrameSize(NSSize::new(f32::from(bounds.size.width) as f64,f32::from(bounds.size.height) as f64));
-        let alpha=native.alphaValue();native.setAlphaValue(1.);
+        // cacheDisplay draws into its own bitmap; presentation alpha remains
+        // owned exclusively by the staged native frame transaction.
         let rect=native.bounds();
         self.image=native.bitmapImageRepForCachingDisplayInRect(rect).and_then(|rep|{
             native.cacheDisplayInRect_toBitmapImageRep(rect,&rep);snapshot_bitmap(&rep)
         });
-        native.setAlphaValue(alpha);self.key=Some(key);true
+        self.key=Some(key);true
     }
 }
 /// PNG decoding normalizes AppKit bitmap layouts; GPUI sprites use straight BGRA.
