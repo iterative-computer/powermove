@@ -645,7 +645,9 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        layout::Panels::new(contributed)
+        layout::Panels::new(contributed).while_loading(
+            self.integration.as_ref().is_some_and(|i| i.panels_loading(cx)),
+        )
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
@@ -3102,9 +3104,11 @@ impl Render for Editor {
                 panel = panel.child(content);
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
-                let coming =
-                    !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
-                let (heading, line, action) = if panels.contains(&id) {
+                let loading = self.integration.as_ref().is_some_and(|i| i.panels_loading(cx));
+                let coming = !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
+                let (heading, line, action) = if loading && !layout::PANELS.contains(&id.as_str()) {
+                    ("Loading…", "", None)
+                } else if panels.contains(&id) {
                     layout::empty_state(&id)
                 } else if coming {
                     ("", "", None)

@@ -379,6 +379,11 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        // Recover may have received the extension publication before this
+        // runtime existed. Replay it, including surfaces mounted in Home's
+        // retired runtime, even if discovery's revision has not changed.
+        self.extensions.panel_runtime_changed();
+        self.drain_extensions(cx);
         self.poll_linked_sync(cx);
         self.wire_effect_desk();
         let check = runtime.clone();

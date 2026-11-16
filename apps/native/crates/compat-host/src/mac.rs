@@ -1400,6 +1400,8 @@ impl MacDomHost {
         }
         let mut layouts = self.shared.layouts.borrow().clone();
         let mut changed = vec![];
+        let active: Vec<String> = panels.iter().map(|(id, _)| id.clone()).collect();
+        let retired = layouts.keys().any(|id| !active.contains(id));
         layouts.retain(|id, _| panels.iter().any(|(active, _)| active == id));
         for (id, rect) in panels {
             if !rect.valid() {
@@ -1414,9 +1416,9 @@ impl MacDomHost {
             layouts.insert(id.clone(), (generation, rect, false));
             changed.push(json!({"id":id,"generation":generation,"rect":rect}));
         }
-        if !changed.is_empty() {
+        if retired || !changed.is_empty() {
             self.shared
-                .send(json!({"kind":"panel_layout","panel":0,"placements":changed}))?;
+                .send(json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}))?;
         }
         *self.shared.layouts.borrow_mut() = layouts;
         Ok(())
@@ -2090,9 +2092,9 @@ fn random_token() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// `read_contribution`'s script: the panel's visible text and its controls
+/// `read_contribution`'s script: the panel's text (even off screen) and controls
 /// (role, label, value, state, panel-relative bounds), capped.
-const READ_CONTRIBUTION: &str = r#"(()=>{const root=document.querySelector('[data-pm-contribution='+JSON.stringify($ID)+']');if(!root)throw Error('no such panel');const box=root.getBoundingClientRect();const text=(root.innerText||'').replace(/\n{3,}/g,'\n\n').trim().slice(0,20000);const controls=[];for(const el of root.querySelectorAll('button,a[href],input,select,textarea,[role=button],[role=checkbox],[role=switch],[role=slider],[role=tab],[role=menuitem],[contenteditable=""],[contenteditable=true]')){if(controls.length>=200)break;const type=(el.getAttribute('type')||'').toLowerCase();if(type==='password'||type==='file'||type==='hidden')continue;const r=el.getBoundingClientRect();if(r.width===0&&r.height===0)continue;const tag=el.tagName;const role=el.getAttribute('role')||(tag==='A'?'link':tag==='SELECT'?'combobox':tag==='TEXTAREA'?'textbox':tag==='INPUT'?(type==='checkbox'?'checkbox':type==='radio'?'radio':type==='range'?'slider':'textbox'):el.isContentEditable?'textbox':'button');const label=(el.getAttribute('aria-label')||(el.labels&&el.labels[0]&&el.labels[0].innerText)||(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'?'':el.innerText)||el.getAttribute('placeholder')||el.getAttribute('title')||el.getAttribute('name')||'').trim().slice(0,200);const c={role,label};if((tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')&&type!=='checkbox'&&type!=='radio')c.value=String(el.value).slice(0,500);if(type==='checkbox'||type==='radio')c.checked=!!el.checked;if(el.disabled||el.getAttribute('aria-disabled')==='true')c.disabled=true;if(tag==='SELECT')c.options=Array.from(el.options).slice(0,100).map(o=>o.text);c.bounds={x:Math.round(r.left-box.left),y:Math.round(r.top-box.top),width:Math.round(r.width),height:Math.round(r.height)};controls.push(c);}return JSON.stringify({text,controls});})()"#;
+const READ_CONTRIBUTION: &str = r#"(()=>{const root=document.querySelector('[data-pm-contribution='+JSON.stringify($ID)+']');if(!root)throw Error('no such panel');const box=root.getBoundingClientRect();const text=(root.textContent||'').replace(/\s+/g,' ').trim().slice(0,20000);const controls=[];for(const el of root.querySelectorAll('button,a[href],input,select,textarea,[role=button],[role=checkbox],[role=switch],[role=slider],[role=tab],[role=menuitem],[contenteditable=""],[contenteditable=true]')){if(controls.length>=200)break;const type=(el.getAttribute('type')||'').toLowerCase();if(type==='password'||type==='file'||type==='hidden')continue;const r=el.getBoundingClientRect();if(r.width===0&&r.height===0)continue;const tag=el.tagName;const role=el.getAttribute('role')||(tag==='A'?'link':tag==='SELECT'?'combobox':tag==='TEXTAREA'?'textbox':tag==='INPUT'?(type==='checkbox'?'checkbox':type==='radio'?'radio':type==='range'?'slider':'textbox'):el.isContentEditable?'textbox':'button');const label=(el.getAttribute('aria-label')||(el.labels&&el.labels[0]&&el.labels[0].textContent)||(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'?'':el.textContent)||el.getAttribute('placeholder')||el.getAttribute('title')||el.getAttribute('name')||'').trim().slice(0,200);const c={role,label};if((tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')&&type!=='checkbox'&&type!=='radio')c.value=String(el.value).slice(0,500);if(type==='checkbox'||type==='radio')c.checked=!!el.checked;if(el.disabled||el.getAttribute('aria-disabled')==='true')c.disabled=true;if(tag==='SELECT')c.options=Array.from(el.options).slice(0,100).map(o=>o.text);c.bounds={x:Math.round(r.left-box.left),y:Math.round(r.top-box.top),width:Math.round(r.width),height:Math.round(r.height)};controls.push(c);}return JSON.stringify({text,controls});})()"#;
 
 #[cfg(test)]
 mod admission_tests {
