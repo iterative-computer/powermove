@@ -95,6 +95,7 @@ mod pro_media;
 mod project_library;
 mod providers;
 mod publish;
+mod quit_limit;
 mod raster_overrides;
 mod render_frames;
 mod recent_work;
