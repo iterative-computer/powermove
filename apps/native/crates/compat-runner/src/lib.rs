@@ -122,7 +122,21 @@ pub(crate) fn pool(scope: &str, host: Arc<NativeHost>) -> Result<RuntimePool> {
         },
     )
 }
+/// Waits for the realm's turn in the shared heap account, calling `waiting`
+/// about every quarter second meanwhile. The realm gives up on its own only
+/// when the account stays stuck (`ADMISSION_PATIENCE`) or it is closed.
+pub(crate) fn admitted(realm: &Realm, waiting: &dyn Fn()) -> Result<()> {
+    loop {
+        match realm.admitted(Duration::from_millis(250)) {
+            Some(admitted) => return admitted,
+            None => waiting(),
+        }
+    }
+}
+/// Runs `source` and waits up to `seconds` for it, not counting the time the
+/// realm waited in line for its heap.
 pub(crate) fn settled(realm: &Realm, source: &str, seconds: u64) -> Result<Evaluation> {
+    admitted(realm, &|| {})?;
     let mut ticket = realm.eval(source)?;
     let deadline = Instant::now() + Duration::from_secs(seconds);
     wait_until(&mut ticket, deadline).unwrap_or_else(|| {
@@ -860,6 +874,32 @@ mod tests {
         assert!(!compiled(&script), "TypeScript alone started it");
         assert!(compiled(&panel), "a Svelte file compiles with it");
         assert!(!compiled(&panel), "the cached graph started it again");
+    }
+    /// The Svelte compiler's deadline counts from when its realm has its
+    /// heap: one waiting its turn in a full account is not timed out.
+    #[test]
+    fn a_compile_waiting_for_heap_is_not_timed_out() {
+        let runner = runner();
+        let root = tempfile::tempdir().unwrap();
+        let panel = root.path().join("panel");
+        std::fs::create_dir_all(&panel).unwrap();
+        std::fs::write(
+            panel.join("index.ts"),
+            "import Panel from './Panel.svelte'; export default function(api: any){api.panels.register({id:'p',title:'P',component:Panel})}",
+        )
+        .unwrap();
+        std::fs::write(panel.join("Panel.svelte"), "<p>panel</p>").unwrap();
+        // The account is full but for a sliver; it is given back in 12 s.
+        let cage = Admission::cage();
+        let held = cage.hold(cage.budget() - cage.used() - 8 * 1024 * 1024).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(12));
+            drop(held);
+        });
+        let svelte = compile::LazySvelte::new(&runner._pool).with_deadline(Duration::from_secs(10));
+        let compiled = compile::compile(&panel, "index.ts", 3, &svelte, None);
+        release.join().unwrap();
+        assert!(compiled.is_ok(), "{:?}", compiled.err());
     }
     type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
