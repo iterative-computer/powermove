@@ -85,6 +85,8 @@ struct QuitCoordinator {
     /// them once, at its end, not window by window (each answers by its
     /// own deadline, `LAST_FRAME_WAIT`).
     frames: Vec<async_channel::Receiver<()>>,
+    /// The stage the quit is in and its bound, renewed after Keep Waiting.
+    stage: Option<(&'static str, std::time::Duration)>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
     queue: Vec<gpui::WeakEntity<Controller>>,
     quitting: bool,
@@ -109,6 +111,12 @@ pub fn allow_quit(cx: &App) {
     delegate.allow();
     delegate.resolve_quit_events(false);
 }
+/// Bounds the quit's stage `name` (`quit_limit`): one that makes no
+/// progress in `bound` asks the person, never ends the quit itself.
+fn arm(cx: &mut App, name: &'static str, bound: std::time::Duration) {
+    cx.global_mut::<QuitCoordinator>().stage = Some((name, bound));
+    crate::quit_limit::stage(name, bound);
+}
 fn cancel_quit(cx: &mut App) {
     crate::quit_limit::cancel();
     pm_shell::session::set_quitting(false);
@@ -125,6 +133,7 @@ fn cancel_quit(cx: &mut App) {
         q.asking_now = None;
         q.queue.clear();
         q.frames.clear();
+        q.stage = None;
         q.host.closing.store(false, Ordering::Release);
         q.controllers.clone()
     };
@@ -327,7 +336,7 @@ fn next_quit(cx: &mut App) {
                 .any(|c| c.read(cx).dirty())
     };
     if !asks {
-        crate::quit_limit::stage("windows", crate::quit_limit::SETTLED);
+        arm(cx, "windows", crate::quit_limit::WINDOWS);
     }
     while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
         if weak
@@ -404,32 +413,63 @@ fn ask_quit_now(cx: &mut App) {
     else {
         return;
     };
+    // Nobody is hurried while asked: the bound waits for the answer.
+    crate::quit_limit::cancel();
     let mut sheet = None;
     let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
     cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
     cx.spawn(async move |cx| {
         let now = answer.recv().await.ok().flatten() == Some(true);
-        let kernel = cx.update(|cx| {
+        let quit_now = cx.update(|cx| {
             let q = cx.global_mut::<QuitCoordinator>();
             q.asking_now = None;
-            (now && q.quitting).then(|| q.host.kernel.clone())
+            // Keep Waiting: the stage is bounded again from now.
+            if !now
+                && q.quitting
+                && let Some((name, bound)) = q.stage
+            {
+                crate::quit_limit::stage(name, bound);
+            }
+            now && q.quitting
         });
-        let Some(kernel) = kernel else {
-            return;
-        };
-        quit_as_is(kernel, note, cx).await;
+        if quit_now {
+            quit_as_is(note, cx).await;
+        }
     })
     .detach();
+}
+/// A stage of a chosen quit made no progress in its bound: the person is
+/// asked whether to keep waiting or quit now. Never while a window saves or
+/// asks something (that is waited for, and the stage bounded again).
+fn ask_stalled(stall: crate::quit_limit::Stall, cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    if !q.quitting || q.terminating || !stall.current() {
+        return;
+    }
+    let busy = q.asking_now.is_some()
+        || q.controllers.iter().filter_map(|weak| weak.upgrade()).any(|c| {
+            let c = c.read(cx);
+            c.save_pending || c.host.borrow().window.attachedSheet().is_some()
+        });
+    if busy {
+        if let Some((name, bound)) = q.stage {
+            crate::quit_limit::stage(name, bound);
+        }
+        return;
+    }
+    crate::diag::line(serde_json::json!({"quit":"ask_stalled","stage":stall.stage}));
+    ask_quit_now(cx);
 }
 /// Quits without the work the quit was waiting for, leaving everything as a
 /// crash would: every edit the kernel acknowledged is already written to its
 /// journal and is made durable here without waiting for the busy kernel.
 /// Saves journal their save point before replacing a file, so the journal
 /// replays onto whatever the disk holds, and the next open offers it.
-async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp) {
-    let synced = cx
+async fn quit_as_is(note: String, cx: &mut gpui::AsyncApp) {
+    crate::diag::line(serde_json::json!({"quit":"securing"}));
+    let secured = cx
         .background_executor()
-        .spawn(async move { kernel.sync_journals() })
+        .spawn(async { crate::quit_limit::secure(crate::quit_limit::SECURE) })
         .await;
     cx.update(|cx| {
         let q = cx.global_mut::<QuitCoordinator>();
@@ -437,13 +477,44 @@ async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp)
         if !q.quitting {
             return;
         }
-        q._delegate.resolve_quit_events(false);
-        if let Err(e) = synced {
-            eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
+        match secured {
+            // The unsaved work is durable in the journals: the next open
+            // offers it back.
+            Ok(()) => {
+                q._delegate.resolve_quit_events(false);
+                crate::diag::line(serde_json::json!({"quit":"quit_now","note":note}));
+                crate::quit_limit::stop_jobs_and_exit();
+            }
+            // Not durable: ending now could lose it, so the app stays.
+            Err(reason) => cannot_quit_now(&reason, cx),
         }
-        eprintln!("Quit Now: {note}");
-        std::process::exit(0);
     });
+}
+/// Quit Now could not make the unsaved work durable: says so, and the app
+/// keeps running with every window it still has.
+fn cannot_quit_now(reason: &str, cx: &mut App) {
+    use crate::alert::{Alert, Button, Key};
+    crate::error_log::shared(cx).borrow_mut().push(
+        "Quit",
+        &format!("Quit Now stopped: {reason}"),
+    );
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    cancel_quit(cx);
+    if let Some(window) = window {
+        let _ = Alert::new(
+            "Powermove couldn’t make your unsaved changes safe, so it didn’t quit.",
+            format!(
+                "Quitting now could lose them: {reason}. Reconnect or free up the disk, then quit again. Window ▸ Error Log has the details."
+            ),
+            vec![Button::new("OK", true).default().key(Key::Escape)],
+        )
+        .sheet(&window);
+    }
 }
 /// The quit alert when the project library could not be written or released.
 /// Nothing in a window can fix it by then (every project's own close was
@@ -517,7 +588,7 @@ fn quit_call(signal: bool) -> ShellCall {
 /// library, then quits.
 fn finish_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
-    crate::quit_limit::stage("library", crate::quit_limit::LIBRARY);
+    arm(cx, "library", crate::quit_limit::LIBRARY);
     let host = cx.global::<QuitCoordinator>().host.clone();
     let signal = cx.global::<QuitCoordinator>().terminating;
     let frames = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().frames);
@@ -576,7 +647,9 @@ fn finish_quit(cx: &mut App) {
                 }
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
-                crate::quit_limit::stage("teardown", crate::quit_limit::TEARDOWN);
+                // Everything is written and released: what is left is the
+                // app's own teardown, with no window left to ask from.
+                crate::quit_limit::cancel();
                 cx.quit();
             }
             other => {
@@ -589,7 +662,6 @@ fn finish_quit(cx: &mut App) {
                     &format!("The project library couldn’t be written before quitting: {reason}"),
                 );
                 let q = cx.global::<QuitCoordinator>();
-                let kernel = q.host.kernel.clone();
                 let window = q
                     .controllers
                     .iter()
@@ -601,7 +673,7 @@ fn finish_quit(cx: &mut App) {
                 let answer = quit_failed_alert(&reason).sheet(&window);
                 cx.spawn(async move |cx| {
                     if answer.recv().await.ok().flatten() == Some(true) {
-                        quit_as_is(kernel, format!("Quitting: {reason}"), cx).await;
+                        quit_as_is(format!("Quitting: {reason}"), cx).await;
                     } else {
                         cx.update(cancel_quit);
                     }
@@ -617,9 +689,17 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         let (delegate, rx) = crate::platform::quit_guard();
         let host = entity.read(cx).mcp.clone();
         crate::quit_limit::set_kernel(host.kernel.clone());
+        let stalls = crate::quit_limit::stalls();
+        cx.spawn(async move |cx| {
+            while let Ok(stall) = stalls.recv().await {
+                cx.update(|cx| ask_stalled(stall, cx));
+            }
+        })
+        .detach();
         cx.set_global(QuitCoordinator {
             _delegate: delegate,
             frames: Vec::new(),
+            stage: None,
             controllers: Vec::new(),
             queue: Vec::new(),
             quitting: false,
@@ -1084,6 +1164,10 @@ impl Controller {
             return;
         };
         let kernel = self.kernel.clone();
+        if intent == Intent::Quit {
+            // Don't Save is answered: archiving the changes is bounded too.
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
+        }
         self.closing_note = Some(closing(intent, "archiving changes"));
         cx.spawn(async move |this, cx| {
             let result = discard_close(&kernel, session).await;
@@ -1120,7 +1204,7 @@ impl Controller {
         let had_project = session.is_some() || self.published.is_some();
         if intent == Intent::Quit {
             // This window's questions are answered: its close is bounded.
-            crate::quit_limit::stage("windows", crate::quit_limit::SETTLED);
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
         }
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         // The picture the viewer shows now is what the next launch shows
@@ -1145,6 +1229,8 @@ impl Controller {
             }
             other => other,
         };
+        #[cfg(debug_assertions)]
+        let stalled_last = cx.global::<QuitCoordinator>().queue.is_empty();
         cx.spawn(async move |this, cx| {
             let result = async {
                 let started = std::time::Instant::now();
@@ -1152,6 +1238,18 @@ impl Controller {
                     let _ = stored.recv().await;
                 }
                 let framed = started.elapsed();
+                // A development build can hold the last window's close, as a
+                // close the kernel never answers does, to try the quit's
+                // stall question by hand (PM-425).
+                #[cfg(debug_assertions)]
+                if intent == Intent::Quit
+                    && std::env::var_os("PM_QUIT_TEST_STALL").is_some()
+                    && stalled_last
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                }
                 if let Some(session) = session {
                     expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
                 }
@@ -1220,15 +1318,6 @@ impl Controller {
                     .detach();
                     if intent == Intent::Quit {
                         crate::diag::line(serde_json::json!({"quit":"window_released"}));
-                        // A development build can hold the main thread in the
-                        // last window's close, as a stuck close does, to try
-                        // the quit's bounds by hand (PM-425).
-                        #[cfg(debug_assertions)]
-                        if std::env::var_os("PM_QUIT_TEST_STALL").is_some()
-                            && cx.global::<QuitCoordinator>().queue.is_empty()
-                        {
-                            std::thread::sleep(std::time::Duration::from_secs(60));
-                        }
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
                     } else if intent == Intent::Project
