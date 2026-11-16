@@ -297,6 +297,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// The field the panel last asked to take the keyboard (`focusRequest`).
+    focus_requested: Option<String>,
     /// A semantic id to scroll into view once a publication has it.
     reveal: Option<(String, std::time::Instant)>,
     /// Told when a new tree is installed: the timeline's native timecode
@@ -378,6 +380,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            focus_requested: None,
             reveal: None,
             installed: None,
             grows: false,
@@ -532,6 +535,7 @@ impl SurfaceView {
             self.reconcile(window, cx);
         }
         self.try_focus_text(cx);
+        self.follow_focus_request(cx);
         self.take_ready(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
@@ -923,10 +927,11 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
-                    // `data-pm-variant="glass"`: a segmented control in the
-                    // system's capsule at the large size.
-                    glass: crate::v4_compile::variant(node) == Some("glass")
-                        && matches!(kind, crate::v4_control::Kind::Segmented),
+                    // Every segmented control is the kit's one: the system's
+                    // Liquid Glass capsule at the large size (PM-409).
+                    // Settings keeps the plain AppKit control of its pages.
+                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
+                        && self.publication.panel != "settings",
                 },
                 &tokens,
                 window,
@@ -1576,6 +1581,36 @@ impl SurfaceView {
             .runtime
             .bound_layers(&self.publication.panel, &binding)?;
         (*bound == [layer.clone()]).then_some(id)
+    }
+    /// A panel names the field that should take the keyboard (`focusRequest`,
+    /// a field's own id): the field takes it once each time the request
+    /// appears or changes, so a search button that opens its field puts the
+    /// caret in it and typed letters never fire shortcuts on the way (PM-402).
+    fn follow_focus_request(&mut self, cx: &mut Context<Self>) {
+        let request = self
+            .publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("focusRequest").and_then(Value::as_str))
+            .filter(|r| !r.is_empty())
+            .find(|r| {
+                self.prepared
+                    .semantics
+                    .get(*r)
+                    .is_some_and(|id| self.fields.contains_key(id))
+            })
+            .map(str::to_owned);
+        if request == self.focus_requested {
+            return;
+        }
+        self.focus_requested = request.clone();
+        let field = request
+            .and_then(|r| self.prepared.semantics.get(&r).copied())
+            .and_then(|id| self.fields.get(&id).cloned());
+        if let Some(field) = field {
+            field.update(cx, |f, cx| f.begin_editing(cx));
+        }
     }
     /// The text field `semantic` lets go of the keyboard (the editor has it).
     pub(crate) fn blur_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
@@ -3358,6 +3393,7 @@ impl SurfaceView {
                                 this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
                             },
                         )
+                        .animate_when_visible()
                         .into_any_element()
                 });
             }

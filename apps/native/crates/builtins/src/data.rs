@@ -220,6 +220,17 @@ impl Backend {
             media_stamp(&self.native.facts),
             self.native.facts["agentPopover"]
         );
+        // A finished encoder check is news for the Export sheet.
+        let stamp = format!(
+            "{stamp}:{}",
+            self.native
+                .export_probe
+                .lock()
+                .unwrap()
+                .done
+                .as_ref()
+                .map_or("", |(key, _)| key.as_str())
+        );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;
             self.native.agent_link.touch();

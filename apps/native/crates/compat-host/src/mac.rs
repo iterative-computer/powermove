@@ -725,17 +725,17 @@ impl SlotView {
             msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]
         }
     }
-    fn clip(&self, rects: Vec<Rect>) {
+    /// Shows the page only within `rects` (window points from the top), each
+    /// with continuous bottom corners of `radius` (a panel body's corners).
+    fn clip(&self, rects: Vec<Rect>, radius: f64) {
         let path = CGMutablePath::new();
         let h = self.bounds().size.height;
         for r in &rects {
-            unsafe {
-                CGMutablePath::add_rect(
-                    Some(&path),
-                    std::ptr::null(),
-                    NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
-                );
-            }
+            add_bottom_rounded(
+                &path,
+                NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
+                radius,
+            );
         }
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
@@ -746,6 +746,37 @@ impl SlotView {
         if let Some(layer) = self.layer() {
             unsafe { layer.setMask(Some(&mask)) }
         }
+    }
+}
+
+/// Adds `rect` (y up) to `path` with continuous corners of `radius` at its
+/// bottom (min y) corners and square top ones, wound as `CGPathAddRect`.
+fn add_bottom_rounded(path: &CGMutablePath, rect: NSRect, radius: f64) {
+    use pm_design::corner::{CONTINUOUS_REACH, continuous_corner, fit};
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+    let r = fit(radius, rect.size.width, rect.size.height);
+    let p = Some(path);
+    let none = std::ptr::null();
+    unsafe {
+        if r <= 0. {
+            CGMutablePath::add_rect(p, none, rect);
+            return;
+        }
+        let corner = |c, a, b| {
+            for [c1, c2, to] in continuous_corner(c, a, b, r).1 {
+                CGMutablePath::add_curve_to_point(p, none, c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+            }
+        };
+        let k = CONTINUOUS_REACH * r;
+        CGMutablePath::move_to_point(p, none, x0 + k, y0);
+        CGMutablePath::add_line_to_point(p, none, x1 - k, y0);
+        corner((x1, y0), (-1., 0.), (0., 1.));
+        CGMutablePath::add_line_to_point(p, none, x1, y1);
+        CGMutablePath::add_line_to_point(p, none, x0, y1);
+        CGMutablePath::add_line_to_point(p, none, x0, y0 + k);
+        corner((x0, y0), (0., 1.), (1., 0.));
+        CGMutablePath::close_subpath(p);
     }
 }
 
@@ -775,6 +806,9 @@ pub struct MacDomHost {
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
     overlays: BTreeMap<String, (Retained<SnapshotView>, Retained<NSImageView>)>,
+    /// The continuous radius of each region's bottom corners
+    /// (`set_corner_radius`): the panels' bodies end in their corners.
+    corner_radius: f64,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -920,6 +954,7 @@ impl MacDomHost {
             content: None,
             fill: None,
             overlays: BTreeMap::new(),
+            corner_radius: 0.,
         };
         host.load();
         Ok(host)
@@ -1152,6 +1187,15 @@ impl MacDomHost {
             Some(gpui),
         );
         refuse_drags(&self.web);
+    }
+    /// The continuous radius of every region's bottom corners: a panel's body
+    /// ends in the panel's own rounded corners, so the page is clipped there
+    /// as the shell clips its own content.
+    pub fn set_corner_radius(&mut self, radius: f64) {
+        if self.corner_radius != radius {
+            self.corner_radius = radius;
+            self.shared.geometry_dirty.set(true);
+        }
     }
     /// Show panel bodies on their ground while keeping overlay regions transparent.
     /// The viewer stage shares the page, but must never inherit the panel fill.
@@ -1518,7 +1562,7 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot.clip(self.shared.panels.borrow().visible());
+        self.slot.clip(self.shared.panels.borrow().visible(), self.corner_radius);
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field

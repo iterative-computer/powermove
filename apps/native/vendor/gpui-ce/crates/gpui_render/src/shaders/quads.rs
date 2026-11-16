@@ -576,7 +576,7 @@ pub mod quad {
             return transparent();
         }
         let quad = get!(QUADS)[input.quad_id as usize];
-        let fade = ContentMask::alpha(quad.content_mask, input.position.xy());
+        let fade = content_mask_alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
             Paint::new(quad.background, quad.bounds),
             input.position.xy(),
@@ -695,7 +695,7 @@ pub mod quad {
             return transparent();
         }
         let quad = get!(QUADS)[input.quad_id as usize];
-        let fade = ContentMask::alpha(quad.content_mask, input.position.xy());
+        let fade = content_mask_alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
             Paint::new(quad.background, quad.bounds),
             input.position.xy(),

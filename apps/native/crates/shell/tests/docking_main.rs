@@ -214,7 +214,6 @@ fn maximize_tracks_group_across_tab_selection_without_persisting_geometry() {
 #[test]
 fn overflow_keeps_active_and_never_loses_a_tab() {
     let group = Group {
-        flex_basis: None,
         tabs: (0..12).map(|i| format!("tab-{i}")).collect(),
         active: 10,
         size: None,

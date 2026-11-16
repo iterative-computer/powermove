@@ -106,6 +106,10 @@ pub struct Controller {
     /// The layer a generated select's open menu edits, bound when it opened.
     pub(crate) generated_menu_layer: Option<String>,
     pub(crate) panel_builds: std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    /// Generated panels' Off/On toggles: the system's segmented control per
+    /// `panel#index`, kept while the control is shown.
+    pub(crate) generated_switches:
+        std::collections::HashMap<String, Entity<pm_shell::native_control::NativeControl>>,
     /// This window's shell view (its live layout).
     pub(crate) shell: Option<gpui::WeakEntity<pm_shell::view::Editor>>,
     /// Cloud media offered and downloading in this window.
@@ -899,6 +903,7 @@ impl Controller {
             workspaces_status: String::new(),
             generated_menu_layer: None,
             panel_builds: Default::default(),
+            generated_switches: Default::default(),
             shell: None,
             cloud: Default::default(),
             captions: Default::default(),
@@ -3273,7 +3278,11 @@ impl Controller {
             return true;
         }
         // Edit menu items reach a focused text field before the document.
-        if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {
+        // Under a sheet, one that no field took goes nowhere.
+        if cmd.name.starts_with("context")
+            && (self.host.borrow().system(&cmd.name)
+                || self.host.borrow().window.attachedSheet().is_some())
+        {
             return true;
         }
         // Escape on Home clears its search, then returns to the project (v1).

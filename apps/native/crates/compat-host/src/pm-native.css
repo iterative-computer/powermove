@@ -60,7 +60,15 @@
       [data-pm-style="tokens-only"] *
     )
   ),
-  input:where(
+  /* Text fields only: a checkbox, radio, slider, colour well or file
+     button keeps the system control the built-in panels draw. */
+  input:not(
+      [type="checkbox"],
+      [type="radio"],
+      [type="range"],
+      [type="color"],
+      [type="file"]
+    ):where(
     :not(
       [data-pm-style="none"],
       [data-pm-style="none"] *,
@@ -918,4 +926,19 @@
   ) {
     display: block;
   }
+}
+
+/* Native panel frame: the shell owns its surface and elevation. These host
+   roots never add another box; controls inside keep their own decoration.
+   The body's padding stays the extension's, as in v1 (extensions pad their
+   own roots; a host inset would double it). */
+html,
+body,
+[data-pm-contribution],
+[data-pm-panel-body] {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  margin: 0 !important;
 }
