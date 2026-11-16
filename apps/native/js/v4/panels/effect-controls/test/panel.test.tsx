@@ -260,3 +260,15 @@ test("a colour wheel sums up on one row and opens in the Color panel", async () 
   await f.root.dispose();
   await f.controller.dispose();
 });
+
+test("the gradient bar blends its start colour into its end colour", async () => {
+  const { rampSlices } = await import("../panel");
+  const slices = rampSlices("#000000", "#ffffff", 4);
+  expect(slices).toEqual(["#202020", "#606060", "#9f9f9f", "#dfdfdf"]);
+  // Short hex and alpha are read; a colour it cannot read splits the bar.
+  expect(rampSlices("#f00", "#0000ff80", 2)).toEqual([
+    "#bf0040df",
+    "#4000bfa0",
+  ]);
+  expect(rampSlices("red", "#ffffff", 2)).toEqual(["red", "#ffffff"]);
+});

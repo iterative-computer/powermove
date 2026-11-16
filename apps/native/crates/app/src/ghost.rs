@@ -69,12 +69,13 @@ pub fn body_size(bounds: Rect, t: &Tokens) -> (f32, f32) {
 }
 /// The body under a panel's header in `bounds` (the panel's rect): the same
 /// box the real body takes, so nothing moves when it arrives.
-/// `poster`: the project's Home poster, shown in the viewer's frame.
+/// `poster`: the picture the opening project's viewer last showed (or its
+/// Home poster), decoded, shown in the viewer's frame.
 pub fn body(
     id: &str,
     bounds: Rect,
     aspect: Option<f32>,
-    poster: Option<&std::path::Path>,
+    poster: Option<std::sync::Arc<RenderImage>>,
     t: &Tokens,
 ) -> AnyElement {
     let m = &t.metrics;
@@ -117,7 +118,7 @@ pub fn body(
                         .overflow_hidden()
                         .bg(wash)
                         .children(poster.map(|poster| {
-                            img(poster.to_path_buf())
+                            img(ImageSource::Render(poster))
                                 .size_full()
                                 .object_fit(ObjectFit::Cover)
                         })),

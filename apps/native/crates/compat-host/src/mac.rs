@@ -236,6 +236,45 @@ impl Shared {
             }
             return Ok(Value::Null);
         }
+        if kind == "dock_content" {
+            let payload = &m["payload"];
+            if let (Some(id), Some(height)) = (
+                payload["id"].as_str().filter(|id| id.len() <= 256),
+                payload["height"]
+                    .as_f64()
+                    .filter(|h| h.is_finite() && *h > 0.),
+            ) {
+                self.handler.event(HostEvent::DockContent {
+                    id: id.into(),
+                    height,
+                });
+            }
+            return Ok(Value::Null);
+        }
+        if kind == "dock_scroll" || kind == "dock_reveal" {
+            let payload = &m["payload"];
+            if let Some(id) = payload["id"].as_str().filter(|id| id.len() <= 256) {
+                if kind == "dock_scroll" {
+                    if let Some(delta) = payload["delta"].as_f64().filter(|v| v.is_finite()) {
+                        self.handler.event(HostEvent::DockScroll {
+                            id: id.into(),
+                            delta,
+                        });
+                    }
+                } else if let (Some(top), Some(height)) =
+                    (payload["top"].as_f64(), payload["height"].as_f64())
+                {
+                    if top.is_finite() && height.is_finite() {
+                        self.handler.event(HostEvent::DockReveal {
+                            id: id.into(),
+                            top,
+                            height,
+                        });
+                    }
+                }
+            }
+            return Ok(Value::Null);
+        }
         if kind == "fonts_loaded" {
             let keys = m["payload"]["keys"]
                 .as_array()

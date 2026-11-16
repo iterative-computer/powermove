@@ -300,6 +300,7 @@ fn size(v: Option<&Value>) -> Option<f32> {
 /// present), and a record without docks shows the viewer alone. Panels no one
 /// provides stay in place; the shell shows a placeholder naming them.
 pub fn layout(record: &Value) -> Layout {
+    let mut flex_bases = std::collections::BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut docks: Vec<Dock> = vec![];
     let specs = record
@@ -327,6 +328,11 @@ pub fn layout(record: &Value) -> Layout {
                 continue;
             }
             let flag = |k: &str| fields.is_some_and(|o| o.get(k) == Some(&Value::Bool(true)));
+            if flag("flex") && !flag("tabbed") {
+                if let Some(basis) = size(fields.and_then(|o| o.get("size"))) {
+                    flex_bases.insert(id.to_owned(), basis);
+                }
+            }
             match groups.last_mut() {
                 Some(g) if flag("tabbed") && stacks(id) && g.tabs.iter().all(|t| stacks(t)) => {
                     g.tabs.push(id.to_owned());
@@ -351,7 +357,9 @@ pub fn layout(record: &Value) -> Layout {
         if groups.is_empty() {
             continue;
         }
-        if groups.iter().all(|g| g.size.is_some()) {
+        if !matches!(d.get("id").and_then(Value::as_str), Some("left" | "right"))
+            && groups.iter().all(|g| g.size.is_some())
+        {
             groups[0].size = None;
         }
         let mut id = d
@@ -403,6 +411,7 @@ pub fn layout(record: &Value) -> Layout {
         }
     }
     Layout {
+        flex_bases,
         version: 1,
         workspace: record_id(record).unwrap_or(FALLBACK).to_owned(),
         docks,
@@ -482,7 +491,13 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
                     if i == 0 {
                         match g.size {
                             Some(n) => s.insert("size".into(), rounded(n)),
-                            None => s.insert("flex".into(), true.into()),
+                            None => {
+                                s.insert("flex".into(), true.into());
+                                if let Some(basis) = layout.flex_bases.get(&g.tabs[0]).copied() {
+                                    s.insert("size".into(), rounded(basis));
+                                }
+                                None
+                            }
                         };
                     } else {
                         s.insert("tabbed".into(), true.into());

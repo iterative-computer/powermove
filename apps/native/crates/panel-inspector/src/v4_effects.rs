@@ -17,6 +17,8 @@ use std::ops::Range;
 pub struct Presentation {
     pub layer_type_labels: HashMap<String, String>,
     pub parameters: HashMap<(String, String), ParameterPresentation>,
+    /// Each definition's layout hints (`ui`), by definition id.
+    pub ui: HashMap<String, serde_json::Value>,
 }
 #[derive(Clone, Debug)]
 pub struct ParameterPresentation {
@@ -26,8 +28,10 @@ pub struct ParameterPresentation {
     pub unit: Option<String>,
     pub precision: Option<usize>,
     pub options: Vec<Value>,
+    /// The definition says it is rarely used (under More), when it says.
+    pub advanced: Option<bool>,
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct FlatRow {
     id: String,
     effect: usize,
@@ -36,6 +40,9 @@ struct FlatRow {
     /// Parameters shown as one summary row (a colour wheel's master and
     /// channels, a curve's points): its key, its label, and its members.
     group: Option<(String, String, Vec<Member>)>,
+    /// An effect's More disclosure: how many it holds, whether it is open,
+    /// and whether any of them differs from its default.
+    more: Option<(usize, bool, bool)>,
 }
 type Member = (PropertyId, String, Option<crate::ParamDefinition>);
 
@@ -108,10 +115,11 @@ impl EffectsPanel {
         layer: &str,
         fx: &[Value],
     ) -> Result<(), InspectorError> {
-        let open = fx
+        let mut open = fx
             .iter()
             .map(|f| model.effect_disclosure(layer, text(f, "id")))
             .collect::<Result<Vec<_>, _>>()?;
+        open.extend(fx.iter().map(|f| model.more_open(layer, text(f, "id"))));
         let key = (
             model.published.snapshot.doc_id,
             model.revision(),
@@ -134,6 +142,7 @@ impl EffectsPanel {
         self.flat.clear();
         for (index, effect) in fx.iter().enumerate() {
             self.flat.push(FlatRow {
+                more: None,
                 id: format!("effect:{}", text(effect, "id")),
                 effect: index,
                 parameter: None,
@@ -150,6 +159,7 @@ impl EffectsPanel {
                     action_id.push('#');
                 }
                 self.flat.push(FlatRow {
+                    more: None,
                     id: action_id,
                     effect: index,
                     parameter: None,
@@ -160,6 +170,17 @@ impl EffectsPanel {
             match model.effect_parameters(layer, id) {
                 Ok(params) => {
                     let definition = text(effect, "type");
+                    // Effect Controls lays an effect out as v1 did; a grade
+                    // instrument folds into its summaries instead.
+                    if self.fold_grades
+                        && !params
+                            .iter()
+                            .any(|(_, p)| grade_group(definition, &p.key).is_some())
+                    {
+                        let rows = self.lay_out(model, effect, index, layer, params);
+                        self.flat.extend(rows);
+                        continue;
+                    }
                     for (property, param) in params {
                         let key = param.key.clone();
                         let group = self
@@ -168,6 +189,7 @@ impl EffectsPanel {
                             .flatten();
                         let Some((group, label)) = group else {
                             self.flat.push(FlatRow {
+                                more: None,
                                 id: pm_model::json::to_canonical_string(&property.value()),
                                 effect: index,
                                 parameter: Some((property, key, Some(param))),
@@ -185,6 +207,7 @@ impl EffectsPanel {
                                 }
                             }
                             None => self.flat.push(FlatRow {
+                                more: None,
                                 id: row_id,
                                 effect: index,
                                 parameter: None,
@@ -202,6 +225,7 @@ impl EffectsPanel {
                     if let Some(params) = effect.get("p").and_then(Value::as_object) {
                         self.flat.extend(params.iter().map(|(key, _)| {
                             FlatRow {
+                                more: None,
                                 id: pm_model::json::to_canonical_string(
                                     &PropertyId::new(
                                         layer,
@@ -234,6 +258,153 @@ impl EffectsPanel {
         self.cached_definition_generation = model.definition_generation;
         self.cache_key = Some(key);
         Ok(())
+    }
+    /// An effect's rows as v1 laid them out (`param_layout`): its gradient
+    /// bar (then its Linear/Radial row) and points first, then its rows,
+    /// Amount and Mix last, then More with the rarely used ones.
+    fn lay_out(
+        &self,
+        model: &Inspector,
+        effect: &Value,
+        index: usize,
+        layer: &str,
+        params: Vec<(PropertyId, crate::ParamDefinition)>,
+    ) -> Vec<FlatRow> {
+        use crate::param_layout::{self, Widget};
+        let (id, definition) = (text(effect, "id"), text(effect, "type"));
+        let display = |key: &str| {
+            model.saved_parameter_presentation(effect, key).or_else(|| {
+                self.presentation
+                    .parameters
+                    .get(&(definition.into(), key.into()))
+                    .cloned()
+            })
+        };
+        let info: Vec<param_layout::Param> = params
+            .iter()
+            .map(|(_, p)| {
+                let d = display(&p.key);
+                param_layout::Param {
+                    key: p.key.clone(),
+                    label: d
+                        .as_ref()
+                        .map(|d| d.label.clone())
+                        .unwrap_or_else(|| pm_surface::humanize(&p.key)),
+                    kind: p.kind.clone(),
+                    min: p.min,
+                    max: p.max,
+                    advanced: d.and_then(|d| d.advanced),
+                }
+            })
+            .collect();
+        let ui = model
+            .saved_parameter_ui(effect)
+            .or_else(|| self.presentation.ui.get(definition).cloned());
+        let layout = param_layout::layout(&info, ui.as_ref());
+        let member = |key: &str| -> Option<Member> {
+            params
+                .iter()
+                .find(|(_, p)| p.key == key)
+                .map(|(property, p)| (property.clone(), p.key.clone(), Some(p.clone())))
+        };
+        let row = |m: Member| FlatRow {
+            id: pm_model::json::to_canonical_string(&m.0.value()),
+            effect: index,
+            parameter: Some(m),
+            ..FlatRow::default()
+        };
+        let group = |kind: &str, row_id: String, label: &str, keys: [&str; 2]| {
+            let members: Vec<Member> = keys.into_iter().filter_map(member).collect();
+            FlatRow {
+                id: row_id,
+                effect: index,
+                group: Some((kind.into(), label.into(), members)),
+                ..FlatRow::default()
+            }
+        };
+        let widget = |w: &Widget, rows: &mut Vec<FlatRow>| match w {
+            Widget::Ramp {
+                start, end, mode, ..
+            } => {
+                rows.push(group(
+                    "ramp",
+                    format!("ramp:{id}"),
+                    "Gradient",
+                    [start.as_str(), end.as_str()],
+                ));
+                rows.extend(mode.as_deref().and_then(member).map(row));
+            }
+            Widget::Point { x, y, label, .. } => {
+                rows.push(group(
+                    "point",
+                    format!("point:{id}:{x}"),
+                    label,
+                    [x.as_str(), y.as_str()],
+                ));
+            }
+        };
+        let mut rows = vec![];
+        let hidden_point = |w: &Widget| matches!(w, Widget::Point { advanced: true, .. });
+        for w in layout.widgets.iter().filter(|w| !hidden_point(w)) {
+            widget(w, &mut rows);
+        }
+        rows.extend(
+            layout
+                .primary
+                .iter()
+                .filter_map(|k| member(k.as_str()))
+                .map(row),
+        );
+        let tucked: Vec<&Widget> = layout.widgets.iter().filter(|w| hidden_point(w)).collect();
+        let count = layout.more.len() + tucked.len();
+        if count > 0 {
+            // A tucked parameter that is not at its default (or is keyed)
+            // marks the closed group, as v1's did.
+            let keys = layout
+                .more
+                .iter()
+                .map(String::as_str)
+                .chain(tucked.iter().flat_map(|w| match w {
+                    Widget::Point { x, y, .. } => vec![x.as_str(), y.as_str()],
+                    Widget::Ramp { .. } => vec![],
+                }));
+            let changed = keys.into_iter().any(|key| {
+                let stored = effect.get("p").and_then(|p| p.get(key));
+                let keyed = stored
+                    .and_then(|s| s.get("kf"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|k| !k.is_empty());
+                let default = params
+                    .iter()
+                    .find(|(_, p)| p.key == key)
+                    .map(|(_, p)| &p.default);
+                keyed
+                    || stored
+                        .and_then(|s| s.get("v"))
+                        .zip(default)
+                        .is_some_and(|(v, d)| v != d)
+            });
+            let open = model.more_open(layer, id);
+            rows.push(FlatRow {
+                id: format!("more:{id}"),
+                effect: index,
+                more: Some((count, open, changed)),
+                ..FlatRow::default()
+            });
+            if open {
+                for w in tucked {
+                    widget(w, &mut rows);
+                }
+                rows.extend(
+                    layout
+                        .more
+                        .iter()
+                        .filter_map(|k| member(k.as_str()))
+                        .map(row),
+                );
+            }
+        }
+        rows
     }
     /// One parameter as a row shows it: its value at `time`, its keys, and
     /// how its control reads (step, unit, precision, options, bounds).
@@ -475,13 +646,32 @@ impl EffectsPanel {
                 ]));
                 continue;
             }
+            if let Some((count, open, changed)) = entry.more {
+                rows.push(object([
+                    ("kind", "more".into()),
+                    ("id", entry.id.clone().into()),
+                    ("effect", id.into()),
+                    ("count", (count as f64).into()),
+                    ("open", open.into()),
+                    ("changed", changed.into()),
+                    ("effectLabel", label.into()),
+                    ("enabled", enabled.into()),
+                ]));
+                continue;
+            }
             if let Some((group, title, members)) = &entry.group {
                 let mut parameters = Vec::with_capacity(members.len());
                 for member in members {
                     parameters.push(self.parameter_value(model, effect, member, time, &layer, id)?);
                 }
+                // A gradient bar and a point are their own rows; a grade
+                // instrument sums up.
+                let kind = match group.as_str() {
+                    "ramp" | "point" => group.as_str(),
+                    _ => "summary",
+                };
                 rows.push(object([
-                    ("kind", "summary".into()),
+                    ("kind", kind.into()),
                     ("id", entry.id.clone().into()),
                     ("effect", id.into()),
                     ("group", group.clone().into()),
@@ -617,6 +807,14 @@ impl EffectsPanel {
                     direction()?,
                     intent.get("shift").and_then(Value::as_bool) == Some(true),
                 )?;
+                return Ok(plan.pin_document());
+            }
+            "disclose" if id.starts_with("more:") => {
+                let open = intent
+                    .get("open")
+                    .and_then(Value::as_bool)
+                    .ok_or(InspectorError::InvalidInput)?;
+                model.set_more_open(&layer, &id["more:".len()..], open)?;
                 return Ok(plan.pin_document());
             }
             "disclose" => {

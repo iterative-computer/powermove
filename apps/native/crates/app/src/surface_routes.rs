@@ -330,7 +330,7 @@ impl Controller {
                 } => {
                     if v.session.is_none() && !v.opening {
                         if let Some(project) = &project {
-                            v.stage_poster(project);
+                            v.stage_open(project);
                         }
                         v.begin_ghost(&name, aspect, cx);
                     }
@@ -446,21 +446,19 @@ impl Controller {
         }
         let project = self.session.as_ref()?.project.clone();
         let doc = self.published.as_ref()?.snapshot.doc_id;
-        let frame = self.viewer.as_ref()?.status().frame?;
-        // Only this project's own picture (a viewer replaced for another
-        // project may still hold the last one's).
-        if frame.stamp.doc_id != doc {
+        let status = self.viewer.as_ref()?.status();
+        let (frame, picture) = (status.frame?, status.settled_picture?);
+        // This project's own picture (a viewer replaced for another project
+        // may still hold the last one's), and of the frame shown now.
+        if picture.stamp.doc_id != doc
+            || picture.stamp.revision != frame.stamp.revision
+            || picture.time != frame.time
+        {
             return None;
         }
-        let picture = frame.picture?;
-        let time = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
-        let mark = crate::poster::last_frame_mark(frame.stamp.revision, time, frame.settled);
-        // Kept already, or settled already where this is its preview.
-        let settled = crate::poster::last_frame_mark(frame.stamp.revision, time, true);
-        if [&mark, &settled]
-            .into_iter()
-            .any(|mark| crate::poster::last_frame_current(&self.profile, &project, mark))
-        {
+        let time = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        let mark = crate::poster::last_frame_mark(picture.stamp.revision, time);
+        if crate::poster::last_frame_current(&self.profile, &project, &mark) {
             return None;
         }
         let profile = self.profile.clone();

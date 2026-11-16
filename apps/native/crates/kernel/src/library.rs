@@ -423,6 +423,23 @@ impl LibraryStore {
         }))
     }
 
+    /// The workspace `id` was last saved with, as its open takes it: its
+    /// `projectWorkspace`, else its session's (`projectMeta`, then the
+    /// older `projectState`). A window lays it out while the project opens.
+    pub fn saved_workspace(&self, id: &str) -> Option<Value> {
+        if let Ok(Some(workspace)) = self.read(&format!("projectWorkspace.{id}")) {
+            return Some(workspace);
+        }
+        ["projectMeta", "projectState"].into_iter().find_map(|family| {
+            self.read(&format!("{family}.{id}"))
+                .ok()
+                .flatten()?
+                .get("workspace")
+                .filter(|w| w.as_object().is_some())
+                .cloned()
+        })
+    }
+
     /// Counts per family, index reconciliation (no values).
     pub fn summary(&self) -> Result<LibrarySummary, LibraryError> {
         let keys = self.keys()?;

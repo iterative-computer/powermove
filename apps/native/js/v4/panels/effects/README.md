@@ -61,7 +61,7 @@ native-scroll performance claim: the kit's virtual-outline integration is absent
 | §6 VoiceOver      | Partial: actual AccessKit roles/names/selected/expanded/disabled/actions and focus order asserted. Kit lacks search-field role, AXRowCount/virtual row navigation, row custom Add action and live announcements.                                               |
 | §7 Appearance     | Tokens only; solid panel, neutral selection, hover and Increase Contrast outlines/separators. No native rendering or theme/accessibility screenshot claim.                                                                                                     |
 | §8 Copy           | Spec copy only; title follows owner decision. No invented failure UI. Preset spoken kind and unspecified failure presentation remain DESIGN-TODOs.                                                                                                             |
-| §9 Don't          | No category rail/fx badge/accent selection/single-click apply. No web-export or unrelated layout changes.                                                                                                                                                      |
+| §9 Don't          | No fx badge/accent selection/single-click apply. The category rail is v1's again (2026-11-16, v1 parity: one click reaches a category; the pop-up took two).                                                                                                   |
 
 The N/A snapshots intentionally equal the synchronous/browsing state; they do not
 introduce fake loading UI, a drop target or multiple selection. Drag snapshot
