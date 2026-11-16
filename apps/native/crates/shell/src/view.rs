@@ -3104,37 +3104,65 @@ impl Render for Editor {
                             this.layout.reset_dock(&key_divider);
                             0.
                         }
-                    }))
-                    .children(glow)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            // The grab reaches over the panels' edges: the
-                            // header or body under it must not also take the
-                            // press (a header would start a panel drag).
-                            cx.stop_propagation();
-                            this.split_focus = Some(divd.clone());
-                            if let Some(h) = &this.host {
-                                h.borrow_mut().splitter_focus = true;
-                            }
-                            // A double-click puts a dock back at its size
-                            // (the original app), and two panels back at
-                            // their heights.
-                            if e.click_count >= 2 {
-                                this.gesture = None;
-                                let (bounds, t) = (this.dock_bounds, this.tokens.clone());
-                                if this.layout.reset_dock(&divd)
-                                    || this.layout.reset_split(&divd, bounds, &t)
-                                {
-                                    this.slides.armed = true;
-                                    this.save();
-                                }
-                                cx.notify();
-                                return;
-                            }
-                            // A folded panel beside it opens first, so the
-                            // drag has room to work with.
-                            if this.layout.expand_beside(&divd) {
+                        _ => return,
+                    };
+                    this.layout.resize_with_panel_heights(
+                        &key_divider,
+                        delta,
+                        this.dock_bounds,
+                        &this.tokens,
+                        &this.dock_natural_heights,
+                    );
+                    this.save();
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .cursor(if d.horizontal {
+                    CursorStyle::ResizeUpDown
+                } else {
+                    CursorStyle::ResizeLeftRight
+                })
+                // The glow follows the pointer along the gap.
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                    let along = if hover_divider.horizontal {
+                        f32::from(e.position.x) - hover_divider.rect.x
+                    } else {
+                        f32::from(e.position.y) - hover_divider.rect.y
+                    };
+                    this.split_hover = Some((hover_key, along));
+                    cx.notify();
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if !*hovered
+                        && this.split_hover.is_some_and(|(k, _)| k == hover_key)
+                        && !matches!(this.gesture, Some(Gesture::Resize(..)))
+                    {
+                        this.split_hover = None;
+                        cx.notify();
+                    }
+                }))
+                .children(glow)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        // The grab reaches over the panels' edges: the
+                        // header or body under it must not also take the
+                        // press (a header would start a panel drag).
+                        cx.stop_propagation();
+                        this.split_focus = Some(divd.clone());
+                        if let Some(h) = &this.host {
+                            h.borrow_mut().splitter_focus = true;
+                        }
+                        // A double-click puts a dock back at its size
+                        // (the original app), and two panels back at
+                        // their heights.
+                        if e.click_count >= 2 {
+                            this.gesture = None;
+                            let (bounds, t) = (this.dock_bounds, this.tokens.clone());
+                            if this.layout.reset_dock(&divd)
+                                || this.layout.reset_split(&divd, bounds, &t)
+                            {
+                                this.slides.armed = true;
                                 this.save();
                             }
                             cx.notify();
