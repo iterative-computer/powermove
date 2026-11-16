@@ -1077,8 +1077,6 @@ impl Tokens {
             (self.colors.text, self.translucency.line)
         }
     }
-    /// Window ground as (colour, alpha): the `ground` tint over the blur, or
-    /// the solid `window` colour under Reduce Transparency.
     /// The panel over the window ground, for a transparent native page below
     /// the shell. This is the same two layers a built-in panel paints.
     pub fn panel_backing(&self) -> [f64; 4] {
@@ -1095,6 +1093,8 @@ impl Tokens {
         [channel(16), channel(8), channel(0), alpha]
     }
 
+    /// Window ground as (colour, alpha): the `ground` tint over the blur, or
+    /// the solid `window` colour under Reduce Transparency.
     pub fn ground(&self) -> (u32, f32) {
         if self.translucent() {
             (self.translucency.ground, self.translucency.window)
