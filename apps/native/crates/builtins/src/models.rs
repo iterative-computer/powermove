@@ -1601,6 +1601,7 @@ impl Backend {
                         // A newer check was asked meanwhile: it reports instead.
                         if probe.asked == key {
                             probe.done = Some((key, found));
+                            probe.unpublished = true;
                             drop(probe);
                             crate::wakers::wake_all();
                         }
@@ -2425,4 +2426,7 @@ pub struct Probe {
     pub asked: String,
     /// The last check that finished while it was still the one asked for.
     pub done: Option<(String, serde_json::Value)>,
+    /// That check is not on the sheet yet: the host publishes the sheet
+    /// again (`Builtins::publish_finished_checks`).
+    pub unpublished: bool,
 }

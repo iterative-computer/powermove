@@ -1224,6 +1224,11 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
     let click = |vcx: &mut VisualTestContext, id: &str| {
         let deadline = Instant::now() + Duration::from_secs(20);
         let b = loop {
+            // As the app does on a wake: the sheet's finished encoder checks
+            // are published (Export Video is off until they are).
+            if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+                wait(ticket);
+            }
             for p in rig.runtime.take_publications() {
                 view.update(vcx, |v, cx| v.publish(p, cx));
             }
@@ -1237,6 +1242,17 @@ fn cancel_reaches_the_app_after_export_without_them(cx: &mut TestAppContext) {
         vcx.simulate_click(b.center(), Modifiers::none());
         vcx.run_until_parked();
     };
+    // Export Video is on once the sheet's encoder checks have finished and
+    // been published.
+    let checked = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+            wait(ticket);
+            break;
+        }
+        assert!(Instant::now() < checked, "the encoder checks never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     click(&mut vcx, "export.start");
     until_asked(&mut vcx, "export.begin");
     wait(
