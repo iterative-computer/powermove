@@ -121,6 +121,8 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
+    build_alpha: Cell<Option<(u64,f64)>>,
+    kept_alpha: Cell<f64>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
     caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
     /// Canvas: the caret rectangle and clip in GPUI points, `None` hides it.
@@ -674,6 +676,8 @@ impl NativeTextSlot {
             wake: RefCell::new(None),
             geometry: Cell::new(None),
             staged: Cell::new(None),
+            build_alpha: Cell::new(None),
+            kept_alpha: Cell::new(1.),
             caret: (kind == TextKind::Canvas).then(|| {
                 let this = PassthroughView::alloc(mtm).set_ivars(());
                 let host: Retained<PassthroughView> =
@@ -787,9 +791,14 @@ impl NativeTextSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
+    pub fn stage_build_alpha(&self,alpha:f64) {
+        let paint=crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
+        let alpha=alpha.clamp(0.,1.);self.state.build_alpha.set(Some((paint,alpha)));self.state.kept_alpha.set(alpha);
+    }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
         self.state.stage(self.state.staged.get());
+        self.stage_build_alpha(self.state.kept_alpha.get());
     }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {
@@ -1069,6 +1078,11 @@ fn place(key: usize, apply: bool) -> bool {
             }
             continue;
         };
+        if let Some((paint,alpha))=state.build_alpha.get() {
+            if Some(paint)==last && state.wrapper.alphaValue()!=alpha {
+                moved=true;if apply{state.wrapper.setAlphaValue(alpha);}
+            }
+        }
         // From GPUI's frame in its parent (P-EMBED).
         let g = state.gpui.frame();
         let visible = intersection(bounds, clip);

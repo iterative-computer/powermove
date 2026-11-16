@@ -9,6 +9,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::rc::Rc;
 
 pub struct TextField {
+    build: Option<crate::native_control::BuildSnapshot>,
+    build_pixels: Rc<std::cell::RefCell<crate::native_control::BuildPixels>>,
     slot: Rc<NativeTextSlot>,
     /// Where the slot was painted inside a scroll layer, to follow it.
     layer: Rc<crate::layer_stage::LayerStage>,
@@ -96,6 +98,8 @@ impl TextField {
         })
         .detach();
         Self {
+            build:None,
+            build_pixels:Default::default(),
             slot,
             layer: Rc::default(),
             kind,
@@ -221,7 +225,16 @@ impl TextField {
     }
     /// A form's field (Settings): AppKit's bordered field is the whole
     /// control, shown at all times; the unit stands beside it.
-    fn render_form(&mut self, window: &mut Window) -> AnyElement {
+    pub fn set_build_snapshot(&mut self,build:Option<crate::native_control::BuildSnapshot>)->bool {
+        let build=build.filter(|b|b.ready.unwrap_or(0.)<1. && matches!(self.kind,TextKind::Form|TextKind::FormNumber));
+        if self.build==build{return false;}self.build=build;
+        if build.is_none(){*self.build_pixels.borrow_mut()=Default::default();}true
+    }
+    fn render_form(&mut self, window: &mut Window,cx:&mut Context<Self>) -> AnyElement {
+        let build=self.build;
+        let pixels=self.build_pixels.clone();
+        let snapshot=pixels.borrow().texture(build.and_then(|b|b.revision));
+        let owner=cx.entity().downgrade();
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let t = &self.tokens;
@@ -244,15 +257,25 @@ impl TextField {
                 div().relative().flex_1().min_w(px(0.)).h(px(t.metrics.field)).child(
                     canvas(
                         |_, _, _| (),
-                        move |bounds, _, window, _| {
+                        move |bounds, _, window, cx| {
                             let mask = window.content_mask().bounds;
                             let (bounds, mask) = layer.painted(bounds, mask, window);
                             slot.stage(rect(bounds), rect(mask));
+                            if let Some(build)=build {
+                                if let Some(revision)=build.revision {
+                                    if pixels.borrow_mut().capture(slot.native_view(),bounds,revision){let _=owner.update(cx,|_,cx|cx.notify());}
+                                }
+                                let (_,live)=pm_design::dots::snapshot_visibility(pixels.borrow().captured(),build.ready);
+                                slot.stage_build_alpha(live as f64);
+                            }else{slot.stage_build_alpha(1.);}
                         },
                     )
                     .absolute()
                     .inset_0(),
-                ),
+                ).children(snapshot.map(|image|{
+                    let filters=build.and_then(|b|b.filter).into_iter().collect::<Vec<_>>();
+                    div().absolute().inset_0().filter(filters).child(img(image).size_full())
+                })),
             )
             .children(self.unit.clone().map(|unit| {
                 div()
@@ -370,7 +393,7 @@ const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
-            return self.render_form(window);
+            return self.render_form(window,cx);
         }
         let slot = self.slot.clone();
         let layer = self.layer.clone();

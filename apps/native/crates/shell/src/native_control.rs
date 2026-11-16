@@ -11,7 +11,7 @@
 use gpui::{prelude::*, *};
 use gpui_macos::native_control::NativeControlSlot;
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
     runtime::AnyObject, sel,
 };
 use objc2_app_kit::*;
@@ -294,9 +294,26 @@ pub struct BuildSnapshot {
     pub filter: Option<Filter>,
 }
 #[derive(Default)]
-struct BuildPixels {
+pub(crate) struct BuildPixels {
     key: Option<(u64, [u32;4])>,
     image: Option<std::sync::Arc<RenderImage>>,
+}
+impl BuildPixels {
+    pub(crate) fn texture(&self, revision:Option<u64>) -> Option<std::sync::Arc<RenderImage>> {
+        revision.and_then(|r|self.key.filter(|(key,_)|*key==r)).and(self.image.clone())
+    }
+    pub(crate) fn captured(&self)->bool {self.image.is_some()}
+    pub(crate) fn capture(&mut self,native:&NSView,bounds:Bounds<Pixels>,revision:u64)->bool {
+        let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
+        let key=(revision,frame);if self.key==Some(key){return false;}
+        native.setFrameSize(NSSize::new(f32::from(bounds.size.width) as f64,f32::from(bounds.size.height) as f64));
+        let alpha=native.alphaValue();native.setAlphaValue(1.);
+        let rect=native.bounds();
+        self.image=native.bitmapImageRepForCachingDisplayInRect(rect).and_then(|rep|{
+            native.cacheDisplayInRect_toBitmapImageRep(rect,&rep);snapshot_bitmap(&rep)
+        });
+        native.setAlphaValue(alpha);self.key=Some(key);true
+    }
 }
 /// PNG decoding normalizes AppKit bitmap layouts; GPUI sprites use straight BGRA.
 pub fn snapshot_bitmap(rep: &NSBitmapImageRep) -> Option<std::sync::Arc<RenderImage>> {
@@ -981,19 +998,7 @@ impl Render for NativeControl {
                     slot.stage(ns_rect(bounds), ns_rect(clip));
                     if let Some(build)=build {
                         if let Some(revision)=build.revision {
-                            let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
-                            let key=(revision,frame);
-                            if pixels.borrow().key!=Some(key) {
-                                native.setFrameSize(NSSize::new(f32::from(bounds.size.width) as f64,f32::from(bounds.size.height) as f64));
-                                let previous_alpha=native.alphaValue();
-                                native.setAlphaValue(1.);
-                                let rect=native.bounds();
-                                let image=native.bitmapImageRepForCachingDisplayInRect(rect).and_then(|rep| {
-                                    native.cacheDisplayInRect_toBitmapImageRep(rect,&rep);
-                                    snapshot_bitmap(&rep)
-                                });
-                                native.setAlphaValue(previous_alpha);
-                                *pixels.borrow_mut()=BuildPixels{key:Some(key),image};
+                            if pixels.borrow_mut().capture(&native,bounds,revision) {
                                 let _=owner.update(cx,|_,cx|cx.notify());
                             }
                         }
@@ -1313,4 +1318,24 @@ fn colour_hex(colour: &NSColor) -> String {
         c(srgb.greenComponent()),
         c(srgb.blueComponent())
     )
+}
+
+#[cfg(test)] mod snapshot_bridge_tests {
+    use super::*;
+    #[test] fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
+        objc2::rc::autoreleasepool(|_| {
+            let image=image::RgbaImage::from_pixel(2,2,image::Rgba([40,80,120,160]));
+            let mut bytes=std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image).write_to(&mut bytes,image::ImageFormat::Png).unwrap();
+            let data=objc2_foundation::NSData::with_bytes(bytes.get_ref());
+            let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data).unwrap();
+            let texture=snapshot_bitmap(&rep).unwrap();
+            let p=&texture.as_bytes(0).unwrap()[..4];
+            assert_eq!(p,&[120,80,40,160]);
+            let image=NSImage::initWithData(NSImage::alloc(),&data).unwrap();
+            let texture=snapshot_image(&image).unwrap();
+            let p=&texture.as_bytes(0).unwrap()[..4];
+            for (actual,expected) in p.iter().zip([120_u8,80,40,160]) {assert!(actual.abs_diff(expected)<=2);}
+        });
+    }
 }

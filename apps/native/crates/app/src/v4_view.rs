@@ -417,6 +417,18 @@ impl SurfaceView {
             });
             control.update(cx,|control,cx|{if control.set_build_snapshot(mode){cx.notify();}});
         }
+        for (fallback,(id,field)) in self.fields.iter().enumerate() {
+            let mut parent=Some(*id);let mut row=None;
+            while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
+            let index=row.unwrap_or(fallback);
+            let mode=state.as_ref().map(|s|{
+                let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
+                let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
+                pm_shell::native_control::BuildSnapshot{revision,ready,filter}
+            });
+            field.update(cx,|field,cx|{if field.set_build_snapshot(mode){cx.notify();}});
+        }
         let active=self.panel_build.is_some() || state.is_some();
         self.panel_build=state;
         if active {cx.notify();}
