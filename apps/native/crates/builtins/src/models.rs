@@ -75,7 +75,11 @@ pub(crate) struct Models {
     /// applied on the panel's next request.
     pub show_missing: bool,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// What the encoder checks were last asked for (`export_projection`).
     pub export_probe_stamp: String,
+    /// The checks' worker reports here: the stamp last asked for, and the
+    /// last finished check with its stamp.
+    pub export_probe: std::sync::Arc<std::sync::Mutex<Probe>>,
     /// The Export sheet is open (PM-376): only then does its subscription
     /// plan the export and check the encoders, which opened audio decoders
     /// and held the panels' thread half a second on every edit and undo.
@@ -147,6 +151,7 @@ impl Models {
             show_missing: false,
             originals: Default::default(),
             export_probe_stamp: String::new(),
+            export_probe: Default::default(),
             export_open: false,
         })
     }
@@ -1386,21 +1391,57 @@ impl Backend {
         self.native.export["presets"] = self.export_presets();
         #[cfg(target_os = "macos")]
         {
+            // Each format's check sets its own format, so the chosen one is
+            // not part of what they depend on: switching kind checks nothing.
+            let mut checked = options.clone();
+            checked.format = pm_promedia::export_panel::Format::Mp4;
             let key = format!(
                 "{}:{}:{}:{:?}",
                 p.snapshot.doc_id,
                 p.revision(),
-                serde_json::to_string(&options).map_err(|e| e.to_string())?,
+                serde_json::to_string(&checked).map_err(|e| e.to_string())?,
                 self.native.originals
             );
+            // The checks plan the whole project and start each encoder (0.75
+            // to 3.1 s on a real project): on a worker, so the sheet answers
+            // at once and Escape never waits behind them. Until they end, the
+            // formats say what the last check said ("Checking…" the first time).
             if self.native.export_probe_stamp != key {
-                self.native.export["capabilities"] = crate::delivery::capabilities(
-                    &p.snapshot,
-                    &options,
+                self.native.export_probe_stamp = key.clone();
+                self.native.export_probe.lock().unwrap().asked = key.clone();
+                let (probe, snapshot, time, originals) = (
+                    self.native.export_probe.clone(),
+                    p.snapshot.clone(),
                     self.time(),
-                    &self.native.originals,
+                    self.native.originals.clone(),
                 );
-                self.native.export_probe_stamp = key;
+                std::thread::Builder::new()
+                    .name("pm-export-checks".into())
+                    .spawn(move || {
+                        let found =
+                            crate::delivery::capabilities(&snapshot, &checked, time, &originals);
+                        let mut probe = probe.lock().unwrap();
+                        // A newer check was asked meanwhile: it reports instead.
+                        if probe.asked == key {
+                            probe.done = Some((key, found));
+                            drop(probe);
+                            crate::wakers::wake_all();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            let probe = self.native.export_probe.lock().unwrap();
+            if let Some((key, found)) = &probe.done
+                && *key == self.native.export_probe_stamp
+            {
+                self.native.export["capabilities"] = found.clone();
+            }
+            drop(probe);
+            for format in crate::delivery::FORMATS {
+                if !self.native.export["capabilities"][*format].is_object() {
+                    self.native.export["capabilities"][*format] =
+                        json!({"available":false,"reason":"Checking…"});
+                }
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -2093,4 +2134,13 @@ mod store_tests {
             Some(json!(["unknown future shape"]))
         );
     }
+}
+
+/// The Export sheet's encoder checks, between the panel and their worker.
+#[derive(Default)]
+pub struct Probe {
+    /// The stamp the panel last asked to check.
+    pub asked: String,
+    /// The last check that finished while it was still the one asked for.
+    pub done: Option<(String, serde_json::Value)>,
 }
