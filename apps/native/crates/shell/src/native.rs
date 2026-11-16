@@ -1512,6 +1512,31 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) {
             track_tab(self, event);
         }
+        /// The middle button is the tab's own: it closes on release.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            if event.buttonNumber() != 2 {
+                unsafe {
+                    let _: () = msg_send![super(self), otherMouseDown: event];
+                }
+            }
+        }
+        /// Middle-click closes the tab, or the page, as v1's tabs did.
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            let local = self.convertPoint_fromView(event.locationInWindow(), None);
+            if event.buttonNumber() != 2 || !self.mouse_inRect(local, self.bounds()) {
+                return;
+            }
+            let close = match self.action() {
+                Some(a) if a == sel!(selectTab:) => sel!(closeTab:),
+                Some(a) if a == sel!(selectPage:) => sel!(closePage:),
+                _ => return,
+            };
+            unsafe {
+                let _: bool = msg_send![self, sendAction: close, to: self.target().as_deref()];
+            }
+        }
     }
 );
 /// The pointer on a tab until it lifts. Released in place it selects the tab.
@@ -2774,7 +2799,7 @@ impl Host {
             row.setEnabled(false);
             row
         };
-        menu.addItem(&line(if shown.finished { "Done" } else { &shown.title }));
+        menu.addItem(&line(if shown.finished { "Done" } else { shown.title.as_str() }));
         if !shown.detail.is_empty() && !shown.finished {
             menu.addItem(&line(&shown.detail));
         }
