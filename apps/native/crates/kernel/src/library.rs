@@ -303,6 +303,23 @@ impl LibraryStore {
         self.rows("projectTrash")
     }
 
+    /// The name of project `id`'s row (in the index or the trash): a project
+    /// renamed while no window had it open has it there, not in its body
+    /// (`LibraryWriter::rename_entry`).
+    pub fn row_name(&self, id: &str) -> Result<Option<String>, LibraryError> {
+        for key in ["projects", "projectTrash"] {
+            if let Some(Value::Array(rows)) = self.read(key)?
+                && let Some(name) = rows
+                    .iter()
+                    .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                    .and_then(|r| r.get("name")?.as_str())
+            {
+                return Ok(Some(name.to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
     /// `R.getAsync(id)` + `R.getStateAsync(id)` + the workspace slot.
     pub fn load(&self, id: &str) -> Result<Option<LibraryProject>, LibraryError> {
         if !valid_id(id) {

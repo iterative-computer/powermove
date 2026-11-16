@@ -1183,3 +1183,61 @@ fn a_closed_project_is_renamed_unless_it_has_unsaved_work() {
     assert_eq!(name(&k, &session.project), "Other");
     assert_eq!(width(&k, &session.project), 640.);
 }
+
+/// A rename changes the name, not when the project was last edited: Home
+/// keeps it where it was, with its date (PM-385).
+#[test]
+fn a_rename_keeps_the_projects_place_and_date() {
+    let root = TempDir::new("rename-place");
+    {
+        let w =
+            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+        for id in ["film", "reel"] {
+            let mut project = value();
+            project
+                .as_object_mut()
+                .unwrap()
+                .insert("id", Value::from(id));
+            w.save_project(id, project, Value::Null, Value::Null, Value::Null)
+                .unwrap();
+        }
+    }
+    let rows = || {
+        pm_kernel::library::LibraryStore::open(&root.0)
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.id, row.name, row.at))
+            .collect::<Vec<_>>()
+    };
+    let before = rows();
+    assert_eq!(before[0].0, "reel");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut k = kernel(&root.0);
+    assert!(matches!(
+        k.shell(ShellCall::Rename {
+            project: "film".into(),
+            name: "Renamed".into(),
+        })
+        .unwrap(),
+        ShellReply::Changed(true)
+    ));
+    k.durability_barrier().unwrap();
+    let after = rows();
+    assert_eq!(after[0], before[0]);
+    assert_eq!(after[1], ("film".into(), "Renamed".into(), before[1].2));
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::PrepareOpen {
+            id: "film".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "film".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!("not opened");
+    };
+    assert_eq!(name(&k, &session.project), "Renamed");
+}

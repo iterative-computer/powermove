@@ -255,6 +255,26 @@ impl LibraryWriter {
             (format!("projectJournal.{id}"), None),
         ])
     }
+    /// The rename of a project no window has open: its row's name, where the
+    /// row is (in `projects` or the trash) and with its date. Its body keeps
+    /// the name it was saved under until it is saved again; an open takes
+    /// the row's ([`crate::library::LibraryStore::row_name`]). False when it
+    /// has no row.
+    pub fn rename_entry(&self, id: &str, name: &str) -> Result<bool, LibraryError> {
+        for key in ["projects", "projectTrash"] {
+            let mut rows = self.rows(key)?;
+            let Some(Value::Object(row)) = rows
+                .iter_mut()
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+            else {
+                continue;
+            };
+            row.insert("name", Value::from(name));
+            self.batch(vec![(key.into(), Some(Value::Array(rows)))])?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// The entry of a project whose body is its `.pmv` file: the row and the
     /// metadata that names the file, never a second copy of the project.
     /// `summary` holds the row's `name`, `w` and `h`.
