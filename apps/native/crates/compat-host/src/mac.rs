@@ -775,9 +775,6 @@ pub struct MacDomHost {
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
     overlays: BTreeMap<String, (Retained<SnapshotView>, Retained<NSImageView>)>,
-    /// Where the fill shows, when narrower than the regions
-    /// (`set_fill_regions`); `None`: wherever they show.
-    fill_regions: Option<Vec<Rect>>,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -923,7 +920,6 @@ impl MacDomHost {
             content: None,
             fill: None,
             overlays: BTreeMap::new(),
-            fill_regions: None,
         };
         host.load();
         Ok(host)
@@ -1157,19 +1153,6 @@ impl MacDomHost {
         );
         refuse_drags(&self.web);
     }
-    /// Shell rectangles the shared document shows through this frame.
-    pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
-        if regions.len() > 256 || regions.iter().any(|r| !r.valid()) {
-            return Err(Error::InvalidGeometry);
-        }
-        let mut panels = self.shared.panels.borrow_mut();
-        if panels.regions.as_ref() != Some(&regions) || panels.fill_regions.is_some() {
-            panels.regions = Some(regions);
-            panels.fill_regions = None;
-            self.shared.geometry_dirty.set(true);
-        }
-        Ok(())
-    }
     /// Show panel bodies on their ground while keeping overlay regions transparent.
     /// The viewer stage shares the page, but must never inherit the panel fill.
     pub fn set_regions_with_transparent_overlays(
@@ -1204,6 +1187,30 @@ impl MacDomHost {
     }
     /// The colour shown under the page within its regions (the panels'
     /// ground), sRGB red, green, blue and alpha in 0–1.
+    /// Whether the panels' ground, as last presented, covers window point
+    /// (`x`, `y`), top-left origin: the slot's own background, or the ground
+    /// layer's path with a colour. False where the page shows what lies
+    /// under it (the viewer's stage, PM-378). For tests.
+    #[doc(hidden)]
+    pub fn ground_covers(&self, x: f64, y: f64) -> bool {
+        let Some(layer) = self.slot.layer() else {
+            return false;
+        };
+        if layer.backgroundColor().is_some() {
+            return true;
+        }
+        let h = self.slot.bounds().size.height;
+        let point = NSPoint::new(x, h - y);
+        self.ground.fillColor().is_some()
+            && self.ground.path().is_some_and(|path| unsafe {
+                objc2_core_graphics::CGPath::contains_point(
+                    Some(&path),
+                    std::ptr::null(),
+                    point,
+                    false,
+                )
+            })
+    }
     /// The extension panels shown through this page and their bodies, so a
     /// press is known by its panel: a tab beside it shows in the same body.
     pub fn set_bodies(&mut self, bodies: Vec<(String, Rect)>) {
@@ -1478,21 +1485,6 @@ impl MacDomHost {
             }
         }
     }
-    /// Where the fill shows within the regions: the panels' bodies, never
-    /// the viewer's stage, where the page shows the viewer through it. `None`
-    /// fills wherever the regions show.
-    pub fn set_fill_regions(&mut self, regions: Option<Vec<Rect>>) -> Result<()> {
-        if let Some(r) = &regions
-            && (r.len() > 256 || r.iter().any(|r| !r.valid()))
-        {
-            return Err(Error::InvalidGeometry);
-        }
-        if self.fill_regions != regions {
-            self.fill_regions = regions;
-            self.shared.geometry_dirty.set(true);
-        }
-        Ok(())
-    }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
     /// A panel leaving its slot gives the window back the keyboard if the
@@ -1537,35 +1529,21 @@ impl MacDomHost {
             self.pressed.set(None);
             self.release_keyboard();
         }
-        // The fill shows within the regions; the page's content only where
-        // its own mask lets it.
-        self.slot.setWantsLayer(true);
-        let color = self
-            .fill
-            .map(|[r, g, b, a]| NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor());
-        if let Some(layer) = self.slot.layer() {
-            // Everywhere the regions show, or (`set_fill_regions`) only in
-            // some of them: a shape layer under the page's.
-            let everywhere = self.fill_regions.is_none();
-            layer.setBackgroundColor(color.as_deref().filter(|_| everywhere));
-            if self.ground.superlayer().is_none() {
-                layer.insertSublayer_atIndex(&self.ground, 0);
+        // The page can cover both panels and the viewer. Only panel bodies
+        // receive a ground; the viewer's native surface must show through.
+        let panels = self.shared.panels.borrow();
+        let visible = panels.visible();
+        let rects = panels.fill_regions.as_deref().unwrap_or(&visible);
+        let path = CGMutablePath::new();
+        let h = self.slot.bounds().size.height;
+        for r in rects {
+            unsafe {
+                CGMutablePath::add_rect(
+                    Some(&path),
+                    std::ptr::null(),
+                    NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
+                );
             }
-            let shape = &self.ground;
-            let path = CGMutablePath::new();
-            let h = self.slot.bounds().size.height;
-            for r in self.fill_regions.iter().flatten() {
-                unsafe {
-                    CGMutablePath::add_rect(
-                        Some(&path),
-                        std::ptr::null(),
-                        NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
-                    );
-                }
-            }
-            shape.setFrame(self.slot.bounds());
-            shape.setPath(Some(&path));
-            shape.setFillColor(color.as_deref().filter(|_| self.fill_regions.is_some()));
         }
         self.web.setWantsLayer(true);
         if let Some(layer) = self.web.layer() {

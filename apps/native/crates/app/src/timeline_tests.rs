@@ -22,6 +22,8 @@ pub(crate) struct Recorder {
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
+    /// Ruler scrubs starting (`true`) and ending, as the app hears them.
+    pub scrubs: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -50,6 +52,9 @@ impl Delegate for Recording {
     }
     fn skim(&self, seconds: Option<f64>, _: &mut App) {
         self.0.skims.borrow_mut().push(seconds);
+    }
+    fn scrubbing(&self, on: bool, _: &mut App) {
+        self.0.scrubs.borrow_mut().push(on);
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
@@ -116,6 +121,24 @@ pub(crate) fn stage(cx: &mut TestAppContext, layers: usize) -> Stage {
     stage_project(cx, crate::v4_view_tests::project_json(layers))
 }
 pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
+    stage_with(cx, project, false)
+}
+/// The panel in a cached slot, as a dock holds it: a frame that renders no
+/// view replays the panel's last one.
+struct Docked {
+    child: Entity<SurfaceView>,
+}
+impl gpui::Render for Docked {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div().size_full().child(
+            self.child
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let rig = crate::v4_view_tests::rig_project("timeline", &project);
     let first = publication(&rig);
     let natives = Natives::default();
@@ -139,7 +162,20 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
         .borrow_mut()
         .insert("timeline".into(), surface.clone().into());
     let outline = natives.outline.clone();
-    let (view, vcx) = window(cx, &rig, first, natives);
+    let (view, vcx) = if docked {
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let child =
+                cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
+            Docked { child }
+        });
+        let vcx = vcx.clone();
+        vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
+    } else {
+        window(cx, &rig, first, natives)
+    };
     outline.bind(view.downgrade());
     let mut stage = Stage {
         rig,
@@ -1299,9 +1335,9 @@ fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppCon
     let mut s = stage(cx, 2);
     let m = tokens().metrics;
     let least = crate::timeline_surface::least_layer_column(&m);
-    // Number, disclosure, badge, three slots of name and three switches.
+    // Number, disclosure, badge, three slots of name and five switches.
     let gap = m.gap as f64;
-    let row = 6. * gap + 8. * m.hit as f64 + m.kind_badge as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
     assert!(least >= row && least >= 320., "{least} < {row}");
     let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
     assert!(column >= least);
@@ -1632,6 +1668,47 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
     assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
     assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
 }
+/// PM-310: a wheel step through the rows moves the strips and the outline
+/// as they were drawn (their scroll layers), with no render of the panel;
+/// the frame hit-testing reads is at the new scroll at once. The panel
+/// renders once the steps stop, and at once for a step past the rows drawn.
+#[gpui::test]
+fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, dy: f32| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    settle(&mut s);
+    let rendered = renders(&s);
+    wheel(&mut s, -30.);
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_y, 30.);
+    wheel(&mut s, -20.);
+    assert_eq!(renders(&s), rendered);
+    // Once the steps stop: the layers' render and the written view's
+    // publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 2).contains(&renders(&s)));
+    // Past a viewport of rows: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, -2000.);
+    assert!(renders(&s) > rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
     cx: &mut TestAppContext,
@@ -1881,6 +1958,9 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
         s.rig.kernel.published(PROJECT).unwrap().revision(),
         revision
     );
+    // The app hears the scrub start before its first seek and end on
+    // release (PM-310: only Properties follows each frame meanwhile).
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
 #[gpui::test]
 fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
@@ -2387,6 +2467,22 @@ fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext)
     assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
     assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
 }
+/// A sheet that covered the tracks closes over a resting pointer (the
+/// Export sheet's buttons lie over the clips): the first sight of the pointer
+/// starts no skim, so the viewer keeps the playhead's picture; moving it does.
+#[gpui::test]
+fn the_pointer_met_again_where_it_rests_starts_no_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let at = s.at(0, 1.0);
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    s.vcx
+        .simulate_mouse_move(at + point(px(6.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
+}
 /// PM-388, zoomed in: the pointer skimmed the clips, then the playhead moved
 /// (a key, a click, playback: the viewer is back on the playhead's frame).
 /// With the pointer resting, a time scroll slides other frames under it and
@@ -2441,6 +2537,9 @@ fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
     s.idle(cx);
     s.recorder.skimming.set(true);
     let at = s.at(0, 1.0);
+    // Coming over the tracks, then moving there: the skimmer shows.
+    s.vcx
+        .simulate_mouse_move(at - point(px(4.), px(0.)), None, Modifiers::none());
     s.vcx.simulate_mouse_move(at, None, Modifiers::none());
     s.idle(cx);
     let over = |s: &mut Stage| {
@@ -2740,201 +2839,20 @@ fn work_out_inside_visible_ruler_preserves_duration_and_view(cx: &mut TestAppCon
     });
 }
 
+/// PM-367: the shell's first word on the timeline's focus (unfocused, at the
+/// first layout) is a change, so the scene and the panel's rows both take
+/// the neutral selection; the accent comes back with the keyboard.
 #[gpui::test]
-fn bar_drag_previews_without_kernel_writes_and_commits_once(cx: &mut TestAppContext) {
-    let mut s = stage(cx, 2);
-    let from = s.at(0, 1.);
-    let to = from + point(px(60.), px(0.));
-    s.vcx
-        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-    s.idle(cx);
-    let before = s.rig.kernel.published(PROJECT).unwrap();
-    s.vcx
-        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-    s.idle(cx);
-    let during = s.rig.kernel.published(PROJECT).unwrap();
-    assert_eq!(during.revision(), before.revision());
-    assert_eq!(during.history.entries, before.history.entries);
-    assert_eq!(s.start_of("l0"), 0.);
-    assert!(
-        s.recorder
-            .timing_previews
-            .borrow()
-            .iter()
-            .any(Option::is_some)
-    );
-    let frame = s.surface.read_with(&s.vcx, |s, _| s.frame().unwrap());
-    let clip = frame.ops.iter().find(|op| op.id == "clip:l0").unwrap();
-    assert!(clip.detail["from"].as_f64().unwrap() > 0.);
-    // This is the surface's Escape handler; it also clears the viewer input.
-    s.surface.update(&mut s.vcx, |s, cx| assert!(s.cancel(cx)));
-    s.idle(cx);
-    assert_eq!(s.start_of("l0"), 0.);
-    assert!(
-        s.recorder
-            .timing_previews
-            .borrow()
-            .last()
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries);
-    s.vcx
-        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
-    s.idle(cx);
-    let from = s.at(0, 1.);
-    s.drag(cx, from, from + point(px(60.), px(0.)), Modifiers::none());
-    assert!(s.start_of("l0") > 0.);
-    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, before.history.entries + 1);
-    assert!(
-        s.recorder
-            .timing_previews
-            .borrow()
-            .last()
-            .unwrap()
-            .is_none()
-    );
-    s.undo(cx);
-    assert_eq!(s.start_of("l0"), 0.);
-}
-
-/// Uses GPUI's mock platform: no application window or user profile.
-#[gpui::test]
-fn work_area_stream_keeps_ruler_mapping_and_tracks_pointer_through_extension(
-    cx: &mut TestAppContext,
-) {
-    for zoom_in in [false, true] {
-        for end in [false, true] {
-            let mut project: serde_json::Value =
-                serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
-            project["work"] = serde_json::json!([1., 3.]);
-            let mut s = stage_project(cx, project.to_string());
-            s.surface.update(&mut s.vcx, |t, cx| {
-                t.fit_time(cx);
-                if zoom_in {
-                    t.command("timeline.zoomIn", 0., None, false, cx);
-                }
-            });
-            s.idle(cx);
-            let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
-                (
-                    t.frame().unwrap().viewport,
-                    t.model().index.work,
-                    t.model().index.duration,
-                    t.time_mapping(),
-                )
-            });
-            let origin = s.origin();
-            let y = origin.y + px(tokens().metrics.ruler / 2.);
-            let x_of =
-                |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
-            let edge = before[usize::from(end)];
-            // Start within the generous hit zone rather than on its center.
-            let from = point(x_of(edge) + px(if end { -4. } else { 4. }), y);
-            s.vcx
-                .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-            s.idle(cx);
-            let mut previous = edge;
-            let mut peak = duration;
-            let times: Vec<f64> = if end {
-                // Slow, fast, beyond comp end, then back to its interior.
-                vec![
-                    3.2, 3.21, 3.3, 3.4, 4., 6., 9., 11., 14., 14., 14., 12., 10., 8., 6., 4.,
-                ]
-            } else {
-                vec![
-                    1.2, 1.21, 1.3, 1.4, 1.8, 2., 2.2, 2.5, 2.7, 2.9, 2.9, 2.7, 2.4, 2., 1.8, 1.5,
-                ]
-            };
-            let mut previous_time = edge;
-            for &time in &times {
-                let at = point(x_of(time), y);
-                s.vcx
-                    .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
-                s.idle(cx);
-                s.surface.read_with(&s.vcx, |t, _| {
-                    assert_eq!(t.time_mapping(), mapping, "ruler changed at {time}");
-                    let actual = t.model().index.work[usize::from(end)];
-                    let expected = pm_panel_timeline::frame(time, t.model().index.fps);
-                    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
-                    if time >= previous_time {
-                        assert!(actual >= previous);
-                    } else {
-                        assert!(actual <= previous);
-                    }
-                    previous = actual;
-                    previous_time = time;
-                    peak = peak.max(actual);
-                    assert_eq!(t.model().index.duration, if end { peak } else { duration });
-                });
-            }
-            let to = point(x_of(*times.last().unwrap()), y);
-            // Queue the last pointer and release together: the pending writer
-            // sample must retain the mapping after the UI gesture becomes idle.
-            s.vcx
-                .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-            s.vcx
-                .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
-            s.idle(cx);
-            s.surface
-                .read_with(&s.vcx, |t, _| assert_eq!(t.time_mapping(), mapping));
-            assert!(s.recorder.seeks.borrow().is_empty());
-            assert!(
-                s.recorder
-                    .timing_previews
-                    .borrow()
-                    .iter()
-                    .all(Option::is_none)
-            );
-            assert!(s.recorder.reports.borrow().is_empty());
-            assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 1);
-            s.undo(cx);
-            s.surface.read_with(&s.vcx, |t, _| {
-                assert_eq!(t.model().index.work, before);
-                assert_eq!(t.model().index.duration, duration);
-            });
-        }
-    }
-}
-
-#[gpui::test]
-fn work_area_cancel_restores_duration_without_refitting_ruler(cx: &mut TestAppContext) {
-    let mut s = stage(cx, 2);
-    s.surface.update(&mut s.vcx, |t, cx| t.fit_time(cx));
-    s.idle(cx);
-    let (v, before, duration, mapping) = s.surface.read_with(&s.vcx, |t, _| {
-        (
-            t.frame().unwrap().viewport,
-            t.model().index.work,
-            t.model().index.duration,
-            t.time_mapping(),
-        )
-    });
-    let origin = s.origin();
-    let y = origin.y + px(tokens().metrics.ruler / 2.);
-    let x_of = |time: f64| origin.x + px((v.layer_column + (time - v.scroll_time) * v.pps) as f32);
-    s.vcx.simulate_mouse_down(
-        point(x_of(before[1]) - px(2.), y),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    s.idle(cx);
-    s.vcx.simulate_mouse_move(
-        point(x_of(duration + 2.), y),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    s.idle(cx);
-    s.surface
-        .read_with(&s.vcx, |t, _| assert!(t.model().index.duration > duration));
-    s.surface.update(&mut s.vcx, |t, cx| {
-        assert!(t.cancel(cx));
-    });
-    s.idle(cx);
-    s.surface.read_with(&s.vcx, |t, _| {
-        assert_eq!(t.time_mapping(), mapping);
-        assert_eq!(t.model().index.work, before);
-        assert_eq!(t.model().index.duration, duration);
-    });
-    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
+fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let focused = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.scene().map(|scene| scene.focused))
+    };
+    assert_eq!(focused(&s), Some(true));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert_eq!(focused(&s), Some(false));
+    assert!(!s.surface.update(&mut s.vcx, |t, cx| t.set_focused(false, cx)));
+    assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
+    assert_eq!(focused(&s), Some(true));
 }

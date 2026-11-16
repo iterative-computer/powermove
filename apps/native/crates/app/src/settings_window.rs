@@ -67,6 +67,34 @@ impl History {
     }
 }
 
+/// Runs `closed` once the window `id` has closed, however it closed, after
+/// the update that closed it.
+pub(crate) fn watch_close(
+    id: WindowId,
+    closed: impl Fn(&mut App) + 'static,
+    cx: &App,
+) -> Subscription {
+    let closed = Rc::new(closed);
+    cx.on_window_closed(move |cx, gone| {
+        if gone == id {
+            let closed = closed.clone();
+            cx.defer(move |cx| closed(cx));
+        }
+    })
+}
+
+/// `events` in order, each run of searches as its last.
+fn latest_searches(events: Vec<Event>) -> Vec<Event> {
+    let mut out: Vec<Event> = vec![];
+    for event in events {
+        if let (Event::Search(_), Some(Event::Search(_))) = (&event, out.last()) {
+            out.pop();
+        }
+        out.push(event);
+    }
+    out
+}
+
 /// Frames the Settings window whose GPUI view is `view` (outside any update
 /// of that window) and sends what is done in its chrome to `owner`.
 pub(crate) fn install(
@@ -79,10 +107,29 @@ pub(crate) fn install(
     let (dark, ground) = scheme(&owner.read(cx).host.borrow().tokens);
     chrome.set_scheme(dark, ground);
     let weak = owner.downgrade();
+    // One act at a time, in the order done: a search the panel answered
+    // late must never overtake a newer one (typing dropped letters, and a
+    // cleared field left the old results). A burst of typing sends only the
+    // latest text.
     cx.spawn(async move |cx| {
-        while let Ok(event) = rx.recv().await {
-            if weak.update(cx, |v, cx| v.settings_event(event, cx)).is_err() {
-                break;
+        while let Ok(first) = rx.recv().await {
+            let mut events = vec![first];
+            while let Ok(more) = rx.try_recv() {
+                events.push(more);
+            }
+            for event in latest_searches(events) {
+                let Ok(act) = weak.update(cx, |v, _| v.settings_intent(event)) else {
+                    return;
+                };
+                if let Some((runtime, intent)) = act {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Ok(ticket) = runtime.panel_act("settings", &intent) {
+                                let _ = ticket.await;
+                            }
+                        })
+                        .await;
+                }
             }
         }
     })
@@ -115,11 +162,21 @@ impl Controller {
             .is_some_and(|h| cx.active_window() == Some(*h))
     }
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.builtins.settings_chrome = None;
-        self.builtins.settings_me = None;
-        if let Some(handle) = self.builtins.windows.remove("settings") {
+        let handle = self.builtins.windows.get("settings").copied();
+        self.settings_closed(cx);
+        if let Some(handle) = handle {
             let _ = handle.update(cx, |_, w, _| w.remove_window());
         }
+    }
+    /// The Settings window is gone (closed here, or by its close button or
+    /// ⌘W): this editor no longer hosts it, and a restart of its panels does
+    /// not show it again (PM-397).
+    pub(crate) fn settings_closed(&mut self, _cx: &mut Context<Self>) {
+        self.builtins.windows.remove("settings");
+        self.builtins.settings_chrome = None;
+        self.builtins.settings_me = None;
+        self.builtins.settings_watch = None;
+        self.builtins.settings_history = History::default();
     }
     /// Settings › Project's header: this project's poster and path, and the
     /// projects open in every editor for the picker (listed only by the
@@ -221,35 +278,66 @@ impl Controller {
         let (back, forward) = self.builtins.settings_history.can();
         chrome.set_history(back, forward);
     }
-    pub(crate) fn settings_event(&mut self, event: Event, cx: &mut Context<Self>) {
+    /// What the panel is asked to do for `event` (and the runtime to ask).
+    pub(crate) fn settings_intent(
+        &mut self,
+        event: Event,
+    ) -> Option<(std::sync::Arc<pm_builtins::Builtins>, Value)> {
         let intent = match event {
             Event::Select(id) => json!({ "select": id }),
             Event::Search(query) => json!({ "search": query }),
             Event::Back => match self.builtins.settings_history.back() {
                 Some(id) => json!({ "select": id }),
-                None => return,
+                None => return None,
             },
             Event::Forward => match self.builtins.settings_history.forward() {
                 Some(id) => json!({ "select": id }),
-                None => return,
+                None => return None,
             },
         };
-        let Some(runtime) = self.builtins.runtime.clone() else {
-            return;
-        };
-        cx.background_executor()
-            .spawn(async move {
-                if let Ok(ticket) = runtime.panel_act("settings", &intent) {
-                    let _ = ticket.await;
-                }
-            })
-            .detach();
+        Some((self.builtins.runtime.clone()?, intent))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::History;
+
+    /// Typing sends only its latest text, and a search typed after a section
+    /// was picked still follows it (the acts stay in order).
+    #[test]
+    fn a_burst_of_typing_asks_once_with_the_latest_text() {
+        use pm_shell::settings_window::Event::*;
+        let s = |t: &str| Search(t.into());
+        assert_eq!(
+            super::latest_searches(vec![s("p"), s("pr"), s("pro"), Select("media".into()), s("pro"), s("")]),
+            vec![s("pro"), Select("media".into()), s("")]
+        );
+        assert_eq!(super::latest_searches(vec![Back, Forward]), vec![Back, Forward]);
+    }
+    use gpui::{AppContext as _, Empty, TestAppContext, WindowOptions};
+    use std::{cell::Cell, rc::Rc};
+
+    /// PM-397: closing the Settings window by its close button or ⌘W (not
+    /// through the editor) is heard, once; another window closing is not.
+    #[gpui::test]
+    fn a_settings_window_closed_any_way_is_heard_once(cx: &mut TestAppContext) {
+        let open = |cx: &mut TestAppContext| {
+            cx.update(|cx| cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Empty)).unwrap())
+        };
+        let (settings, other) = (open(cx), open(cx));
+        let heard = Rc::new(Cell::new(0));
+        let _watch = cx.update(|cx| {
+            let heard = heard.clone();
+            super::watch_close(settings.window_id(), move |_| heard.set(heard.get() + 1), cx)
+        });
+        other.update(cx, |_, w, _| w.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(heard.get(), 0);
+        settings.update(cx, |_, w, _| w.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(heard.get(), 1);
+    }
 
     #[test]
     fn back_and_forward_walk_the_sections_visited() {

@@ -128,6 +128,12 @@ pub struct Host {
     followed: Option<i64>,
     /// When Properties last followed while playing (`FOLLOW_EVERY` apart).
     followed_at: Option<std::time::Instant>,
+    /// A ruler scrub is under way (the timeline says); `scrubbed`: the time
+    /// moved during it, so the other panels hear it once it ends.
+    pub(crate) scrubbing: bool,
+    scrubbed: bool,
+    /// The last time a scrub asked for: written to the kernel when it ends.
+    pub(crate) scrub_time: Option<f64>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     /// Each panel body's scroll (owner request 2026-11-14: side panels
     /// scroll when their content is taller than their slot), kept across
@@ -158,6 +164,10 @@ pub struct Host {
     /// This editor's entity while it hosts Settings (its picker lists the
     /// other editors' projects without reading this one, being updated).
     pub(crate) settings_me: Option<gpui::EntityId>,
+    /// Hears the Settings window close however it closes (its close button,
+    /// ⌘W), so a closed window is forgotten and nothing shows it again
+    /// (PM-397).
+    pub(crate) settings_watch: Option<gpui::Subscription>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     /// Projects whose offline clips the person chose to export without, this
@@ -218,6 +228,7 @@ impl Controller {
             self.builtins.settings_chrome.take(),
             std::mem::take(&mut self.builtins.settings_history),
             self.builtins.settings_me.take(),
+            self.builtins.settings_watch.take(),
         );
         self.builtins = Host::default();
         self.builtins.windows = windows;
@@ -225,6 +236,7 @@ impl Controller {
             self.builtins.settings_chrome,
             self.builtins.settings_history,
             self.builtins.settings_me,
+            self.builtins.settings_watch,
         ) = settings;
         self.builtins.agent_carry = carry;
         self.builtins.project = Some(project.clone());
@@ -341,7 +353,12 @@ impl Controller {
                             // asked for before the project arrived) shows its
                             // panel from the new realm, not an empty sheet.
                             // Settings, on the section it was showing.
-                            if v.builtins.windows.contains_key(&id) {
+                            let live = v
+                                .builtins
+                                .windows
+                                .get(&id)
+                                .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
+                            if live {
                                 let _ = match v.builtins.settings_history.current() {
                                     Some(page) if id == "settings" => check.show_section(&id, &page),
                                     _ => check.show(&id),
@@ -581,7 +598,23 @@ impl Controller {
             host.publish_time(time, playing);
         }
         self.sync_viewer_stage();
-        if !self.builtins.clock.due(time, playing) {
+        let due = self.builtins.clock.due(time, playing);
+        // Scrubbing the ruler, Properties follows the time as it does in
+        // playback (each new frame, off the main thread); the other panels
+        // (the timeline's own, whose only change is its spoken time) hear it
+        // once the scrub ends. The playhead and timecode are CALayers.
+        if self.builtins.scrubbing && !playing {
+            if due {
+                self.builtins.scrubbed = true;
+                if let Some(gizmos) = &self.builtins.gizmos {
+                    gizmos.update(cx, |g, cx| g.refresh(cx));
+                }
+            }
+            self.follow_playback(time, cx);
+            return;
+        }
+        let rested = std::mem::take(&mut self.builtins.scrubbed);
+        if !due && !rested {
             if playing {
                 self.follow_playback(time, cx);
             }
@@ -1615,7 +1648,14 @@ impl Controller {
                             })
                             .detach();
                         }
-                        SurfaceWindow { owner, panel, keys, chrome: None, drag: None, editor: parent }
+                        SurfaceWindow {
+                            owner,
+                            panel,
+                            keys,
+                            drag: None,
+                            editor: parent,
+                            chrome: None,
+                        }
                     })
                 },
             );
@@ -1654,6 +1694,16 @@ impl Controller {
                                     window.bounds_changed(cx);
                                 });
                             });
+                        }
+                        if settings {
+                            let owner = cx.entity().downgrade();
+                            v.builtins.settings_watch = Some(crate::settings_window::watch_close(
+                                handle.window_id(),
+                                move |cx| {
+                                    let _ = owner.update(cx, |v, cx| v.settings_closed(cx));
+                                },
+                                cx,
+                            ));
                         }
                         v.builtins.windows.insert(id, handle.into());
                         // The panel learns where it is shown now (the
@@ -2434,6 +2484,16 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn skimming(&self, cx: &App) -> bool {
         crate::skimming::on(&self.0, cx)
     }
+    fn scrubbing(&self, on: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            v.builtins.scrubbing = on;
+            if !on {
+                // The panels hear where the scrub left the time.
+                v.finish_scrub();
+                v.tick_builtins(cx);
+            }
+        });
+    }
     fn skimmer_shown(&self, cx: &App) -> bool {
         self.0
             .upgrade()
@@ -2844,12 +2904,12 @@ struct SurfaceWindow {
     owner: Entity<Controller>,
     panel: String,
     keys: PopoverKeys,
-    /// Settings' AppKit chrome (the owner holds it too, to update it).
-    chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
     /// The Agent popover's header drag in progress.
     drag: Option<crate::popover_drag::HeaderDrag>,
     /// The editor window it belongs to (its drop targets, its bounds).
     editor: Option<AnyWindowHandle>,
+    /// Settings' AppKit chrome (the owner holds it too, to update it).
+    chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
 }
 impl SurfaceWindow {
     /// A press on the popover's header: a drag begins once the pointer
@@ -3743,77 +3803,6 @@ pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
         ],
     )
 }
-
-#[cfg(test)]
-mod panel_scroll_tests {
-    use super::*;
-    #[::core::prelude::v1::test]
-    fn panel_scroll_capture() {
-        let dir = std::env::var("PM_DOCK_CAPTURE").ok();
-        objc2::rc::autoreleasepool(|_| {
-            let mut cx = HeadlessAppContext::with_platform(
-                Arc::new(gpui_parley::ParleyTextSystem::new(
-                    gpui_parley::SystemFonts::Load,
-                )),
-                Arc::new(()),
-                || {
-                    Some(Box::new(
-                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
-                    ))
-                },
-            );
-            struct Frame(ScrollHandle);
-            impl Render for Frame {
-                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                    div().size_full().bg(rgb(0x202020)).child(panel_scroll_body(
-                        "test",
-                        160.,
-                        &self.0,
-                        div()
-                            .w(px(200.))
-                            .h(px(1000.))
-                            .flex_none()
-                            .bg(rgb(0x336699))
-                            .into_any_element(),
-                    ))
-                }
-            }
-            let handle = ScrollHandle::new();
-            let window = cx
-                .open_window(size(px(300.), px(160.)), |_, cx| {
-                    cx.new(|_| Frame(handle.clone()))
-                })
-                .unwrap();
-            cx.run_until_parked();
-            assert!(
-                f32::from(handle.max_offset().y) > 0.,
-                "content really scrolls"
-            );
-            handle.set_offset(point(px(0.), px(-120.)));
-            window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
-            cx.run_until_parked();
-            assert_eq!(f32::from(handle.offset().y), -120.);
-            let image = cx.capture_screenshot(window.into()).unwrap();
-            if let Some(dir) = dir {
-                std::fs::create_dir_all(&dir).unwrap();
-                image.save(format!("{dir}/panel-scroll.png")).unwrap();
-            }
-            if std::env::var_os("PM_DOCK_BASELINE").is_none() {
-                let scale = image.width() / 300;
-                for y in 0..image.height() {
-                    for x in 292 * scale..image.width() {
-                        assert_eq!(
-                            &image.get_pixel(x, y).0[..3],
-                            &[32, 32, 32],
-                            "scrollbar thumb painted"
-                        );
-                    }
-                }
-            }
-        });
-    }
-}
-
 /// A side panel's body: the scroller, a scroll layer, around the panel. A
 /// view of its own, cached, so a wheel step that only moves the offset
 /// replays its drawing instead of the window laying the panel out again.

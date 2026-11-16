@@ -120,6 +120,13 @@ fn build_frame(
     let height = (rect.h - t.metrics.header).max(0.);
     let dim = panel_build::playback(playing).0;
     let surface = slot_surface(t, Some(&state));
+    // The light is the accent's, its hot core and the sketch's warm dots
+    // drawn from it and the theme's ink: no colour of its own.
+    let accent = t.colors.accent;
+    let hot = pm_design::mix(accent, 0xffffff, 0.45);
+    let core = pm_design::mix(accent, 0xffffff, 0.9);
+    let sketch = t.colors.muted;
+    let ink = t.colors.text;
     div().absolute().inset_0().occlude().h(px(height)).overflow_hidden().rounded(px(t.radius.lg))
         .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
             let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
@@ -158,10 +165,10 @@ fn build_frame(
                                 let distance = ((xx+1.5-lx).powi(2)+(yy+1.5-ly).powi(2)).sqrt();
                                 let glow = (1.-distance/radius).max(0.).powf(2.2)*breath*cooling*dim*light_alpha;
                                 if glow > 0.001 && panel_build::inside_slot([xx,yy], size, 10.) && panel_build::inside_slot([xx+3.,yy+3.], size, 10.) {
-                                    if light { paint(xx,yy,3.,3.,0.,0xf0580a,glow.min(0.22)); }
+                                    if light { paint(xx,yy,3.,3.,0.,accent,glow.min(0.22)); }
                                     else {
                                         let add = |shift: u32, strength: f32| (((surface>>shift)&255) as f32 + strength*glow).min(255.) as u32;
-                                        let color = (add(16,240.)<<16)|(add(8,88.)<<8)|add(0,10.);
+                                        let color = (add(16,((accent>>16)&255) as f32)<<16)|(add(8,((accent>>8)&255) as f32)<<8)|add(0,(accent&255) as f32);
                                         paint(xx,yy,3.,3.,0.,color,1.);
                                     }
                                 }
@@ -186,7 +193,7 @@ fn build_frame(
                             for dot in panel_build::sketch_dots(size,row_y,erasure*dim) {
                                 let d = ((dot.center[0]-lx).powi(2)+(dot.center[1]-ly).powi(2)).sqrt();
                                 let heat = if reduced { 0. } else { (1.-d/36.).max(0.)*cooling };
-                                let color = pm_design::mix(if light {0x8f7868} else {0xc4aa96},0xffb27a,heat);
+                                let color = pm_design::mix(sketch,hot,heat);
                                 paint(dot.center[0]-dot.radius,dot.center[1]-dot.radius,dot.radius*2.,dot.radius*2.,dot.radius,color,dot.alpha + heat*0.65*dim);
                             }
                         }
@@ -194,13 +201,13 @@ fn build_frame(
                 }
                 if ink_only && state.stage == panel_build::Stage::Ink {
                     let [x, width] = panel_build::ink_track(size[0], fraction, elapsed, reduced);
-                    let color = panel_build::ink_color(elapsed, light, reduced);
+                    let color = panel_build::ink_color(elapsed, accent, ink, reduced);
                     let alpha = dim * (1. - panel_build::fade(elapsed - 0.58, 0.3));
                     paint(x, y-1., width, 2., 1., color, alpha);
                 }
                 if ink_only && !reduced && light_alpha > 0. {
-                    paint(lx-4.,ly-4.,8.,8.,4.,0xffb27a,0.3*dim*light_alpha*cooling);
-                    paint(lx-1.5,ly-1.5,3.,3.,1.5,0xfff4ea,dim*light_alpha*cooling);
+                    paint(lx-4.,ly-4.,8.,8.,4.,hot,0.3*dim*light_alpha*cooling);
+                    paint(lx-1.5,ly-1.5,3.,3.,1.5,core,dim*light_alpha*cooling);
                 }
             });
         }).w_full().h_full()).into_any_element()

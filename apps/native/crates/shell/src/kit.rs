@@ -1178,12 +1178,3 @@ fn empty_state_at_scale(t: &Tokens, scale: f32, symbol: &str, title: &str, detai
         )
 }
 
-/// A trailing shelf count, sharing Home's caption and tabular figures.
-pub fn shelf_count(t: &Tokens, count: usize) -> Div {
-    div()
-        .flex_none()
-        .text_role(t, Text::Caption)
-        .font_features(tabular())
-        .text_color(rgb(t.colors.muted))
-        .child(count.to_string())
-}

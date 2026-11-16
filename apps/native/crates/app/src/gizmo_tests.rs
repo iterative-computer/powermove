@@ -692,7 +692,6 @@ fn the_viewer_cursor_says_what_a_press_does(cx: &mut TestAppContext) {
         CursorStyle::ZoomIn
     );
 }
-
 /// The selection's outline moves with the view while the Hand drags it, not
 /// on release.
 #[gpui::test]
@@ -2272,7 +2271,7 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     };
     let before = document(&s);
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
-    // In the 3D view (the editor view; camera view moves the camera itself).
+    // In the 3D view (the editor view; camera view never moves the camera).
     s.surface
         .update(&mut s.vcx, |g, cx| g.studio_setting("look", "free", cx));
     cx.run_until_parked();
@@ -2797,29 +2796,33 @@ fn the_middle_button_orbits_pans_and_zooms(cx: &mut TestAppContext) {
     assert!(d.target == c.target && (reach(d) - reach(c)).abs() > 1e-6, "zoom");
     assert!(s.recorder.navigation.borrow().is_empty(), "the 2D view never panned");
 }
-/// In camera view every navigation moves the camera itself (Blender's Lock
-/// Camera to View, as Fly does): a burst of wheel notches is one undo step,
-/// stored once the wheel rests, and the viewer keeps looking through it.
+/// In camera view a scroll navigates the view (the viewer's own zoom), and
+/// a middle drag leaves for the editor view from where the camera stands
+/// (Blender with Lock Camera to View off): the authored camera never moves
+/// and no undo step is made (PM-367).
 #[gpui::test]
-fn navigating_in_camera_view_moves_the_camera_as_one_undo_step(cx: &mut TestAppContext) {
+fn navigating_in_camera_view_never_moves_the_authored_camera(cx: &mut TestAppContext) {
     let mut s = studio_stage(cx);
     let h = applied(&s);
     let before = stored(&s, "cam");
-    let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
     scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
     scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "still the camera's framing");
+    assert!(!s.recorder.navigation.borrow().is_empty(), "the viewer zoomed");
     cx.executor().advance_clock(std::time::Duration::from_millis(500));
-    let kernel = s.rig.kernel.clone();
-    settle(cx, move |_| kernel.published(PROJECT).unwrap().history.applied > h);
-    assert_eq!(applied(&s), h + 1, "one step");
-    let after = stored(&s, "cam");
-    // Two notches from z = 6 toward its target at 0: 6 / 1.44.
-    let z = num(&after["p"]["position.z"]);
-    assert!((z - 6. / 1.44).abs() < 1e-6, "{after}");
-    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
-    undo_3d(&mut s, cx);
-    assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);
+    cx.run_until_parked();
+    assert_eq!(applied(&s), h, "no undo step");
+    assert_eq!(stored(&s, "cam"), before, "the camera is as authored");
+    let from = s.point_of([300., 180.]);
+    let to = from + point(px(30.), px(40.));
+    s.vcx.simulate_mouse_down(from, MouseButton::Middle, Modifiers::none());
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, Modifiers::none());
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, Modifiers::none());
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "the editor view orbits");
+    assert_eq!(applied(&s), h, "no undo step");
+    assert_eq!(stored(&s, "cam"), before, "the camera is as authored");
 }
 /// The numpad views (number row too): Front looks down −Z from +Z, orbit
 /// steps undo each other, + zooms one notch.

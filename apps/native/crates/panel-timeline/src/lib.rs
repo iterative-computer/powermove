@@ -108,6 +108,9 @@ pub struct TimelineModel {
     /// Hide Shy Layers: shy layers (and what a shy group holds) have no row.
     /// They still draw, play and export.
     pub hide_shy: bool,
+    /// The timeline panel does not hold the keyboard: selected rows take
+    /// the neutral selection fill, not the accent (PM-367).
+    pub panel_blurred: bool,
     pub search: String,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,

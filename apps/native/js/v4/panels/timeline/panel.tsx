@@ -279,7 +279,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
-            data-pm-variant="plate"
+            data-pm-variant="glass"
             value={f.mode}
             options={[
               { id: "Layers", label: "Layers" },
@@ -438,17 +438,20 @@ function Layer({
   row,
   send,
   single,
+  lit,
 }: {
   row: LayerRow;
   send: Send;
   single: boolean;
+  /** Selected while the timeline holds the keyboard: the accent's. */
+  lit: boolean;
 }) {
-  // As v1: every row keeps its switches' columns at its trailing edge, so
-  // names truncate at the same place on every row and nothing moves under
-  // the pointer. Visibility and the parent link always show; Lock shows
-  // when set, or under the pointer, keyboard focus or a single selected
-  // layer. Shy and Solo stay reachable on each layer row.
-  const focusedSelection = useContext(TimelineFocused) && row.selected;
+  // As v1 and After Effects: every row keeps its switches' columns at its
+  // trailing edge, so names truncate at the same place on every row and
+  // nothing moves under the pointer. Visibility and the parent link always
+  // show; Shy, Solo and Lock show when set, or under the pointer, keyboard
+  // focus or a single selected layer (PM-367: they stay on the row, and in
+  // the Layer menu and the row menu).
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
@@ -466,6 +469,22 @@ function Layer({
           },
         ]
       : []),
+    {
+      name: "shy" as const,
+      on: row.shy === true,
+      label: "Toggle Shy",
+      symbol: row.shy ? "face.dashed.fill" : "face.dashed",
+      active: row.shy === true,
+      always: false,
+    },
+    {
+      name: "solo" as const,
+      on: row.solo,
+      label: "Toggle Solo",
+      symbol: row.solo ? "s.circle.fill" : "s.circle",
+      active: row.solo,
+      always: false,
+    },
     {
       name: "lock" as const,
       on: row.locked,
@@ -502,7 +521,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t(focusedSelection ? "colors.accent_text" : "colors.muted"),
+              color: t(lit ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -533,7 +552,7 @@ function Layer({
               label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
               symbol={row.expanded ? "chevron.down" : "chevron.right"}
               quiet
-              tint={focusedSelection ? "colors.accent_text" : undefined}
+              tint={lit ? "colors.accent_text" : undefined}
               tabIndex={-1}
               send={send}
               intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -572,7 +591,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t(focusedSelection ? "colors.accent_text" : "colors.text"),
+            color: t(lit ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -604,7 +623,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
-              ...(focusedSelection ? { color: t("colors.accent_text") } : {}),
+              ...(lit ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -625,7 +644,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={focusedSelection ? "colors.accent_text" : undefined}
+              tint={lit ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -824,10 +843,14 @@ const TimelineRow = memo(
     row: published,
     send,
     single,
+    focused,
   }: {
     row: Row;
     send: Send;
     single: boolean;
+    /** The timeline holds the keyboard (PM-367): selection takes the
+     * accent then, the neutral selection fill otherwise (the Mac's). */
+    focused: boolean;
     key?: string;
   }) {
     const [hover, setHover] = useState(false);
@@ -891,7 +914,7 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.selected && timelineFocused
+          ...(row.selected && focused
             ? {
                 background: t(
                   row.hovered
@@ -901,14 +924,14 @@ const TimelineRow = memo(
                 color: t("colors.accent_text"),
               }
             : row.selected
-              ? { background: t("colors.fill_strong") }
-              : row.hovered
+              ? { background: t("colors.selected_fill") }
+            : row.hovered
               ? { background: t("colors.hover") }
               : {}),
         }}
       >
         {row.kind === "layer" ? (
-          <Layer row={row} send={send} single={single} />
+          <Layer row={row} send={send} single={single} lit={row.selected && focused} />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
         ) : (
@@ -993,6 +1016,7 @@ const TimelineRow = memo(
   (before, after) =>
     before.send === after.send &&
     before.single === after.single &&
+    before.focused === after.focused &&
     JSON.stringify(before.row) === JSON.stringify(after.row),
 );
 
@@ -1112,6 +1136,7 @@ export function TimelinePanel({
                       row={row}
                       send={send}
                       single={!f.selection || f.selection.count <= 1}
+                      focused={f.focused !== false}
                     />
                   ))}
                 </UI.Tree>

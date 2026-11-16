@@ -581,29 +581,6 @@ export function ProjectView(props: ProjectViewProps) {
                 </text>
               </div>
             ) : null}
-            {f.folder?.link ? (
-              <text
-                attr={{
-                  symbol:
-                    f.folder.sync === "NotFound"
-                      ? "link.badge.plus"
-                      : f.folder.sync === "Syncing"
-                        ? "arrow.triangle.2.circlepath"
-                        : "link",
-                }}
-                style={{
-                  position: "absolute",
-                  right: token("metrics.media_inset"),
-                  bottom: token("metrics.media_inset"),
-                  symbolSize: token("metrics.symbol_inline"),
-                  color: token(
-                    f.folder.sync === "NotFound"
-                      ? "colors.danger"
-                      : "colors.secondary",
-                  ),
-                }}
-              />
-            ) : null}
             {f.comp?.open ? (
               <div
                 role="img"
@@ -643,7 +620,7 @@ export function ProjectView(props: ProjectViewProps) {
       const count = n ? `${n} ${n === 1 ? "item" : "items"}` : "Empty";
       if (f.folder.sync === "NotFound") return "Folder not found";
       if (f.folder.sync === "Syncing") return "Syncing…";
-      return f.folder.link ? `Linked · ${n} items` : count;
+      return count;
     }
     if (f.state?.overlay === "Loading…") return "Loading media…";
     return [meta(row), row.folder_path?.join(" / ")]
@@ -765,30 +742,6 @@ export function ProjectView(props: ProjectViewProps) {
           }}
         >
           {nameText(row)}
-          {f.folder?.link ? (
-            <text
-              attr={{
-                symbol:
-                  f.folder.sync === "NotFound"
-                    ? "link.badge.plus"
-                    : f.folder.sync === "Syncing"
-                      ? "arrow.triangle.2.circlepath"
-                      : "link",
-              }}
-              style={{
-                symbolSize: token("metrics.symbol_inline"),
-                color: token(
-                  f.folder.sync === "NotFound"
-                    ? row.selected
-                      ? "colors.selected_danger"
-                      : "colors.danger"
-                    : row.selected
-                      ? "colors.selected_secondary"
-                      : "colors.secondary",
-                ),
-              }}
-            />
-          ) : null}
         </div>
         {actions.length ? (
           actionButtons(actions, "colors.secondary")

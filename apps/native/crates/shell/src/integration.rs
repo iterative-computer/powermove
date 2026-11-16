@@ -20,6 +20,9 @@ pub trait Integration {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement>;
+    /// Whether panel `id` holds the keyboard, told each time the shell lays
+    /// it out (the timeline's selected rows take the accent only then).
+    fn panel_focused(&self, _id: &str, _focused: bool, _cx: &mut App) {}
     /// Content for panel `id`'s 32 pt header, replacing the shell's title
     /// (a tab group keeps its tab strip, and then `tabbed`: the tab names
     /// the panel, so its header leaves out its own title). `None` = the

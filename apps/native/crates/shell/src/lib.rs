@@ -64,12 +64,12 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
-    check_view3d, document_subtitle, native_color, opens_in_place,
-    popover_frame, project_menu_entries, request_close, resize_from_top, send_menu_command,
-    set_viewer_preference, sidebar_frame, system_accent, viewer_preference, viewer_slot,
-    viewer_window, window_backdrop, zoom_limit,
-    apply_tabs_mode, editor_window_tabbing,
+    viewer_preference, set_viewer_preference, apply_tabs_mode, editor_window_tabbing, live_window_ids,
+    opens_in_place, project_menu_entries,
+    ADD, AgentStatus, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows,
+    check_view3d, document_subtitle, native_color, popover_frame, request_close, resize_from_top,
+    send_menu_command, sidebar_frame, system_accent, viewer_slot, viewer_window, window_backdrop,
+    zoom_limit,
 };
 
 #[cfg(all(test, target_os = "macos"))]

@@ -627,7 +627,83 @@
     outline-offset: var(--pm-focus-offset);
   }
 
-  /* WebKit follows the system scrollbar appearance and visibility setting. */
+  /* The one rule an extension's own CSS does not win (an important layered
+     declaration beats an unlayered one): a field's or a button's focus ring
+     is the neutral one the built-in fields draw, never the accent (owner
+     rule: no accent focus rings). Opted-out panels keep their own. */
+  :is(input, textarea, select, button, [contenteditable]):focus-visible:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    outline: var(--pm-focus-width) solid var(--pm-focus) !important;
+    outline-offset: var(--pm-focus-offset) !important;
+  }
+
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    background: transparent;
+    background-clip: padding-box;
+    border-radius: var(--pm-r-capsule);
+  }
+  :hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-scrollbar-thumb,
+  .pm-scrolling:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--pm-text) 28%, transparent);
+  }
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-track,
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
   [data-pm-style="none"],
   [data-pm-style="tokens-only"] {
     font: initial;

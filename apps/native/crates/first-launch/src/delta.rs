@@ -510,12 +510,17 @@ impl Merge<'_> {
         };
         Ok(())
     }
+    /// The native copy as it stands: a Home rename of it while closed (its
+    /// row's name, marked) is native work too, though the body is unchanged.
     fn stored_fingerprint(&self, id: &str) -> Result<Option<String>> {
-        Ok(self
-            .writer
-            .store()
-            .load(id)?
-            .map(|p| fingerprint(&p.project, p.history.as_ref())))
+        let store = self.writer.store();
+        let renamed = store.renamed(id)?;
+        Ok(store.load(id)?.map(|mut p| {
+            if let (Some(name), KernelValue::Object(m)) = (&renamed, &mut p.project) {
+                m.insert("name", KernelValue::from(name.as_str()));
+            }
+            fingerprint(&p.project, p.history.as_ref())
+        }))
     }
     fn projects(&mut self, hook: &mut impl FnMut(Event) -> Result<()>) -> Result<()> {
         let store = self.next_store();

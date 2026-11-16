@@ -989,11 +989,21 @@ impl Kernel {
                     self.sessions[&handle.project].destination,
                     Destination::File(_)
                 ) && !self.project(&handle.project).unwrap().store().needs_save();
+                // Nothing edited since it opened or was saved: what the close
+                // writes keeps the row's edit time (PM-392).
+                let edited = self.project(&handle.project).unwrap().store().needs_save();
                 let recovery_copy = if unchanged {
                     self.save_session_meta(&handle.project)?;
                     None
                 } else {
-                    let saved = self.save_session(&handle, None)?;
+                    let kept = (!edited)
+                        .then(|| self.library.as_ref().map(|w| w.keep_time(true)))
+                        .flatten();
+                    let saved = self.save_session(&handle, None);
+                    if let (Some(w), Some(was)) = (&self.library, kept) {
+                        w.keep_time(was);
+                    }
+                    let saved = saved?;
                     let ShellReply::Saved {
                         recovery_copy,
                         displaced,
@@ -1393,35 +1403,47 @@ impl Kernel {
             return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
         }
         let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
-        let Some(p) = w.store().load(project).map_err(failure)? else {
+        let store = w.store();
+        let meta = store
+            .read(&format!("projectMeta.{project}"))
+            .map_err(failure)?;
+        if meta.as_ref().is_some_and(|m| m.get("file").is_some())
+            && !store.dir().join(format!("project.{project}.json")).exists()
+        {
             // A file's entry: the file holds the name, renamed by opening it.
             return Ok(ShellReply::Changed(false));
-        };
+        }
         // Work a session left without saving is replayed onto what the slot
         // holds; a rename would change that base, and the next open could
         // not offer the work. A copy of another project keeps its journal
-        // under that project's id (PM-360).
-        let journals = [Some(project.to_owned()), p
-            .session
-            .as_ref()
-            .and_then(|m| m.get("copyOf")?.get("entry")?.as_str())
-            .map(str::to_owned)];
+        // under that project's id (PM-360). An older build's journal counts
+        // when it is newer than the slot, which only a load tells.
+        let journals = [
+            Some(project.to_owned()),
+            meta.as_ref()
+                .and_then(|m| m.get("copyOf")?.get("entry")?.as_str())
+                .map(str::to_owned),
+        ];
         let unsaved = journals.iter().flatten().any(|id| {
             self.project_dir(id)
                 .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty())
-        });
-        if unsaved || p.journal_applied > 0 {
+        }) || (store
+            .read(&format!("projectJournal.{project}"))
+            .map_err(failure)?
+            .is_some()
+            && store
+                .load(project)
+                .map_err(failure)?
+                .is_some_and(|p| p.journal_applied > 0));
+        if unsaved {
             return Ok(ShellReply::HasUnsavedWork);
         }
-        let w = self.library.as_ref().unwrap();
-        w.save_project(
-            project,
-            with_identity(p.project, project, Some(name)),
-            p.history.unwrap_or(Value::Null),
-            p.workspace.unwrap_or(Value::Null),
-            p.session.unwrap_or(Value::Null),
-        )
-        .map_err(failure)?;
+        // Only the name in Home's row, kept in its place with its date: the
+        // body of a long project is hundreds of megabytes, and the next open
+        // names the project from its row.
+        if !w.rename_entry(project, name).map_err(failure)? {
+            return Err(failure("Library project is missing"));
+        }
         Ok(ShellReply::Changed(true))
     }
     fn duplicate_slot(
@@ -1736,7 +1758,7 @@ impl Kernel {
                     return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
                 }
                 let reader = LibraryStore::open(&profile);
-                let Some(p) = reader.load(&project).map_err(failure)? else {
+                let Some(mut p) = reader.load(&project).map_err(failure)? else {
                     // A file's entry has no body of its own (save_file_entry):
                     // its unsaved work is in the journal.
                     let file = reader
@@ -1752,6 +1774,12 @@ impl Kernel {
                     }
                     return self.open_without_file(id, &project);
                 };
+                // Renamed while no window had it open: the row has the name.
+                if let Some(name) = reader.renamed(&project).map_err(failure)?
+                    && let Value::Object(m) = &mut p.project
+                {
+                    m.insert("name", Value::from(name));
+                }
                 let owned = self.library.as_ref().is_some_and(|w| {
                     w.store().dir().canonicalize().ok() == reader.dir().canonicalize().ok()
                 });
@@ -2470,6 +2498,29 @@ impl Kernel {
                 journal_id,
             },
         );
+        // What an open writes to the library (view state, a format upgrade,
+        // a file's entry) is not an edit: the row keeps its edit time.
+        let kept = self.library.as_ref().map(|w| w.keep_time(true));
+        let written = self.write_opened_entry(&handle, slot_current, &mut info);
+        if let (Some(w), Some(was)) = (&self.library, kept) {
+            w.keep_time(was);
+        }
+        written?;
+        Ok(ShellReply::Opened {
+            session: handle,
+            info,
+            decision,
+            recovery,
+        })
+    }
+    /// The library entry of a session just opened (`open_session`). On
+    /// failure the session is closed again.
+    fn write_opened_entry(
+        &mut self,
+        handle: &SessionHandle,
+        slot_current: bool,
+        info: &mut OpenInfo,
+    ) -> Result<(), KernelFailure> {
         // A new/copy project gets a rollback-readable slot immediately.
         if slot_current {
             // Reopening a library project rewrites none of it, however large.
@@ -2496,7 +2547,7 @@ impl Kernel {
             self.sessions[&handle.project].destination,
             Destination::Library(_)
         ) {
-            if let Err(e) = self.save_session(&handle, None) {
+            if let Err(e) = self.save_session(handle, None) {
                 self.sessions.remove(&handle.project);
                 self.close(&handle.project);
                 return Err(e);
@@ -2510,12 +2561,7 @@ impl Kernel {
             self.close(&handle.project);
             return Err(e);
         }
-        Ok(ShellReply::Opened {
-            session: handle,
-            info,
-            decision,
-            recovery,
-        })
+        Ok(())
     }
     fn recovery_copy(
         &self,

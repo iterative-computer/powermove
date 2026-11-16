@@ -221,13 +221,17 @@ impl Editor {
         }
     }
     /// The panel or dock a drop is named after, in this layout.
-    fn near_name(&self, near: layout::Near, panels: &layout::Panels) -> (String, &'static str) {
+    fn near_name(
+        &self,
+        near: layout::Near,
+        drag: &PanelDrag,
+        panels: &layout::Panels,
+    ) -> (String, &'static str) {
+        // Named after the tab that will show there once the dragged one left.
         let title = |d: usize, g: usize| {
             self.layout
-                .docks
-                .get(d)
-                .and_then(|dock| dock.groups.get(g))
-                .map_or_else(String::new, |g| panels.title(g.active()).to_string())
+                .shown_after(d, g, &drag.id, drag.stack)
+                .map_or_else(String::new, |id| panels.title(&id).to_string())
         };
         match near {
             layout::Near::Tab(d, g) => (title(d, g), "tab"),
@@ -244,7 +248,7 @@ impl Editor {
     /// The drag card's second line: where the panel would go.
     fn destination(&self, drag: &PanelDrag, panels: &layout::Panels) -> String {
         if let Some(p) = drag.preview {
-            let (name, kind) = self.near_name(p.near, panels);
+            let (name, kind) = self.near_name(p.near, drag, panels);
             return match kind {
                 "tab" => format!("Tab with {name}"),
                 "above" => format!("Above {name}"),
@@ -287,7 +291,7 @@ impl Editor {
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
-            self.tokens = crate::theme::tokens(
+            let tokens = crate::theme::tokens(
                 match window.appearance() {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark => {
                         pm_design::Scheme::Dark
@@ -296,6 +300,12 @@ impl Editor {
                 },
                 crate::native::settings(),
             );
+            // A window's appearance is reported more often than it changes:
+            // the same look rebuilds nothing (PM-400).
+            if tokens == self.tokens {
+                return;
+            }
+            self.tokens = tokens;
             if let Some(h) = &self.host {
                 h.borrow_mut().update_tokens(self.tokens.clone());
             }
@@ -523,6 +533,8 @@ impl Editor {
             project: self.project.clone(),
             workspace: self.layout.workspace.clone(),
             tab_group: host.tab_leader(),
+            tab_index: host.tab_index(),
+            pages: host.page_ids(),
             fullscreen: host.is_fullscreen(),
         })
     }
@@ -1405,15 +1417,10 @@ impl Editor {
         let Some(Gesture::Panel(drag)) = self.gesture.take() else {
             return None;
         };
-        let target = drag.preview?.target;
-        if drag.stack {
-            self.layout.move_stack_to(&drag.id, target)
-        } else {
-            self.layout.move_panel_to(&drag.id, target)
-        }
-        .ok()?;
+        let preview = drag.preview?;
+        self.layout.apply_drop(&drag.id, &preview, drag.stack).ok()?;
         self.save();
-        Some(target)
+        Some(preview.target)
     }
     /// Ends the drag in progress as a release does: a panel moved lands
     /// where its preview showed, a resize keeps the sizes it reached.
@@ -1474,12 +1481,8 @@ impl Editor {
             let name = self.moving_name(&drag.id, drag.stack, &panels);
             let message = match drag.preview {
                 Some(p) => {
-                    let (near, kind) = self.near_name(p.near, &panels);
-                    let moved = if drag.stack {
-                        self.layout.move_stack_to(&drag.id, p.target)
-                    } else {
-                        self.layout.move_panel_to(&drag.id, p.target)
-                    };
+                    let (near, kind) = self.near_name(p.near, &drag, &panels);
+                    let moved = self.layout.apply_drop(&drag.id, &p, drag.stack);
                     match moved {
                         Ok(()) => match kind {
                             "tab" => format!("{name} tabbed with {near}"),
@@ -2930,6 +2933,10 @@ impl Render for Editor {
                 }
                 continue;
             }
+            if let (Some(i), Some(f)) = (self.integration.clone(), self.panel_focus.get(&id)) {
+                let focused = f.contains_focused(w, cx);
+                i.panel_focused(&id, focused, cx);
+            }
             let content = self
                 .integration
                 .as_ref()
@@ -3097,61 +3104,37 @@ impl Render for Editor {
                             this.layout.reset_dock(&key_divider);
                             0.
                         }
-                        _ => return,
-                    };
-                    this.layout.resize_with_panel_heights(
-                        &key_divider,
-                        delta,
-                        this.dock_bounds,
-                        &this.tokens,
-                        &this.dock_natural_heights,
-                    );
-                    this.save();
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .cursor(if d.horizontal {
-                    CursorStyle::ResizeUpDown
-                } else {
-                    CursorStyle::ResizeLeftRight
-                })
-                // The glow follows the pointer along the gap.
-                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                    let along = if hover_divider.horizontal {
-                        f32::from(e.position.x) - hover_divider.rect.x
-                    } else {
-                        f32::from(e.position.y) - hover_divider.rect.y
-                    };
-                    this.split_hover = Some((hover_key, along));
-                    cx.notify();
-                }))
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    if !*hovered
-                        && this.split_hover.is_some_and(|(k, _)| k == hover_key)
-                        && !matches!(this.gesture, Some(Gesture::Resize(..)))
-                    {
-                        this.split_hover = None;
-                        cx.notify();
-                    }
-                }))
-                .children(glow)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        // The grab reaches over the panels' edges: the
-                        // header or body under it must not also take the
-                        // press (a header would start a panel drag).
-                        cx.stop_propagation();
-                        this.split_focus = Some(divd.clone());
-                        if let Some(h) = &this.host {
-                            h.borrow_mut().splitter_focus = true;
-                        }
-                        // A double-click puts a dock back at its size
-                        // (the original app); between panels it does nothing.
-                        if e.click_count >= 2 {
-                            this.gesture = None;
-                            if this.layout.reset_dock(&divd) {
-                                this.slides.armed = true;
+                    }))
+                    .children(glow)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            // The grab reaches over the panels' edges: the
+                            // header or body under it must not also take the
+                            // press (a header would start a panel drag).
+                            cx.stop_propagation();
+                            this.split_focus = Some(divd.clone());
+                            if let Some(h) = &this.host {
+                                h.borrow_mut().splitter_focus = true;
+                            }
+                            // A double-click puts a dock back at its size
+                            // (the original app), and two panels back at
+                            // their heights.
+                            if e.click_count >= 2 {
+                                this.gesture = None;
+                                let (bounds, t) = (this.dock_bounds, this.tokens.clone());
+                                if this.layout.reset_dock(&divd)
+                                    || this.layout.reset_split(&divd, bounds, &t)
+                                {
+                                    this.slides.armed = true;
+                                    this.save();
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            // A folded panel beside it opens first, so the
+                            // drag has room to work with.
+                            if this.layout.expand_beside(&divd) {
                                 this.save();
                             }
                             cx.notify();

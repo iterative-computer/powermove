@@ -962,6 +962,20 @@ impl GizmoSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// Whether a Blender key of View ▸ 3D in `group` belongs to the viewer
+    /// (PM-367): the composition shows Studio 3D layers, the viewer has the
+    /// keyboard (`canvas`, or the gizmos' own focus), and for the view keys
+    /// the 3D side of 2D | 3D is showing. Otherwise the key goes on to its
+    /// next meaning; the menus and the bar still run the command.
+    pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
+        let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        focused
+            && self.studio.active()
+            && match group {
+                "look" | "fly" => true,
+                _ => self.studio.free_look,
+            }
+    }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
         self.rulers.shown = shown;
@@ -1201,6 +1215,11 @@ impl GizmoSurface {
         // Flying: a click keeps the flight (Blender's Fly).
         if self.studio_flying() {
             self.studio_fly_end(true, cx);
+            return;
+        }
+        // Along the viewer's edges the dividers' grab reaches over it: a
+        // press there resizes, it never takes a handle (PM-289).
+        if on_divider_reach(self.bounds, event.position, &self.tokens) {
             return;
         }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
@@ -3045,5 +3064,28 @@ mod snapping_toggle_tests {
         assert!(snapping_suspended(true, true));
         assert!(snapping_suspended(false, false));
         assert!(snapping_suspended(false, true));
+    }
+}
+/// Whether `at` lies in the band along the viewer's edges that the dividers
+/// beside it take (their grab reaches `splitter_reach` into each side).
+fn on_divider_reach(bounds: Bounds<Pixels>, at: Point<Pixels>, t: &pm_design::Tokens) -> bool {
+    let reach = px(t.metrics.splitter_reach + t.metrics.border);
+    let (left, top) = (bounds.origin.x, bounds.origin.y);
+    let (right, bottom) = (left + bounds.size.width, top + bounds.size.height);
+    bounds.contains(&at)
+        && (at.x < left + reach || at.x > right - reach || at.y < top + reach || at.y > bottom - reach)
+}
+#[cfg(test)]
+mod divider_reach_tests {
+    use gpui::{Bounds, point, px, size};
+    #[test]
+    fn a_press_along_the_viewers_edge_is_the_dividers() {
+        let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let b = Bounds::new(point(px(100.), px(50.)), size(px(600.), px(400.)));
+        let reach = t.metrics.splitter_reach + t.metrics.border;
+        assert!(super::on_divider_reach(b, point(px(100. + reach - 1.), px(200.)), &t));
+        assert!(super::on_divider_reach(b, point(px(400.), px(450. - reach + 1.)), &t));
+        assert!(!super::on_divider_reach(b, point(px(400.), px(250.)), &t));
+        assert!(!super::on_divider_reach(b, point(px(90.), px(250.)), &t));
     }
 }

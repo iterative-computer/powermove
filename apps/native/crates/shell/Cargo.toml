@@ -33,6 +33,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 name = "child_windows"
 harness = false
 [[test]]
+name = "settings_chrome"
+harness = false
+[[test]]
 name = "child_windows_gpui"
 harness = false
 [[test]]

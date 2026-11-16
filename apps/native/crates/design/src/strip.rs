@@ -6,8 +6,11 @@
 //! smoothly into a luminous foot, a 1 px rim of light in its own hue inside
 //! the edge instead of an outline, light falling on the top edge that thins
 //! out round the top corners (brightest along the top and corners, never a
-//! band with a visible end), and pale names. Hover and selection brighten
-//! and whiten the rim.
+//! band with a visible end), and semibold names (3:1, large-bold text) in a
+//! pale tint of the hue, or a deep shade where a tint cannot hold that and
+//! on yellow and orange, whose slabs are the reference's bright amber. As
+//! bright and saturated as the owner's reference: each hue as vivid as sRGB
+//! allows. Hover and selection brighten and whiten the rim.
 //!
 //! On the light canvas (`Tokens::strip_light`): a pale tint of the hue, a
 //! step deeper at the top and lighter in the foot, a 1 px rim in a deeper
@@ -23,7 +26,7 @@
 //! view.
 use crate::{
     Scheme, Tokens,
-    color::{mix, oklch, to_oklch},
+    color::{mix, oklch, oklch_fit, to_oklch},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -102,6 +105,9 @@ pub struct TrimGrip {
 
 /// How far down a strip its name's descenders reach (a share of its height).
 const LABEL_FOOT: f32 = 0.78;
+/// The contrast a strip's name holds on the dark canvas: names are semibold
+/// (large-bold text, 3:1), with a little room over that floor.
+const NAME_CONTRAST: f32 = 3.2;
 /// How far down a strip the ruler's grid line reaches before it has faded
 /// out: about half its height (the owner's reference).
 pub const GRID_FADE: f32 = 0.5;
@@ -197,21 +203,50 @@ impl Tokens {
         };
         // A selected strip is a step brighter as well as white-rimmed.
         let lift = if selected { 0.03 } else { 0. };
-        let deep = oklch(0.4 + lift, chroma, hue);
-        // The foot is as luminous as the hue allows while a name, which
-        // stands on the deeper upper band, still holds 4.5:1 at the foot of
-        // its descenders (`LABEL_FOOT` of the way down).
+        // As bright and saturated as the reference's slabs: a deep top that
+        // opens into a luminous foot, each as vivid as sRGB allows the hue.
+        let vivid = match (coloured, disabled) {
+            (false, _) => 0.,
+            (true, true) => 0.06,
+            (true, false) => 0.26,
+        };
+        // Yellow and orange are light hues: the reference's amber slab, a
+        // step brighter, under a dark name.
+        let light_hue = coloured && (35. ..110.).contains(&hue);
+        let (top, foot) = if light_hue { (0.63, 0.74) } else { (0.5, 0.63) };
+        let deep = oklch_fit(top + lift, vivid, hue);
+        let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(deep, bottom, LABEL_FOOT);
         let landed = |c: u32| mix(self.colors.panel, c, opacity);
-        let body = (0..=16)
-            .map(|step| oklch(0.6 + lift - step as f32 * 0.01, chroma * 0.9, hue))
-            .find(|bottom| crate::color::contrast(0xffffff, landed(under(*bottom))) >= 4.7)
-            .unwrap_or_else(|| oklch(0.44 + lift, chroma * 0.9, hue));
         let under_label = under(body);
-        let foreground = (0..=14)
-            .map(|step| oklch(0.86 + step as f32 * 0.01, chroma * 0.7, hue))
-            .find(|label| crate::color::contrast(*label, landed(under_label)) >= 4.6)
-            .unwrap_or(0xffffff);
+        // Names are semibold, so they hold 3:1 (large-bold text) from the
+        // slab's top to the foot of their descenders, veiled outside the
+        // work area too: a pale tint of the hue where that holds, else a
+        // deep shade of it.
+        let (veil, veil_alpha) = self.work_area_veil();
+        let holds = |name: u32| {
+            [deep, under_label].iter().all(|ground| {
+                let ground = landed(*ground);
+                crate::color::contrast(name, ground) >= NAME_CONTRAST
+                    && crate::color::contrast(name, mix(ground, veil, veil_alpha)) >= NAME_CONTRAST
+            })
+        };
+        let pale = || {
+            (0..=12)
+                .map(|step| oklch_fit(0.85 + step as f32 * 0.01, vivid * 0.4, hue))
+                .find(|name| holds(*name))
+        };
+        let shade = || {
+            (0..=18)
+                .map(|step| oklch_fit(0.3 - step as f32 * 0.015, vivid * 0.6, hue))
+                .find(|name| holds(*name))
+        };
+        let foreground = if light_hue {
+            shade().or_else(pale)
+        } else {
+            pale().or_else(shade)
+        }
+        .unwrap_or(0xffffff);
         // The rim's light is the palest tint of the hue; under the pointer
         // it brightens toward white, selected it is white.
         let tint = oklch(0.9, chroma * 0.55, hue);
@@ -235,7 +270,7 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
-            grid: (tint, if disabled { 0.1 } else { 0.3 }),
+            grid: (tint, if disabled { 0.12 } else { 0.4 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.45, 6., 16.)
             } else {
@@ -244,10 +279,18 @@ impl Tokens {
             foreground,
             // Marks (waveforms) stand on the foot, the body's lightest part:
             // the palest step of the hue that still reads there.
-            primary: (0..=12)
-                .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
-                .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
-                .unwrap_or(0xffffff),
+            // On the light hues' bright foot the marks are a deep shade.
+            primary: if light_hue {
+                (0..=12)
+                    .map(|step| oklch_fit(0.4 - step as f32 * 0.02, vivid * 0.6, hue))
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .unwrap_or(0x000000)
+            } else {
+                (0..=12)
+                    .map(|step| oklch(0.8 + step as f32 * 0.01, chroma * 0.62, hue))
+                    .find(|mark| crate::color::contrast(*mark, solid(body)) >= 2.5)
+                    .unwrap_or(0xffffff)
+            },
         }
     }
     /// The strip on the light canvas (see the module's note).
@@ -340,6 +383,15 @@ impl Tokens {
             oklch(0.74, 0.13, hue)
         } else {
             oklch(0.56, 0.14, hue)
+        }
+    }
+    /// A selected key's ring in the graph: v1's green, in this appearance.
+    pub fn graph_key_selected(&self) -> u32 {
+        let (_, _, hue) = to_oklch(self.colors.labels.green);
+        if self.scheme == Scheme::Dark {
+            oklch(0.83, 0.15, hue)
+        } else {
+            oklch(0.6, 0.15, hue)
         }
     }
     /// The graph's selected direction handles: v1's yellow, in this appearance.

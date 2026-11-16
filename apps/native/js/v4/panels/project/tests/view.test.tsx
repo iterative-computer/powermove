@@ -154,8 +154,8 @@ for (const [state, view, extra] of cases)
     if (state.startsWith("linked-Syncing")) {
       expect(
         Object.values(report.nodes).some(
-          (node: any) =>
-            node.props.attr?.symbol === "arrow.triangle.2.circlepath",
+          // The quiet line says it (no glyph: lists are quiet text).
+          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
         ),
       ).toBe(true);
     }

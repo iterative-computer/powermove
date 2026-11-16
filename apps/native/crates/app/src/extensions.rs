@@ -1975,11 +1975,15 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
-        // Exports and explicit background review launches keep WebKit working
-        // while the editor is occluded; neither activates or parks the window.
+        // An export's page is never shown: it runs for its job in a window of
+        // its own, whatever the editor's window does. In the editor's, a window
+        // behind others or hidden held the page back (its answers came 3 to 7
+        // times slower and the export took 2 to 4 times as long as in front).
+        // An explicit background review launch keeps WebKit working while the
+        // editor is occluded, in the editor's window.
+        let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
             && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
-        let exporting = key.starts_with(EXPORT_PAGE);
         if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
@@ -2081,9 +2085,6 @@ impl Controller {
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill.get()));
-                // The ground is the panels': the viewer's stage shows the
-                // viewer through the page, never under a panel's tint.
-                let _ = host.set_fill_regions(Some(mine.iter().map(|(_, r)| *r).collect()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,
