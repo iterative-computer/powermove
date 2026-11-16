@@ -114,3 +114,20 @@ fn native_group_planning_p95_stays_under_four_tenths_of_a_millisecond() {
     times.sort_by(f64::total_cmp);
     assert!(times[times.len() * 95 / 100] <= 0.4);
 }
+
+#[test]
+fn snapped_key_time_keeps_the_key_in_its_dot_group() {
+    let tokens = Tokens::new(Scheme::Dark, Default::default());
+    let scene = scene(&tokens);
+    let frame = scene.prepare(fixture::viewport(&tokens), &tokens).unwrap();
+    let mut ink = AgentInk::default();
+    let mut e = event(Kind::Key);
+    e.times = vec![1.486]; // Snaps to the visible 1.5s key at 30fps.
+    ink.receive(e, 0);
+    let groups = ink.groups(&frame, &scene, &tokens, 600);
+    assert!(groups.iter().any(|g| {
+        g.indices
+            .iter()
+            .any(|i| frame.ops[*i].id.starts_with("key:"))
+    }));
+}

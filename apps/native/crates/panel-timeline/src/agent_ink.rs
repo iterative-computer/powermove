@@ -123,7 +123,7 @@ impl AgentInk {
         })
     }
     /// Indices borrow the ordinary frame; native painting never clones its ops.
-    pub fn groups(&self, frame: &Frame, _scene: &Scene, t: &Tokens, now: u64) -> Vec<DotGroup> {
+    pub fn groups(&self, frame: &Frame, scene: &Scene, t: &Tokens, now: u64) -> Vec<DotGroup> {
         let mut groups: Vec<DotGroup> = Vec::new();
         let v = frame.viewport;
         for a in &self.events {
@@ -165,7 +165,9 @@ impl AgentInk {
                                 + (op.bounds.x + op.bounds.width / 2. - v.layer_column) / v.pps;
                             layer == a.event.layer
                                 && (a.event.times.is_empty()
-                                    || a.event.times.iter().any(|t| (*t - time).abs() < 0.01))
+                                    || a.event.times.iter().any(|t| {
+                                        (*t - time).abs() <= 0.5 / scene.fps.max(1.) + 0.000_001
+                                    }))
                         })
                 } else {
                     false
