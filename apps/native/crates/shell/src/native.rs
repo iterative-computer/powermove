@@ -620,8 +620,9 @@ define_class!(
             if let Some(window) = app.windowWithWindowNumber(number) {
                 show_in_tab_group(&window);
             }
-            // This window's own tab, pressed while Home shows over the
-            // project: back to the project (v1's title-bar tab).
+            // A project's tab shows the project: Home or a page (the Store,
+            // Settings) showing in that window steps aside, whichever window
+            // it is. A page is shown only by its own cell.
             let own = unsafe {
                 let in_window: bool = msg_send![sender, respondsToSelector: sel!(window)];
                 let window: *mut NSWindow = if in_window {
@@ -633,6 +634,8 @@ define_class!(
             };
             if own == Some(number) {
                 self.send(Command { name: "leaveHome".into(), args: vec![], token: None });
+            } else {
+                route(number, "leaveHome".into());
             }
         }
         /// A page's cell (Settings, the Store) in the strip: it shows over
@@ -3937,6 +3940,10 @@ impl Host {
             };
             window.as_ref().map_or(own, |w| w.windowNumber())
         };
+        // Only the window the group shows says where the strip's run starts;
+        // the others, drawing theirs out of sight (a tab still showing Home
+        // missing from their list), only read it.
+        let front_of_group = selected == own;
         let tabs: Vec<Tab> = group
             .iter()
             .map(|w| Tab {
@@ -4076,7 +4083,7 @@ impl Host {
             tabs.iter().position(|t| t.window == first)
         });
         let (start, widths, overflow) = tab_layout_kept(&natural, selected, room, keep);
-        if let Some(first) = tabs.get(start) {
+        if let Some(first) = tabs.get(start).filter(|_| front_of_group) {
             STRIP_START.with(|s| s.borrow_mut().insert(strip_group, first.window));
         }
         let mut x = height + TAB_GAP;

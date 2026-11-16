@@ -471,13 +471,14 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             assert_eq!(tool, actual);
         }
     }
-    for field in [
-        "inspection",
-        "app",
-        "instructions",
-        "commandFields",
-        "easePresets",
-    ] {
+    for field in ["inspection", "instructions", "commandFields", "easePresets"] {
         assert_eq!(bare[field], expected[field]);
     }
+    // The app subset adds exactly the native panel-authoring tools.
+    let mut app = bare["app"].as_array().unwrap().clone();
+    app.extend([
+        serde_json::json!("panel_begin"),
+        serde_json::json!("panel_build"),
+    ]);
+    assert_eq!(expected["app"], serde_json::Value::Array(app));
 }

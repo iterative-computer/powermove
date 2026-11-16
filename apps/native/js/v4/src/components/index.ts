@@ -715,8 +715,10 @@ export interface ColorWheelProps extends SurfaceProps {
   min: number;
   max: number;
   /** The wheel's master and its limits: shown on the wheel's bezel, so the
-   * wheel and its master read as one instrument (set in its own field). */
-  master?: { value: number; min: number; max: number };
+   * wheel and its master read as one instrument. With its `binding`, the
+   * host draws the master as a strip under the wheel (the bezel's
+   * material, its number beside it) that a drag sets. */
+  master?: { value: number; min: number; max: number; binding?: string };
 }
 /** A colour wheel (drawn by the host): dragging the puck pushes red, green
  * and blue together, keeping their brightness, in one Undo step; Option
@@ -738,6 +740,7 @@ export function ColorWheel(props: ColorWheelProps) {
               master: master.value,
               masterMin: master.min,
               masterMax: master.max,
+              ...(master.binding ? { masterBinding: master.binding } : {}),
             }
           : {}),
       }),

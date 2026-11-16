@@ -327,8 +327,11 @@ pub struct Metrics {
     /// The least width of two colour wheels side by side on their plates
     /// (each wheel and its plate's padding, and the gap between them).
     pub grade_pair: f32,
-    /// A colour wheel's master field, centred under the wheel: its number is
-    /// subordinate to the instrument.
+    /// The most two plates side by side take (each at the largest wheel,
+    /// and the gap): past it a row of wheels is centred, never stretched.
+    pub grade_pair_max: f32,
+    /// A colour wheel's master: the number beside its strip takes most of
+    /// six tenths of this.
     pub grade_field: f32,
     /// The curve editor's least graph height; it grows square with the
     /// panel's width up to `curve_editor_max`.
@@ -868,6 +871,7 @@ impl Tokens {
                 grade_wheel: 112.,
                 grade_wheel_max: 220.,
                 grade_pair: 2. * (112. + 2. * space.sm) + space.sm,
+                grade_pair_max: 2. * 220. + space.sm,
                 grade_field: 72.,
                 curve_editor: 200.,
                 curve_editor_max: 360.,
