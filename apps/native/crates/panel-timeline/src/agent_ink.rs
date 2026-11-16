@@ -1,13 +1,11 @@
-//! Timeline-only agent ink. This never mutates the scene, hit tests or document.
-//! The host supplies time and requests frames only while `moving` is true.
+//! Timeline-only dot reveal. The panel lane owns the shared sampling and shader.
 use crate::{
     RowId,
-    render::{Frame, Op, Rect, Scene},
+    render::{Frame, Rect, Scene},
     v4,
 };
-use pm_design::Tokens;
+use pm_design::{Tokens, dots};
 use std::collections::VecDeque;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Focus,
@@ -25,26 +23,49 @@ pub struct Event {
     pub property: Option<String>,
     pub kind: Kind,
     pub times: Vec<f64>,
+    pub step: u64,
+    pub committed: bool,
 }
 #[derive(Clone, Debug)]
 struct Active {
     event: Event,
     started: u64,
+    committed: Option<u64>,
+}
+#[derive(Clone, Debug)]
+pub struct DotGroup {
+    pub bounds: Rect,
+    pub indices: Vec<usize>,
+    pub detail: f32,
+    pub resolve: f32,
+    pub pending: bool,
+    pub reduced: bool,
 }
 #[derive(Default)]
 pub struct AgentInk {
     events: VecDeque<Active>,
 }
+const REFINE_MS: u64 = (dots::REFINE_SECONDS * 1000.) as u64;
+const RESOLVE_MS: u64 = (dots::RESOLVE_SECONDS * 1000.) as u64;
 impl AgentInk {
     pub fn receive(&mut self, event: Event, now: u64) {
+        if event.kind == Kind::End {
+            self.events.retain(|a| a.event.kind != Kind::Held);
+            return;
+        }
         if event.kind != Kind::Held {
             self.events
                 .retain(|a| a.event.layer != event.layer || a.event.kind != Kind::Held);
         }
-        if event.kind == Kind::End {
-            self.events.clear();
+        if !matches!(event.kind, Kind::Create | Kind::Key | Kind::Held) {
             return;
         }
+        let started = self
+            .events
+            .iter()
+            .find(|a| a.event.step == event.step && a.event.kind != Kind::Held)
+            .map_or(now, |a| a.started);
+        let committed = event.committed.then_some(now);
         if let Some(old) = self
             .events
             .iter_mut()
@@ -52,7 +73,8 @@ impl AgentInk {
         {
             *old = Active {
                 event,
-                started: now,
+                started,
+                committed,
             };
             return;
         }
@@ -61,269 +83,246 @@ impl AgentInk {
         }
         self.events.push_back(Active {
             event,
-            started: now,
+            started,
+            committed,
         });
     }
-    pub fn moving(&mut self, now: u64) -> bool {
-        self.events
-            .retain(|a| a.event.kind == Kind::Held || now.saturating_sub(a.started) < 1600);
-        self.events
-            .iter()
-            .any(|a| a.event.kind != Kind::Held && now.saturating_sub(a.started) < 1600)
+    pub fn commit(&mut self, step: u64, now: u64) {
+        for a in &mut self.events {
+            if a.event.step == step {
+                a.committed = Some(now);
+            }
+        }
     }
     pub fn empty(&self) -> bool {
         self.events.is_empty()
     }
-    pub fn paint(&self, frame: &mut Frame, scene: &Scene, tokens: &Tokens, now: u64) {
-        if self.events.is_empty() {
-            return;
-        }
-        let palette = tokens.sketch();
-        let reduced = tokens.accessibility.reduce_motion;
-        let v = frame.viewport;
-        for (event_index, active) in self.events.iter().enumerate() {
-            let age = now.saturating_sub(active.started) as f64;
-            if age >= 1600. && active.event.kind != Kind::Held {
-                continue;
-            }
-            let row = v4::row_id(&match &active.event.property {
-                Some(property) => RowId::Property {
-                    layer_id: active.event.layer.clone(),
-                    channel: property.clone(),
-                },
-                None => RowId::Layer(active.event.layer.clone()),
+    fn resolve_at(a: &Active) -> Option<u64> {
+        a.committed.map(|t| t.max(a.started + REFINE_MS))
+    }
+    pub fn moving(&mut self, now: u64) -> bool {
+        self.moving_with_motion(now, false)
+    }
+    pub fn moving_with_motion(&mut self, now: u64, reduced: bool) -> bool {
+        if reduced {
+            self.events.retain(|a| {
+                a.event.kind == Kind::Held || a.committed.is_none_or(|t| now < t + 160)
             });
-            let row = if scene.row(&row).is_some() {
-                row
+            return self
+                .events
+                .iter()
+                .any(|a| a.event.kind != Kind::Held && a.committed.is_some_and(|t| now < t + 160));
+        }
+        self.events.retain(|a| {
+            a.event.kind == Kind::Held || Self::resolve_at(a).is_none_or(|t| now < t + RESOLVE_MS)
+        });
+        self.events.iter().any(|a| {
+            a.event.kind != Kind::Held
+                && (now < a.started + REFINE_MS
+                    || Self::resolve_at(a).is_some_and(|t| now < t + RESOLVE_MS))
+        })
+    }
+    /// Indices borrow the ordinary frame; native painting never clones its ops.
+    pub fn groups(&self, frame: &Frame, _scene: &Scene, t: &Tokens, now: u64) -> Vec<DotGroup> {
+        let mut groups: Vec<DotGroup> = Vec::new();
+        let v = frame.viewport;
+        for a in &self.events {
+            let age = now.saturating_sub(a.started) as f32 / 1000.;
+            let resolve = Self::resolve_at(a).map_or(0., |at| {
+                dots::resolve(now.saturating_sub(at) as f32 / 1000.)
+            });
+            let resolve = if t.accessibility.reduce_motion {
+                a.committed.map_or(0., |at| {
+                    dots::resolve(now.saturating_sub(at) as f32 / 160. * dots::RESOLVE_SECONDS)
+                })
             } else {
-                v4::row_id(&RowId::Layer(active.event.layer.clone()))
+                resolve
             };
-            let Some(top) = scene.scroll_for(&row) else {
-                continue;
-            };
-            let y = tokens.metrics.ruler as f64 + top - v.scroll_y;
-            let target = scene.row(&row);
-            let strength = if target.is_some_and(|r| r.selected || r.hovered) {
-                0.25
-            } else {
-                1.
-            };
-            let height = if matches!(v4::parse_row(&row), Ok(RowId::Property { .. })) {
-                tokens.metrics.property_row
-            } else {
-                tokens.metrics.track_row
-            } as f64;
-            if y + height < tokens.metrics.ruler as f64 || y > v.height {
-                let mut tick = Op::new(
-                    format!("agent-edge:{}", active.event.layer),
-                    "rect",
-                    Rect::new(
-                        0.,
-                        if y < 0. {
-                            tokens.metrics.ruler as f64
-                        } else {
-                            v.height - 4.
-                        },
-                        4.,
-                        4.,
-                    ),
-                    palette.ink,
-                );
-                tick.opacity = (1. - ((age - 1200.) / 300.).clamp(0., 1.)).max(0.);
-                frame.ops.push(tick);
+            if resolve >= 1. && a.event.kind != Kind::Held {
                 continue;
             }
-            let fade = if reduced { 120. } else { 160. };
-            let wash =
-                strength * (age / fade).clamp(0., 1.) * (1. - ((age - 1200.) / 400.).clamp(0., 1.));
-            // Twelve adjacent fills approximate the header gradient without a layer/buffer.
-            for i in 0..12 {
-                let width = v.layer_column * 0.6 / 12.;
-                let mut op = Op::new(
-                    format!("agent-wash:{}:{i}", active.event.layer),
-                    "rect",
-                    Rect::new(i as f64 * width, y, width + 0.5, height),
-                    palette.wash,
-                );
-                op.opacity = wash * (1. - i as f64 / 12.);
-                frame.ops.push(op);
-            }
-            if !reduced && event_index + 1 == self.events.len() {
-                let mut core = Op::new(
-                    format!("agent-core:{}", active.event.layer),
-                    "circle",
-                    Rect::new(2., y + height / 2. - 1.5, 3., 3.),
-                    palette.core,
-                );
-                core.opacity = wash;
-                frame.ops.push(core);
-            }
-            if active.event.kind == Kind::Held {
-                let mut dot = Op::new(
-                    format!("agent-held:{}", active.event.layer),
-                    "circle",
-                    Rect::new(v.layer_column - 8., y + height / 2. - 1.45, 2.9, 2.9),
-                    palette.ink,
-                );
-                dot.opacity = 0.6;
-                frame.ops.push(dot);
-            }
-            let mut animated = 0;
-            for op in &mut frame.ops {
-                if active.event.kind == Kind::Create
-                    && op.id == format!("clip-content:{}", active.event.layer)
-                    && op.text.is_some()
-                {
-                    op.opacity *= ((age - 80.) / 200.).clamp(0., 1.);
+            let clip = format!("clip:{}", a.event.layer);
+            let label = format!("clip-content:{}", a.event.layer);
+            let mut indices = Vec::new();
+            let mut bounds: Option<Rect> = None;
+            for (i, op) in frame.ops.iter().enumerate() {
+                if op.covered {
+                    continue;
                 }
-                if active.event.kind == Kind::Create
-                    && op.id == format!("clip:{}", active.event.layer)
-                {
-                    let dry = if reduced {
-                        (age / 160.).clamp(0., 1.)
-                    } else {
-                        ((age - 680.) / 300.).clamp(0., 1.)
-                    } as f32;
-                    op.color = pm_design::color::mix(palette.ink, op.color, dry);
-                    // Native clips use their gradient/rim detail, rather than
-                    // the flat op colour. Dry that same paint, too.
-                    for key in ["top", "bottom", "ring", "light", "grid"] {
-                        if let Some(rgb) = op.detail[key].as_u64() {
-                            op.detail[key] = serde_json::json!(pm_design::color::mix(
-                                palette.ink,
-                                rgb as u32,
-                                dry,
-                            ));
-                        }
-                    }
-                    if !reduced {
-                        if age < 400. {
-                            op.opacity = 0.;
-                        } else {
-                            let grow = ((age - 400.) / 280.).clamp(0., 1.);
-                            op.bounds.width *= 1. - (1. - grow).powi(3);
-                        }
-                    }
+                let matches = if a.event.kind == Kind::Create {
+                    op.id == clip || op.id == label
+                } else if a.event.kind == Kind::Key && op.id.starts_with("key:") {
+                    serde_json::from_str::<(String, String)>(&op.id[4..])
+                        .ok()
+                        .and_then(|(row, _)| v4::parse_row(&row).ok())
+                        .is_some_and(|row| {
+                            let layer = match row {
+                                RowId::Layer(id)
+                                | RowId::Property { layer_id: id, .. }
+                                | RowId::Effect { layer_id: id, .. } => id,
+                            };
+                            let time = v.scroll_time
+                                + (op.bounds.x + op.bounds.width / 2. - v.layer_column) / v.pps;
+                            layer == a.event.layer
+                                && (a.event.times.is_empty()
+                                    || a.event.times.iter().any(|t| (*t - time).abs() < 0.01))
+                        })
+                } else {
+                    false
+                };
+                if !matches {
+                    continue;
                 }
-                if active.event.kind == Kind::Key && op.id.starts_with("key:") && animated < 8 {
-                    let Ok((key_row, _)) = serde_json::from_str::<(String, String)>(&op.id[4..])
-                    else {
-                        continue;
-                    };
-                    let Ok(key_row) = v4::parse_row(&key_row) else {
-                        continue;
-                    };
-                    let layer = match key_row {
-                        RowId::Layer(id) | RowId::Property { layer_id: id, .. } | RowId::Effect { layer_id: id, .. } => id,
-                    };
-                    if layer != active.event.layer {
-                        continue;
+                let mut b = op.bounds;
+                if let Some(c) = op.clip {
+                    let x = b.x.max(c.x);
+                    let y = b.y.max(c.y);
+                    b = Rect::new(
+                        x,
+                        y,
+                        (b.x + b.width).min(c.x + c.width) - x,
+                        (b.y + b.height).min(c.y + c.height) - y,
+                    );
+                }
+                let x = b.x.max(v.layer_column);
+                let y = b.y.max(t.metrics.ruler as f64);
+                b = Rect::new(
+                    x,
+                    y,
+                    (b.x + b.width).min(v.width) - x,
+                    (b.y + b.height).min(v.height) - y,
+                );
+                if b.width <= 0. || b.height <= 0. {
+                    continue;
+                }
+                indices.push(i);
+                bounds = Some(match bounds {
+                    None => b,
+                    Some(old) => {
+                        let x = old.x.min(b.x);
+                        let y = old.y.min(b.y);
+                        Rect::new(
+                            x,
+                            y,
+                            (old.x + old.width).max(b.x + b.width) - x,
+                            (old.y + old.height).max(b.y + b.height) - y,
+                        )
                     }
-                    let time = v.scroll_time
-                        + (op.bounds.x + op.bounds.width / 2. - v.layer_column) / v.pps;
-                    if !active.event.times.is_empty()
-                        && !active.event.times.iter().any(|t| (*t - time).abs() < 0.01)
-                    {
-                        continue;
-                    }
-                    let age = (age - animated as f64 * 60.).max(0.);
-                    animated += 1;
-                    let dry = if reduced {
-                        (age / 160.).clamp(0., 1.)
-                    } else {
-                        ((age - 280.) / 300.).clamp(0., 1.)
-                    };
-                    op.color = pm_design::color::mix(palette.ink, op.color, dry as f32);
-                    if !reduced {
-                        let scale = 0.7 + 0.3 * (1. - (1. - (age / 180.).clamp(0., 1.)).powi(3));
-                        op.bounds.x += op.bounds.width * (1. - scale) / 2.;
-                        op.bounds.y += op.bounds.height * (1. - scale) / 2.;
-                        op.bounds.width *= scale;
-                        op.bounds.height *= scale;
+                });
+            }
+            if a.event.kind == Kind::Held {
+                let row = v4::row_id(&RowId::Layer(a.event.layer.clone()));
+                if let Some(top) = _scene.scroll_for(&row) {
+                    let y = t.metrics.ruler as f64 + top - v.scroll_y
+                        + t.metrics.track_row as f64 / 2.
+                        - 1.35;
+                    if y >= t.metrics.ruler as f64 && y < v.height {
+                        groups.push(DotGroup {
+                            bounds: Rect::new(v.layer_column - 8., y, 2.7, 2.7),
+                            indices: vec![],
+                            detail: 0.,
+                            resolve: 1.,
+                            pending: true,
+                            reduced: true,
+                        });
                     }
                 }
-            }
-            if active.event.kind == Kind::Create && age < 400. && !reduced {
-                if let Some(bar) = frame
-                    .ops
-                    .iter()
-                    .find(|o| o.id == format!("clip:{}", active.event.layer))
-                    .map(|o| o.bounds)
+            } else if let Some(bounds) = bounds {
+                let detail = if t.accessibility.reduce_motion {
+                    4.
+                } else {
+                    dots::detail(age)
+                };
+                // One filter per step bounds all its strip/key members together.
+                if let Some(group) = groups
+                    .iter_mut()
+                    .find(|g| !g.pending && g.detail == detail && g.resolve == resolve)
                 {
-                    let duration = (bar.width / 0.6).clamp(1., 400.);
-                    let end = bar.x + bar.width * (age / duration).clamp(0., 1.);
-                    let mut x = bar.x.max(v.layer_column);
-                    let end = end.min(v.width);
-                    let mut dots = 0;
-                    while x < end && dots < 600 {
-                        for y in [bar.y, bar.y + bar.height] {
-                            let mut dot = Op::new(
-                                format!("agent-pencil:{}:{x}:{y}", active.event.layer),
-                                "circle",
-                                Rect::new(x, y, 1.8, 1.8),
-                                palette.pencil,
-                            );
-                            dot.opacity = 0.38;
-                            frame.ops.push(dot);
-                            dots += 1;
-                        }
-                        x += palette.dot_pitch;
-                    }
+                    let x = group.bounds.x.min(bounds.x);
+                    let y = group.bounds.y.min(bounds.y);
+                    group.bounds = Rect::new(
+                        x,
+                        y,
+                        (group.bounds.x + group.bounds.width).max(bounds.x + bounds.width) - x,
+                        (group.bounds.y + group.bounds.height).max(bounds.y + bounds.height) - y,
+                    );
+                    group.indices.extend(indices);
+                } else {
+                    groups.push(DotGroup {
+                        bounds,
+                        indices,
+                        detail,
+                        resolve,
+                        pending: false,
+                        reduced: t.accessibility.reduce_motion,
+                    });
                 }
             }
         }
+        groups
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn event() -> Event {
+    fn event(kind: Kind) -> Event {
         Event {
             layer: "L".into(),
             property: None,
-            kind: Kind::Focus,
+            kind,
             times: vec![],
+            step: 1,
+            committed: true,
         }
     }
     #[test]
     fn no_run_allocates_or_schedules_nothing() {
-        let mut ink = AgentInk::default();
-        assert!(ink.empty());
-        assert!(!ink.moving(0));
-        assert_eq!(ink.events.capacity(), 0);
+        let mut s = AgentInk::default();
+        assert!(s.empty());
+        assert_eq!(s.events.capacity(), 0);
+        assert!(!s.moving(0));
     }
     #[test]
     fn idle_has_zero_requested_frames_after_fifteen_seconds() {
-        let mut ink = AgentInk::default();
-        ink.receive(event(), 0);
-        let mut frames = 0;
-        for ms in (15_000..25_000).step_by(50) {
-            if ink.moving(ms) {
-                frames += 1;
-            }
-        }
-        assert_eq!(frames, 0);
+        let mut s = AgentInk::default();
+        s.receive(event(Kind::Create), 0);
+        assert_eq!(
+            (15_000..25_000)
+                .step_by(50)
+                .filter(|t| s.moving(*t))
+                .count(),
+            0
+        );
     }
     #[test]
-    fn queue_is_bounded_and_merges_same_targets() {
-        let mut ink = AgentInk::default();
-        for i in 0..20 {
-            let mut e = event();
-            e.layer = format!("L{i}");
-            ink.receive(e, i);
+    fn queue_is_bounded() {
+        let mut s = AgentInk::default();
+        for n in 0..20 {
+            let mut e = event(Kind::Key);
+            e.layer = n.to_string();
+            s.receive(e, n);
         }
-        assert_eq!(ink.events.len(), 6);
-        ink.receive(event(), 21);
-        ink.receive(event(), 22);
-        assert_eq!(ink.events.len(), 6);
+        assert_eq!(s.events.len(), 6);
     }
     #[test]
     fn held_dot_is_static() {
-        let mut ink = AgentInk::default();
-        let mut e = event();
-        e.kind = Kind::Held;
-        ink.receive(e, 0);
-        assert!(!ink.moving(15_000));
-        assert!(!ink.empty());
+        let mut s = AgentInk::default();
+        s.receive(event(Kind::Held), 0);
+        assert!(!s.moving(15_000));
+        assert!(!s.empty());
+    }
+    #[test]
+    fn dotted_wait_sleeps_until_commit() {
+        let mut s = AgentInk::default();
+        let mut e = event(Kind::Create);
+        e.committed = false;
+        s.receive(e, 0);
+        assert!(s.moving(400));
+        assert!(!s.moving(900));
+        assert!(!s.empty());
+        s.commit(1, 1000);
+        assert!(s.moving(1000));
+        assert!(!s.moving(1700));
+        assert!(s.empty());
     }
 }

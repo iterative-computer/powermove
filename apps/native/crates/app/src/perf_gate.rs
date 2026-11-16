@@ -72,14 +72,17 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 for index in 0..40 {
                                     let layer=layers[index%layers.len()].clone();
                                     if let Some(publication)=kernel.published(&project) {
+                                        let time=index as f64/20.;
+                                        let mut property=pm_kernel::commands::properties::SetProperty::new(layer.clone(),"opacity",30.+((index/layers.len())%2)as f64,time);
+                                        property.mode=pm_kernel::commands::properties::KeyMode::Keyframe;
                                         let request=pm_kernel::Request::new(pm_kernel::Caller::realm(90_001,1,pm_kernel::Origin::Agent),pm_kernel::Call::Transact {
                                             label:Some("Synthetic coedit perf".into()),expected_revision:Some(publication.revision()),
-                                            body:vec![pm_kernel::Command::SetStaticOpacity{layer_id:layer.clone(),value:30.+((index/layers.len())%2)as f64}].into(),
+                                            body:vec![pm_kernel::Command::Property(pm_kernel::PropertyCommand::Set(property))].into(),
                                         }).with_document(publication.snapshot.doc_id).outside_revision(publication.revision());
                                         let _=kernel.call(&project,request).wait();
                                         host.publish_presence(pm_mcp::presence::Presence {
-                                            project:project.clone(),run:"synthetic-perf".into(),kind:pm_mcp::presence::Kind::Key,
-                                            layer:Some(layer),property:None,times:vec![],
+                                            project:project.clone(),run:"synthetic-perf".into(),step:index as u64,kind:pm_mcp::presence::Kind::Key,
+                                            layer:Some(layer),property:Some("opacity".into()),times:vec![time],
                                         });
                                     }
                                     let next=started+std::time::Duration::from_millis((index as u64+1)*50);

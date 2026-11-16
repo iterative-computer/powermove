@@ -390,6 +390,7 @@ struct LayerDrop {
 }
 pub struct TimelineSurface {
     agent_ink: pm_panel_timeline::agent_ink::AgentInk,
+    agent_dot_groups: Vec<pm_panel_timeline::agent_ink::DotGroup>,
     agent_ink_clock: std::time::Instant,
     agent_ink_task: Option<Task<()>>,
     agent_ink_frames: u64,
@@ -515,6 +516,7 @@ impl TimelineSurface {
         outline.bind_surface(cx.entity().downgrade());
         let mut this = Self {
             agent_ink: Default::default(),
+            agent_dot_groups: Vec::new(),
             agent_ink_clock: std::time::Instant::now(),
             agent_ink_task: None,
             agent_ink_frames: 0,
@@ -570,8 +572,8 @@ impl TimelineSurface {
         };
         cx.on_release(|s, cx| {
             if s.viewer_previewing {
-                let delegate=s.delegate.clone();
-                cx.defer(move |cx|delegate.timing_preview(None,cx));
+                let delegate = s.delegate.clone();
+                cx.defer(move |cx| delegate.timing_preview(None, cx));
             }
         })
         .detach();
@@ -675,11 +677,17 @@ impl TimelineSurface {
                     property: event.property,
                     kind,
                     times: event.times,
+                    step: event.step,
+                    committed: true,
                 },
                 now,
             );
         }
-        if self.agent_ink_task.is_none() && self.agent_ink.moving(now) {
+        if self.agent_ink_task.is_none()
+            && self
+                .agent_ink
+                .moving_with_motion(now, self.tokens.accessibility.reduce_motion)
+        {
             self.agent_ink_task = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -688,7 +696,9 @@ impl TimelineSurface {
                     let moving = this
                         .update(cx, |s, cx| {
                             let now = s.agent_ink_clock.elapsed().as_millis() as u64;
-                            let moving = s.agent_ink.moving(now);
+                            let moving = s
+                                .agent_ink
+                                .moving_with_motion(now, s.tokens.accessibility.reduce_motion);
                             if !moving {
                                 s.agent_ink_task = None;
                             }
@@ -1149,7 +1159,9 @@ impl TimelineSurface {
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
-                s.snap_guide = client.active_drag().and_then(|d| d.snap_target_in(&client.model.index));
+                s.snap_guide = client
+                    .active_drag()
+                    .and_then(|d| d.snap_target_in(&client.model.index));
                 s.client = Some(client);
                 s.busy = false;
                 if let Some(preview) = preview {
@@ -1308,23 +1320,18 @@ impl TimelineSurface {
             cx.defer(move |cx| delegate.view_moved(cx));
         }
         let frame = self.frame.clone()?;
-        if self.agent_ink.empty() || !matches!(self.gesture, Gesture::Idle) {
-            return Some(frame);
+        self.agent_dot_groups.clear();
+        if !self.agent_ink.empty() && matches!(self.gesture, Gesture::Idle) {
+            if let Some(scene) = &self.scene {
+                self.agent_dot_groups = self.agent_ink.groups(
+                    &frame,
+                    scene,
+                    &self.tokens,
+                    self.agent_ink_clock.elapsed().as_millis() as u64,
+                );
+            }
         }
-        let started = std::time::Instant::now();
-        let mut frame = (*frame).clone();
-        if let Some(scene) = &self.scene {
-            self.agent_ink.paint(
-                &mut frame,
-                scene,
-                &self.tokens,
-                self.agent_ink_clock.elapsed().as_millis() as u64,
-            );
-            self.agent_ink_samples[self.agent_ink_sample_count % 64] =
-                started.elapsed().as_secs_f64() * 1000.;
-            self.agent_ink_sample_count += 1;
-        }
-        Some(Arc::new(frame))
+        Some(frame)
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
     /// `keySelectionActive`, and each visible row's layer with its top and
@@ -3225,8 +3232,7 @@ impl TimelineSurface {
         } else if self.skim_live(cx) {
             self.skim_to(x, cx);
         }
-        let hovered = self.clip_at(x, y)
-            .map(|(id, _)| (id.to_owned(), x));
+        let hovered = self.clip_at(x, y).map(|(id, _)| (id.to_owned(), x));
         // The grip only changes side at the strip's middle: repaint when the
         // clip or the side changes, not on every pointer move.
         let side = |h: &Option<(String, f64)>| {
@@ -4407,7 +4413,13 @@ impl Render for TimelineSurface {
                                 let gutter = (m.gap + m.border * 2.) as f64;
                                 (left, left + f32::from(text.width) as f64 + gutter)
                             });
-                            for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
+                            let dot_started=std::time::Instant::now();
+                            let dot_groups=this.upgrade().map(|entity|entity.read(cx).agent_dot_groups.clone()).unwrap_or_default();
+                            let dot_indices: BTreeSet<usize>=dot_groups.iter().flat_map(|g|g.indices.iter().copied()).collect();
+                            let dot_plan_ms=dot_started.elapsed().as_secs_f64()*1000.;
+                            for (op_index,op) in frame.ops.iter().enumerate().filter(|(_,op)| !op.id.starts_with("toggle:")) {
+                                if dot_indices.contains(&op_index) {continue;}
+
                                 if cull.skip(op) {
                                     continue;
                                 }
@@ -4464,6 +4476,37 @@ impl Render for TimelineSurface {
                                         ),
                                     _ => paint(op, bounds.origin, &tokens, window, cx),
                                 }
+                            }
+                            let dot_paint=std::time::Instant::now();
+                            for group in &dot_groups {
+                                let b=group.bounds;
+                                let area=Bounds::new(bounds.origin+point(px(b.x as f32),px(b.y as f32)),size(px(b.width as f32),px(b.height as f32)));
+                                if above.is_some_and(|mask|area.origin.y>=mask.bottom()) {continue;}
+                                if group.pending {
+                                    window.paint_quad(PaintQuad::new(area).background(rgb(tokens.colors.accent)).corner_radii(px(1.35)));
+                                    continue;
+                                }
+                                let draw=|window:&mut Window,cx:&mut App| {
+                                    for &index in &group.indices {
+                                        let op=&frame.ops[index];
+                                        if group.reduced {
+                                            let mut op=op.clone();op.opacity*=group.resolve as f64;
+                                            for key in ["ringAlpha","lightAlpha","shadowAlpha","gridAlpha"] {
+                                                if let Some(alpha)=op.detail[key].as_f64(){op.detail[key]=serde_json::json!(alpha*group.resolve as f64);}
+                                            }
+                                            paint(&op,bounds.origin,&tokens,window,cx);
+                                        } else {paint(op,bounds.origin,&tokens,window,cx);}
+                                    }
+                                };
+                                window.with_content_mask(Some(ContentMask{bounds:above.map_or(area,|m|Bounds::from_corners(area.origin,point(area.right(),area.bottom().min(m.bottom())))),fade_out:Default::default()}),|window| {
+                                    if group.reduced {draw(window,cx);} else {
+                                        window.with_filter_layer(area,Corners::all(px(0.)),0.,&[gpui::Filter::DotMatrix{detail:group.detail,resolve:group.resolve,accent:tokens.colors.accent}],|window|draw(window,cx));
+                                    }
+                                });
+                            }
+                            if !dot_groups.is_empty() {
+                                let elapsed=dot_plan_ms+dot_paint.elapsed().as_secs_f64()*1000.;
+                                let _=this.update(cx,|s,_| {s.agent_ink_samples[s.agent_ink_sample_count%64]=elapsed;s.agent_ink_sample_count+=1;});
                             }
                             if let Some(started) = started {
                                 let ms = started.elapsed().as_secs_f64() * 1000.;
@@ -4941,9 +4984,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         "clip" => {
             let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
             let number = |key: &str| op.detail[key].as_f64().unwrap_or(0.);
-            let tint = |rgb: u32, a: f64| {
-                rgba((rgb << 8) | ((a * op.opacity).clamp(0., 1.) * 255.).round() as u32)
-            };
+            let tint =
+                |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
             let radius = px(op.radius as f32).min(area.size.height / 2.);
             let smoothing = t.radius.smoothing;
             let ring = px(number("ringWidth").max(1.) as f32);
@@ -4966,8 +5008,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 PaintQuad::new(area)
                     .background(linear_gradient(
                         180.,
-                        linear_color_stop(tint(hex("top"), 1.), 0.),
-                        linear_color_stop(tint(hex("bottom"), 1.), 1.),
+                        linear_color_stop(tint(hex("top"), op.opacity), 0.),
+                        linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
                     ))
                     .corner_radii(radius)
                     .corner_smoothing(smoothing),
@@ -5002,9 +5044,9 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 area,
                 radius,
                 smoothing,
-                (hex("ring"), (number("ringAlpha") * op.opacity) as f32),
+                (hex("ring"), number("ringAlpha") as f32),
                 ring,
-                (hex("light"), (number("lightAlpha") * op.opacity) as f32),
+                (hex("light"), number("lightAlpha") as f32),
                 window,
             );
         }

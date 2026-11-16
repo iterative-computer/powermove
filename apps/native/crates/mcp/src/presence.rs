@@ -19,6 +19,11 @@ pub enum Kind {
 pub struct Presence {
     pub project: String,
     pub run: String,
+    /// Kernel revision identifying the committed visual step.
+    #[serde(default)]
+    pub step: u64,
+    #[serde(default)]
+    pub step: u64,
     pub kind: Kind,
     pub layer: Option<String>,
     pub property: Option<String>,

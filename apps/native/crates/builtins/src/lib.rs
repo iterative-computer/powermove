@@ -1111,9 +1111,10 @@ impl Builtins {
         &self.broker.project
     }
     pub fn agent_current_thread(&self) -> Option<String> {
-        let (agent, _) = self.agent_state().ok()?;
-        let state = agent.shared();
-        Some(state.panel.active_id().to_owned())
+        // Toolbar actions must not wait for a busy agent worker either.
+        self.agent_status();
+        let id = self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.2.clone();
+        (!id.is_empty()).then_some(id)
     }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(

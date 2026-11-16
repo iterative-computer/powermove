@@ -127,7 +127,7 @@ impl McpSession {
                 .or_else(|| active.default_comp.clone());
             if target
                 .as_ref()
-                .is_some_and(|id| view.snapshot.open_comp().as_ref() != Some(id))
+                .is_some_and(|id| view.snapshot.render_comp() != *id)
             {
                 refresh(active, &mut automation, &project, self.writer)?;
                 return Ok(None);
@@ -248,6 +248,7 @@ impl McpSession {
         host.publish_presence(crate::presence::Presence {
             project: project.clone(),
             run: worker.active.as_ref().unwrap().run.clone(),
+            step: baseline.revision,
             kind: crate::presence::Kind::Held,
             layer: worker.active.as_ref().unwrap().focus.last().cloned(),
             property: None,
@@ -397,6 +398,7 @@ impl McpSession {
                 host.publish_presence(crate::presence::Presence {
                     project: project.clone(),
                     run: active.run.clone(),
+                    step: baseline.revision,
                     kind: if matches!(&result,Ok(v) if v["status"]=="applied") {
                         crate::presence::Kind::Landed
                     } else {

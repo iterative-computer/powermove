@@ -395,6 +395,7 @@ impl Automation {
         let event = crate::presence::Presence {
             project: project.into(),
             run: run.into(),
+            step: self.revision(project).unwrap_or(0),
             kind,
             layer,
             property,
