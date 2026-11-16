@@ -2606,7 +2606,7 @@ impl Render for Editor {
                         } else {
                             title_width(panels.title(tab), t.typography.title, w)
                         };
-                        let drawn = match tab_track.title_limit.map(|limit| (limit - TAB_SPACING).max(0.)) {
+                        let drawn = match tab_track.active_limit.filter(|_| ti == active) {
                             Some(limit) => full.min(limit),
                             None => full,
                         };
@@ -2655,8 +2655,8 @@ impl Render for Editor {
                         .text_size(px(t.typography.title))
                         .font_weight(FontWeight(t.typography.medium_weight))
                         .whitespace_nowrap();
-                    // Long titles truncate at a readable width; excess tabs use the menu.
-                    cell = match tab_track.title_limit.map(|limit| (limit - TAB_SPACING).max(0.)) {
+                    // Only an active tab wider than the room beside More Panels truncates.
+                    cell = match tab_track.active_limit.filter(|_| selected) {
                         Some(limit) => cell
                             .max_w(px(limit))
                             .min_w(px(0.))
@@ -2720,9 +2720,11 @@ impl Render for Editor {
                 }
                 tab_spans.insert((p.dock, p.group), spans);
                 header = header.child(strip);
-                if multi {
-                    let entries: Vec<_> = (0..tabs.len())
-                        .map(|i| {
+                if !tab_track.overflow.is_empty() {
+                    let entries: Vec<_> = tab_track
+                        .overflow
+                        .iter()
+                        .map(|&i| {
                             MenuEntry::item(
                                 panels.title(&tabs[i]),
                                 format!("panel:activate:{}", tabs[i]),
@@ -4422,75 +4424,5 @@ mod slide_tests {
         s.armed = true;
         s.place(&[("viewer".into(), r(8., 52.))], &t);
         assert_eq!(s.shown("viewer", r(8., 52.)), r(8., 52.));
-    }
-}
-
-#[cfg(test)]
-mod dock_tab_capture_tests {
-    use super::*;
-    use std::sync::Arc;
-    #[::core::prelude::v1::test]
-    fn dock_tabs_capture() {
-        let Ok(dir) = std::env::var("PM_DOCK_CAPTURE") else {
-            return;
-        };
-        objc2::rc::autoreleasepool(|_| {
-            let mut cx = HeadlessAppContext::with_platform(
-                Arc::new(gpui_parley::ParleyTextSystem::new(
-                    gpui_parley::SystemFonts::Load,
-                )),
-                Arc::new(()),
-                || {
-                    Some(Box::new(
-                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
-                    ))
-                },
-            );
-            let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
-            let window = cx
-                .open_window(size(px(1100.), px(700.)), |_, cx| {
-                    cx.new(|cx| {
-                        let mut editor = Editor::new(t, None, cx);
-                        editor.layout = Layout::preset("design");
-                        editor.layout.move_panel("fxbrowser", 0, 0, true).unwrap();
-                        editor
-                    })
-                })
-                .unwrap();
-            cx.run_until_parked();
-            std::fs::create_dir_all(&dir).unwrap();
-            cx.capture_screenshot(window.into())
-                .unwrap()
-                .save(format!("{dir}/dock-tabs.png"))
-                .unwrap();
-            if std::env::var_os("PM_DOCK_BASELINE").is_none() {
-                fn assert_strips(v: &Editor) {
-                    for p in &v.geometry.panels {
-                        let group = &v.layout.docks[p.dock].groups[p.group];
-                        assert_eq!(v.geometry.tabs[&(p.dock, p.group)].len(), group.tabs.len());
-                    }
-                }
-                let restored = window.update(&mut cx, |v, _, _| {
-                    assert_strips(v);
-                    serde_json::to_string(&v.layout).unwrap()
-                }).unwrap();
-                window.update(&mut cx, |v, _, cx| {
-                    assert!(v.run_shell_command("panel:close:fxbrowser", cx));
-                }).unwrap();
-                cx.run_until_parked();
-                window.update(&mut cx, |v, _, cx| {
-                    assert_strips(v);
-                    v.layout = serde_json::from_str(&restored).unwrap();
-                    cx.notify();
-                }).unwrap();
-                cx.run_until_parked();
-                window.update(&mut cx, |v, _, cx| {
-                    assert_strips(v);
-                    assert!(v.run_shell_command("panel:activate:layer-effects", cx));
-                }).unwrap();
-                cx.run_until_parked();
-                window.update(&mut cx, |v, _, _| assert_strips(v)).unwrap();
-            }
-        });
     }
 }
