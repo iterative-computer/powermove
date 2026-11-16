@@ -1350,6 +1350,18 @@ fn a_body_saved_in_the_trash_names_its_row_and_takes_off_a_renames_mark() {
     assert_eq!(name(&k, &session.project), "C");
 }
 
+/// Metadata naming a backing file in the library's own `recovery-files` that
+/// is gone (an earlier copy's file): the project has a body of its own, so it
+/// is a library project, and it opens as a copy (its file is offline).
+fn offline_file(root: &Path) -> Value {
+    let store = pm_kernel::library::LibraryStore::open(root).dir().to_path_buf();
+    let path = store.parent().unwrap().join("recovery-files").join("film.pmv");
+    let mut file = pm_model::json::Map::new();
+    file.insert("path", Value::from(path.to_string_lossy().into_owned()));
+    let mut meta = pm_model::json::Map::new();
+    meta.insert("file", Value::Object(file));
+    Value::Object(meta)
+}
 /// Quit compaction folds in only work that replays onto its project opened
 /// as itself; anything else is left in its journal for the next open's
 /// question, and no entry is made on its own (acceptance run 16: a quit made
@@ -1431,11 +1443,7 @@ fn a_quit_folds_only_work_that_replays_onto_its_project_as_itself() {
             let w = pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None)
                 .unwrap();
             if change == "file" {
-                let meta = pm_model::json::parse(
-                    r#"{"file":{"path":"/nonexistent/powermove-offline.pmv"}}"#,
-                )
-                .unwrap();
-                w.set("projectMeta.film", meta).unwrap();
+                w.set("projectMeta.film", offline_file(&root.0)).unwrap();
             } else {
                 let mut p = value();
                 let m = p.as_object_mut().unwrap();
@@ -1470,12 +1478,7 @@ fn an_offline_projects_copy_is_reopened_however_its_library_is_named() {
         p.as_object_mut().unwrap().insert("id", Value::from("film"));
         w.save_project("film", p, Value::Null, Value::Null, Value::Null)
             .unwrap();
-        w.set(
-            "projectMeta.film",
-            pm_model::json::parse(r#"{"file":{"path":"/nonexistent/powermove-offline.pmv"}}"#)
-                .unwrap(),
-        )
-        .unwrap();
+        w.set("projectMeta.film", offline_file(&root.0)).unwrap();
         w.flush().unwrap();
     }
     let count = || {
