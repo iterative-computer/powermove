@@ -92,7 +92,10 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 250);
+    assert_eq!(bindings.len(), 292);
+    let camera = bindings.iter().find(|b| b.id == "native.newCamera").unwrap();
+    assert_eq!(camera.command, "newCamera");
+    assert_eq!(camera.chord, "cmd+alt+shift+c");
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
@@ -458,6 +461,28 @@ fn picker_pages_a_long_list_and_the_search_reaches_past_it() {
         "a family past the first page is one search away"
     );
 }
+#[test]
+fn a_row_that_stays_is_chosen_and_the_menu_stays_open() {
+    // The Agent's provider rows: choosing one keeps the menu for the
+    // provider's models; a model row closes it.
+    let mut p = Picker {
+        open: true,
+        choices: vec![
+            Choice::new("ChatGPT", "agentPick:0").stays(true),
+            Choice::new("Claude", "agentPick:1").stays(true),
+            Choice::new("GPT-6.1-Sol", "agentPick:2"),
+        ],
+        ..Default::default()
+    };
+    p.search("claude".into());
+    assert_eq!(p.navigate("down"), None);
+    assert_eq!(p.navigate("enter"), Some("agentPick:1".into()));
+    assert!(p.open, "a provider keeps the menu open");
+    p.search("sol".into());
+    p.navigate("down");
+    assert_eq!(p.navigate("enter"), Some("agentPick:2".into()));
+    assert!(!p.open, "a model closes it");
+}
 
 /// Typing straight after ⌘K reaches the palette: the shortcut resolves to
 /// the palette at once, and the shell opens it inside that key press
@@ -475,4 +500,41 @@ fn the_palette_opens_inside_its_key_press_so_no_typing_is_lost() {
     // the palette's field is first responder before the next key is read.
     assert!(pm_shell::opens_in_place("palette"));
     assert!(!pm_shell::opens_in_place("save"));
+}
+
+#[test]
+fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
+    let items = menu::view3d();
+    for (group, value) in [
+        ("nav", "left"),
+        ("nav", "right"),
+        ("nav", "bottom"),
+        ("nav", "top"),
+        ("nav", "front"),
+        ("nav", "back"),
+        ("look", "camera"),
+        ("nav", "selected"),
+        ("nav", "persp"),
+        ("nav", "roll-left"),
+        ("nav", "roll-right"),
+    ] {
+        assert!(
+            items.iter().any(|i| i.command == "studio.view"
+                && i.args == vec![serde_json::json!(group), serde_json::json!(value)]),
+            "{group}/{value}"
+        );
+    }
+    let bindings = shipped();
+    let grave = bindings.iter().find(|b| b.chord == "`").unwrap();
+    assert_eq!(grave.command, "maximizePanel");
+    for (chord, value) in [
+        ("numpad5", "persp"),
+        ("5", "persp"),
+        ("shift+numpad4", "roll-left"),
+        ("shift+numpad6", "roll-right"),
+    ] {
+        assert!(bindings.iter().any(|b| b.chord == chord
+            && b.command == "studio.view"
+            && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
+    }
 }

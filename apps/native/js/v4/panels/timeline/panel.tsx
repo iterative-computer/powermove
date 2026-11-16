@@ -47,6 +47,7 @@ function Icon(props: {
   disabled?: boolean;
   active?: boolean;
   primary?: boolean;
+  square?: boolean;
   /** A row's small mark (its disclosure): the inline glyph in the muted ink. */
   quiet?: boolean;
   /** The glyph's own ink (a token name), for a mark that carries state in
@@ -55,6 +56,7 @@ function Icon(props: {
   tabIndex?: number;
   key?: string;
   children?: ComponentChildren;
+  parentPick?: string;
 }) {
   // DESIGN-TODO(opus) T1: kit has no symbol slot. This is a neutral, labelled
   // control with inspectable required symbol, not a text/emoji icon substitute.
@@ -63,7 +65,13 @@ function Icon(props: {
       id={props.id}
       label={props.label}
       title={props.title ?? props.label}
-      metadata={{ requiredSymbol: props.symbol, designTodo: "T1" }}
+      metadata={{
+        requiredSymbol: props.symbol,
+        designTodo: "T1",
+        ...(props.parentPick
+          ? { timelineParentPick: { layer: props.parentPick } }
+          : {}),
+      }}
       disabled={props.disabled}
       active={props.active}
       tabIndex={props.tabIndex}
@@ -71,13 +79,27 @@ function Icon(props: {
         symbolSize: t(
           props.quiet ? "metrics.symbol_inline" : "metrics.symbol_panel",
         ),
+        ...(props.square
+          ? {
+              width: t("metrics.hit"),
+              height: t("metrics.hit"),
+            }
+          : {}),
+        ...(props.square && props.active
+          ? { background: t("colors.selected_fill") }
+          : {}),
         ...(props.primary ? { color: t("colors.text") } : {}),
         ...(props.quiet ? { color: t("colors.muted") } : {}),
         ...(props.tint ? { color: t(props.tint) } : {}),
       }}
       onClick={(event) => {
         event.stopPropagation();
-        if (!props.disabled) props.send(props.intent);
+        if (!props.disabled)
+          props.send(
+            props.intent.type === "disclosure"
+              ? { ...props.intent, all: !!event.altKey }
+              : props.intent,
+          );
       }}
     >
       {props.children}
@@ -126,6 +148,12 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 id={`timeline:tab:${tab.id}`}
                 label={tab.name}
                 title={tab.name}
+                onPointerDown={(event) => {
+                  if (event.button === 2) {
+                    event.stopPropagation();
+                    send({ type: "tabContext", id: tab.id });
+                  }
+                }}
                 role="tab"
                 tabIndex={tab.active ? 0 : -1}
                 aria-selected={tab.active}
@@ -149,6 +177,14 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
               >
                 {tab.name}
               </UI.ToolbarItem>
+              <Icon
+                id={`timeline:tab-menu:${tab.id}`}
+                label={`${tab.name} menu`}
+                symbol="ellipsis"
+                quiet
+                send={send}
+                intent={{ type: "tabContext", id: tab.id }}
+              />
               {f.tabs.length > 1 && tab.showClose && (
                 <Icon
                   id={`timeline:tab-close:${tab.id}`}
@@ -263,9 +299,11 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
         <Icon
           id="timeline:graph"
           label="Graph Editor"
-          title="Graph Editor"
+          title={graph ? "Hide Graph Editor (⇧F3)" : "Show Graph Editor (⇧F3)"}
           symbol="point.topleft.down.to.point.bottomright.curvepath"
           active={graph}
+          primary
+          square
           send={send}
           intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
         />
@@ -326,17 +364,20 @@ function Layer({
   row,
   send,
   single,
+  lit,
 }: {
   row: LayerRow;
   send: Send;
   single: boolean;
+  /** Selected while the timeline holds the keyboard: the accent's. */
+  lit: boolean;
 }) {
-  // As v1: every row keeps its switches' columns at its trailing edge, so
-  // names truncate at the same place on every row and nothing moves under
-  // the pointer. Visibility and the parent link always show; Lock shows
-  // when set, or under the pointer, keyboard focus or a single selected
-  // layer. Shy and Solo are the Layer menu's and the row menu's (the owner
-  // took their row buttons out).
+  // As v1 and After Effects: every row keeps its switches' columns at its
+  // trailing edge, so names truncate at the same place on every row and
+  // nothing moves under the pointer. Visibility and the parent link always
+  // show; Shy, Solo and Lock show when set, or under the pointer, keyboard
+  // focus or a single selected layer (PM-367: they stay on the row, and in
+  // the Layer menu and the row menu).
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
@@ -352,6 +393,22 @@ function Layer({
           },
         ]
       : []),
+    {
+      name: "shy" as const,
+      on: row.shy === true,
+      label: "Toggle Shy",
+      symbol: row.shy ? "face.dashed.fill" : "face.dashed",
+      active: row.shy === true,
+      always: false,
+    },
+    {
+      name: "solo" as const,
+      on: row.solo,
+      label: "Toggle Solo",
+      symbol: row.solo ? "s.circle.fill" : "s.circle",
+      active: row.solo,
+      always: false,
+    },
     {
       name: "lock" as const,
       on: row.locked,
@@ -388,7 +445,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t("colors.muted"),
+              color: t(lit ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -397,28 +454,46 @@ function Layer({
             {String(row.index).padStart(2, "0")}
           </text>
         )}
-        {row.canOpen ? (
-          <Icon
-            id={`timeline:disclosure:${row.id}`}
-            label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-            symbol={row.expanded ? "chevron.down" : "chevron.right"}
-            quiet
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-          />
-        ) : (
-          // The disclosure column stays reserved so badges and names align.
-          <div
-            role="presentation"
-            style={{
-              width: t("metrics.hit"),
-              minWidth: t("metrics.hit"),
-              flexShrink: 0,
-              height: t("metrics.hit"),
-            }}
-          />
-        )}
+        <div
+          role="presentation"
+          metadata={{ timelineIndent: row.depth }}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            flexShrink: 0,
+          }}
+        >
+          {Array.from({ length: Math.min(4, row.depth) }, (_, depth) => (
+            <div
+              key={depth}
+              role="presentation"
+              style={{ width: t("metrics.timeline_indent"), flexShrink: 0 }}
+            />
+          ))}
+          {row.canOpen ? (
+            <Icon
+              id={`timeline:disclosure:${row.id}`}
+              label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+              symbol={row.expanded ? "chevron.down" : "chevron.right"}
+              quiet
+              tint={lit ? "colors.accent_text" : undefined}
+              tabIndex={-1}
+              send={send}
+              intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+            />
+          ) : (
+            // The disclosure column stays reserved so badges and names align.
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                flexShrink: 0,
+                height: t("metrics.hit"),
+              }}
+            />
+          )}
+        </div>
         <div
           role="presentation"
           attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}
@@ -440,7 +515,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t("colors.text"),
+            color: t(lit ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -472,6 +547,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
+              ...(lit ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -488,9 +564,11 @@ function Layer({
           item.on || item.always || show ? (
             <Icon
               key={item.name}
+              parentPick={item.name === "parent" ? row.layer : undefined}
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
+              tint={lit ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -581,8 +659,71 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           {row.label}
         </text>
       </div>
-      <div style={{ ...line, paddingRight: t("metrics.gap") }}>
-        {/* The link stands before the value: values end on one edge. */}
+      <div
+        style={{
+          ...line,
+          width: t("metrics.value_column"),
+          flexShrink: 0,
+          gap: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        }}
+      >
+        {/* v1 propertyValueColumns: equal axis columns, then the Scale link. */}
+
+        {row.numeric && row.scaleLinked === undefined ? (
+          <UI.NumberField
+            id={`timeline:value:${row.id}`}
+            label={row.label}
+            {...row.numeric}
+            disabled={row.locked}
+            tabIndex={-1}
+          />
+        ) : (
+          (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
+            (axis) =>
+              axis.editor ? (
+                <UI.TextField
+                  id={`timeline:value-edit:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                  value={axis.editor.value}
+                  binding={axis.editor.binding}
+                  style={{
+                    flexGrow: 1,
+                    flexBasis: t("metrics.hit"),
+                    minWidth: t("metrics.hit"),
+                  }}
+                  tabIndex={-1}
+                  metadata={{ cancelChange: true }}
+                  onChange={(e) =>
+                    send({ type: "editDone", value: String(e.value ?? "") })
+                  }
+                />
+              ) : (
+                <text
+                  id={`timeline:value:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}, ${axis.readout}`}
+                  metadata={
+                    row.locked
+                      ? {}
+                      : {
+                          timelineScrub: { layer: row.layer, path: axis.path },
+                        }
+                  }
+                  style={{
+                    color: t(row.locked ? "colors.muted" : "colors.text"),
+                    fontSize: t("typography.body"),
+                    fontVariantNumeric: "tabular-nums",
+                    flexGrow: 1,
+                    flexBasis: t("metrics.hit"),
+                    minWidth: t("metrics.hit"),
+                    overflow: "hidden",
+                  }}
+                >
+                  {axis.readout}
+                </text>
+              ),
+          )
+        )}
         {row.scaleLinked !== undefined && (
           <Icon
             id={`timeline:scale-link:${row.id}`}
@@ -599,30 +740,6 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             intent={{ type: "scaleLink", layer: row.layer }}
           />
         )}
-        {row.numeric && row.scaleLinked === undefined ? (
-          <UI.NumberField
-            id={`timeline:value:${row.id}`}
-            label={row.label}
-            {...row.numeric}
-            disabled={row.locked}
-            tabIndex={-1}
-          />
-        ) : (
-          <text
-            label={row.accessibilityLabel}
-            metadata={{
-              designTodo: "T5",
-              timelineScrub: { layer: row.layer, path: row.path },
-            }}
-            style={{
-              color: t(row.locked ? "colors.muted" : "colors.text"),
-              fontSize: t("typography.body"),
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {row.readout}
-          </text>
-        )}
       </div>
     </>
   );
@@ -632,10 +749,14 @@ const TimelineRow = memo(
     row: published,
     send,
     single,
+    focused,
   }: {
     row: Row;
     send: Send;
     single: boolean;
+    /** The timeline holds the keyboard (PM-367): selection takes the
+     * accent then, the neutral selection fill otherwise (the Mac's). */
+    focused: boolean;
     key?: string;
   }) {
     let clickModifiers: Modifiers = {};
@@ -679,13 +800,24 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.hovered && !row.selected
-            ? { background: t("colors.hover") }
-            : {}),
+          ...(row.selected && focused
+            ? {
+                background: t(
+                  row.hovered
+                    ? "colors.timeline_selected_hover"
+                    : "colors.timeline_selected",
+                ),
+                color: t("colors.accent_text"),
+              }
+            : row.selected
+              ? { background: t("colors.selected_fill") }
+            : row.hovered
+              ? { background: t("colors.hover") }
+              : {}),
         }}
       >
         {row.kind === "layer" ? (
-          <Layer row={row} send={send} single={single} />
+          <Layer row={row} send={send} single={single} lit={row.selected && focused} />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
         ) : (
@@ -770,6 +902,7 @@ const TimelineRow = memo(
   (before, after) =>
     before.send === after.send &&
     before.single === after.single &&
+    before.focused === after.focused &&
     JSON.stringify(before.row) === JSON.stringify(after.row),
 );
 
@@ -884,6 +1017,7 @@ export function TimelinePanel({
                       row={row}
                       send={send}
                       single={!f.selection || f.selection.count <= 1}
+                      focused={f.focused !== false}
                     />
                   ))}
                 </UI.Tree>

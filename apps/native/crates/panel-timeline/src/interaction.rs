@@ -2,7 +2,7 @@ use crate::snap::{Anchor, DirectionalSnap, Edge, Target};
 use crate::{GraphDisplay, GraphMode, PropertyFacts, TimelineIndex, TimelineMode, TimelineModel};
 use pm_kernel::commands::{
     comps::CompPatch,
-    keyframes::{CopiedKey, EaseSide, EaseSpec, HandleValue},
+    keyframes::{CopiedKey, EaseSide, EaseSpec, HandleValue, TemporalEase},
     layers::{LayerPatch, ParentChange},
     properties::SetProperty,
 };
@@ -790,6 +790,19 @@ impl TimelineModel {
         p.calls.push(SelectionCall::Keys(selected).into());
         Ok(p)
     }
+    /// v1's separateDimensionsItem: the selection when the row's layer is
+    /// in it, else that layer; locked layers stay as they are.
+    fn separate_targets(&self, layer: &str) -> Vec<String> {
+        let selected = self.selection.layers();
+        let ids: Vec<String> = if selected.iter().any(|id| id == layer) {
+            selected.to_vec()
+        } else {
+            vec![layer.to_owned()]
+        };
+        ids.into_iter()
+            .filter(|id| self.index.layer(id).is_some_and(|l| !l.effectively_locked))
+            .collect()
+    }
     pub fn require_channel(&self, layer: &str, channel: &str) -> Result<(), ModelError> {
         let l = self
             .index
@@ -964,6 +977,15 @@ pub enum DragKind {
     TrimOut {
         ids: Vec<String>,
     },
+    QuickOffsetKeys {
+        groups: Vec<Vec<String>>,
+        time: f64,
+    },
+    TextStagger {
+        band: crate::stagger::Band,
+        end: bool,
+        time: f64,
+    },
     QuickOffsetLayers {
         ids: Vec<String>,
     },
@@ -1013,6 +1035,7 @@ pub struct DragSample {
 }
 #[derive(Clone, Debug)]
 pub struct Drag {
+    work_duration: f64,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1021,7 +1044,61 @@ pub struct Drag {
     pub key_snap: Option<crate::snap::GroupLock>,
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
+    selected_property_keys: std::collections::HashSet<String>,
     property_keys: std::collections::HashMap<(String, String), Vec<(String, f64)>>,
+    /// A key drag in the Speed Graph: each key side's speed and influence at
+    /// the press. A vertical drag there changes speeds (as v1 does), never
+    /// the keys' values.
+    speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
+    /// A handle drag: its key's layer-local time and value, and the other
+    /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
+    handle_key: Option<(f64, f64, Option<TemporalEase>)>,
+}
+/// Each side's ease of the keys `ids` as the graph shows it: the speed (value
+/// units per second) and influence (percent) of its direction handle, so a
+/// linear side reads its real chord speed, not a stored zero.
+fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, TemporalEase)> {
+    let mut out = vec![];
+    for id in ids {
+        let Some((_, channel, _)) = index.key(id) else {
+            continue;
+        };
+        let Some(i) = channel.keys.iter().position(|k| &k.id == id) else {
+            continue;
+        };
+        let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
+        let points = pm_kernel::commands::keyframes::handle_points(&stored);
+        let key = &channel.keys[i];
+        let Some(value) = key.value.as_f64() else {
+            continue;
+        };
+        for (side, neighbour) in [
+            (EaseSide::In, i.checked_sub(1)),
+            (
+                EaseSide::Out,
+                Some(i + 1).filter(|n| *n < channel.keys.len()),
+            ),
+        ] {
+            let slot = if side == EaseSide::In { 0 } else { 1 };
+            let (Some((t, v)), Some(n)) = (points.get(i).and_then(|p| p[slot]), neighbour) else {
+                continue;
+            };
+            let reach = t - key.time;
+            let span = (channel.keys[n].time - key.time).abs();
+            if reach.abs() < 1e-9 || span < 1e-9 {
+                continue;
+            }
+            out.push((
+                id.clone(),
+                side,
+                TemporalEase {
+                    speed: (v - value) / reach,
+                    influence: (reach.abs() / span * 100.).clamp(0.1, 100.),
+                },
+            ));
+        }
+    }
+    out
 }
 impl Drag {
     /// Captures identities and baselines once; never keeps a writer lease itself.
@@ -1093,6 +1170,29 @@ impl Drag {
                     }
                 }
             }
+            DragKind::TextStagger { band, time, .. } => {
+                finite(*time)?;
+                for key in ["delay", "duration", "stagger"] {
+                    let path = format!("ta.{}.{key}", band.animator);
+                    if key == "duration" || index.channel(&band.layer, &path).is_some() {
+                        model.require_channel(&band.layer, &path)?;
+                    }
+                }
+            }
+            DragKind::QuickOffsetKeys { groups, time } => {
+                finite(*time)?;
+                if groups.len() < 2 {
+                    return Err(ModelError::InvalidGesture);
+                }
+                for id in groups.iter().flatten() {
+                    let (l, _, _) = index
+                        .key(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    if l.effectively_locked {
+                        return Err(ModelError::Locked(l.id.clone()));
+                    }
+                }
+            }
             DragKind::Handle { id, .. } => {
                 let (l, _, _) = index
                     .key(id)
@@ -1156,18 +1256,30 @@ impl Drag {
             for (l, c) in targets {
                 let layer = index.layer(l).unwrap();
                 let channel = index.channel(l, c).unwrap();
-                if !channel
-                    .keys
-                    .iter()
-                    .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
-                {
+                let paired = match c.as_str() {
+                    "scale.x" => index.channel(l, "scale.y"),
+                    "scale.y" => index.channel(l, "scale.x"),
+                    _ => None,
+                };
+                let at_key = |channel: &crate::Channel| {
+                    channel
+                        .keys
+                        .iter()
+                        .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
+                };
+                if !at_key(channel) && !paired.is_some_and(at_key) {
                     let keys: Vec<_> = channel
                         .keys
                         .iter()
                         .filter(|k| model.selection.keys().contains(&k.id))
                         .filter_map(|k| k.value.as_f64().map(|v| (k.id.clone(), v)))
                         .collect();
-                    if !keys.is_empty() {
+                    let paired_selected = paired.is_some_and(|p| {
+                        p.keys.iter().any(|k| {
+                            model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
+                        })
+                    });
+                    if !keys.is_empty() || paired_selected {
                         property_keys.insert((l.clone(), c.clone()), keys);
                     }
                 }
@@ -1185,15 +1297,41 @@ impl Drag {
         } else {
             None
         };
+        let speed_eases = match &kind {
+            DragKind::GraphKeys { ids } if model.graph_mode == GraphMode::Speed => {
+                Some(key_eases(index, ids))
+            }
+            _ => None,
+        };
+        let handle_key = match &kind {
+            DragKind::Handle { id, side } => index.key(id).and_then(|(_, _, key)| {
+                let value = key.value.as_f64()?;
+                let other = if *side == EaseSide::In {
+                    EaseSide::Out
+                } else {
+                    EaseSide::In
+                };
+                let opposite = key_eases(index, std::slice::from_ref(id))
+                    .into_iter()
+                    .find(|(_, s, _)| *s == other)
+                    .map(|(_, _, e)| e);
+                Some((key.time, value, opposite))
+            }),
+            _ => None,
+        };
         Ok(Self {
+            handle_key,
+            speed_eases,
             kind,
             start: index.clone(),
+            work_duration: index.duration,
             snap: DirectionalSnap::default(),
             fixed: None,
             anchors,
             key_snap: None,
             track_snap,
             property_values: Default::default(),
+            selected_property_keys: model.selection.keys().iter().cloned().collect(),
             property_keys,
         })
     }
@@ -1219,7 +1357,15 @@ impl Drag {
             DragKind::Layers { .. } => "Move clip",
             DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
+            DragKind::TextStagger { end, .. } => {
+                if end {
+                    "Stretch text animation"
+                } else {
+                    "Move text animation"
+                }
+            }
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
+            DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
             DragKind::Keys { .. } => "Move keyframe",
             DragKind::GraphKeys { .. } => "Edit curve",
             DragKind::StretchKeys { .. } => "Stretch keyframes",
@@ -1295,6 +1441,23 @@ impl Drag {
         };
         let mut out = Vec::new();
         match &self.kind {
+            DragKind::TextStagger { band, end, time } => {
+                out.extend(band.commands(*end, sample.time_delta, self.start.fps, *time))
+            }
+            DragKind::QuickOffsetKeys { groups, time } => {
+                let mut model = TimelineModel::default();
+                model.index = self.start.clone();
+                let plan = model.quick_offset_keys(groups, sample.time_delta, *time)?;
+                for call in plan.calls {
+                    if let pm_kernel::Call::Transact {
+                        body: pm_kernel::WriteBody::Commands(commands),
+                        ..
+                    } = call
+                    {
+                        out.extend(commands);
+                    }
+                }
+            }
             DragKind::ProEdit(command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
                 let mut command = command.clone();
@@ -1446,14 +1609,37 @@ impl Drag {
                 }
                 .into(),
             ),
-            DragKind::GraphKeys { ids } => out.push(
-                KeyframeCommand::GraphMove {
-                    key_ids: ids.clone(),
-                    delta,
-                    value_delta: sample.value_delta,
+            DragKind::GraphKeys { ids } => {
+                // In the Speed Graph the vertical axis is speed: the keys
+                // keep their values and each side's speed moves instead.
+                let speeds = self.speed_eases.as_ref();
+                out.push(
+                    KeyframeCommand::GraphMove {
+                        key_ids: ids.clone(),
+                        delta,
+                        value_delta: if speeds.is_some() {
+                            0.
+                        } else {
+                            sample.value_delta
+                        },
+                    }
+                    .into(),
+                );
+                for (id, side, ease) in speeds.into_iter().flatten() {
+                    out.push(
+                        KeyframeCommand::SetHandle {
+                            key_id: id.clone(),
+                            side: *side,
+                            value: HandleValue::Ease(TemporalEase {
+                                speed: ease.speed + sample.value_delta,
+                                influence: ease.influence,
+                            }),
+                            split: false,
+                        }
+                        .into(),
+                    );
                 }
-                .into(),
-            ),
+            }
             DragKind::StretchKeys {
                 ids,
                 anchor_time,
@@ -1499,18 +1685,46 @@ impl Drag {
             DragKind::Handle { id, side } => {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
+                let (t, mut v) = (sample.handle_time, sample.handle_value);
+                // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
+                if let Some((_, key_value, _)) = self.handle_key
+                    && sample.modifiers.shift
+                {
+                    v = key_value;
+                }
                 out.push(
                     KeyframeCommand::SetHandle {
                         key_id: id.clone(),
                         side: *side,
-                        value: HandleValue::Point {
-                            t: sample.handle_time,
-                            v: sample.handle_value,
-                        },
+                        value: HandleValue::Point { t, v },
                         split: sample.modifiers.alt,
                     }
                     .into(),
                 );
+                // Unless ⌥ splits them, the other handle stays on the same
+                // tangent through the key, keeping its own length (v1's
+                // `mirroredBezierHandlePoint`).
+                if let Some((key_time, key_value, Some(opposite))) = self.handle_key
+                    && !sample.modifiers.alt
+                    && (t - key_time).abs() > 1e-9
+                {
+                    out.push(
+                        KeyframeCommand::SetHandle {
+                            key_id: id.clone(),
+                            side: if *side == EaseSide::In {
+                                EaseSide::Out
+                            } else {
+                                EaseSide::In
+                            },
+                            value: HandleValue::Ease(TemporalEase {
+                                speed: (v - key_value) / (t - key_time),
+                                influence: opposite.influence,
+                            }),
+                            split: false,
+                        }
+                        .into(),
+                    );
+                }
             }
             DragKind::Property { targets, time } => {
                 for (l, c) in targets {
@@ -1524,6 +1738,33 @@ impl Drag {
                                 }
                                 .into(),
                             );
+                        }
+                        if self.start.layer(l).is_some_and(|layer| layer.scale_linked) {
+                            let paired = match c.as_str() {
+                                "scale.x" => Some("scale.y"),
+                                "scale.y" => Some("scale.x"),
+                                _ => None,
+                            };
+                            if let Some(paired) = paired {
+                                if let Some(channel) = self.start.channel(l, paired) {
+                                    for key in &channel.keys {
+                                        if self.selected_property_keys.contains(&key.id) {
+                                            if let Some(start) = key.value.as_f64() {
+                                                out.push(
+                                                    KeyframeCommand::Edit {
+                                                        key_id: key.id.clone(),
+                                                        time: None,
+                                                        value: Some(Value::Number(
+                                                            start + sample.value_delta,
+                                                        )),
+                                                    }
+                                                    .into(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         continue;
                     }
@@ -1541,6 +1782,38 @@ impl Drag {
                         })
                         .ok_or(ModelError::MissingHost("evaluated property baseline"))?;
                     let value = baseline + sample.value_delta;
+                    if matches!(c.as_str(), "scale.x" | "scale.y")
+                        && targets
+                            .iter()
+                            .filter(|(layer, path)| {
+                                layer == l && matches!(path.as_str(), "scale.x" | "scale.y")
+                            })
+                            .count()
+                            == 1
+                    {
+                        let paired = if c == "scale.x" { "scale.y" } else { "scale.x" };
+                        let other = self
+                            .property_values
+                            .get(&(l.clone(), paired.into()))
+                            .copied()
+                            .or_else(|| self.start.channel(l, paired)?.value.as_f64())
+                            .ok_or(ModelError::InvalidNumber)?;
+                        let mut model = TimelineModel::default();
+                        model.index = self.start.clone();
+                        for call in model
+                            .scale_value(l, c, value, *time, baseline, other)?
+                            .calls
+                        {
+                            if let Call::Transact {
+                                body: WriteBody::Commands(commands),
+                                ..
+                            } = call
+                            {
+                                out.extend(commands);
+                            }
+                        }
+                        continue;
+                    }
                     out.push(
                         PropertyCommand::Set(SetProperty::new(l, c, Value::Number(value), *time))
                             .into(),
@@ -1551,21 +1824,23 @@ impl Drag {
                 let [a, b] = self.start.work;
                 let frame = 1. / self.start.fps;
                 let duration = self.start.duration;
-                let (a, b, duration) = match self.kind {
-                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b, duration),
+                let (a, b) = match self.kind {
+                    DragKind::WorkIn => ((a + delta).max(0.).min(b - frame), b),
                     DragKind::WorkOut => {
                         let end = (b + delta).max(a + frame);
-                        (a, end, duration.max(end))
+                        self.work_duration = self.work_duration.max(end);
+                        (a, end)
                     }
                     _ => {
                         let d = delta.max(-a).min(duration - b);
-                        (a + d, b + d, duration)
+                        (a + d, b + d)
                     }
                 };
                 out.push(
                     CompCommand::Set {
                         patch: Box::new(CompPatch {
-                            duration: Some(duration),
+                            duration: matches!(self.kind, DragKind::WorkOut)
+                                .then_some(self.work_duration),
                             work_area: Some((a, b)),
                             ..Default::default()
                         }),
@@ -1788,6 +2063,19 @@ impl TimelineModel {
                             .is_some_and(|c| !c.keys.is_empty()),
                     false,
                 );
+                // v1's separateDimensionsItem: on a Position row, checked
+                // while its layer's dimensions are separate.
+                if channel == "position" || channel.starts_with("position.") {
+                    let separated = self
+                        .index
+                        .layer(layer)
+                        .is_some_and(|l| l.separate_dimensions);
+                    add(
+                        "track.separate",
+                        !self.separate_targets(layer).is_empty(),
+                        separated,
+                    );
+                }
             }
             Context::Layer { .. } => add("layer.shared-menu", true, false),
             Context::Graph { series } => {
@@ -1929,6 +2217,41 @@ impl TimelineModel {
             "track.paste" => {
                 return Err(ModelError::MissingHost("clipboard payload: use paste_keys"));
             }
+            "track.separate" => {
+                let Context::Track { layer, .. } = context else {
+                    return Err(ModelError::InvalidGesture);
+                };
+                let separated = !self
+                    .index
+                    .layer(layer)
+                    .is_some_and(|l| l.separate_dimensions);
+                let commands = self
+                    .separate_targets(layer)
+                    .into_iter()
+                    .map(|layer_id| {
+                        pm_kernel::commands::layers::LayerCommand::Set {
+                            layer_id,
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                separate_dimensions: Some(separated),
+                                ..Default::default()
+                            },
+                        }
+                        .into()
+                    })
+                    .collect();
+                let mut plan = Plan::edit(commands, self.index.revision);
+                if let Some(pm_kernel::Call::Transact { label, .. }) = plan.calls.first_mut() {
+                    *label = Some(
+                        if separated {
+                            "Separate Dimensions"
+                        } else {
+                            "Join Dimensions"
+                        }
+                        .into(),
+                    );
+                }
+                plan
+            }
             "layer.shared-menu" => {
                 if let Context::Layer { id } = context {
                     Plan {
@@ -2013,6 +2336,7 @@ pub fn menu_label(id: &str) -> &'static str {
         "track.add" => "Add Keyframe",
         "track.paste" => "Paste Keyframes",
         "track.clear" => "Remove All Keyframes",
+        "track.separate" => "Separate Dimensions",
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
         "graph.speed" => "Speed Graph",

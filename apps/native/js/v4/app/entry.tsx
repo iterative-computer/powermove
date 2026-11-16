@@ -38,6 +38,7 @@ import { mount as agent } from "../panels/agent/mount";
 import { mount as settings } from "../panels/settings/mount";
 import { mount as exportPanel } from "../panels/export/mount";
 import { mount as color } from "../panels/color/mount";
+import { mount as easing } from "../panels/easing/mount";
 declare const runtime: { engine(operation: string, input?: Json): Json };
 const native = (operation: string, input: unknown = null): any =>
   runtime.engine(operation, input as Json);
@@ -54,6 +55,7 @@ const MOUNTS: Record<string, Mount> = {
   settings,
   export: exportPanel,
   color,
+  easing,
 };
 let mounted: Mounted | undefined;
 let host: HostClient;
