@@ -6393,4 +6393,3 @@ fn export_destination_choice_does_not_start_or_change_the_draft_and_blocks_dupli
     }
     assert_eq!(backend.native.platform.len(), 1);
 }
-
