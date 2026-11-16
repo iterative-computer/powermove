@@ -1338,7 +1338,8 @@ fn colour_hex(colour: &NSColor) -> String {
 }
 
 #[cfg(test)] mod snapshot_bridge_tests {
-    use super::*;
+    use super::{snapshot_bitmap,snapshot_image,NSBitmapImageRep,NSImage};
+    use objc2::AnyThread;
     #[test] fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
         objc2::rc::autoreleasepool(|_| {
             let image=image::RgbaImage::from_pixel(2,2,image::Rgba([40,80,120,160]));
