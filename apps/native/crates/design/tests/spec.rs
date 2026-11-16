@@ -562,6 +562,10 @@ const ROLES: &[(&str, &str)] = &[
         "Tallest sheet option body before it scrolls",
     ),
     (
+        "metrics.export_preview",
+        "Export progress sheet's picture of the frame last encoded",
+    ),
+    (
         "metrics.segment_radius",
         "Segment and tab corner inside a pill (concentric)",
     ),

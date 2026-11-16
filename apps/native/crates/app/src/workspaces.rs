@@ -28,7 +28,11 @@ impl Controller {
     /// The store as this window sees it; the same `Rc` until it changes.
     pub fn workspace_store(&self) -> Rc<Store> {
         let state = self.kernel.state();
-        let project = self.published.as_ref().map(|p| p.workspace.clone());
+        // While a project opens, its saved workspace (`opening_workspace`).
+        let project = match &self.published {
+            Some(p) => Some(p.workspace.clone()),
+            None => self.opening_workspace.clone(),
+        };
         let mut cache = self.workspace_store.0.borrow_mut();
         if let Some((revision, seen, store)) = &*cache
             && *revision == state.revision

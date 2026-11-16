@@ -23,6 +23,8 @@ pub(crate) struct Recorder {
     pub skims: RefCell<Vec<Option<f64>>>,
     /// Ruler scrubs starting (`true`) and ending, as the app hears them.
     pub scrubs: RefCell<Vec<bool>>,
+    /// For each seek, whether a ruler scrub was under way.
+    pub seeks_in_scrub: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -41,6 +43,8 @@ impl Delegate for Recording {
     fn seek(&self, seconds: f64, _: &mut App) {
         *self.0.time.borrow_mut() = seconds;
         self.0.seeks.borrow_mut().push(seconds);
+        let scrubbing = self.0.scrubs.borrow().last() == Some(&true);
+        self.0.seeks_in_scrub.borrow_mut().push(scrubbing);
     }
     fn effect(&self, effect: HostEffect, _: &mut App) {
         self.0.effects.borrow_mut().push(effect);
@@ -2693,6 +2697,32 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         near(seeks.first().copied(), 2.5),
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
+}
+/// A press on the ruler with the skimmer showing scrubs from the time under
+/// the pointer: every seek is the scrub's (whose time is written once, as
+/// it ends), never a seek to the skimmer before it (which wrote the time at
+/// once and had every panel take the write as the drag began).
+#[gpui::test]
+fn a_ruler_press_with_the_skimmer_showing_seeks_only_within_the_scrub(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let tracks = s.at(0, 1.5);
+    s.vcx.simulate_mouse_move(tracks, None, Modifiers::none());
+    s.idle(cx);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let ruler = s.origin() + point(px(column + 100.), px(tokens().metrics.ruler / 2.));
+    s.vcx.simulate_mouse_move(ruler, None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(), "the skimmer shows");
+    s.drag(cx, ruler, ruler + point(px(40.), px(0.)), Modifiers::none());
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(seeks.len() >= 2, "{seeks:?}");
+    assert!(
+        s.recorder.seeks_in_scrub.borrow().iter().all(|&s| s),
+        "a seek outside the scrub: {:?}",
+        s.recorder.seeks_in_scrub.borrow()
+    );
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
 /// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
 /// or in time (the viewer keeps the playhead's picture), nor does a move

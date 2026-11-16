@@ -129,6 +129,25 @@ fn stamp_by(stamp_file: &Path, identity: &str) -> Option<(i64, Option<f64>)> {
     let same = lines.next().is_some_and(|by| by.trim() == identity);
     Some((if same { stamp } else { STALE }, at))
 }
+/// A stored picture decoded to straight RGBA with its size, to show from
+/// the first frame it is laid out in. Blocking (a file read and a decode).
+pub(crate) fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut pixels).ok()?;
+    pixels.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => pixels,
+        png::ColorType::Rgb => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None,
+    };
+    Some((info.width, info.height, rgba))
+}
 /// Whether a frame shows anything: a flat frame (all black, or one colour
 /// from edge to edge) does not.
 pub(crate) fn has_content(png: &[u8]) -> bool {
@@ -224,11 +243,9 @@ pub(crate) fn last_frame_files(profile: &Path, id: &str) -> (PathBuf, PathBuf) {
     files(&profile.join("caches").join("last-frame"), id)
 }
 /// What a last frame shows: the project's revision and the playhead's time,
-/// by this build, and whether it is the settled picture or a preview (which
-/// the settled one replaces).
-pub(crate) fn last_frame_mark(revision: u64, time: f64, settled: bool) -> String {
-    let preview = if settled { "" } else { "\npreview" };
-    format!("{revision}\n{time:.4}\n{}{preview}", identity())
+/// by this build.
+pub(crate) fn last_frame_mark(revision: u64, time: f64) -> String {
+    format!("{revision}\n{time:.4}\n{}", identity())
 }
 /// The picture that stands in for `id` while it opens: the frame its viewer
 /// last showed, else its Home card's poster; none when neither was ever
@@ -356,7 +373,7 @@ mod tests {
     fn a_last_frame_is_current_for_its_revision_and_time() {
         let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&profile);
-        let mark = last_frame_mark(7, 12.04, true);
+        let mark = last_frame_mark(7, 12.04);
         assert!(!last_frame_current(&profile, "file-1", &mark), "none stored yet");
         let (image, stamp) = last_frame_files(&profile, "file-1");
         std::fs::create_dir_all(image.parent().unwrap()).unwrap();
@@ -364,12 +381,8 @@ mod tests {
         std::fs::write(&stamp, &mark).unwrap();
         assert!(image.ends_with("caches/last-frame/file_1.png"));
         assert!(last_frame_current(&profile, "file-1", &mark));
-        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04, true)));
-        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3., true)));
-        assert!(
-            !last_frame_current(&profile, "file-1", &last_frame_mark(7, 12.04, false)),
-            "a preview is not the settled picture"
-        );
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04)));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3.)));
         std::fs::remove_dir_all(&profile).unwrap();
     }
 

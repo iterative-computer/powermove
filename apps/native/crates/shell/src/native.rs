@@ -426,8 +426,11 @@ pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
 /// frame is set on a later turn of the run loop, because a view asks for
 /// this while its window is being drawn and resizing calls back into it.
 pub fn resize_from_top(w: &gpui::Window, height: f32, tallest: f32, cx: &mut gpui::App) {
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
-    else {
+    // A window with no AppKit view (a headless test's) has no frame to set.
+    let Ok(handle) = HasWindowHandle::window_handle(w) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         return;
     };
     let view: Retained<NSView> =
@@ -3007,6 +3010,7 @@ pub struct Host {
     pub contributed_choices: Vec<Choice>,
     /// Rectangles of panel bodies a native surface below GPUI draws.
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
+    pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -3209,6 +3213,7 @@ impl Host {
             base_choices: choices,
             contributed_choices: vec![],
             native_panels: Rc::default(),
+            native_panel_clips: Rc::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],
@@ -3228,7 +3233,7 @@ impl Host {
             sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
-        let native_rects = host.borrow().native_panels.clone();
+        let native_rects = host.borrow().native_panel_clips.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {

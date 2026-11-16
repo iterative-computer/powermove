@@ -95,6 +95,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
 | `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
 | `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
+| `metrics.export_preview` | Export progress sheet's picture of the frame last encoded | 315 | 315 | 315 | 315 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |

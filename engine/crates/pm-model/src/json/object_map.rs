@@ -107,11 +107,20 @@ where
     static INTERNER: OnceLock<Mutex<SchemaInterner>> = OnceLock::new();
     // No user code runs while locked. Recovering poison remains safe because
     // entries are only weak hints and the map validates all key bytes.
-    let schema = INTERNER
+    let shared = INTERNER
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .intern(keys, hash);
+    // Each thread shares a copy of its own: threads building one document
+    // side by side would otherwise all count references on one schema (its
+    // counter a cache line every core fights over), which held a parallel
+    // parse to little better than one thread.
+    let schema = if Arc::strong_count(&shared) > 1 {
+        Arc::new((*shared).clone())
+    } else {
+        shared
+    };
     RECENT.with(|recent| recent.borrow_mut()[slot] = (hash, Arc::downgrade(&schema)));
     schema
 }
@@ -507,6 +516,24 @@ mod tests {
             ["influence", "speed"]
         );
         assert_eq!(small[&k("speed")], 0.0);
+    }
+
+    /// Threads building objects of one shape side by side each count
+    /// references on a schema of their own (one shared counter held a
+    /// parallel parse to little better than one thread); one thread's
+    /// objects still share theirs.
+    #[test]
+    fn each_thread_shares_a_schema_of_its_own() {
+        let make = || -> ObjectMap<u32> {
+            [(k("per-thread-a"), 1), (k("per-thread-b"), 2)]
+                .into_iter()
+                .collect()
+        };
+        let here = make();
+        assert!(Arc::ptr_eq(&here.schema, &make().schema));
+        let there = std::thread::spawn(move || make().schema).join().unwrap();
+        assert!(!Arc::ptr_eq(&here.schema, &there));
+        assert_eq!(here.schema.keys, there.keys);
     }
 
     #[test]

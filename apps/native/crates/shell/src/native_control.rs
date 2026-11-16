@@ -331,8 +331,18 @@ pub struct NativeControl {
     search_value: Option<Value>,
     /// Where the slot was painted inside a scroll layer, to follow it.
     layer: Rc<crate::layer_stage::LayerStage>,
+    /// Shown as a picture of itself while its surface's body scrolls.
+    picture: crate::picture::Picture,
+    /// What the last update set, to tell a changed value from the same one.
+    seen: Option<(Value, Vec<Value>, bool)>,
 }
 impl EventEmitter<Value> for NativeControl {}
+
+impl Drop for NativeControl {
+    fn drop(&mut self) {
+        self.picture.retire();
+    }
+}
 impl NativeControl {
     /// The width the control fits its title in.
     pub fn width(&self) -> f32 {
@@ -775,7 +785,19 @@ impl NativeControl {
             host_revision: None,
             search_value: None,
             layer: Rc::default(),
+            picture: Default::default(),
+            seen: None,
         }
+    }
+    /// Shares its surface's picture hold (P-SLOT-PICTURE).
+    pub fn picture_with(&mut self, hold: &crate::picture::PictureHold) {
+        self.picture.hold = hold.clone();
+    }
+    /// The surface's hold changed: a held control draws as its picture, a
+    /// released one as itself again.
+    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
+        self.picture.hold_changed();
+        cx.notify();
     }
     /// Puts the keyboard in a search field (⌘F), with its text selected;
     /// one not yet in its window takes it when it is first placed.
@@ -838,6 +860,11 @@ impl NativeControl {
     /// Stages the slot again on a frame whose cached paint did not run: as
     /// last painted, or shifted with the scroll layer it is in.
     pub fn keep(&self, window: &Window) {
+        if self.picture.standing() {
+            // Its picture stands in the scene the frame replays.
+            self.slot.hide();
+            return;
+        }
         match self.layer.kept(window) {
             Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
             None => self.slot.keep(),
@@ -851,6 +878,8 @@ impl NativeControl {
     /// checkbox or switch and presses a button; the arrows step a slider.
     /// Returns whether the key was the control's.
     pub fn key(&self, key: &str) -> bool {
+        // A key for the control brings the real one back for the hold.
+        self.picture.go_live();
         let press = |view: &NSView| unsafe {
             let _: () = msg_send![view, performClick: std::ptr::null::<AnyObject>()];
         };
@@ -942,6 +971,13 @@ impl NativeControl {
                 options.clone_into(&mut range);
             }
         }
+        // A value that changes while the picture stands brings the real
+        // control back for the rest of the hold.
+        let seen = (value.clone(), options.to_vec(), disabled);
+        if self.seen.as_ref().is_some_and(|s| *s != seen) {
+            self.picture.go_live();
+        }
+        self.seen = Some(seen);
         let shown = self._target.ivars().options.borrow().clone();
         let unchanged_search = matches!(self.control, Control::Search(_))
             && self.search_value.replace(value.clone()).as_ref() == Some(value);
@@ -957,10 +993,19 @@ impl NativeControl {
     }
 }
 impl Render for NativeControl {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
+        let picture = self.picture.painter();
+        // The keyboard is in a search field: it stays the real one.
+        let pictures = !self.focused();
+        let pressed = cx.listener(|this, _: &MouseDownEvent, window, cx| {
+            if this.picture.press(window) {
+                cx.stop_propagation();
+                cx.notify();
+            }
+        });
         let native: Retained<NSView> = unsafe {
             Retained::retain(self.control.view() as *const NSView as *mut NSView).unwrap()
         };
@@ -971,12 +1016,20 @@ impl Render for NativeControl {
         } else {
             div().w(px(self.width))
         };
-        root.relative().h(px(self.height)).child(
+        root.relative()
+            .h(px(self.height))
+            .on_mouse_down(MouseButton::Left, pressed)
+            .child(
             canvas(
                 |_, _, _| (),
-                move |bounds, _, window, _| {
+                move |painted, _, window, _| {
                     let (bounds, clip) =
-                        layer.painted(bounds, window.content_mask().bounds, window);
+                        layer.painted(painted, window.content_mask().bounds, window);
+                    let size = ns_rect(bounds).size;
+                    if pictures && picture.paint(painted, || slot.picture(size), window) {
+                        slot.hide();
+                        return;
+                    }
                     slot.stage(ns_rect(bounds), ns_rect(clip));
                     if focus.get()
                         && let Some(window) = native.window()
