@@ -754,7 +754,9 @@ exports[`no-search-results: six-op tree snapshot passes the real Rust wire and k
       scroll group settings.detail label="General"
         div status label="No Results. Try a different search."
           text
-            text "No settings found."
+            text "No Results"
+          text
+            text "Try a different search."
 Focus: []"
 `;
 
