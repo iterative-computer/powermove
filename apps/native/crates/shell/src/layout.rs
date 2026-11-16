@@ -163,6 +163,32 @@ pub struct Geometry {
     /// at the tab the pointer is on. Empty, the header is shared evenly.
     pub tabs: std::collections::HashMap<(usize, usize), Vec<(usize, f32, f32)>>,
 }
+impl Geometry {
+    /// Bubble-only wheel routing: inner scroll views have first refusal. The
+    /// dock's divider grab extends past its viewport into the edge gutter.
+    pub fn wheel_dock(&self, x: f32, y: f32, reach: f32) -> Option<usize> {
+        self.side_docks
+            .iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(di, _)| *di)
+            .or_else(|| {
+                self.dividers.iter().find_map(|d| {
+                    if d.horizontal || d.group.is_some() {
+                        return None;
+                    }
+                    let viewport = self.side_docks.get(&d.dock)?;
+                    let hit = Rect {
+                        x: d.rect.x - reach,
+                        w: d.rect.w + 2. * reach,
+                        y: viewport.y,
+                        h: viewport.h,
+                    };
+                    hit.contains(x, y).then_some(d.dock)
+                })
+            })
+    }
+}
+
 fn dock_for(id: &str, g: Group) -> Dock {
     dock(id, Some(DEFAULT_RIGHT), vec![g])
 }

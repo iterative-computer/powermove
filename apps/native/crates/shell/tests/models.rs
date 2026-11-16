@@ -683,3 +683,78 @@ fn view_menu_exposes_the_pie_choices_without_stealing_maximize() {
             && b.args == vec![serde_json::json!("nav"), serde_json::json!(value)]));
     }
 }
+
+#[test]
+fn dock_wheel_hit_test_includes_edge_grabs_and_stacked_gaps_only() {
+    let mut geometry = Geometry::default();
+    geometry.side_docks.insert(
+        0,
+        Rect {
+            x: 0.,
+            y: 40.,
+            w: 200.,
+            h: 560.,
+        },
+    );
+    geometry.side_docks.insert(
+        2,
+        Rect {
+            x: 800.,
+            y: 40.,
+            w: 200.,
+            h: 560.,
+        },
+    );
+    geometry.dividers = vec![
+        Divider {
+            dock: 0,
+            group: None,
+            horizontal: false,
+            rect: Rect {
+                x: 200.,
+                y: 40.,
+                w: 10.,
+                h: 560.,
+            },
+        },
+        Divider {
+            dock: 2,
+            group: None,
+            horizontal: false,
+            rect: Rect {
+                x: 790.,
+                y: 40.,
+                w: 10.,
+                h: 560.,
+            },
+        },
+    ];
+    for x in [0., 100., 199., 200., 205., 215.] {
+        assert_eq!(geometry.wheel_dock(x, 300., 6.), Some(0));
+    }
+    for x in [784., 790., 799., 800., 900., 999.] {
+        assert_eq!(geometry.wheel_dock(x, 300., 6.), Some(2));
+    }
+    for (x, y) in [
+        (216., 300.),
+        (783., 300.),
+        (500., 300.),
+        (205., 39.),
+        (205., 600.),
+    ] {
+        assert_eq!(geometry.wheel_dock(x, y, 6.), None);
+    }
+    // A horizontal timeline divider and dividers outside side docks never route.
+    geometry.dividers.push(Divider {
+        dock: 1,
+        group: None,
+        horizontal: true,
+        rect: Rect {
+            x: 216.,
+            y: 600.,
+            w: 568.,
+            h: 10.,
+        },
+    });
+    assert_eq!(geometry.wheel_dock(500., 605., 6.), None);
+}

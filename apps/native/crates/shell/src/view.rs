@@ -339,6 +339,31 @@ impl Editor {
         self.seen = None;
         self.persist_session();
     }
+    fn dock_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if event.modifiers.control || event.modifiers.platform || event.modifiers.shift {
+            return;
+        }
+        let by = -f32::from(event.delta.pixel_delta(px(16.)).y);
+        if by == 0. || !by.is_finite() {
+            return;
+        }
+        let Some(di) = self.geometry.wheel_dock(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            self.tokens.metrics.splitter_reach,
+        ) else {
+            return;
+        };
+        let id = self.layout.docks[di].id.clone();
+        let moved = self.scroll_dock(&id, by);
+        // The gutter belongs to this column, even at its limit. Never pass a
+        // wheel to the viewer beneath the divider's overlapping hit area.
+        cx.stop_propagation();
+        if moved {
+            cx.notify();
+        }
+    }
+
     /// Move a side column without saving transient viewport state (Electron's rule).
     pub fn scroll_dock(&mut self, id: &str, by: f32) -> bool {
         if !by.is_finite() { return false; }
@@ -2139,24 +2164,7 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
-                if e.modifiers.control || e.modifiers.platform || e.modifiers.shift {
-                    return;
-                }
-                let dock = this
-                    .geometry
-                    .side_docks
-                    .iter()
-                    .find(|(_, r)| r.contains(f32::from(e.position.x), f32::from(e.position.y)))
-                    .map(|(di, _)| this.layout.docks[*di].id.clone());
-                if let Some(id) = dock {
-                    let by = -f32::from(e.delta.pixel_delta(px(16.)).y);
-                    if this.scroll_dock(&id, by) {
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }
-            }))
+            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2919,6 +2927,7 @@ impl Render for Editor {
             };
             let mut splitter = positioned(hit)
                 .id(format!("splitter-{i}"))
+                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
                 .role(Role::Splitter)
                 .aria_label("Resize dock")
                 .tab_index(1000 + i as isize)

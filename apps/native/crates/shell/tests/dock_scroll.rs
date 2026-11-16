@@ -425,3 +425,135 @@ fn normal_height_content_floors_capture_before_and_after() {
         .unwrap();
     });
 }
+
+#[test]
+fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
+    for side in ["left", "right"] {
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = context();
+            let window = cx
+                .open_window(size(px(1000.), px(900.)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut editor = Editor::new(
+                            Tokens::new(Scheme::Dark, Accessibility::default()),
+                            None,
+                            cx,
+                        );
+                        tall(&mut editor);
+                        if side == "left" {
+                            let left = editor
+                                .layout
+                                .docks
+                                .iter()
+                                .position(|d| d.id == "left")
+                                .unwrap();
+                            let right = editor
+                                .layout
+                                .docks
+                                .iter()
+                                .position(|d| d.id == "right")
+                                .unwrap();
+                            let groups = editor.layout.docks[left].groups.clone();
+                            editor.layout.docks[left].groups =
+                                editor.layout.docks[right].groups.clone();
+                            editor.layout.docks[right].groups = groups;
+                        }
+                        editor
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let panel = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap()
+                })
+                .unwrap();
+            let gap = Tokens::new(Scheme::Dark, Accessibility::default())
+                .metrics
+                .dock_gap;
+            let edge = if side == "left" {
+                panel.x + panel.w + gap / 2.
+            } else {
+                panel.x - gap / 2.
+            };
+            for (x, y) in [
+                (edge, panel.y + 80.),
+                (panel.x + 30., panel.y + panel.h + gap / 2.),
+            ] {
+                window
+                    .update(&mut cx, |editor, _, cx| {
+                        editor.scroll_dock(side, -10000.);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let before = window
+                    .update(&mut cx, |editor, _, _| {
+                        editor.panel_rect("inspector").unwrap().y
+                    })
+                    .unwrap();
+                let event = ScrollWheelEvent {
+                    position: point(px(x), px(y)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                    modifiers: Default::default(),
+                    touch_phase: Default::default(),
+                }
+                .to_platform_input();
+                cx.update_window(window.into(), |_, w, cx| {
+                    w.dispatch_event(event, cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                let after = window
+                    .update(&mut cx, |editor, _, _| {
+                        editor.panel_rect("inspector").unwrap().y
+                    })
+                    .unwrap();
+                assert!(
+                    after < before,
+                    "wheel over edge or gap moves the whole column at {x},{y}"
+                );
+            }
+            window
+                .update(&mut cx, |editor, _, cx| {
+                    editor.scroll_dock(side, 10000.);
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let before = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap().y
+                })
+                .unwrap();
+            let event = ScrollWheelEvent {
+                position: point(px(edge), px(panel.y + 80.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                modifiers: Default::default(),
+                touch_phase: Default::default(),
+            }
+            .to_platform_input();
+            let result = cx
+                .update_window(window.into(), |_, w, cx| w.dispatch_event(event, cx))
+                .unwrap();
+            cx.run_until_parked();
+            assert!(
+                !result.propagate,
+                "the gutter keeps the wheel at the column limit"
+            );
+            let after = window
+                .update(&mut cx, |editor, _, _| {
+                    editor.panel_rect("inspector").unwrap().y
+                })
+                .unwrap();
+            assert_eq!(after, before);
+            if let Ok(dir) = std::env::var("PM_DOCK_CAPTURE_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                cx.capture_screenshot(window.into())
+                    .unwrap()
+                    .save(std::path::Path::new(&dir).join(format!("{side}-edge-scroll.png")))
+                    .unwrap();
+            }
+        });
+    }
+}
