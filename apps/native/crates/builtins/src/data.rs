@@ -1005,5 +1005,7 @@ fn media_stamp(facts: &Value) -> u64 {
     facts["skimming"].as_bool().hash(&mut hash);
     // Settings › Shortcuts: its page is rebuilt with a new stamp.
     facts["shortcuts"]["stamp"].as_u64().hash(&mut hash);
+    // Settings › Project's header: the poster, the path, the open projects.
+    facts["settingsHeader"].to_string().hash(&mut hash);
     hash.finish()
 }

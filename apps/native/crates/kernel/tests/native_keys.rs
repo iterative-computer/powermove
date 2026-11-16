@@ -1,5 +1,6 @@
-//! Profile keys only the native app writes (Settings › Shortcuts' keymap):
-//! accepted as settings, kept in the store, read back on the next launch.
+//! Profile keys only the native app writes (Settings › Shortcuts' keymap,
+//! Settings › General › Open Projects In): accepted as settings, kept in the
+//! store, read back on the next launch.
 mod common;
 use pm_kernel::library::{NATIVE_KEYS, StoreKey, parse_key};
 use pm_kernel::persistence::{DiskFormat, LibraryWriter};
@@ -8,7 +9,7 @@ use pm_model::json::parse;
 
 #[test]
 fn the_keymap_is_a_setting_that_is_stored_and_read_back() {
-    assert_eq!(NATIVE_KEYS, ["keymap"]);
+    assert_eq!(NATIVE_KEYS, ["keymap", "openProjectsIn"]);
     assert!(is_setting("keymap"));
     assert_eq!(parse_key("keymap"), Some(StoreKey::Static("keymap".into())));
     let keymap = parse(
@@ -32,4 +33,26 @@ fn the_keymap_is_a_setting_that_is_stored_and_read_back() {
     assert!(dir.path("store/keymap.json").exists());
     let loaded = StateSnapshot::load(writer.store()).unwrap();
     assert_eq!(loaded.settings.get("keymap"), Some(&keymap));
+}
+
+#[test]
+fn how_projects_open_is_a_setting_that_is_stored_and_read_back() {
+    assert!(is_setting("openProjectsIn"));
+    let windows = parse(r#""windows""#).unwrap();
+    let (next, _) = StateSnapshot::seeded()
+        .stage(StateTransaction {
+            ops: vec![StateOp::Setting {
+                key: "openProjectsIn".into(),
+                value: Some(windows.clone()),
+            }],
+            ..Default::default()
+        })
+        .expect("Open Projects In is a setting");
+    assert_eq!(next.settings.get("openProjectsIn"), Some(&windows));
+    let dir = common::TempDir::new("native-keys-open");
+    let writer = LibraryWriter::open(&dir.0, DiskFormat::V1_2, None).unwrap();
+    writer.set("openProjectsIn", windows.clone()).unwrap();
+    writer.flush().unwrap();
+    let loaded = StateSnapshot::load(writer.store()).unwrap();
+    assert_eq!(loaded.settings.get("openProjectsIn"), Some(&windows));
 }

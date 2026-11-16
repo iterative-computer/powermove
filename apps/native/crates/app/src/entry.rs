@@ -379,6 +379,18 @@ pub fn editors(cx: &App) -> Vec<Entity<Controller>> {
         .unwrap_or_default()
 }
 
+/// Every open editor's controller with its window.
+pub fn editor_windows(cx: &App) -> Vec<(Entity<Controller>, AnyWindowHandle)> {
+    cx.try_global::<Entries>()
+        .map(|e| {
+            e.editors
+                .iter()
+                .filter_map(|(e, w)| Some((e.upgrade()?, *w)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The new window's opening, taken once by the window factory.
 pub fn take_for_new_window(cx: &mut App) -> Option<Pending> {
     cx.default_global::<Entries>().next_window.pop_front()
@@ -392,9 +404,8 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
     cx.defer(pm_shell::open_editor);
 }
 
-/// Was: a project opened as a tab of `leader`'s window. One project per
-/// window now (an open replaces the project shown, `Controller::replace_project`);
-/// kept for callers that still name a tab, it opens a window of its own.
+/// Tabs mode: a project opened as a tab of `leader`'s window, in a window of
+/// its own joined to that window's tabs (`Controller::replace_project`).
 pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
     cx.default_global::<Entries>()
         .next_window

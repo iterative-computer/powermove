@@ -192,3 +192,26 @@ test("selectable prose keeps breakable display text and exact source metadata", 
   });
   root.dispose();
 });
+
+test("a stable quote source cites through the latest publication and sender", async () => {
+  const p = withRows([{ id: "history:m", commandId: "m", chosen: {}, open: false,
+    value: { role: "assistant", text: "Exact source text" } }]);
+  const root = createRoot(async (c) => ({ accepted: true, revision: c.baseRevision + 1 }));
+  let oldCalls = 0;
+  await root.render(<AgentView publication={p} send={() => { oldCalls++; }} />);
+  const next = structuredClone(p);
+  const existing = quoteSelection("other", "Already quoted", 0, 7)!;
+  next.sequence++;
+  next.snapshot.draft.citations = [existing];
+  let citations: unknown;
+  await root.render(<AgentView publication={next} send={(a) => {
+    if (a.type === "citations") citations = a.citations;
+  }} />);
+  const source = root.inspect().nodes.find((n) => n.props.label === "Transcript text")!;
+  await root.drive(source.id, "select", { selection: [0, 5] });
+  const cite = root.inspect().nodes.find((n) => n.props.label === "Cite selection")!;
+  await root.drive(cite.id, "click");
+  expect(oldCalls).toBe(0);
+  expect(citations).toEqual([existing, quoteSelection("history:m", "Exact source text", 0, 5)]);
+  await root.dispose();
+});

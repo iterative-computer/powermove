@@ -428,6 +428,13 @@ impl MetalRenderer {
             .filter(|v| (2..=3).contains(v))
             .unwrap_or(3);
         layer.set_maximum_drawable_count(drawables);
+        // PM_GPUI_DISPLAY_SYNC=0 hands each drawable to the compositor when
+        // it is ready instead of at the next vsync (PM-310): a refresh sooner
+        // to the glass, but frames that take more than about half a refresh
+        // land on uneven refreshes, so it stays a measurement for now.
+        if std::env::var_os("PM_GPUI_DISPLAY_SYNC").is_some_and(|v| v == "0") {
+            layer.set_display_sync_enabled(false);
+        }
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         layer.set_framebuffer_only(false);
 

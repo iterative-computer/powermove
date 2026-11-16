@@ -40,6 +40,8 @@ pub(crate) struct TestWindowState {
     appearance_change_callback: Option<Box<dyn FnMut()>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     frame_wake_count: Rc<Cell<usize>>,
+    presented_sizes: Vec<Size<DevicePixels>>,
+    scale_factor: f32,
     frame_scheduled: bool,
     frame_callback_pending: bool,
     input_handler: Option<PlatformInputHandler>,
@@ -106,6 +108,8 @@ impl TestWindow {
             appearance_change_callback: None,
             request_frame_callback: None,
             frame_wake_count: Rc::new(Cell::new(0)),
+            presented_sizes: Vec::new(),
+            scale_factor: 2.0,
             frame_scheduled: false,
             frame_callback_pending: false,
             input_handler: None,
@@ -196,6 +200,17 @@ impl TestWindow {
         self.0.lock().appearance_change_callback = Some(callback);
     }
 
+    /// Device-pixel sizes submitted to the headless presentation backend.
+    pub fn presented_sizes(&self) -> Vec<Size<DevicePixels>> {
+        self.0.lock().presented_sizes.clone()
+    }
+
+    /// Delivers the same resize callback as a backing-scale change.
+    pub fn simulate_scale_change(&mut self, scale: f32) {
+        self.0.lock().scale_factor = scale;
+        self.simulate_resize(self.content_size());
+    }
+
     /// Returns how many times this window's frame waker has been invoked.
     pub fn frame_wake_count(&self) -> usize {
         self.0.lock().frame_wake_count.get()
@@ -256,7 +271,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn scale_factor(&self) -> f32 {
-        2.0
+        self.0.lock().scale_factor
     }
 
     fn appearance(&self) -> WindowAppearance {
@@ -443,6 +458,7 @@ impl PlatformWindow for TestWindow {
         state.frame_callback_pending = true;
         state.frame_scheduled = true;
         let device_size: Size<DevicePixels> = state.bounds.size.to_device_pixels(scale_factor);
+        state.presented_sizes.push(device_size);
         if let Some(renderer) = &mut state.renderer {
             renderer.render_scene(scene, device_size).warn_on_err();
         }

@@ -19,6 +19,7 @@ objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-quartz-core = "0.3"
 block2 = "0.6"
+resvg = { version = "=0.48.1", default-features = false }
 raw-window-handle = "0.6"
 async-channel = "2"
 core-graphics = "0.24"
@@ -41,5 +42,5 @@ harness = false
 name = "hosted_present"
 harness = false
 [[test]]
-name = "one_window_per_project"
+name = "window_tabs"
 harness = false

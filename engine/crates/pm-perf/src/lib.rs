@@ -142,6 +142,20 @@ counters! {
     LayersPlanned = "engine.layers_planned",
     /// Compositions evaluated and planned (passes built).
     CompPasses = "engine.comp_passes",
+    /// Microseconds the counting thread spent laying out and painting text
+    /// layers' scenes (their plans).
+    TextLayoutMicros = "engine.text_layout_us",
+    /// Microseconds drawing text rasters the text cache missed (coverage,
+    /// atlas, encoding).
+    TextRenderMicros = "engine.text_render_us",
+    /// Of those, making glyph coverage geometry the coverage cache lacked.
+    TextCoverageMicros = "engine.text_coverage_us",
+    /// Microseconds building or waiting for effect programs the cache lacked.
+    ProgramMicros = "engine.program_us",
+    /// Microseconds drawing vector rasters (shapes) the vector cache missed.
+    VectorMicros = "engine.vector_us",
+    /// Microseconds reading still images the media cache missed.
+    ImageMicros = "engine.image_us",
 
     // Caches: one hit and one miss counter each.
     /// Render pipelines found in the renderer's pipeline caches.
@@ -246,6 +260,20 @@ pub fn add(counter: Counter, n: u64) {
     });
     if GLOBAL_ON.load(Ordering::Relaxed) {
         GLOBAL[counter as usize].fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+/// Adds the microseconds from its start to its drop to a counter: a span of
+/// work on this thread (`let _span = Span::new(Counter::…)`).
+pub struct Span(Counter, std::time::Instant);
+impl Span {
+    pub fn new(counter: Counter) -> Self {
+        Self(counter, std::time::Instant::now())
+    }
+}
+impl Drop for Span {
+    fn drop(&mut self) {
+        add(self.0, self.1.elapsed().as_micros() as u64);
     }
 }
 

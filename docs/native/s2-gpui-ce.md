@@ -717,7 +717,9 @@ and zero `presentedTime` values. This is not a zero-drop result or P1 approval.
   Encode against the supplied drawable texture's actual dimensions during resize.
 
 `PM_GPUI_CV_DISPLAY_LINK=1` selects the old source;
-`PM_GPUI_CA_DISPLAY_LINK=1` selects the NSView CADisplayLink diagnostic.
+`PM_GPUI_CA_DISPLAY_LINK=1` selected the NSView CADisplayLink diagnostic. Since
+PM-310 that link is the default and `PM_GPUI_METAL_DISPLAY_LINK=1` selects this one
+(see vendor/gpui-ce/POWERMOVE.md, P-120).
 `--p120` compares legacy CV synchronous/async policies with the new default.
 A short plain-CADisplayLink async timeline trial still had **6.934 ms** drawable
 wait p95 and **9.934 ms** frame p95; that path did not solve pool starvation.

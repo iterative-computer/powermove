@@ -2323,7 +2323,8 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
     hover(&mut s, cx, at);
     assert!(s.recorder.skims.borrow().is_empty());
     s.recorder.skimming.set(true);
-    for seconds in [1.0, 2.0, 1.5] {
+    // (The pointer rests at 1.0 now: a skim starts once it moves.)
+    for seconds in [2.0, 1.0, 1.5] {
         let at = s.at(0, seconds);
         hover(&mut s, cx, at);
         let last = *s.recorder.skims.borrow().last().unwrap();
@@ -2347,6 +2348,88 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         near(seeks.first().copied(), 2.5),
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
+}
+/// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
+/// or in time (the viewer keeps the playhead's picture), nor does a move
+/// event that did not move the pointer; moving it does. A skim showing
+/// stays under the pointer as the time scrolls beneath it.
+#[gpui::test]
+fn a_scroll_under_a_resting_pointer_never_starts_a_skim(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 40);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    let skimmer = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.skimmer());
+    wheel(&mut s, cx, point(px(0.), px(-40.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(0.), px(-200.)), Modifiers::control());
+    wheel(&mut s, cx, point(px(-60.), px(0.)), Modifiers::none());
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()) > 0.);
+    assert_eq!(skimmer(&s), None);
+    assert!(s.recorder.skims.borrow().is_empty(), "the viewer keeps the playhead's picture");
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(skimmer(&s), None, "a move event that did not move the pointer");
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let shown = skimmer(&s);
+    assert!(shown.is_some(), "the pointer moved over the clips");
+    wheel(&mut s, cx, point(px(60.), px(0.)), Modifiers::none());
+    let now = skimmer(&s);
+    assert!(now.is_some() && now != shown, "{shown:?} -> {now:?}");
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), now);
+}
+/// PM-388, zoomed in: the pointer skimmed the clips, then the playhead moved
+/// (a key, a click, playback: the viewer is back on the playhead's frame).
+/// With the pointer resting, a time scroll slides other frames under it and
+/// a move event that does not move it comes: neither starts skimming again;
+/// moving the pointer does.
+#[gpui::test]
+fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_moved(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx, 4);
+    s.recorder.skimming.set(true);
+    let at = s.at(1, 1.0);
+    let wheel = |s: &mut Stage, cx: &mut TestAppContext, delta: Point<Pixels>, mods: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: mods,
+            ..Default::default()
+        });
+        s.idle(cx);
+    };
+    // Zoomed in around the pointer.
+    wheel(&mut s, cx, point(px(0.), px(-300.)), Modifiers::control());
+    s.vcx
+        .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims > 0, "the pointer moved over the clips");
+    // While the skim shows, a time scroll keeps it under the pointer.
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    let skims = s.recorder.skims.borrow().len();
+    assert!(skims >= 2, "a showing skim follows the time under the pointer");
+    // The playhead moves: the viewer shows its frame again.
+    *s.recorder.time.borrow_mut() = 0.5;
+    wheel(&mut s, cx, point(px(-40.), px(0.)), Modifiers::none());
+    wheel(&mut s, cx, point(px(40.), px(0.)), Modifiers::none());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.recorder.skims.borrow().len(), skims, "nothing skims without the pointer moving");
+    s.vcx
+        .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
 }
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays

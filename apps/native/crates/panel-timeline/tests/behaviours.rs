@@ -2832,7 +2832,10 @@ fn three_d_group_twirl_filters_static_transforms_and_keeps_children_indented() {
 
 #[test]
 fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
-    let m = model(parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"work":[6,18],"markers":[{"id":"m","t":12}],"layers":[{"id":"a","type":"shape","from":2,"dur":2,"p":{"opacity":{"v":0,"kf":[{"i":"k","t":0,"v":0}]}}},{"id":"b","type":"shape","from":8,"dur":2,"on":false,"collapsed":true,"p":{"opacity":{"v":0,"kf":[{"i":"other","t":1,"v":0}]}}}]}"#).unwrap());
+    // A short moving clip avoids equal-distance ties between its two ends
+    // and separate landmarks. Outside samples clear both anchors and the
+    // exclusive out-edge target one frame beyond the playhead.
+    let m = model(parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"work":[6,18],"markers":[{"id":"m","t":12}],"layers":[{"id":"a","type":"shape","from":2,"dur":0.25,"p":{"opacity":{"v":0,"kf":[{"i":"k","t":0,"v":0}]}}},{"id":"b","type":"shape","from":8,"dur":2,"on":false,"collapsed":true,"p":{"opacity":{"v":0,"kf":[{"i":"other","t":1,"v":0}]}}}]}"#).unwrap());
     for pps in [40., 100., 400.] {
         for kind in [
             DragKind::Layers {
@@ -2853,7 +2856,7 @@ fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
         ] {
             let keys = matches!(kind, DragKind::Keys { .. } | DragKind::GraphKeys { .. });
             let anchor = if matches!(kind, DragKind::TrimOut { .. }) {
-                4.
+                2.25
             } else {
                 2.
             };
@@ -2865,7 +2868,7 @@ fn electron_snap_gesture_target_matrix_at_multiple_zooms() {
                     let overshoot = if inside {
                         (acquire * 0.5).min(0.001)
                     } else {
-                        release + 2. / pps
+                        release + 2. / pps + if matches!(kind, DragKind::Layers { .. }) { 0.25 } else { 0. } + if keys { 0. } else { 1. / m.index.fps }
                     };
                     drag.commands(DragSample {
                         time_delta: target - anchor + direction * overshoot,

@@ -105,6 +105,23 @@ export interface ExportSheetProps {
   model: ExportModel;
   anchor: number;
 }
+/** "Work area" names what it exports: the whole composition when the work
+ * area was never narrowed (it starts as the whole length), else its span. */
+export function workAreaLabel(p: {
+  hasWorkArea: boolean;
+  workArea?: [number, number] | null;
+  duration?: number;
+}) {
+  if (!p.hasWorkArea) return "Work area · not set";
+  const [a, b] = p.workArea ?? [];
+  if (a === undefined || b === undefined || p.duration === undefined)
+    return "Work area";
+  if (a <= 1e-6 && b >= p.duration - 1e-6)
+    return "Work area · whole composition";
+  const s = (t: number) => `${Number(t.toFixed(2))}`;
+  return `Work area · ${s(a)}–${s(b)} s`;
+}
+
 export function ExportSheet({ model, anchor }: ExportSheetProps) {
   const [, update] = useReducer((n) => n + 1, 0);
   useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
@@ -539,9 +556,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     ? select("range", [
                         {
                           v: "work",
-                          label: p.hasWorkArea
-                            ? "Work area"
-                            : "Work area · not set",
+                          label: workAreaLabel(p),
                         },
                         { v: "all", label: "Full composition" },
                       ])

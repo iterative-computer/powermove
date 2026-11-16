@@ -251,7 +251,7 @@ mod project_layout_tests {
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
 type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
-type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, Option<String>);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts);
 pub struct Builtins {
     agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
@@ -962,13 +962,13 @@ impl Builtins {
         let observed = (|| {
             let entries = self.broker.entries.try_lock().ok()?;
             let Some(entry) = entries.get("agent").cloned() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
+                return Some((false, false, None, 0, (vec![], 0, String::new())));
             };
             drop(entries);
             let backend = entry.try_lock().ok()?.backend.clone();
             let backend = backend.try_lock().ok()?;
             let Some(agent) = backend.native.agent.clone() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
+                return Some((false, false, None, 0, (vec![], 0, String::new())));
             };
             drop(backend);
             let state = agent.try_lock().ok()?;
@@ -992,7 +992,6 @@ impl Builtins {
                 session.elapsed_ms(agent_host::now_ms()),
                 background,
                 (tasks, revision, panel.active_id().into()),
-                session.run.as_ref().map(|_| if !session.activity.is_empty() { session.activity.clone() } else { session.progress.last().cloned().unwrap_or_else(|| "Agent working".into()) }),
             ))
         })();
         if let Some(observed) = observed {
@@ -1103,17 +1102,6 @@ impl Builtins {
         let backend = self.backend(PROJECT_PANEL).ok()?;
         let backend = backend.shared();
         backend.native.project.panel.drag.clone()
-    }
-    pub fn agent_progress(&self) -> Option<String> {
-        self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).5.clone()
-    }
-    pub fn project_id(&self) -> &str {
-        &self.broker.project
-    }
-    pub fn agent_current_thread(&self) -> Option<String> {
-        let (agent, _) = self.agent_state().ok()?;
-        let state = agent.shared();
-        Some(state.panel.active_id().to_owned())
     }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(
@@ -1299,7 +1287,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
-            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), None)),
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()))),
             pool,
             broker,
             realms: Mutex::default(),
@@ -1771,6 +1759,12 @@ impl Builtins {
         let section = serde_json::to_string(section).unwrap_or_default();
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.show({section})"))
+    }
+    /// Something done in a panel's native chrome (Settings' sidebar and
+    /// search field), for the panel's model.
+    pub fn panel_act(&self, panel: &str, intent: &Value) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.act({intent})"))
     }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
