@@ -2078,6 +2078,17 @@ function Composer({
             style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
             onClick={() => send({ type: "attach" })}
           />
+          {/* v1's: drag a box anywhere over the editor; the agent gets
+              what was under it (the composition there, or the window). */}
+          <UI.ToolbarItem
+            id="agent-pick-region"
+            label="Select part of the screen"
+            title="Select part of the screen for the agent"
+            metadata={{ symbol: "rectangle.dashed" }}
+            disabled={disabled || s.attachments.length >= 6}
+            style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+            onClick={() => send({ type: "pickRegion" })}
+          />
           <div style={{ flexGrow: 1 }} />
           {working && (
             <button

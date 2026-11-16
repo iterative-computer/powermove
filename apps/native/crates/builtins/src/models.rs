@@ -1859,6 +1859,16 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "pickRegion" {
+                        // The window shows a crosshair over the editor; what
+                        // is selected comes back through `agent_attach`.
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.pickRegion".into(), Value::Null));
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "attach" {
                         // The window shows its file picker; chosen files come back
                         // through `Builtins::agent_attach`.

@@ -95,6 +95,7 @@ test("focus order follows the thread bar, conversation and composer as the origi
     "agent-conversation",
     "agent-composer-text",
     "agent-attach",
+    "agent-pick-region",
     "agent-send",
     "agent-model",
     "agent-effort",

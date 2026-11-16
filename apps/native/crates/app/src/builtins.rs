@@ -1960,6 +1960,28 @@ impl Controller {
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }
+                // Select part of the screen (v1's): the popover gives way to a
+                // crosshair over the editor; what is selected is attached, and
+                // the popover comes back either way.
+                "agent.pickRegion" => {
+                    let editor = self.host.borrow().window.clone();
+                    let handle = window.window_handle();
+                    self.close_agent(cx);
+                    let picked = pm_shell::region_pick::pick(&editor);
+                    cx.spawn(async move |this, cx| {
+                        let picked = picked.recv().await.ok().flatten();
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = this.update(cx, |v, cx| {
+                                if let Some(rect) = picked {
+                                    v.attach_region(rect, window, cx);
+                                }
+                                v.show_builtin("agent", window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
                 "agent.attach" => {
                     let target = crate::platform::ns_window(window)
                         .unwrap_or_else(|| self.host.borrow().window.clone());
@@ -2564,19 +2586,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         self.0.upgrade().is_some_and(|c| c.read(cx).playing())
     }
     fn frame(&self, _: Bounds<Pixels>, cx: &App) -> Option<crate::gizmo::ViewFrame> {
-        let controller = self.0.upgrade()?;
-        let v = controller.read(cx);
-        let slot = v.host.borrow().viewer_rect.get()?;
-        let scale = v.view.scale.get();
-        let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
-        Some(crate::gizmo::ViewFrame {
-            origin: point(
-                px(slot.x + (slot.w - w as f32) / 2. + v.view.shown_pan()[0] as f32),
-                px(slot.y + (slot.h - h as f32) / 2. + v.view.shown_pan()[1] as f32),
-            ),
-            scale,
-            size: v.dimensions,
-        })
+        self.0.upgrade()?.read(cx).composition_frame()
     }
     fn tool(&self, cx: &App) -> crate::gizmo::Tool {
         use crate::gizmo::Tool;
