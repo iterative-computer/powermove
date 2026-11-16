@@ -752,7 +752,13 @@ impl Controller {
     /// seen. Not in a development lane launch, which never takes the front.
     fn show_window(&self) {
         if !gpui_macos::child_window::would_hold() {
-            self.host.borrow().window.makeKeyAndOrderFront(None);
+            // Hidden (Hide Powermove): it comes forward when the person shows the app.
+            let window = objc2::rc::Weak::from(&*self.host.borrow().window);
+            gpui_macos::child_window::when_shown(move || {
+                if let Some(window) = window.load() {
+                    window.makeKeyAndOrderFront(None);
+                }
+            });
         }
     }
     /// A close or quit met an edit the kernel still holds open (`label`):

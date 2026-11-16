@@ -922,6 +922,16 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
 /// above the app's own front editor window, or behind, as `present` puts an
 /// inactive app's window.
 fn select_in_background(window: &NSWindow) {
+    // Picking a tab orders its window in, which unhides a hidden app.
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_in_background(&window);
+            }
+        });
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -1756,6 +1766,15 @@ const TAB_SHOWN: &str = "PMShellTabShown";
 /// this way while the app is inactive gets no activation, so nothing else
 /// makes it hide AppKit's tab row or draw its own strip for the new state.
 fn show_in_tab_group(window: &NSWindow) {
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                show_in_tab_group(&window);
+            }
+        });
+        return;
+    }
     unsafe {
         let group: *mut AnyObject = msg_send![window, tabGroup];
         if group.is_null() {
@@ -1819,6 +1838,9 @@ fn select_tab(window: &NSWindow, by: isize) {
         return;
     }
     let next = &group[((at as isize + by).rem_euclid(count)) as usize];
+    if gpui_macos::child_window::app_hidden() {
+        return;
+    }
     unsafe {
         let tab_group: *mut AnyObject = msg_send![window, tabGroup];
         if !tab_group.is_null() {
@@ -1897,6 +1919,15 @@ pub fn bring_session_window(id: u64) {
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_window_tab(&window);
+            }
+        });
+        return;
+    }
     unsafe {
         let group: *mut AnyObject = msg_send![window, tabGroup];
         if !group.is_null() {
