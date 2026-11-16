@@ -273,9 +273,45 @@ pub fn group_ancestors<'a>(comp: &'a Node, layer: &'a Node) -> Vec<&'a Node> {
     out
 }
 
+/// The id of a key stored without one (v1 writes a shape path's vertex keys
+/// so): derived, never stored, from its layer, its channel (v1's name:
+/// `g.<path>.v.<vertex>.<x|y>`) and its place in the track, so the same key
+/// has the same id on every open of the same file. The timeline, selection
+/// and every keyframe command use it as they use a stored id; nothing writes
+/// it into the document.
+pub fn derived_key_id(layer: &str, channel: &str, index: usize) -> String {
+    format!("~{layer}~{channel}~{index}")
+}
+/// `(layer, channel, index)` of a [`derived_key_id`].
+pub fn parse_derived_key_id(id: &str) -> Option<(&str, &str, usize)> {
+    let rest = id.strip_prefix('~')?;
+    let (head, index) = rest.rsplit_once('~')?;
+    let (layer, channel) = head.split_once('~')?;
+    Some((layer, channel, index.parse().ok()?))
+}
+
 /// Every keyframe id (`i`) under the layers of a composition: any object
 /// with a `kf` array counts as a channel (layer, effect, mask and transition
 /// channels alike).
+/// Whether a [`derived_key_id`] names a key stored without an id in the
+/// project.
+pub fn derived_key_exists(root: &Node, id: &str) -> bool {
+    let Some((layer_id, channel, index)) = parse_derived_key_id(id) else {
+        return false;
+    };
+    let Some(layer) = find_layer(root, layer_id).and_then(|loc| layer_at(root, &loc)) else {
+        return false;
+    };
+    let layer = layer.to_value();
+    crate::commands::channels::find(&layer, channel)
+        .and_then(|path| crate::commands::channels::get(&layer, &path).cloned())
+        .is_some_and(|prop| {
+            crate::commands::track::keys_of(&prop)
+                .get(index)
+                .is_some_and(|k| k.get("i").is_none())
+        })
+}
+
 pub fn keyframe_ids(comp: &Node, out: &mut std::collections::HashSet<String>) {
     fn walk(node: &Node, out: &mut std::collections::HashSet<String>) {
         match node.kind() {

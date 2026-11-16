@@ -83,10 +83,10 @@ pub mod pro_source;
 mod pro_support;
 pub mod pro_transport;
 
-mod channels;
+pub(crate) mod channels;
 mod cx;
 mod spine;
-mod track;
+pub(crate) mod track;
 // Shared legacy Number coercion for storage recovery sequence metadata.
 pub(crate) use track::js_number;
 mod values;
@@ -285,6 +285,20 @@ impl Command {
         state: Option<&crate::state::StateSnapshot>,
         text: Option<&crate::text_host::SharedTextHost>,
     ) -> Result<Vec<Op>, CommandError> {
+        self.plan_renamed(root, origin, state, text)
+            .map(|(ops, _)| ops)
+    }
+
+    /// [`plan_with_state`](Self::plan_with_state) with the keys stored
+    /// without ids it moved to another place in their track, as `(before,
+    /// after)` derived ids.
+    pub(crate) fn plan_renamed(
+        &self,
+        root: &Node,
+        origin: Origin,
+        state: Option<&crate::state::StateSnapshot>,
+        text: Option<&crate::text_host::SharedTextHost>,
+    ) -> Result<(Vec<Op>, Vec<(String, String)>), CommandError> {
         let mut cx = Cx::new(root, origin);
         cx.state = state;
         cx.text = text;
@@ -292,7 +306,9 @@ impl Command {
             Command::SetStaticOpacity { .. }
             | Command::SetLayerName { .. }
             | Command::SetLayerVisible { .. }
-            | Command::SetLayerLocked { .. } => return spine::plan(self, root, origin),
+            | Command::SetLayerLocked { .. } => {
+                return spine::plan(self, root, origin).map(|ops| (ops, Vec::new()));
+            }
             Command::Layer(c) => c.plan(&mut cx)?,
             Command::Property(c) => c.plan(&mut cx)?,
             Command::Keyframe(c) => c.plan(&mut cx)?,
@@ -313,7 +329,7 @@ impl Command {
             Command::ProLink(c) => c.plan(&mut cx)?,
             Command::ProSource(c) => c.plan(&mut cx)?,
         }
-        Ok(cx.finish())
+        Ok(cx.finish_renamed())
     }
 }
 

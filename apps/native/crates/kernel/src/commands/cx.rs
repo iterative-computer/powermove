@@ -59,6 +59,9 @@ pub struct Cx<'a> {
     doc: Document,
     ops: Vec<Op>,
     revision: u64,
+    /// Keys stored without ids that the command moved to another place in
+    /// their track, as `(before, after)` derived ids (the selection follows).
+    pub(crate) renamed: Vec<(String, String)>,
 }
 
 impl<'a> Cx<'a> {
@@ -71,6 +74,7 @@ impl<'a> Cx<'a> {
             doc: Document::from_root(Some(root.clone()), 0),
             ops: Vec::new(),
             revision: 0,
+            renamed: Vec::new(),
         }
     }
 
@@ -100,6 +104,11 @@ impl<'a> Cx<'a> {
     /// The operations written, in order.
     pub(crate) fn finish(self) -> Vec<Op> {
         self.ops
+    }
+
+    /// The operations and the keys renamed ([`Cx::renamed`]).
+    pub(crate) fn finish_renamed(self) -> (Vec<Op>, Vec<(String, String)>) {
+        (self.ops, self.renamed)
     }
 
     // ── writes ─────────────────────────────────────────────────────────────
