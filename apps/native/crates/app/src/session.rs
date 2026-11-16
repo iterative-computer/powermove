@@ -491,7 +491,7 @@ impl pm_shell::integration::Integration for Bridge {
         let mut panels = v.extensions.contributed.clone();
         // Titles are profile registry metadata, available even while this
         // recovered window's own callbacks and panel runtime are loading.
-        for entry in v.kernel.state().registries.get("panels").into_iter().flatten() {
+        for entry in v.kernel.state().registries.get("panels").into_iter().flatten().rev() {
             if !panels.iter().any(|(id, _)| id == &entry.id) {
                 if let Some(title) = entry.definition.get("title").and_then(pm_model::Value::as_str) {
                     panels.push((entry.id.clone(), title.to_owned()));
@@ -499,7 +499,9 @@ impl pm_shell::integration::Integration for Bridge {
             }
         }
         if let Some(host) = &v.extensions.host {
-            for surface in host.surfaces() {
+            for surface in host.records().into_iter().filter(|record| {
+                record["surface"] == true && record["enabled"] == true && record["health"]["state"] == "ok"
+            }) {
                 if let (Some(id), Some(title)) = (surface["id"].as_str(), surface["manifest"]["name"].as_str()) {
                     if !panels.iter().any(|(known, _)| known == id) {
                         panels.push((id.to_owned(), title.to_owned()));
