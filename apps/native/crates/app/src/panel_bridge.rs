@@ -374,7 +374,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: args["_panel_owner"].as_str().map(str::to_owned) });
                 cx.notify();
             });
             editor.update(cx, |_, cx| cx.notify());
@@ -434,7 +434,12 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                             e.commit_agent_panel_layout(cx);
                         } else { e.release_agent_panel(&id); cx.notify(); }
                     });
-                    c.update(cx, |v, cx| { v.agent_panel_builds.remove(&id); v.panel_builds.remove(&id); cx.notify(); });
+                    c.update(cx, |v, cx| {
+                        if let Some(build) = v.agent_panel_builds.remove(&id) {
+                            if let Some(target) = build.target { v.panel_builds.remove(&target); }
+                        }
+                        v.panel_builds.remove(&id); cx.notify();
+                    });
                     Ok(())
                 })?;
             }
