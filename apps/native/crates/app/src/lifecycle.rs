@@ -522,16 +522,19 @@ fn finish_quit(cx: &mut App) {
             })),
             other => other,
         };
+        crate::diag::line(serde_json::json!({"quit":"library_prepared","ok":matches!(result, Some(Ok(_)))}));
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // A clean quit leaves library.lock released, not to go stale.
             if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
                 result = Some(Err(e));
             }
         }
+        crate::diag::line(serde_json::json!({"quit":"library_released","ok":matches!(result, Some(Ok(_)))}));
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
             crate::error_log::session_ended(signal).await;
         }
+        crate::diag::line(serde_json::json!({"quit":"session_ended"}));
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
@@ -542,6 +545,14 @@ fn finish_quit(cx: &mut App) {
                     window.endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
                 }
                 allow_quit(cx);
+                if signal {
+                    // Unattended: everything is durable (journals flushed,
+                    // library released, the Error Log marked). AppKit's
+                    // terminate waits behind a sheet still up (a recovery
+                    // question), so the process ends here.
+                    crate::diag::line(serde_json::json!({"quit":"exit"}));
+                    std::process::exit(0);
+                }
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
                 cx.quit();
