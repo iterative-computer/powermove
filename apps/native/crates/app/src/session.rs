@@ -275,6 +275,28 @@ const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
 /// first frame (a Recover question there can hold it) before it opens its
 /// own project anyway (PM-384).
 const FRONT_WAIT_LOOKS: u32 = 300;
+/// How long the person and the viewer are quiet before a restored tab behind
+/// the front one opens its project (one at a time, as opens go).
+const RESTORE_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+/// The least time between two restored tabs behind the front one starting
+/// their opens: an open parses on every core, and what it starts (the
+/// project's extensions, its media) runs a while after it.
+const RESTORE_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+/// Whether a restored tab behind the front one may start its open now: the
+/// app has been quiet for [`RESTORE_QUIET`] and no other such tab started
+/// within [`RESTORE_GAP`]. Taking the turn starts the gap.
+fn restore_turn() -> bool {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !pm_engine_service::jobs::app_quiet_for(RESTORE_QUIET) {
+        return false;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed() < RESTORE_GAP) {
+        return false;
+    }
+    *last = Some(std::time::Instant::now());
+    true
+}
 
 /// Why a project opened as a copy, in user language (never the enum name):
 /// said when it opens. The window's subtitle keeps saying it
@@ -1282,22 +1304,51 @@ impl Controller {
                 }
                 if found.is_none() {
                     v.release_front();
+                    // Nothing to reopen: the window is Home, and starts its
+                    // panels now.
+                    v.host.borrow_mut().restored_project = None;
+                    v.update_builtins(cx);
                 }
                 cx.notify();
             });
             if let Some((id, name)) = found {
                 // The window that was in front opens first, alone, and
-                // shows its first frame; the others wait for it.
+                // shows its first frame; the others wait for it, and then
+                // for the person and the viewer to be quiet a moment, so a
+                // launch with many tabs works on the front one first. A tab
+                // the person selects opens at once.
                 if !front {
+                    // Selected by the person: shown once the restored tabs
+                    // have joined their groups (until then every window is).
+                    let shown = |v: &Self| {
+                        !pm_shell::restore_arranging()
+                            && pm_shell::window_shown(&v.host.borrow().window)
+                    };
                     for _ in 0..FRONT_WAIT_LOOKS {
-                        if pm_shell::front_restoring().is_none() {
+                        if pm_shell::front_restoring().is_none()
+                            || matches!(this.update(cx, |v, _| shown(v)), Ok(true))
+                        {
                             break;
                         }
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(100))
                             .await;
                     }
+                    loop {
+                        let Ok((shown, busy)) =
+                            this.update(cx, |v, _| (shown(v), v.mcp.operation_in_progress()))
+                        else {
+                            return;
+                        };
+                        if shown || (!busy && restore_turn()) {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(250))
+                            .await;
+                    }
                 }
+                crate::diag::line(serde_json::json!({"restore": "open", "front": front}));
                 // Every restored window reopens its project, one open at a
                 // time (an open holds the project-operation fence): a tab
                 // waits for the one before it instead of giving up.
@@ -2816,14 +2867,24 @@ impl Controller {
         }
         self.mcp.bind_window(self.window_key, self.session.clone());
     }
+    /// A window restored as a tab behind the front one whose project has not
+    /// started opening yet: its work waits for its turn (see the restore in
+    /// `reopen_restored`), or for the person to select it.
+    pub(crate) fn restore_waiting(&self) -> bool {
+        let host = self.host.borrow();
+        host.restored_project.is_some()
+            && !host.restored_front
+            && self.session.is_none()
+            && !self.opening
+            && !(!pm_shell::restore_arranging() && pm_shell::window_shown(&host.window))
+    }
     /// Tells the viewer whether its window can be seen: a tab behind
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self) {
         let Some(viewer) = &self.viewer else {
             return;
         };
-        let window = &self.host.borrow().window;
-        let shown = window.isVisible() && !window.isMiniaturized();
+        let shown = pm_shell::window_shown(&self.host.borrow().window);
         let now = (viewer.identity(), shown);
         if self.viewer_shown != Some(now) && viewer.set_shown(shown).is_ok() {
             self.viewer_shown = Some(now);

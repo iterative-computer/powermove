@@ -2056,6 +2056,27 @@ pub fn live_window_ids() -> Vec<u64> {
 /// yet to show its first frame: the other restored windows open theirs
 /// after it, so the one a person sees opens alone (PM-384). 0: none.
 static FRONT_RESTORING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether the person can see `window`'s content: on screen, not
+/// minimized, and the selected tab of its group (a tab behind another
+/// reports itself visible).
+pub fn window_shown(window: &NSWindow) -> bool {
+    window.isVisible()
+        && !window.isMiniaturized()
+        && window
+            .tabGroup()
+            .and_then(|group| group.selectedWindow())
+            .is_none_or(|selected| std::ptr::eq(&*selected, window))
+}
+/// A restored session's windows are still joining their tab groups: a
+/// window's visibility says nothing yet about which tab the person sees.
+static RESTORE_ARRANGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_restore_arranging(arranging: bool) {
+    RESTORE_ARRANGING.store(arranging, std::sync::atomic::Ordering::Release);
+}
+/// Whether restored windows are still joining their tab groups.
+pub fn restore_arranging() -> bool {
+    RESTORE_ARRANGING.load(std::sync::atomic::Ordering::Acquire)
+}
 pub fn set_front_restoring(id: Option<u64>) {
     FRONT_RESTORING.store(id.unwrap_or(0), std::sync::atomic::Ordering::Release);
 }

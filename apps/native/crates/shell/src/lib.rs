@@ -59,7 +59,7 @@ pub mod welcome_view;
 pub mod workspace;
 #[cfg(target_os = "macos")]
 pub use macos::open_editor_tab;
-pub use native::{front_restoring, set_front_restoring};
+pub use native::{front_restoring, restore_arranging, set_front_restoring, window_shown};
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{

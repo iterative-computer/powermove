@@ -168,9 +168,34 @@ static ACTIVITIES: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
 /// work (the background render) waits until they have been idle a while,
 /// as it does after the viewer draws.
 pub fn note_input() {
+    noted_activity();
     for activity in ACTIVITIES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         activity.touch();
     }
+}
+/// When the person or a viewer last did something, in milliseconds since
+/// [`ACTIVITY_EPOCH`].
+static LAST_ACTIVITY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVITY_EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+fn noted_activity() {
+    LAST_ACTIVITY_MS.store(
+        ACTIVITY_EPOCH.elapsed().as_millis() as u64,
+        Ordering::Release,
+    );
+}
+/// Whether the person has pressed, scrolled and typed nothing, and no viewer
+/// has drawn or played, for `quiet`: work that can wait for them (projects
+/// of tabs behind the front one) goes now.
+pub fn app_quiet_for(quiet: std::time::Duration) -> bool {
+    let busy = ACTIVITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(Activity::busy);
+    let since = (ACTIVITY_EPOCH.elapsed().as_millis() as u64)
+        .saturating_sub(LAST_ACTIVITY_MS.load(Ordering::Acquire));
+    !busy && since >= quiet.as_millis() as u64
 }
 pub(crate) fn watch_activity(activity: &Activity) {
     ACTIVITIES
@@ -198,6 +223,7 @@ impl Activity {
             let _grant = self.quiet.0.lock().unwrap();
             self.busy.store(true, Ordering::Release);
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            noted_activity();
             return;
         }
         self.busy.store(false, Ordering::Release);
