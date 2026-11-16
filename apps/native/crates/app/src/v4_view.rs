@@ -98,11 +98,22 @@ impl Outline {
         }
     }
 }
+/// A virtual list's `rangechange` as last sent.
+#[derive(Clone, Copy, PartialEq)]
+struct RangeSent {
+    range: (usize, usize),
+    width: u32,
+    count: usize,
+    published: (usize, usize),
+}
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
 #[path = "v4_grade.rs"]
 mod grade;
+
+#[path = "v4_cull.rs"]
+mod cull;
 
 /// A number field's value after an arrow key: the typed text (else the
 /// field's value) one step up or down, ten with Shift, within its limits.
@@ -179,6 +190,8 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// Rows of a long scroller left out of a frame (`v4_cull`).
+    cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
     row_sources: HashMap<Id, (EntityId, Value)>,
     /// Disclosure buttons pressed whose group the script has not yet shown
@@ -218,7 +231,11 @@ pub struct SurfaceView {
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
     /// Each virtual list's width last told to its panel.
-    list_widths: HashMap<Id, f32>,
+    list_widths: HashMap<Id, (f32, f32)>,
+    /// Each virtual list's last `rangechange` (range, width, its geometry):
+    /// a wheel step within the same rows sends nothing, so the panel doesn't
+    /// commit and draw again (PM-311).
+    sent_ranges: HashMap<Id, RangeSent>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -287,6 +304,7 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
             scrolls: BTreeMap::new(),
@@ -309,6 +327,7 @@ impl SurfaceView {
             scrub_ops: VecDeque::new(),
             dragging: None,
             list_widths: HashMap::new(),
+            sent_ranges: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -498,6 +517,7 @@ impl SurfaceView {
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
         self.disclosures.clear();
+        self.sent_ranges.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -519,6 +539,7 @@ impl SurfaceView {
         if self.pressed.is_some_and(|id| !live(&id)) {
             self.pressed = None;
         }
+        self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
@@ -573,18 +594,23 @@ impl SurfaceView {
                 .then(|| control_kind(&self.publication.panel, node))
                 .flatten();
             if let Some(kind) = kind {
-                let started = std::time::Instant::now();
-                let existed = self.controls.contains_key(&id);
-                self.mount_control(kind, view, node, lease, window, cx);
-                self.host_rows(id, node, cx);
-                mounts.0 += 1;
-                mounts.1 += started.elapsed();
-                if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
-                    crate::diag::line(
-                        serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
-                        "new": !existed, "options": options_len(node),
-                        "ms": started.elapsed().as_secs_f64() * 1000.}),
-                    );
+                if !self.controls.contains_key(&id) && self.cull_large() && self.in_scroller(id) {
+                    // Made when its row is first built (`v4_cull`).
+                    self.cull.deferred.insert(id, kind);
+                } else {
+                    let started = std::time::Instant::now();
+                    let existed = self.controls.contains_key(&id);
+                    self.mount_control(kind, view, node, lease, window, cx);
+                    self.host_rows(id, node, cx);
+                    mounts.0 += 1;
+                    mounts.1 += started.elapsed();
+                    if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
+                        crate::diag::line(
+                            serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
+                            "new": !existed, "options": options_len(node),
+                            "ms": started.elapsed().as_secs_f64() * 1000.}),
+                        );
+                    }
                 }
                 // A native control is a Tab stop too: the panel draws its
                 // focus ring and forwards its keys (Full Keyboard Access).
@@ -738,6 +764,21 @@ impl SurfaceView {
                 crate::v4_native::announce(&ns_window, &message);
             }
         }
+    }
+    /// A control whose row is built for the first time (`v4_cull`).
+    fn mount_deferred(
+        &mut self,
+        id: Id,
+        kind: crate::v4_control::Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (prepared, surface) = (self.prepared.clone(), self.publication.surface.clone());
+        let (Some(view), Some(node)) = (prepared.node(id), surface.node(id)) else {
+            return;
+        };
+        self.mount_control(kind, view, node, view.binding.clone(), window, cx);
+        self.host_rows(id, node, cx);
     }
     fn mount_control(
         &mut self,
@@ -1519,13 +1560,37 @@ impl SurfaceView {
             }
         }
     }
-    /// Re-stage AppKit slots whose cached paint did not run this frame.
-    pub fn keep_native_slots(&self, cx: &App) {
-        for control in self.controls.values() {
-            control.read(cx).keep();
+    /// Whether a native view draws anywhere in the panel.
+    pub(crate) fn has_native(&self) -> bool {
+        self.prepared.nodes.values().any(|n| n.native.is_some())
+    }
+    /// Whether a native view (the timeline, the viewer's gizmos) draws
+    /// inside this node: its content is not drawn by the panel's scene.
+    fn holds_native(&self, id: Id) -> bool {
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            let Some(node) = self.prepared.node(at) else {
+                continue;
+            };
+            if node.native.is_some() {
+                return true;
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        false
+    }
+    /// Re-stage AppKit slots whose cached paint did not run this frame (a
+    /// slot inside a scroll layer follows the layer's offset).
+    pub fn keep_native_slots(&self, window: &Window, cx: &App) {
+        for (id, control) in &self.controls {
+            // A control whose row is left out stays where it is: hidden.
+            if self.left_out(*id) {
+                continue;
+            }
+            control.read(cx).keep(window);
         }
         for field in self.fields.values() {
-            field.read(cx).keep();
+            field.read(cx).keep(window);
         }
     }
     fn run(
@@ -2051,6 +2116,36 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
+    /// The keyboard is on a node of this view that hears keys, itself or
+    /// through what holds it (a Project card a click focused, in a grid that
+    /// listens): its Space is its own (Quick Look), not Play.
+    pub fn focused_takes_keys(&self, window: &Window) -> bool {
+        let Some(mut at) = self
+            .focus
+            .iter()
+            .find_map(|(id, focus)| focus.is_focused(window).then_some(*id))
+        else {
+            return false;
+        };
+        while let Some(node) = self.prepared.node(at) {
+            if node.events.key_down {
+                return true;
+            }
+            let Some(parent) = node.parent else { break };
+            at = parent;
+        }
+        false
+    }
+    /// The button came up in the window while a scrub or a captured press of
+    /// this view still waits for it: its own listener never heard the
+    /// release (the panel was drawn again while held). It ends now.
+    pub fn release_unheard(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let held = self.scrub.is_some() || self.capture.is_some();
+        if held {
+            self.release_pointer(window.mouse_position(), 1, Modifiers::none(), cx);
+        }
+        held
+    }
     /// The pressed pointer comes up: a scrub or a grading drag ends (one
     /// Undo step), a captured node hears `pointerup`.
     fn release_pointer(
@@ -2247,6 +2342,26 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
+            // A wheel step only moves the content, in the Project panel: the
+            // one long list the layer made faster (PM-311). Elsewhere it gained
+            // nothing measurable and held hover and AppKit controls a frame
+            // behind the content (PM-389, PM-390). A native view inside draws
+            // on its own and keeps the full redraw. Nor does one whose content
+            // fits it while it leaves rows out (`v4_cull`: a page in a body
+            // that scrolls around it): a step the layer replays carries its
+            // offset past its range until the next layout, showing rows that
+            // are not built. A scroller that scrolls keeps the layer: what it
+            // records past its edges (one viewport) is what the culling builds.
+            let fits = self
+                .scrolls
+                .get(&id)
+                .is_some_and(|s| s.max_offset().y <= px(0.));
+            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+                && !self.holds_native(id)
+                && !(fits && self.culls_in(id))
+            {
+                element = element.scroll_layer();
+            }
             if follows {
                 // `metadata.scrollToken`: a new value goes back to the end
                 // (the panel's Scroll to Latest).
@@ -2311,19 +2426,24 @@ impl SurfaceView {
             // new width as soon as a frame lays it out (measured after
             // layout: a panel maximized or resized draws nothing more until
             // something else does, so a check while rendering saw the size
-            // before and the grid kept its old columns).
+            // before and the grid kept its old columns). A new height asks
+            // for the rows that show now: a list built while its slot was a
+            // row tall kept a page of one row as the slot grew (PM-387).
             let known = self.list_widths.get(&id).copied();
             let view = cx.entity().downgrade();
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let width = f32::from(bounds.size.width);
-                        if width > 0. && known != Some(width) {
+                        let size = (
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                        );
+                        if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
                                 let _ = view.update(cx, |v, cx| {
-                                    if v.list_widths.get(&id) != Some(&width) {
-                                        v.list_widths.insert(id, width);
+                                    if v.list_widths.get(&id) != Some(&size) {
+                                        v.list_widths.insert(id, size);
                                         v.range_change(id, geometry, cx);
                                     }
                                 });
@@ -2447,6 +2567,10 @@ impl SurfaceView {
             usize::MAX
         };
         for child in node.children.iter().take(shown) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
@@ -2472,6 +2596,7 @@ impl SurfaceView {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
         }
+        children.extend(self.cull.record(id));
         if let Some(surface) = &node.native
             && let Some(view) = self.natives.views.borrow().get(surface.as_ref())
         {
@@ -3016,9 +3141,10 @@ impl SurfaceView {
         // covers its neighbours.
         if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
+            let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
-                let (title, tokens) = (title.clone(), tokens.clone());
-                cx.new(|_| Tooltip { title, tokens }).into()
+                let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
+                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
             });
         }
         element
@@ -3429,16 +3555,30 @@ impl SurfaceView {
         let Some(scroll) = self.scrolls.get(&id) else {
             return;
         };
-        let offset = -f32::from(scroll.offset().y) as f64;
         let bounds = scroll.bounds();
         let height = f32::from(bounds.size.height) as f64;
+        // A wheel step can leave the offset past the end until the next
+        // frame clamps it: read it within the list, or the range is empty
+        // and the list shows no rows.
+        let end = (geometry.count as f64 * geometry.item_size - height).max(0.);
+        let offset = (-f32::from(scroll.offset().y) as f64).clamp(0., end);
         if let Ok(range) = geometry.visible(offset, height) {
+            let width = f32::from(bounds.size.width);
+            let sent = RangeSent {
+                range,
+                width: width.to_bits(),
+                count: geometry.count,
+                published: geometry.range,
+            };
+            if self.sent_ranges.insert(id, sent) == Some(sent) {
+                return;
+            }
             self.send(
                 id,
                 "rangechange",
                 EventDetail {
                     range: Some(range),
-                    width: Some(f32::from(bounds.size.width) as f64),
+                    width: Some(width as f64),
                     ..Default::default()
                 },
                 cx,
@@ -3505,6 +3645,7 @@ impl Render for SurfaceView {
         }
         self.presence = presence;
         self.motion.frame(window);
+        self.plan_cull(window, cx);
         let t = &self.table.tokens;
         let root = div().relative().w_full();
         let root = if self.grows {
@@ -3527,14 +3668,45 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.cull.outer_mark())
     }
 }
-struct Tooltip {
+pub(crate) struct Tooltip {
     title: SharedString,
     tokens: pm_design::Tokens,
+    /// The node it describes: its title is read again at each draw, so a
+    /// press that changes it (a disclosure's Expand to Collapse, applied when
+    /// the panel republishes) never leaves the old words up while hovered.
+    source: Option<(WeakEntity<SurfaceView>, Id)>,
+}
+impl Tooltip {
+    /// A tooltip for node `id` of `view`, showing `title` until it changes.
+    pub(crate) fn following(
+        view: WeakEntity<SurfaceView>,
+        id: Id,
+        title: SharedString,
+        tokens: pm_design::Tokens,
+    ) -> Self {
+        Self {
+            title,
+            tokens,
+            source: Some((view, id)),
+        }
+    }
+    /// Its node's title now (the last one, when the node has none left).
+    pub(crate) fn current_title(&mut self, cx: &App) -> SharedString {
+        if let Some(title) = self.source.as_ref().and_then(|(view, id)| {
+            view.upgrade()
+                .and_then(|view| view.read(cx).tooltip_title(*id))
+        }) {
+            self.title = title;
+        }
+        self.title.clone()
+    }
 }
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.current_title(cx);
         let t = &self.tokens;
         // Line 1 names the thing (with its shortcut); an optional line 2,
         // after a newline, says what it does (HIG help tags), in secondary.
@@ -3920,9 +4092,14 @@ impl SurfaceView {
     /// The style of a scrolling body's content (`panel_body`): the panel at
     /// least `body` tall, and as tall as it last measured.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
-        self.fit.set(body);
         gpui::StyleRefinement::default()
             .w_full()
-            .h(px(body.max(self.natural.get())))
+            .h(px(self.body_height(body)))
+    }
+    /// The panel's height in a body that scrolls: its content, at least
+    /// the body's slot.
+    pub(crate) fn body_height(&self, body: f32) -> f32 {
+        self.fit.set(body);
+        body.max(self.natural.get())
     }
 }

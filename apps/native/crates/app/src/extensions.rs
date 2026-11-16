@@ -1925,16 +1925,22 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
-        // Exports and explicit background review launches keep WebKit working
-        // while the editor is occluded; neither activates or parks the window.
+        // An export's page is never shown: it runs for its job in a window of
+        // its own, whatever the editor's window does. In the editor's, a window
+        // behind others or hidden held the page back (its answers came 3 to 7
+        // times slower and the export took 2 to 4 times as long as in front).
+        // An explicit background review launch keeps WebKit working while the
+        // editor is occluded, in the editor's window.
+        let exporting = key.starts_with(EXPORT_PAGE);
         let background_review = cfg!(debug_assertions)
             && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").as_deref() == Some(std::ffi::OsStr::new("1"));
-        if (key.starts_with(EXPORT_PAGE) || background_review) && host.begin_background_job(false).is_err() {
+        if (exporting || background_review) && host.begin_background_job(exporting).is_err() {
             eprintln!("an export page could not keep running in the background");
         }
-        let shell = self.host.borrow();
-        host.install_below(&shell.native_container(), &shell.gpui);
-        drop(shell);
+        if !exporting {
+            let shell = self.host.borrow();
+            host.install_below(&shell.native_container(), &shell.gpui);
+        }
         drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions

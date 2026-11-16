@@ -553,6 +553,7 @@ impl<V: View> Element for ViewElement<V> {
                             && element_state.cache_key == cache_key
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
+                            && window.scroll_layer_depth == 0
                             && !window.a11y.rebuilding()
                         {
                             let prepaint_start = window.prepaint_index();

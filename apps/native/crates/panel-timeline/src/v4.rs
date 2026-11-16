@@ -455,7 +455,10 @@ pub async fn dispatch(
             if targets.is_empty() {
                 return Err(ModelError::Locked(layer.into()).into());
             }
-            client.model.property_diamond(&targets, context.time)?
+            let mut plan = client.model.property_diamond(&targets, context.time)?;
+            let focus = focus_property(client, layer, path);
+            plan.calls.splice(0..0, focus);
+            plan
         }
         "adjacentKey" => {
             let layer = string(intent, "layer")?;
@@ -468,13 +471,15 @@ pub async fn dispatch(
                 "next" => 1,
                 _ => return Err(Error::InvalidIntent("direction")),
             };
+            let effects = client
+                .model
+                .adjacent_key(direction, context.time, Some((layer, path)))
+                .map(HostEffect::Seek)
+                .into_iter()
+                .collect();
             Plan {
-                effects: client
-                    .model
-                    .adjacent_key(direction, context.time, Some((layer, path)))
-                    .map(HostEffect::Seek)
-                    .into_iter()
-                    .collect(),
+                calls: focus_property(client, layer, path),
+                effects,
                 ..Plan::default()
             }
         }
@@ -719,4 +724,23 @@ fn frame_facts(
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
             else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
     })
+}
+/// A press on a property row's diamond or key arrows works on that property
+/// as a press on the row does (v1's gutterDown): the graph plots its track,
+/// it becomes the selected channel and its layer is selected. The buttons
+/// keep the click from the row, so they do it themselves.
+fn focus_property(client: &mut TimelineClient, layer: &str, path: &str) -> Vec<pm_kernel::Call> {
+    client.model.graph_focus = Some((layer.into(), path.into()));
+    let mut calls: Vec<pm_kernel::Call> = vec![];
+    if !client.model.selection.contains(layer) {
+        calls.push(
+            pm_kernel::SelectionCall::Layers {
+                ids: vec![layer.into()],
+                add: false,
+            }
+            .into(),
+        );
+    }
+    calls.push(pm_kernel::SelectionCall::Channel(Some(path.into())).into());
+    calls
 }
