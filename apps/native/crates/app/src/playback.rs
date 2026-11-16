@@ -563,3 +563,7 @@ mod extension_compile_log_tests {
         assert_eq!(log.entries[0].source, source);
     }
 }
+
+#[cfg(test)]
+#[path = "cursor_render_tests.rs"]
+mod cursor_render_tests;
