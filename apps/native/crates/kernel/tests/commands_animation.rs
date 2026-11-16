@@ -792,7 +792,7 @@ fn graph_moves_stop_a_frame_before_keys_they_do_not_own() {
     assert_eq!(k.len(), 2);
     assert_eq!(num(&k[0], &["t"]), 29.0 / 30.0);
     assert_eq!(num(&k[0], &["v"]), 10.0);
-    assert_eq!(s.history().undo_label(), Some("Edit curve"));
+    assert_eq!(s.history().undo_label(), Some("Edit Curve"));
 }
 
 #[test]

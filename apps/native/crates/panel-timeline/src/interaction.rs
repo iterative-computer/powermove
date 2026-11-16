@@ -1335,7 +1335,10 @@ impl Drag {
             property_keys,
         })
     }
-    pub fn label(&self) -> &'static str {
+    /// The gesture's undo name: v1's words (timeline.ts), in Title Case as
+    /// the Edit menu shows every action.
+    pub fn label(&self) -> String {
+        let many = |n: usize, one: &str, more: &str| if n > 1 { more } else { one }.to_owned();
         match self.kind {
             DragKind::ProEdit(ref command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
@@ -1348,32 +1351,37 @@ impl Drag {
                     Pro::Slide { .. } => "Slide Edit",
                     _ => "Edit Clips",
                 }
+                .into()
             }
             DragKind::Timing(ref command) => match command {
                 pm_kernel::TimingCommand::RippleTrim { .. } => "Ripple Trim",
                 pm_kernel::TimingCommand::Roll { .. } => "Roll Edit",
                 _ => "Slide Layer",
-            },
-            DragKind::Layers { .. } => "Move clip",
-            DragKind::DuplicateLayers { .. } => "Duplicate Layers",
-            DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
-            DragKind::TextStagger { end, .. } => {
-                if end {
-                    "Stretch text animation"
-                } else {
-                    "Move text animation"
-                }
             }
-            DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
-            DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
-            DragKind::Keys { .. } => "Move keyframe",
-            DragKind::GraphKeys { .. } => "Edit curve",
-            DragKind::StretchKeys { .. } => "Stretch keyframes",
-            DragKind::TransformKeys { .. } => "Scale keyframes",
-            DragKind::Handle { .. } => "Adjust Handle",
-            DragKind::Property { .. } => "Change Property",
-            DragKind::WorkMove => "Move work area",
-            _ => "Work area",
+            .into(),
+            DragKind::Layers { .. } => "Move Clip".into(),
+            DragKind::DuplicateLayers { .. } => "Duplicate Layers".into(),
+            DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim Clip".into(),
+            DragKind::TextStagger { end, .. } => if end {
+                "Stretch Text Animation"
+            } else {
+                "Move Text Animation"
+            }
+            .into(),
+            DragKind::QuickOffsetLayers { .. } => "Quick Offset Layers".into(),
+            DragKind::QuickOffsetKeys { .. } => "Quick Offset Keyframes".into(),
+            DragKind::Keys { ref ids } => many(ids.len(), "Move Keyframe", "Move Keyframes"),
+            DragKind::GraphKeys { ref ids } => many(ids.len(), "Edit Curve", "Edit Keyframes"),
+            DragKind::StretchKeys { .. } => "Stretch Keyframes".into(),
+            DragKind::TransformKeys { .. } => "Scale Keyframes".into(),
+            DragKind::Handle { .. } => "Adjust Easing".into(),
+            // v1: "Edit <property>" (the row's name).
+            DragKind::Property { ref targets, .. } => match targets.as_slice() {
+                [(_, channel)] => format!("Edit {}", crate::property_label(channel)),
+                _ => "Edit Properties".into(),
+            },
+            DragKind::WorkMove => "Move Work Area".into(),
+            _ => "Work Area".into(),
         }
     }
     pub fn commands(&mut self, sample: DragSample) -> Result<Vec<Command>, ModelError> {

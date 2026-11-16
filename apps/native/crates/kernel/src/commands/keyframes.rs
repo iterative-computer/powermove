@@ -295,7 +295,7 @@ pub enum KeyframeCommand {
     /// composition and none comes within a frame of a key it does not own
     /// (the graph never replaces keys); numeric values move by
     /// `value_delta` (rounded to 0.001). Send totals with
-    /// `update_gesture_from_start`. Label "Edit curve" / "Edit keyframes".
+    /// `update_gesture_from_start`. Label "Edit Curve" / "Edit Keyframes".
     GraphMove {
         key_ids: Vec<String>,
         delta: f64,
@@ -336,9 +336,9 @@ impl KeyframeCommand {
             KeyframeCommand::SetHold { .. } => "Toggle Hold Keyframe",
             KeyframeCommand::SetHandle { .. } => "Adjust Handle",
             KeyframeCommand::SetSpring { .. } => "Set Spring",
-            KeyframeCommand::GraphMove { key_ids, .. } if key_ids.len() > 1 => "Edit keyframes",
-            KeyframeCommand::GraphMove { .. } => "Edit curve",
-            KeyframeCommand::Transform { .. } => "Scale keyframes",
+            KeyframeCommand::GraphMove { key_ids, .. } if key_ids.len() > 1 => "Edit Keyframes",
+            KeyframeCommand::GraphMove { .. } => "Edit Curve",
+            KeyframeCommand::Transform { .. } => "Scale Keyframes",
         }
         .to_owned()
     }
