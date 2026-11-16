@@ -602,6 +602,16 @@ impl Layout {
             };
             let d = &mut self.docks[divider.dock];
             if side {
+                // Freeze every open fluid group's displayed share before
+                // changing the pair, so spare space is not redistributed.
+                for (index, group) in d.groups.iter().enumerate() {
+                    if !group.collapsed
+                        && group.size.is_none()
+                        && let Some(displayed) = height(divider.dock, index)
+                    {
+                        self.flex_bases.insert(group.tabs[0].clone(), displayed);
+                    }
+                }
                 // A side stack can exceed its viewport. Record the requested
                 // adjacent heights; never turn a fixed neighbour into a fluid
                 // filler, or it would shrink as soon as this splitter moves.
@@ -1243,16 +1253,22 @@ impl Layout {
             DropTarget::Edge(_) => {}
         }
         let mut next = self.clone();
+        // Capture both bases before changing either first tab. A moved tab
+        // must not carry its source group's basis into the destination.
+        let destination_basis = match target {
+            DropTarget::Tab { dock, group, .. } => next
+                .flex_bases
+                .remove(&next.docks[dock].groups[group].tabs[0]),
+            _ => None,
+        };
         let source = &mut next.docks[di].groups[gi];
+        let source_basis = next.flex_bases.remove(&source.tabs[0]);
         // A stack keeps its height within its dock; in another dock it
         // shares the room (its old height means nothing there).
         let same_dock = match target {
             DropTarget::Tab { dock, .. } | DropTarget::Split { dock, .. } => dock == di,
             DropTarget::Beside { .. } | DropTarget::Edge(_) => false,
         };
-        if !same_dock {
-            next.flex_bases.remove(&source.tabs[0]);
-        }
         let moved = if stack {
             Group {
                 tabs: std::mem::take(&mut source.tabs),
@@ -1267,12 +1283,22 @@ impl Layout {
             }
             self::group(&[&item], None)
         };
+        if let Some(basis) = source_basis {
+            if let Some(first) = source.tabs.first() {
+                next.flex_bases.insert(first.clone(), basis);
+            } else if same_dock && !matches!(target, DropTarget::Tab { .. }) {
+                next.flex_bases.insert(moved.tabs[0].clone(), basis);
+            }
+        }
         match target {
             DropTarget::Tab { dock, group, index } => {
                 let g = &mut next.docks[dock].groups[group];
                 let index = index.min(g.tabs.len());
                 g.active = index + moved.active;
                 g.tabs.splice(index..index, moved.tabs);
+                if let Some(basis) = destination_basis {
+                    next.flex_bases.insert(g.tabs[0].clone(), basis);
+                }
                 next.docks[dock].collapsed = false;
             }
             DropTarget::Split { dock, group } => {
@@ -1365,11 +1391,13 @@ impl Layout {
             .and_then(|d| d.groups.get_mut(group))
             .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
         anyhow::ensure!(from < g.tabs.len(), "Unknown tab");
+        let first = g.tabs[0].clone();
         let item = g.tabs.remove(from);
         // `to` is an insertion slot in the original list; account for the removal.
         let to = if to > from { to - 1 } else { to }.min(g.tabs.len());
         g.tabs.insert(to, item);
         g.active = to;
+        rekey_basis(&mut self.flex_bases, &first, g);
         Ok(())
     }
     /// Closes a panel. The viewer cannot be closed.
@@ -1380,7 +1408,9 @@ impl Layout {
             .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
         let mut next = self.clone();
         let g = &mut next.docks[di].groups[gi];
+        let first = g.tabs[0].clone();
         g.tabs.remove(ti);
+        rekey_basis(&mut next.flex_bases, &first, g);
         // The showing tab keeps showing when a tab before it closes.
         if ti < g.active {
             g.active -= 1;
@@ -1395,7 +1425,9 @@ impl Layout {
             .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
         let mut next = self.clone();
         let g = &mut next.docks[di].groups[gi];
+        let first = g.tabs[0].clone();
         g.tabs.retain(|t| t == id || !closable(t));
+        rekey_basis(&mut next.flex_bases, &first, g);
         g.active = g.tabs.iter().position(|t| t == id).unwrap_or(0);
         next.commit(self)
     }
@@ -1578,7 +1610,9 @@ impl Layout {
                 {
                     Some(g) => {
                         let at = index.min(g.tabs.len());
+                        let first = g.tabs[0].clone();
                         g.tabs.insert(at, id.into());
+                        rekey_basis(&mut self.flex_bases, &first, g);
                         if at <= g.active && g.tabs.len() > 1 {
                             g.active += 1;
                         }
@@ -2175,5 +2209,15 @@ mod view_tile_tests {
         assert_eq!((t[0].w, t[0].h), (200., 100.));
         assert_eq!((t[3].x, t[3].y), (212., 122.));
         assert_eq!(view_tiles(r, 1, 2.), vec![r]);
+    }
+}
+
+// Groups have no stable ID in the flex+size format. Keep the first-tab key
+// synchronized when membership changes, deleting it when the group disappears.
+fn rekey_basis(bases: &mut BTreeMap<String, f32>, first: &str, group: &Group) {
+    if let Some(basis) = bases.remove(first)
+        && let Some(next) = group.tabs.first()
+    {
+        bases.insert(next.clone(), basis);
     }
 }
