@@ -13,6 +13,9 @@ pub enum Action {
     Acknowledge,
     /// Leave another file's unsaved work where it is.
     Leave,
+    /// Escape: the open is called off; nothing is recovered or copied, and
+    /// the next open asks again.
+    Cancel,
 }
 /// Unsaved work left for another file (`from`, no longer where it was) whose
 /// saved content is exactly this file's. Whether this is that file is the
@@ -44,11 +47,13 @@ pub fn ask_recovery(
 ) -> Alert<Action> {
     let mut buttons = vec![
         Button::new("Recover", Action::Recover).default(),
-        Button::new("Open as Copy", Action::OpenAsCopy).cancel(),
+        Button::new("Open as Copy", Action::OpenAsCopy),
     ];
     if can_archive_recently_deleted {
         buttons.push(Button::new("Discard Edits", Action::Discard).destructive());
     }
+    // Escape cancels the open: it never answers the question.
+    buttons.push(Button::new("Cancel", Action::Cancel).cancel());
     Alert::new(
         if signal {
             format!("Powermove quit before the changes to “{name}” were saved.")
@@ -173,6 +178,13 @@ impl PreparedRecovery {
             alert,
             archive_recently_deleted,
         })
+    }
+    /// The call that calls the open off (Cancel, or the question gone
+    /// unanswered): its prepared open and lock go, the journal stays.
+    pub fn forget(&self) -> ShellCall {
+        ShellCall::ForgetRecovery {
+            ticket: self.ticket.clone(),
+        }
     }
     /// The call to submit with KernelHandle::shell (never .wait()), for an
     /// action this alert offered.

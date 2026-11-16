@@ -33,8 +33,9 @@ fn ask_exact_copy_and_safe_keyboard() {
                 }
             )
         );
-        assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits"]);
-        assert_eq!(on_escape(&a), Some(Action::OpenAsCopy));
+        assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits", "Cancel"]);
+        // Escape cancels the open; it never answers Open as Copy (run 22).
+        assert_eq!(on_escape(&a), Some(Action::Cancel));
         assert_eq!(on_return(&a), Some(Action::Recover));
         assert!(a.buttons[2].destructive);
         assert!(!a.buttons[2].default);
@@ -44,7 +45,7 @@ fn ask_exact_copy_and_safe_keyboard() {
 fn unarchivable_edits_never_offer_discard() {
     assert_eq!(
         labels(&ask_recovery("Synthetic", false, false, false)),
-        ["Recover", "Open as Copy"]
+        ["Recover", "Open as Copy", "Cancel"]
     );
 }
 #[test]
@@ -78,6 +79,9 @@ fn kernel_reply_uses_ticket_and_exact_decisions() {
         assert_eq!(ticket, "synthetic-ticket");
         assert_eq!(decision, expected);
     }
+    // Cancel decides nothing: the open it prepared is forgotten instead.
+    assert!(p.decision(Action::Cancel).is_none());
+    assert!(matches!(p.forget(), ShellCall::ForgetRecovery { ticket } if ticket == "synthetic-ticket"));
     assert!(p.decision(Action::Discard).is_none());
     let p = PreparedRecovery::from_reply(&reply, "Synthetic", true, true).unwrap();
     assert!(matches!(
@@ -162,7 +166,7 @@ fn reopening_after_a_stop_says_so_and_keeps_the_choices() {
         a.message,
         "“Launch Film” stopped after an internal error with unsaved changes."
     );
-    assert_eq!(labels(&a), ["Recover", "Open as Copy"]);
+    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Cancel"]);
     assert_eq!(on_return(&a), Some(Action::Recover));
 }
 
@@ -206,5 +210,5 @@ fn after_a_quit_signal_the_offer_is_plain() {
         a.message,
         "Powermove quit before the changes to “Launch Film” were saved."
     );
-    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits"]);
+    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits", "Cancel"]);
 }

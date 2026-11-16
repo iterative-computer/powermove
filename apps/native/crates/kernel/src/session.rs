@@ -43,6 +43,12 @@ pub enum ShellCall {
         ticket: String,
         decision: RecoveryDecision,
     },
+    /// The person cancelled the Recover question: the open it prepared goes,
+    /// its project lock with it; nothing is recovered or copied, the journal
+    /// is kept, and the next open asks again.
+    ForgetRecovery {
+        ticket: String,
+    },
     /// Library copies holding work for the file this session has open in
     /// place that the person has not been told about yet (see
     /// `Kernel::unoffered_copies`). Replies `Copies`.
@@ -863,6 +869,10 @@ impl Kernel {
                     Some(job) => job.run(),
                     None => Err(failure("Nothing to do")),
                 }
+            }
+            ShellCall::ForgetRecovery { ticket } => {
+                self.pending_recovery.remove(&ticket);
+                Ok(ShellReply::Kept(Vec::new()))
             }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self

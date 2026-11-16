@@ -1697,3 +1697,51 @@ fn a_file_entry_whose_file_is_gone_asks_before_recovering_its_work() {
         }
     }
 }
+
+/// Cancelling the Recover question (Escape) calls the open off: the open it
+/// prepared and its project lock go, nothing is recovered or copied, the
+/// journal stays, and the next open asks again and opens the file itself,
+/// not a copy (run 22: Escape answered Open as Copy).
+#[test]
+fn a_cancelled_recover_question_leaves_everything_and_asks_again() {
+    let root = TempDir::new("recovery-cancel");
+    let path = saved_file(&root, value());
+    let mut k = kernel(&root.0);
+    let (id, _) = launch(&mut k, &path, RecoveryDecision::Recover);
+    let id = id.unwrap();
+    widen(&mut k, &id, 333.0);
+    k.durability_barrier().unwrap();
+    drop(k); // killed
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "file".into(),
+            source: SessionSource::File(path.clone()),
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired { ticket, .. } = reply else {
+        panic!("asked first: {reply:?}");
+    };
+    k.shell(ShellCall::ForgetRecovery {
+        ticket: ticket.clone(),
+    })
+    .unwrap();
+    assert!(
+        k.shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::Recover,
+        })
+        .is_err(),
+        "the cancelled question is gone"
+    );
+    assert!(copies(&root).is_empty(), "nothing copied");
+    // Opened again: asked again, as the file (its lock went), and Recover
+    // brings the edit back.
+    let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+    assert_eq!(offered, "Recovered { truncated: false }");
+    let id = id.unwrap();
+    assert_eq!(id, "file");
+    assert_eq!(width(&k, &id), 333.0);
+    assert!(copies(&root).is_empty(), "no copies: {:?}", copies(&root));
+}
