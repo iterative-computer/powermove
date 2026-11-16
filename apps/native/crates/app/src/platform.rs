@@ -589,23 +589,7 @@ pub fn reveal(path: &std::path::Path) {
     }
 }
 pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
-    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-    let Some(root) = app.mainMenu() else { return };
-    for top in root.itemArray() {
-        if top.title().to_string() != "Edit" {
-            continue;
-        }
-        if let Some(menu) = top.submenu() {
-            for (index, (verb, label)) in [("Undo", undo), ("Redo", redo)].into_iter().enumerate() {
-                if let Some(item) = menu.itemAtIndex(index as isize) {
-                    item.setTitle(&NSString::from_str(
-                        &label.map_or(verb.to_string(), |l| format!("{verb} {l}")),
-                    ));
-                    item.setEnabled(label.is_some());
-                }
-            }
-        }
-    }
+    pm_shell::history_titles(undo, redo);
 }
 
 // Preserve GPUI's existing application delegate while intercepting termination
