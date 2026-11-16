@@ -96,6 +96,21 @@ fn every_native_segmented_control_is_the_glass_one() {
             );
         }
     }
+    // A row of options drawn as radio buttons in Rust (a two-word toggle as
+    // segments) is a segmented control of its own. The kit's lone radio
+    // button and the first-launch choice cards are other controls.
+    for file in &sources {
+        let name = file.file_name().unwrap().to_string_lossy().to_string();
+        if matches!(name.as_str(), "kit.rs" | "welcome_view.rs") || name.contains("test") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(
+            !text.contains("Role::RadioButton"),
+            "{}: options drawn as radio buttons; use the kit's segmented control",
+            file.display()
+        );
+    }
     let view = std::fs::read_to_string(root().join("crates/app/src/v4_view.rs")).unwrap();
     assert!(
         view.contains("glass: matches!(kind, crate::v4_control::Kind::Segmented)"),
