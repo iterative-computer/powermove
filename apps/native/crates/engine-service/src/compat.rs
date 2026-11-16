@@ -38,10 +38,6 @@ pub struct BaseRequest {
     pub scale: f64,
     /// Today's preview crop window, in raster pixels.
     pub crop: Option<PixelRect>,
-    /// Only these pixels of the whole (uncropped) raster are wanted: the
-    /// reply is the whole raster with just this window painted
-    /// ([`BaseRaster::window`]).
-    pub window: Option<PixelRect>,
 }
 
 /// A base raster as an extension's canvas sees it: straight RGBA8 rows of
@@ -57,10 +53,6 @@ pub struct BaseRaster {
     /// The part of the canvas the layer's quad samples (`[ox, oy, sx, sy]`):
     /// a crop window's canvas sits inside the whole raster.
     pub uv: [f64; 4],
-    /// For a [`BaseRequest::window`]: the part of the `width` × `height`
-    /// raster `straight_rgba` holds (`[x, y, w, h]`), the same pixels the
-    /// whole raster has there.
-    pub window: Option<[u32; 4]>,
 }
 
 type Job = (BaseRequest, Sender<Result<Option<BaseRaster>, String>>);
@@ -150,7 +142,7 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
         .content
         .map(|value| Node::from_value(value, request.document.revision()));
     let painted = renderer
-        .layer_raster_window(
+        .layer_raster(
             &request.document,
             &request.composition,
             &request.layer,
@@ -158,7 +150,6 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
             request.seconds,
             request.scale,
             pm_protocol::color::Precision::Float16,
-            request.window.map(|w| [w.x, w.y, w.width, w.height]),
         )
         .map_err(|e| e.to_string())?;
     let Some(raster) = painted else {
@@ -173,28 +164,7 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
         selection: raster.selection,
         font_offset: raster.font_offset,
         uv,
-        window: None,
     };
-    // The whole raster (as without a crop) with only the window painted: the
-    // window of what `place_raster` makes of the whole canvas.
-    if let Some(window) = request.window {
-        let (cw, ch) = (raster.canvas.0.max(1), raster.canvas.1.max(1));
-        let painted =
-            pm_export::raster::encode_rgba8_f32(&raster.pixels.pixels, SnapshotPixels::Straight);
-        let (pixels, x, y, w, h) = match pm_export::raster::place_raster(
-            &painted,
-            raster.pixels.crop,
-            (cw, ch),
-            Some(window),
-        ) {
-            Some((pixels, w, h)) => (pixels, window.x.min(cw), window.y.min(ch), w, h),
-            None => (Vec::new(), window.x.min(cw), window.y.min(ch), 0, 0),
-        };
-        return Ok(Some(BaseRaster {
-            window: Some([x, y, w, h]),
-            ..geometry(cw, ch, pixels, [0., 0., 1., 1.])
-        }));
-    }
     // Text with no ink is a transparent canvas of its geometry.
     if raster.pixels.pixels.is_empty() {
         let (w, h) = raster.canvas;
@@ -1135,64 +1105,6 @@ pub fn hidden_raster() -> CompatAnswer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// A window of a base raster is the whole raster's straight pixels there,
-    /// with the whole raster's size and geometry.
-    #[test]
-    fn a_base_window_is_the_whole_raster_s_pixels_there() {
-        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
-        let document = Arc::new(pm_model::Document::new(
-            Some(pm_model::canonical::canonical_project(project)),
-            1,
-        ));
-        // The raster worker makes its own device on the first request.
-        let rasters = LayerRasters::start(None).unwrap();
-        let ask = |window: Option<PixelRect>| {
-            rasters
-                .raster(BaseRequest {
-                    document: document.clone(),
-                    composition: "Pshapes-primitives-root".into(),
-                    layer: "L00d".into(),
-                    content: None,
-                    seconds: 1.25,
-                    scale: 5.5,
-                    crop: None,
-                    window,
-                })
-                .unwrap()
-                .unwrap()
-        };
-        let whole = ask(None);
-        assert_eq!(whole.window, None);
-        assert!(
-            whole.straight_rgba.iter().any(|&b| b > 0),
-            "the shape is inked"
-        );
-        let (w, h) = (whole.width, whole.height);
-        for [x, y, ww, wh] in [
-            [w / 4, h / 3, w / 2, h / 3],
-            [w - 2, h - 1, 9, 9],
-            [0, 0, 1, 1],
-        ] {
-            let part = ask(Some(PixelRect {
-                x,
-                y,
-                width: ww,
-                height: wh,
-            }));
-            let [px, py, pw, ph] = part.window.unwrap();
-            assert_eq!([px, py], [x, y]);
-            assert_eq!([pw, ph], [ww.min(w - x), wh.min(h - y)]);
-            assert_eq!((part.width, part.height, part.uv), (w, h, whole.uv));
-            assert_eq!((part.box_size, part.anchor), (whole.box_size, whole.anchor));
-            let expected: Vec<u8> = (py..py + ph)
-                .flat_map(|r| {
-                    let at = ((r * w + px) * 4) as usize;
-                    whole.straight_rgba[at..at + (pw * 4) as usize].to_vec()
-                })
-                .collect();
-            assert_eq!(part.straight_rgba, expected, "window {x},{y}");
-        }
-    }
     use pm_protocol::common::{CompositionId, LayerId};
     fn need(layer: &str) -> CompatNeed {
         CompatNeed {
