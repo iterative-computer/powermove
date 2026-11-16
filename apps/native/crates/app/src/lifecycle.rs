@@ -92,6 +92,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    pm_shell::session::set_quitting(false);
     cx.global::<QuitCoordinator>()
         ._delegate
         .resolve_quit_events(true);
@@ -231,7 +232,11 @@ fn start_quit(cx: &mut App) {
             &path,
             pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
         );
+        if let Some(front) = pm_shell::front_window_id() {
+            pm_shell::session::write(&path, pm_shell::session::Change::Front(front));
+        }
     }
+    pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     // SIGTERM: nobody is there to answer a Save question. Unsaved work is
