@@ -2488,6 +2488,7 @@ mod tests {
             settled: false,
             loading: vec![("b-slow".into(), "Slow".into())],
             unavailable: vec![],
+            provides: Default::default(),
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
@@ -2498,6 +2499,7 @@ mod tests {
             settled: true,
             loading: vec![],
             unavailable: vec![],
+            provides: Default::default(),
         };
         let start = ResourceSnapshot {
             pending: true,
