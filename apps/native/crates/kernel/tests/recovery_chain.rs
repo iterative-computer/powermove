@@ -776,9 +776,13 @@ fn a_continued_session_matches_only_its_own_bases() {
 #[test]
 fn a_project_opened_as_a_copy_recovers_on_the_next_open() {
     let root = TempDir::new("recovery-as-copy");
+    // The project is in another library (the original app's): it opens as a
+    // copy in this one. (A project of this library whose file is gone opens
+    // as itself: PM-421.)
+    let orig = TempDir::new("copy-source");
     {
         let w =
-            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+            pm_kernel::persistence::LibraryWriter::open(&orig.0, DiskFormat::V1_2, None).unwrap();
         let mut project = value();
         let o = project.as_object_mut().unwrap();
         o.insert("id", Value::from("sync"));
@@ -796,7 +800,7 @@ fn a_project_opened_as_a_copy_recovers_on_the_next_open() {
         k.shell(ShellCall::PrepareOpen {
             id: "sync".into(),
             source: SessionSource::Library {
-                profile: root.0.clone(),
+                profile: orig.0.clone(),
                 project: "sync".into(),
             },
             electron_profile: None,
@@ -886,9 +890,13 @@ fn a_project_opened_as_a_copy_recovers_on_the_next_open() {
 #[test]
 fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
     let root = TempDir::new("reopen-as-copy");
+    // The project is in another library (the original app's): it opens as a
+    // copy in this one. (A project of this library whose file is gone opens
+    // as itself: PM-421.)
+    let orig = TempDir::new("copy-source");
     {
         let w =
-            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+            pm_kernel::persistence::LibraryWriter::open(&orig.0, DiskFormat::V1_2, None).unwrap();
         let mut project = value();
         let o = project.as_object_mut().unwrap();
         o.insert("id", Value::from("sync"));
@@ -908,7 +916,7 @@ fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
             .shell(ShellCall::PrepareOpen {
                 id: "sync".into(),
                 source: SessionSource::Library {
-                    profile: root.0.clone(),
+                    profile: orig.0.clone(),
                     project: "sync".into(),
                 },
                 electron_profile: None,
@@ -954,11 +962,8 @@ fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
         k.shell(ShellCall::Close(session)).unwrap();
         assert_eq!(entries(), after_save, "open {reopen} made another entry");
     }
-    assert_eq!(after_save.len(), 2, "{after_save:?}");
-    assert!(
-        after_save.iter().any(|e| e == "sync Sync — Native"),
-        "{after_save:?}"
-    );
+    // This library holds the one copy; the project stays in its own.
+    assert_eq!(after_save.len(), 1, "{after_save:?}");
     // Work not saved in that copy, then a forced quit: the next open asks,
     // and Recover brings it back in the same copy.
     {
@@ -972,7 +977,7 @@ fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
         .shell(ShellCall::PrepareOpen {
             id: "sync".into(),
             source: SessionSource::Library {
-                profile: root.0.clone(),
+                profile: orig.0.clone(),
                 project: "sync".into(),
             },
             electron_profile: None,
@@ -1001,7 +1006,7 @@ fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
         .shell(ShellCall::PrepareOpen {
             id: "sync".into(),
             source: SessionSource::Library {
-                profile: root.0.clone(),
+                profile: orig.0.clone(),
                 project: "sync".into(),
             },
             electron_profile: None,
@@ -1033,9 +1038,13 @@ fn a_project_opened_as_a_copy_reopens_with_its_saved_edits() {
 #[test]
 fn a_duplicated_copy_does_not_take_over_its_project() {
     let root = TempDir::new("duplicated-copy");
+    // The project is in another library (the original app's): it opens as a
+    // copy in this one. (A project of this library whose file is gone opens
+    // as itself: PM-421.)
+    let orig = TempDir::new("copy-source");
     {
         let w =
-            pm_kernel::persistence::LibraryWriter::open(&root.0, DiskFormat::V1_2, None).unwrap();
+            pm_kernel::persistence::LibraryWriter::open(&orig.0, DiskFormat::V1_2, None).unwrap();
         let mut project = value();
         let o = project.as_object_mut().unwrap();
         o.insert("id", Value::from("sync"));
@@ -1053,7 +1062,7 @@ fn a_duplicated_copy_does_not_take_over_its_project() {
             .shell(ShellCall::PrepareOpen {
                 id: id.into(),
                 source: SessionSource::Library {
-                    profile: root.0.clone(),
+                    profile: if id == "sync" { orig.0.clone() } else { root.0.clone() },
                     project: id.into(),
                 },
                 electron_profile: None,
@@ -1527,15 +1536,15 @@ fn an_offline_project_opens_as_itself_and_an_earlier_copy_is_reopened() {
         k.durability_barrier().unwrap();
         slot
     };
-    save("film", offline_file(&root.0));
+    save("reel", offline_file(&root.0));
     // An old copy of another project, opened as its own entry (a restored
     // tab of a copy: run 17's "Run6 — Native ×5").
     save("copyfive", offline_file(&root.0));
     let before = ids();
     let mut k = kernel(&root.0);
     for (round, (profile, project)) in [
-        (root.0.clone(), "film"),
-        (store.clone(), "film"),
+        (root.0.clone(), "reel"),
+        (store.clone(), "reel"),
         (root.0.clone(), "copyfive"),
         (store.clone(), "copyfive"),
     ]
@@ -1546,8 +1555,10 @@ fn an_offline_project_opens_as_itself_and_an_earlier_copy_is_reopened() {
         assert_eq!(ids(), before, "round {round}: no entry made");
     }
     drop(k);
-    // A copy an earlier build made of it when its file was gone (recorded
-    // under the store folder's name) is where its work went: it reopens.
+    // A project an earlier build copied when its file was gone (the copy
+    // recorded under the store folder's name) reopens that copy, where its
+    // work went.
+    save("film", offline_file(&root.0));
     let hash = pm_kernel::base_hash_of(
         &pm_kernel::library::LibraryStore::open(&root.0)
             .load("film")
