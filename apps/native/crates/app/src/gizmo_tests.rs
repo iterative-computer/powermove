@@ -41,6 +41,8 @@ struct Recorder {
     lease: RefCell<Option<Entity<u8>>>,
     /// Files dropped on the viewer.
     files: RefCell<Vec<std::path::PathBuf>>,
+    /// Where each outline was placed over the viewer.
+    placements: RefCell<Vec<Option<crate::gizmo_layer::Placement>>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -122,8 +124,15 @@ impl Host for Recording {
         if let Some(lease) = self.0.lease.borrow().as_ref() {
             let _ = lease.read(cx);
         }
+        // The view moves with the pans asked for, as the app's does.
+        let pan = self.0.navigation.borrow().iter().fold(point(px(0.), px(0.)), |sum, n| {
+            match n {
+                Navigate::Pan(by) => sum + *by,
+                _ => sum,
+            }
+        });
         Some(ViewFrame {
-            origin: bounds.origin + point(px(20.), px(20.)),
+            origin: bounds.origin + point(px(20.), px(20.)) + pan,
             scale: 1.,
             size: self.0.size.get().unwrap_or([640., 360.]),
         })
@@ -134,10 +143,11 @@ impl Host for Recording {
     fn overlay(
         &self,
         lines: Vec<OverlayLine>,
-        _: Option<crate::gizmo_layer::Placement>,
+        at: Option<crate::gizmo_layer::Placement>,
         _: &mut App,
     ) {
         *self.0.lines.borrow_mut() = lines;
+        self.0.placements.borrow_mut().push(at);
     }
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
@@ -401,6 +411,43 @@ fn an_untraced_drag_reads_no_input_times(cx: &mut TestAppContext) {
     assert!(s.recorder.reports.borrow().is_empty());
     assert!(s.recorder.stamps.borrow().is_empty());
 }
+/// A corner drag whose release the viewer never hears (it was drawn again
+/// or covered while held) still ends when the window reports the release:
+/// the Scale edit is closed and kept, nothing is left open to block a save.
+#[gpui::test]
+fn a_drag_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(50.), px(50.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    let open = |s: &Stage| s.rig.kernel.published(PROJECT).unwrap().entry.is_some();
+    assert!(open(&s), "the drag holds its edit");
+    // The window's report of the release, without the viewer's mouse-up.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| kernel.published(PROJECT).unwrap().entry.is_none());
+    s.refresh(cx);
+    assert!(s.pose().scale[0] > before.scale[0], "the scale is kept");
+    // A second report (the viewer did hear it) changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
+    });
+}
 #[gpui::test]
 fn dragging_a_corner_scales_and_undo_restores_it(cx: &mut TestAppContext) {
     let mut s = stage(cx);
@@ -639,6 +686,40 @@ fn the_viewer_cursor_says_what_a_press_does(cx: &mut TestAppContext) {
     assert_eq!(
         s.surface.read_with(&s.vcx, |g, _| g.cursor_style()),
         CursorStyle::ZoomIn
+    );
+}
+/// The selection's outline moves with the view while the Hand drags it, not
+/// on release.
+#[gpui::test]
+fn the_outline_follows_a_hand_pan_while_held(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Hand));
+    let origin = |s: &Stage| {
+        s.recorder
+            .placements
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|p| *p)
+            .expect("an outline placed")
+            .origin
+    };
+    let before = origin(&s);
+    let at = s.point_of([210., 160.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(30.), px(-12.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    // Still held: the outline is where the view now is.
+    let held = origin(&s);
+    assert_eq!([held[0] - before[0], held[1] - before[1]], [30., -12.]);
+    s.vcx.simulate_mouse_up(
+        at + point(px(30.), px(-12.)),
+        MouseButton::Left,
+        Modifiers::none(),
     );
 }
 #[gpui::test]
@@ -2186,7 +2267,7 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     };
     let before = document(&s);
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
-    // In the 3D view (the editor view; camera view moves the camera itself).
+    // In the 3D view (the editor view; camera view never moves the camera).
     s.surface
         .update(&mut s.vcx, |g, cx| g.studio_setting("look", "free", cx));
     cx.run_until_parked();
@@ -2705,29 +2786,33 @@ fn the_middle_button_orbits_pans_and_zooms(cx: &mut TestAppContext) {
     assert!(d.target == c.target && (reach(d) - reach(c)).abs() > 1e-6, "zoom");
     assert!(s.recorder.navigation.borrow().is_empty(), "the 2D view never panned");
 }
-/// In camera view every navigation moves the camera itself (Blender's Lock
-/// Camera to View, as Fly does): a burst of wheel notches is one undo step,
-/// stored once the wheel rests, and the viewer keeps looking through it.
+/// In camera view a scroll navigates the view (the viewer's own zoom), and
+/// a middle drag leaves for the editor view from where the camera stands
+/// (Blender with Lock Camera to View off): the authored camera never moves
+/// and no undo step is made (PM-367).
 #[gpui::test]
-fn navigating_in_camera_view_moves_the_camera_as_one_undo_step(cx: &mut TestAppContext) {
+fn navigating_in_camera_view_never_moves_the_authored_camera(cx: &mut TestAppContext) {
     let mut s = studio_stage(cx);
     let h = applied(&s);
     let before = stored(&s, "cam");
-    let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
     scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
     scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "still the camera's framing");
+    assert!(!s.recorder.navigation.borrow().is_empty(), "the viewer zoomed");
     cx.executor().advance_clock(std::time::Duration::from_millis(500));
-    let kernel = s.rig.kernel.clone();
-    settle(cx, move |_| kernel.published(PROJECT).unwrap().history.applied > h);
-    assert_eq!(applied(&s), h + 1, "one step");
-    let after = stored(&s, "cam");
-    // Two notches from z = 6 toward its target at 0: 6 / 1.44.
-    let z = num(&after["p"]["position.z"]);
-    assert!((z - 6. / 1.44).abs() < 1e-6, "{after}");
-    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
-    undo_3d(&mut s, cx);
-    assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);
+    cx.run_until_parked();
+    assert_eq!(applied(&s), h, "no undo step");
+    assert_eq!(stored(&s, "cam"), before, "the camera is as authored");
+    let from = s.point_of([300., 180.]);
+    let to = from + point(px(30.), px(40.));
+    s.vcx.simulate_mouse_down(from, MouseButton::Middle, Modifiers::none());
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, Modifiers::none());
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, Modifiers::none());
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "the editor view orbits");
+    assert_eq!(applied(&s), h, "no undo step");
+    assert_eq!(stored(&s, "cam"), before, "the camera is as authored");
 }
 /// The numpad views (number row too): Front looks down −Z from +Z, orbit
 /// steps undo each other, + zooms one notch.

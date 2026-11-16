@@ -408,7 +408,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -1060,7 +1060,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -1513,6 +1513,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
@@ -1934,7 +1970,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -2364,6 +2400,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.accent_text",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.accent_text",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -2821,7 +2915,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -3251,6 +3345,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -3708,7 +3860,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -4138,6 +4290,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -4592,7 +4802,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -5024,6 +5234,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -5715,7 +5961,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -6147,6 +6393,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -6641,7 +6923,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -7071,6 +7353,64 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -7534,7 +7874,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -7987,6 +8327,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
@@ -8272,6 +8648,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -8725,7 +9137,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -9178,6 +9590,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
@@ -9599,7 +10047,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -10052,6 +10500,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-29990",
                                     "label": "Toggle Visibility",
@@ -10334,6 +10818,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10658,6 +11178,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-29992",
                                     "label": "Toggle Visibility",
@@ -10940,6 +11496,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11264,6 +11856,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-29994",
                                     "label": "Toggle Visibility",
@@ -11546,6 +12174,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11870,6 +12534,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-29996",
                                     "label": "Toggle Visibility",
@@ -12152,6 +12852,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12476,6 +13212,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-29998",
                                     "label": "Toggle Visibility",
@@ -12758,6 +13530,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13082,6 +13890,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30000",
                                     "label": "Toggle Visibility",
@@ -13364,6 +14208,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13688,6 +14568,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30002",
                                     "label": "Toggle Visibility",
@@ -13970,6 +14886,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14294,6 +15246,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30004",
                                     "label": "Toggle Visibility",
@@ -14576,6 +15564,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14900,6 +15924,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30006",
                                     "label": "Toggle Visibility",
@@ -15182,6 +16242,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15506,6 +16602,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30008",
                                     "label": "Toggle Visibility",
@@ -15788,6 +16920,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16112,6 +17280,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30010",
                                     "label": "Toggle Visibility",
@@ -16394,6 +17598,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16718,6 +17958,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30012",
                                     "label": "Toggle Visibility",
@@ -17000,6 +18276,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17324,6 +18636,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30014",
                                     "label": "Toggle Visibility",
@@ -17606,6 +18954,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17930,6 +19314,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30016",
                                     "label": "Toggle Visibility",
@@ -18212,6 +19632,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -18536,6 +19992,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:row-30018",
                                     "label": "Toggle Visibility",
@@ -18818,6 +20310,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -19260,7 +20788,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -19722,6 +21250,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -20164,7 +21728,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -20626,6 +22190,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -21078,7 +22678,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -21850,7 +23450,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -22283,6 +23883,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -22837,7 +24473,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -23298,6 +24934,42 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
+                                  "props": {
                                     "data-pm-component": "toolbar-item",
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
@@ -23719,7 +25391,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
-                    "data-pm-variant": "plate",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",

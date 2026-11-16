@@ -600,11 +600,24 @@ impl Store {
             }
             return p.clone();
         }
-        let default = self
-            .default
-            .as_deref()
-            .filter(|_| self.project_id.is_some());
-        [preferred, default, self.current.as_deref()]
+        // A project with no workspace of its own (a new one) starts with the
+        // workspace picked in this window, else the default workspace, a
+        // built-in as shipped: never the last one used in some other window,
+        // whose sizes were dragged for another project and another window's
+        // height (PM-394).
+        if self.project_id.is_some() {
+            if let Some(record) = preferred.and_then(|id| self.get(id)).filter(|r| usable(r)) {
+                return record.clone();
+            }
+            let id = self.default.as_deref().unwrap_or(FALLBACK);
+            if let Some(record) = self.get(id).filter(|r| !is_builtin(r)).cloned() {
+                return record;
+            }
+            if let Some(record) = preset(id).or_else(|| preset(FALLBACK)) {
+                return record;
+            }
+        }
+        [preferred, self.current.as_deref()]
             .into_iter()
             .flatten()
             .find_map(|id| self.get(id))
@@ -772,6 +785,35 @@ mod tests {
         assert_eq!(layout(&w), l);
     }
 
+    #[test]
+    fn a_new_project_starts_with_the_default_workspace_as_shipped() {
+        let mut edited = preset("design").unwrap();
+        edited["layout"]["docks"] = json!([{"id": "center", "panels": ["project"]}]);
+        let s = Store {
+            records: seeded(&[edited]),
+            current: Some("design".into()),
+            project_id: Some("new".into()),
+            ..Default::default()
+        };
+        // Not the edited Design last used in another window: Design as shipped.
+        assert_eq!(s.active(None), preset("design").unwrap());
+        // The default workspace setting, when it names one of the person's own.
+        let mine = json!({"id": "mine", "name": "Mine", "layout": {"docks": [{"id": "center", "panels": ["viewer"]}]}});
+        let s = Store {
+            records: seeded(&[mine.clone()]),
+            default: Some("mine".into()),
+            project_id: Some("new".into()),
+            ..Default::default()
+        };
+        assert_eq!(record_id(&s.active(None)), Some("mine"));
+        // Home (no project) keeps the last one used.
+        let s = Store {
+            records: seeded(&[mine]),
+            current: Some("mine".into()),
+            ..Default::default()
+        };
+        assert_eq!(record_id(&s.active(None)), Some("mine"));
+    }
     #[test]
     fn store_offers_builtins_then_saved_and_hides_other_projects_records() {
         let mut s = Store {

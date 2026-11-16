@@ -50,6 +50,8 @@ pm-edit = { path = "../pm-edit" }
 # Proxies of an older project's clips select the frames their originals do.
 pm-proxy = { path = "../pm-proxy" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
+# The app's text box: the query engine the kernel measures with.
+pm-wasm = { path = "../pm-wasm" }
 read-fonts = "0.45"
 png = "0.18"
 resvg = { version = "=0.48.1", default-features = false, features = ["raster-images"] }
@@ -85,6 +87,11 @@ harness = false
 [[test]]
 # Runs on the main thread (the CoreText font registry).
 name = "text_weight"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText font registry).
+name = "text_box"
 harness = false
 
 [[test]]

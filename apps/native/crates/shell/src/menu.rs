@@ -245,7 +245,14 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::command("Open Recent", "openRecent", ""),
                 r("Projects…", "projects"),
                 sep(),
-                m("closeTab"),
+                // ⌘W closes the tab (Tabs) or the project (Separate Windows),
+                // named by the mode the menu bar was built in.
+                if crate::tabs_mode() {
+                    m("closeTab")
+                } else {
+                    let e = eq.iter().find(|e| e.command == "closeTab").unwrap();
+                    Item::command("Close Project", "closeTab", &e.accelerator)
+                },
                 sep(),
                 m("save"),
                 m("saveAs"),
@@ -507,6 +514,17 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::command("Panel Library", "panelLibrary", ""),
                 Item::command("Maximize Panel", "maximizePanel", "`"),
                 Item::command("Restore Panel", "restorePanel", ""),
+                sep(),
+                // v1's tab items (Settings › General › Open Projects In:
+                // with Separate Windows a new tab is a new window).
+                Item::command("New Tab", "newTab", ""),
+                m("nextTab"),
+                m("previousTab"),
+                Item::command("Move Tab to New Window", "moveTabToNewWindow", ""),
+                // The app's own: AppKit's merges nothing for windows that
+                // never tab on their own (`editor_window_tabbing`).
+                Item::command("Merge All Windows", "mergeAllWindows", ""),
+                Item::role("Show All Tabs", "toggleTabOverview:", ""),
                 sep(),
                 Item::command("Store", "store", ""),
                 Item::command("Background Tasks", "backgroundTasks", "cmd+9"),

@@ -418,6 +418,15 @@ pub fn decoded_bytes_estimate(path: &Path) -> Result<usize> {
     Ok(w as usize * h as usize * 4 * sample)
 }
 
+/// [`decoded_bytes_estimate`] of the preview [`read_preview`] makes at
+/// `edge` (its longest side), never more than the whole image's.
+pub fn preview_bytes_estimate(path: &Path, edge: u32) -> Result<usize> {
+    let whole = decoded_bytes_estimate(path)?;
+    let (w, h) = pixel_size(path)?;
+    let ratio = (f64::from(edge) / f64::from(w.max(h).max(1))).min(1.0);
+    Ok((whole as f64 * ratio * ratio).ceil() as usize)
+}
+
 /// Frame count and delays; None for a single image.
 pub fn animation(path: &Path) -> Result<Option<Animation>> {
     let src = source(path)?;

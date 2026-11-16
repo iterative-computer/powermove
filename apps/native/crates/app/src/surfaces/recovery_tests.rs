@@ -17,7 +17,7 @@ fn on_escape(a: &Alert<Action>) -> Option<Action> {
 #[test]
 fn ask_exact_copy_and_safe_keyboard() {
     for truncated in [false, true] {
-        let a = ask_recovery("Launch Film", truncated, true);
+        let a = ask_recovery("Launch Film", truncated, true, false);
         assert_eq!(
             a.message,
             "Powermove quit unexpectedly while “Launch Film” had unsaved changes."
@@ -43,7 +43,7 @@ fn ask_exact_copy_and_safe_keyboard() {
 #[test]
 fn unarchivable_edits_never_offer_discard() {
     assert_eq!(
-        labels(&ask_recovery("Synthetic", false, false)),
+        labels(&ask_recovery("Synthetic", false, false, false)),
         ["Recover", "Open as Copy"]
     );
 }
@@ -157,7 +157,7 @@ fn unrecoverable_reply_never_leaks_diagnostics_or_discards() {
 }
 #[test]
 fn reopening_after_a_stop_says_so_and_keeps_the_choices() {
-    let a = after_stop(ask_recovery("Launch Film", false, false), "Launch Film");
+    let a = after_stop(ask_recovery("Launch Film", false, false, false), "Launch Film");
     assert_eq!(
         a.message,
         "“Launch Film” stopped after an internal error with unsaved changes."
@@ -195,4 +195,16 @@ fn unrecoverable_says_what_could_not_be_recovered() {
         a.informative
     );
     assert_eq!(labels(&a), ["Open Saved Version", "OK"]);
+}
+
+/// A quit signal (logout, shutdown, a script) left the work on purpose: the
+/// offer says so plainly, never "unexpectedly"; the buttons are the same.
+#[test]
+fn after_a_quit_signal_the_offer_is_plain() {
+    let a = ask_recovery("Launch Film", false, true, true);
+    assert_eq!(
+        a.message,
+        "Powermove quit before the changes to “Launch Film” were saved."
+    );
+    assert_eq!(labels(&a), ["Recover", "Open as Copy", "Discard Edits"]);
 }

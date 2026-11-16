@@ -148,50 +148,86 @@ pub fn tokens() -> Tokens {
     };
     theme::tokens(scheme, native::settings())
 }
-/// Reopens the saved windows (all of them only when the system keeps windows
-/// on quit; see `Session::restore_plan`). With no session, one new window.
+/// Reopens the saved windows and tabs, every one (as v1 did), with the one
+/// that was in front in front again. With no session, one new window.
 fn restore_session(cx: &mut App) {
-    let plan = view::session_path()
-        .filter(|p| p.exists())
-        .and_then(|p| match session::Session::load(&p) {
+    let mut front = None;
+    let path = view::session_path().filter(|p| p.exists());
+    let plan = path
+        .as_ref()
+        .and_then(|p| match session::Session::load(p) {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("Window session could not be restored: {e}");
                 None
             }
         })
-        .map(|s| s.restore_plan(keeps_windows()))
+        .map(|s| {
+            let plan = s.launch_plan(crate::tabs_mode(), keeps_windows());
+            front = s.key.filter(|k| plan.iter().any(|w| w.id == *k));
+            plan
+        })
         .unwrap_or_default();
+    // The file holds what this launch reopens and nothing older: entries an
+    // earlier build left behind go (PM-392). Queued before any window
+    // writes its own state.
+    if let Some(path) = &path
+        && !plan.is_empty()
+    {
+        session::write(
+            path,
+            session::Change::Replace(session::Session {
+                version: 1,
+                windows: plan.clone(),
+                key: front,
+                complete: true,
+            }),
+        );
+    }
     if plan.is_empty() {
         open_editor_window(cx, true, None, None);
         return;
     }
+    // The window (or tab group) that was in front opens last, so it lies
+    // over the others from the start: separate windows each take the front
+    // as they open.
+    let group = |s: &session::WindowState| s.tab_group.unwrap_or(s.id);
+    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
+    let (mut plan, last): (Vec<_>, Vec<_>) =
+        plan.into_iter().partition(|s| Some(group(s)) != front_group);
+    plan.extend(last);
     for state in plan {
         let leader = state.tab_group;
         open_editor_window(cx, true, Some(state), leader);
     }
-}
-/// System Settings ▸ Desktop & Dock ▸ “Close windows when quitting an application”
-/// off ⇒ `NSQuitAlwaysKeepsWindows`. `PM_NATIVE_RESTORE=all|one` overrides it.
-fn keeps_windows() -> bool {
-    match std::env::var("PM_NATIVE_RESTORE").as_deref() {
-        Ok("all") => return true,
-        Ok("one") => return false,
-        _ => {}
+    // Once the tabs have joined their groups (a turn later), the window that
+    // was in front comes forward again, its tab the one shown.
+    if let Some(id) = front {
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = cx.update(|_| native::bring_session_window(id));
+        })
+        .detach();
     }
-    use objc2_foundation::{NSString, NSUserDefaults};
-    NSUserDefaults::standardUserDefaults()
-        .boolForKey(&NSString::from_str("NSQuitAlwaysKeepsWindows"))
+}
+/// Every window and tab comes back on relaunch with its project, as v1
+/// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
+/// windows when quitting an application”. `PM_NATIVE_RESTORE=one` brings
+/// back the front window alone (tests, reviews).
+fn keeps_windows() -> bool {
+    std::env::var("PM_NATIVE_RESTORE").as_deref() != Ok("one")
 }
 /// A new editor window, cascaded from the key one (File ▸ New Window).
 pub fn open_editor(cx: &mut App) {
     open_editor_window(cx, true, None, None);
 }
-/// Was: a new editor window as a native tab of `leader`'s. One project per
-/// window now, so it is a window of its own.
+/// A new editor window as a native tab of `leader`'s (Tabs mode), else a
+/// window of its own.
 pub fn open_editor_tab(cx: &mut App, leader: u64) {
-    let _ = leader;
-    open_editor_window(cx, true, None, None);
+    let leader = (crate::tabs_mode() && leader != 0).then_some(leader);
+    open_editor_window(cx, true, None, leader);
 }
 fn next_window_id() -> u64 {
     thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
@@ -246,6 +282,7 @@ fn open_editor_window(
             };
             if let Some(s) = restore.as_ref().filter(|_| visible) {
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+                host.borrow_mut().restored_pages = s.pages.clone();
             }
             if visible {
                 let h = host.borrow();

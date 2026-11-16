@@ -779,11 +779,11 @@ impl Render for PanelLibrary {
             sidebar = sidebar.child(
                 kit.row(format!("library-page-{page:?}"), self.page == page)
                     .role(Role::Button)
-                    .aria_label(format!("{}, {count}", page.title()))
+                    // A quiet list: the page's name, no count (owner rule).
+                    .aria_label(page.title().to_string())
                     .tab_index(0)
                     .child(kit.symbol(symbol, m.symbol_panel, Weight::Regular, c.muted))
                     .child(div().flex_1().child(page.title()))
-                    .child(kit::shelf_count(&t, count))
                     .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
                         if e.keystroke.key == "enter" {
                             v.set_page(page, cx);
