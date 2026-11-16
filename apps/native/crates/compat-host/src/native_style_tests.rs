@@ -11,9 +11,6 @@ fn golden_stylesheet() {
         std::fs::write(&path, &css).unwrap();
     }
     assert_eq!(css, std::fs::read_to_string(path).unwrap());
-    if let Ok(dir) = std::env::var("PM_FRAME_CAPTURE_DIR") {
-        std::fs::write(std::path::Path::new(&dir).join("native-frame.css"), &css).unwrap();
-    }
 }
 #[test]
 fn every_token_matches_each_resolved_scheme() {
@@ -306,10 +303,6 @@ fn native_backing_matches_panel_over_window_over_every_backdrop() {
                 },
             );
             let backing = panel_backing(&t);
-            if !solid && let Ok(dir) = std::env::var("PM_FRAME_CAPTURE_DIR") {
-                std::fs::write(std::path::Path::new(&dir).join(format!("{scheme:?}-surface.json")),
-                    serde_json::to_string_pretty(&serde_json::json!({"surface": backing, "panel": t.colors.panel, "panel_alpha": t.translucency.panel, "radius": t.metrics.panel_radius, "padding": t.metrics.inset, "header": t.metrics.header})).unwrap()).unwrap();
-            }
             let (window, window_alpha) = t.ground();
             for backdrop in [0., 0.2, 0.5, 1.] {
                 for (channel, shift) in [16, 8, 0].into_iter().enumerate() {

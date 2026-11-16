@@ -929,7 +929,9 @@
 }
 
 /* Native panel frame: the shell owns its surface and elevation. These host
-   roots never add another box; controls inside keep their own decoration. */
+   roots never add another box; controls inside keep their own decoration.
+   The body's padding stays the extension's, as in v1 (extensions pad their
+   own roots; a host inset would double it). */
 html,
 body,
 [data-pm-contribution],
@@ -939,7 +941,4 @@ body,
   border-radius: 0 !important;
   box-shadow: none !important;
   margin: 0 !important;
-}
-:where([data-pm-panel-body]) {
-  padding: var(--pm-inset);
 }
