@@ -988,7 +988,9 @@ impl McpSession {
             "select_layers" => {
                 let ids = prepared_selection.unwrap();
                 if self.agent_token.is_none() {
-                    return host.select_layers(&id, &ids, args["add"] == true, self.writer);
+                    let selection =
+                        host.select_layers(&id, &ids, args["add"] == true, self.writer)?;
+                    return Ok(json!({"selection":selection}));
                 }
                 Ok({
                     if args["add"] != true {
