@@ -497,7 +497,10 @@ fn take_write_feedback(
     result: Result<String, String>,
     done: impl FnOnce(String) -> String,
 ) {
-    let message = match result { Ok(label) => done(label), Err(error) => error };
+    let message = match result {
+        Ok(label) => done(label),
+        Err(error) => error,
+    };
     *panel = message.clone();
     *window = message;
 }
@@ -506,10 +509,14 @@ mod take_feedback_tests {
     use super::take_write_feedback;
     #[test]
     fn completed_take_writes_report_success_and_failure_in_the_window() {
-        for (result, expected) in [(Ok("Opening shot".into()), "Saved Opening shot"),
-            (Err("The disk is full".into()), "The disk is full")] {
+        for (result, expected) in [
+            (Ok("Opening shot".into()), "Saved Opening shot"),
+            (Err("The disk is full".into()), "The disk is full"),
+        ] {
             let (mut panel, mut window) = (String::new(), String::new());
-            take_write_feedback(&mut panel, &mut window, result, |label| format!("Saved {label}"));
+            take_write_feedback(&mut panel, &mut window, result, |label| {
+                format!("Saved {label}")
+            });
             assert_eq!(window, expected);
             assert_eq!(panel, expected);
         }
