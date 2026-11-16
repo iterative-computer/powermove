@@ -2960,14 +2960,7 @@ impl TimelineSurface {
             .map(|i| match i.id {
                 pm_panel_timeline::MenuItem::SEPARATOR => serde_json::json!({"separator":true}),
                 pm_panel_timeline::MenuItem::HEADER => serde_json::json!({"header":true,"label":i.label}),
-                id => {
-                    let mut row = serde_json::json!({"id":id,"label":i.label,"disabled":!i.enabled,"checked":i.checked});
-                    // v1 draws each ease with its curve.
-                    if let Some(name) = id.strip_prefix("ease.") {
-                        row["curve"] = serde_json::json!(pm_eval::easing::preset(name));
-                    }
-                    row
-                }
+                id => serde_json::json!({"id":id,"label":i.label,"disabled":!i.enabled,"checked":i.checked}),
             })
             .collect();
         // Host commands after the timeline's own rows, by the index the menu

@@ -1048,9 +1048,6 @@ impl Controller {
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
                     entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
-                    entry.curve = row["curve"].as_array().and_then(|c| {
-                        Some([c.first()?.as_f64()?, c.get(1)?.as_f64()?, c.get(2)?.as_f64()?, c.get(3)?.as_f64()?])
-                    });
                     entry
                 })
                 .collect()

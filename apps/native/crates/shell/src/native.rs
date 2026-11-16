@@ -74,8 +74,6 @@ pub struct MenuEntry {
     pub children: Vec<MenuEntry>,
     /// A section's title (the keyframe menu's "Keyframe"): no action.
     pub header: bool,
-    /// An ease row's curve `[x1, y1, x2, y2]`, drawn beside its name.
-    pub curve: Option<[f64; 4]>,
     /// The key the menu bar shows for the row's command (`menu::chord_for`).
     pub shortcut: Option<String>,
 }
@@ -88,7 +86,6 @@ impl MenuEntry {
             enabled: true,
             children: vec![],
             header: false,
-            curve: None,
             shortcut: None,
         }
     }
@@ -7774,9 +7771,6 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
             continue;
         }
         let item = named_item(mtm, &entry.label, &entry.command);
-        if let Some(curve) = entry.curve {
-            item.setImage(Some(&ease_curve_image(curve)));
-        }
         if let Some(chord) = &entry.shortcut {
             let (key, flags) = menu::accelerator(chord);
             item.setKeyEquivalent(&NSString::from_str(&key));
@@ -7797,30 +7791,6 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
         }
         menu.addItem(&item);
     }
-}
-
-/// An ease's curve as a menu item's template image (it takes the menu's text
-/// colour, and the highlight's): the curve from (0, 0) to (1, 1) through its
-/// two handles, scaled to show an overshoot.
-pub fn ease_curve_image(curve: [f64; 4]) -> Retained<NSImage> {
-    use objc2_app_kit::{NSBezierPath, NSColor};
-    let low = curve[1].min(curve[3]).min(0.);
-    let high = curve[1].max(curve[3]).max(1.);
-    let handler = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
-        let inset = 1.5;
-        let (w, h) = (rect.size.width - 2. * inset, rect.size.height - 2. * inset);
-        let at = |x: f64, y: f64| NSPoint::new(inset + x * w, inset + (y - low) / (high - low) * h);
-        let path = NSBezierPath::bezierPath();
-        path.moveToPoint(at(0., 0.));
-        path.curveToPoint_controlPoint1_controlPoint2(at(1., 1.), at(curve[0], curve[1]), at(curve[2], curve[3]));
-        path.setLineWidth(1.4);
-        NSColor::blackColor().setStroke();
-        path.stroke();
-        objc2::runtime::Bool::YES
-    });
-    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(18., 14.), false, &handler);
-    image.setTemplate(true);
-    image
 }
 
 /// The viewer slot's AppKit side: a view whose picture is the engine's Metal

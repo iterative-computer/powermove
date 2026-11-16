@@ -165,13 +165,6 @@ fn append_menu(
             item.setKeyEquivalent(&NSString::from_str(&key));
             item.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags(flags as _));
         }
-        // An ease row shows its curve beside its name (v1's ease menu).
-        if let Some(curve) = option.get("curve").and_then(Value::as_array)
-            && let [x1, y1, x2, y2] = curve.as_slice()
-            && let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1.as_f64(), y1.as_f64(), x2.as_f64(), y2.as_f64())
-        {
-            item.setImage(Some(&pm_shell::ease_curve_image([x1, y1, x2, y2])));
-        }
         unsafe {
             item.setTarget(Some(target));
         }
