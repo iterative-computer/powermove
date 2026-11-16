@@ -2569,6 +2569,22 @@ impl SurfaceView {
                 .width;
             element = element.min_w(width);
         }
+        if let Some((labels, room)) = &node.fits_labels {
+            let mut text = window.text_style();
+            text.refine(&node.style.text);
+            let size = text.font_size.to_pixels(window.rem_size());
+            let widest = labels
+                .iter()
+                .map(|label| {
+                    let run = text.to_run(label.len());
+                    window
+                        .text_system()
+                        .shape_line(label.clone(), size, &[run])
+                        .width
+                })
+                .fold(px(0.), |a, b| a.max(b));
+            element = element.min_w(widest + px(*room)).flex_shrink_0();
+        }
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }

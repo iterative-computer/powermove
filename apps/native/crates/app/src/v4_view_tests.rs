@@ -1922,3 +1922,50 @@ fn a_deep_panel_tree_renders_within_a_small_stack(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(bounds(&mut vcx, "deepest").size.width > px(0.));
 }
+
+/// A rail that names its labels (`metadata.fitsLabels`) is at least as wide
+/// as the widest of them with its padding and its rows' indent, and keeps
+/// that width in a container too narrow for it and the list beside it: the
+/// Effects rail never cuts a category's name (PM-455).
+#[gpui::test]
+fn a_rail_is_as_wide_as_its_widest_name_in_a_narrow_dock(cx: &mut TestAppContext) {
+    let rail_width = |cx: &mut TestAppContext, labels: Value| {
+        let rig = rig("viewer", 1);
+        let _ = publication(&rig);
+        let mut ops = node_ops(
+            1,
+            0,
+            "div",
+            json!({"style":{"display":"flex","flexDirection":"row","width":160,"height":120}}),
+            &[],
+        );
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"id":"rail","data-pm-component":"list","label":"Categories",
+                "metadata":{"fitsLabels":labels,"fitsInsetToken":"metrics.gap"},
+                "style":{"flexGrow":0,"flexShrink":0,"flexBasis":"auto","minWidth":20,
+                    "paddingLeft":8,"paddingRight":8,"fontSize":{"token":"typography.body"}}}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "div",
+            json!({"id":"list","style":{"flexGrow":1,"minWidth":0}}),
+            &[],
+        ));
+        let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+        vcx.run_until_parked();
+        bounds(&mut vcx, "rail").size.width
+    };
+    let short = rail_width(cx, json!(["All"]));
+    let long = rail_width(cx, json!(["All", "JB Air Backgrounds"]));
+    let none = rail_width(cx, json!([]));
+    assert_eq!(short, none, "a short name leaves the list its own width");
+    assert!(
+        long > none && long > px(130.),
+        "the widest name sets the rail's width in a 160 pt row: {long:?}"
+    );
+}
