@@ -3504,8 +3504,12 @@ mod playback_pool_tests {
         // they land; twice the bound held is a leak, and the error says what
         // holds it.
         engine.cache.clear();
-        let flying: Vec<_> = (0..POOL_BOUND).map(|_| engine.cache_surface(small).unwrap()).collect();
-        let past = engine.cache_surface(large).expect("a frame past a full pool");
+        let flying: Vec<_> = (0..POOL_BOUND)
+            .map(|_| engine.cache_surface(small).unwrap())
+            .collect();
+        let past = engine
+            .cache_surface(large)
+            .expect("a frame past a full pool");
         assert_eq!(engine.pool.len(), POOL_BOUND + 1);
         drop((flying, past));
         engine.cache_surface(small).unwrap();
