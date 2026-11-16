@@ -445,6 +445,14 @@ impl pm_shell::integration::Integration for Bridge {
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
     }
+    fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
+        if id != "timeline" {
+            return;
+        }
+        if let Some(timeline) = self.0.read(cx).builtins.timeline.clone() {
+            timeline.update(cx, |t, cx| t.set_focused(focused, cx));
+        }
+    }
     fn workspaces(&self, cx: &App) -> Option<std::rc::Rc<pm_shell::workspace::Store>> {
         Some(self.0.read(cx).workspace_store())
     }

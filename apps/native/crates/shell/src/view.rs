@@ -2549,6 +2549,10 @@ impl Render for Editor {
                 root = root.child(panel);
                 continue;
             }
+            if let (Some(i), Some(f)) = (self.integration.clone(), self.panel_focus.get(&id)) {
+                let focused = f.contains_focused(w, cx);
+                i.panel_focused(&id, focused, cx);
+            }
             let content = self
                 .integration
                 .as_ref()

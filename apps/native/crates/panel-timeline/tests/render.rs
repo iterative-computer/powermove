@@ -785,6 +785,28 @@ fn selected_rows_use_accent_tints_in_light_and_dark() {
     }
 }
 
+/// PM-367: the accent marks the selection only while the timeline holds the
+/// keyboard; elsewhere selected rows take the neutral selection fill, and
+/// hover is unchanged.
+#[test]
+fn selected_rows_go_neutral_when_the_timeline_lacks_focus() {
+    let t = tokens();
+    for (selected, hovered, expected) in [
+        (true, false, t.colors.selected_fill),
+        (true, true, t.colors.selected_fill),
+        (false, true, t.colors.hover),
+    ] {
+        let mut r = row("states", RowContent::Layer { clip: Some(clip("states")), summary: vec![].into() });
+        r.selected = selected;
+        r.hovered = hovered;
+        let mut s = Scene::new(vec![r], 10., 30., &t).unwrap();
+        s.focused = false;
+        let wire = s.prepare(viewport(&t), &t).unwrap().wire();
+        let row = wire["ops"].as_array().unwrap().iter().find(|o| o["id"] == "row:states").unwrap();
+        assert_eq!(row["color"], expected, "{selected} {hovered}");
+    }
+    assert_ne!(t.colors.selected_fill, t.colors.timeline_selected);
+}
 
 /// Five points in from either end of a strip trims that end, wherever the
 /// zoom puts its ends between points (acceptance found the out end giving

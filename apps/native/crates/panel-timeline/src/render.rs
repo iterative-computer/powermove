@@ -339,6 +339,9 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
     stagger: HashMap<String, Vec<crate::stagger::Band>>,
+    /// The timeline holds the keyboard: selected rows take the accent tint
+    /// then, the neutral selection fill otherwise (the Mac convention, PM-367).
+    pub focused: bool,
 }
 /// Where dropped media joins the layer stack ([`Scene::drop_before`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -669,6 +672,7 @@ impl Scene {
             markers: vec![],
             bars: vec![],
             stagger: HashMap::new(),
+            focused: true,
         })
     }
     /// v1's `layerDrop` geometry: the layer row under `y` (panel space; a
@@ -1047,7 +1051,9 @@ impl Scene {
                 format!("row:{}", row.id),
                 "rect",
                 rect,
-                if row.selected && row.hovered {
+                if row.selected && !self.focused {
+                    c.selected_fill
+                } else if row.selected && row.hovered {
                     c.timeline_selected_hover
                 } else if row.selected {
                     c.timeline_selected

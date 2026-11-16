@@ -386,6 +386,9 @@ pub struct TimelineSurface {
     reading: BTreeSet<crate::waveforms::Key>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
+    /// The timeline panel holds the keyboard (the shell says, as it lays
+    /// the panel out): selected rows take the accent tint only then.
+    focused: bool,
     /// The graph on screen; its value range may be held (`steady_graph`).
     graph: Option<Arc<Graph>>,
     /// The latest graph over its own fitted range, for Fit Selected Curves.
@@ -518,6 +521,7 @@ impl TimelineSurface {
             skimmer: None,
             pointer: None,
             hover_clip: None,
+            focused: false,
             activation: None,
             media_over: None,
             effect_over: None,
@@ -1052,7 +1056,7 @@ impl TimelineSurface {
             }
         }
         self.model = built.model;
-        self.scene = Some(built.scene.clone());
+        self.scene = Some(self.with_focus(built.scene.clone()));
         self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());
         // A range the wheel panned to stays for its view.
         let panned = match (&self.graph, &self.graph_view) {
@@ -1068,7 +1072,7 @@ impl TimelineSurface {
             None => {}
         }
         self.graph_fitted = built.graph;
-        self.outline.set_scene(Some(built.scene));
+        self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
         let duration = self.model.index.duration;
@@ -3027,6 +3031,29 @@ impl TimelineSurface {
     #[cfg(test)]
     pub fn graph(&self) -> Option<Arc<Graph>> {
         self.graph.clone()
+    }
+    /// The shell says whether the timeline panel holds the keyboard; the
+    /// selected rows' tint follows it (PM-367).
+    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        if let Some(scene) = self.scene.take() {
+            let scene = self.with_focus(scene);
+            self.outline.set_scene(Some(scene.clone()));
+            self.scene = Some(scene);
+            self.frame = None;
+            cx.notify();
+        }
+    }
+    fn with_focus(&self, scene: Arc<Scene>) -> Arc<Scene> {
+        if scene.focused == self.focused {
+            return scene;
+        }
+        let mut next = Scene::clone(&scene);
+        next.focused = self.focused;
+        Arc::new(next)
     }
     #[cfg(test)]
     pub fn scene(&self) -> Option<Arc<Scene>> {
