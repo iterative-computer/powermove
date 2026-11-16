@@ -1187,7 +1187,9 @@ impl Controller {
         }
         let layer = self.gizmo_layer.as_mut().unwrap();
         match at {
-            Some(at) if !lines.is_empty() => layer.set(&lines, at, scale),
+            Some(at) if !lines.is_empty() || !self.gizmo_marks.is_empty() => {
+                layer.set(&lines, &self.gizmo_marks, at, scale)
+            }
             _ => layer.clear(),
         }
     }

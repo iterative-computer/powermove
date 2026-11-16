@@ -2692,6 +2692,9 @@ impl crate::gizmo::Host for ControllerDelegate {
     ) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
     }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.gizmo_marks = marks);
+    }
     fn pick_surface(
         &self,
         at: [f32; 2],
