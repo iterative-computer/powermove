@@ -458,6 +458,7 @@ fn ask_session_failed(error: &str, cx: &mut App) {
 fn finish_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
     let host = cx.global::<QuitCoordinator>().host.clone();
+    let signal = cx.global::<QuitCoordinator>().terminating;
     for weak in cx.global::<QuitCoordinator>().controllers.clone() {
         let _ = weak.update(cx, |v, cx| {
             v.closing_note = Some("Quitting: writing the project library…".into());
@@ -474,7 +475,7 @@ fn finish_quit(cx: &mut App) {
         }
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // The Error Log's store: this quit was not a crash.
-            crate::error_log::session_ended().await;
+            crate::error_log::session_ended(signal).await;
         }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the

@@ -19,7 +19,11 @@ use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{OnceLock, mpsc},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -95,9 +99,21 @@ enum Persist {
     Log { code: String, text: String },
     Clear,
     Bundle(PathBuf, async_channel::Sender<Result<(), String>>),
-    Ended(async_channel::Sender<()>),
+    /// A clean quit; `true` when a quit signal (logout, shutdown, a script)
+    /// asked for it.
+    Ended(async_channel::Sender<()>, bool),
 }
 static WORKER: OnceLock<mpsc::Sender<Persist>> = OnceLock::new();
+/// Left in the diagnostics folder by a quit a signal asked for, and taken
+/// back at the next launch: unsaved work it left is offered as a quit's,
+/// not a crash's.
+const SIGNAL_QUIT: &str = "quit-signal";
+static LAST_QUIT_BY_SIGNAL: AtomicBool = AtomicBool::new(false);
+/// The last session ended by a quit signal (unsaved work stayed in its
+/// journal on purpose), not by a crash.
+pub fn last_quit_by_signal() -> bool {
+    LAST_QUIT_BY_SIGNAL.load(Ordering::Relaxed)
+}
 fn send(request: Persist) {
     if let Some(worker) = WORKER.get() {
         let _ = worker.send(request);
@@ -118,6 +134,8 @@ pub fn persist(profile: &Path, cx: &mut App) {
     if WORKER.get().is_some() {
         return;
     }
+    let marker = profile.join("diagnostics").join(SIGNAL_QUIT);
+    LAST_QUIT_BY_SIGNAL.store(std::fs::remove_file(&marker).is_ok(), Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     let _ = WORKER.set(tx);
     let (rows_tx, rows_rx) = async_channel::bounded(1);
@@ -150,7 +168,8 @@ fn worker(profile: &Path, rx: mpsc::Receiver<Persist>, rows: async_channel::Send
                     Persist::Bundle(_, reply) => {
                         let _ = reply.try_send(Err(error.to_string()));
                     }
-                    Persist::Ended(reply) => {
+                    Persist::Ended(reply, signal) => {
+                        mark_signal_quit(profile, signal);
                         let _ = reply.try_send(());
                     }
                     _ => {}
@@ -186,8 +205,9 @@ fn worker(profile: &Path, rx: mpsc::Receiver<Persist>, rows: async_channel::Send
                     .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
                 let _ = reply.try_send(result);
             }
-            Persist::Ended(reply) => {
+            Persist::Ended(reply, signal) => {
                 let _ = storage.archive_setting(RUNNING);
+                mark_signal_quit(profile, signal);
                 let _ = reply.try_send(());
             }
         }
@@ -226,11 +246,18 @@ fn unsaved_work(profile: &Path) -> bool {
             .any(|d| !pm_kernel::journal::sessions(&d.path()).is_empty())
     })
 }
-/// A clean quit clears the running marker. A worker that died drops the
-/// reply, so this never waits on it.
-pub async fn session_ended() {
+fn mark_signal_quit(profile: &Path, signal: bool) {
+    if signal {
+        let _ = std::fs::create_dir_all(profile.join("diagnostics"));
+        let _ = std::fs::write(profile.join("diagnostics").join(SIGNAL_QUIT), b"");
+    }
+}
+/// A clean quit clears the running marker; `signal`: a quit signal asked for
+/// it (`last_quit_by_signal` at the next launch). A worker that died drops
+/// the reply, so this never waits on it.
+pub async fn session_ended(signal: bool) {
     let (tx, rx) = async_channel::bounded(1);
-    send(Persist::Ended(tx));
+    send(Persist::Ended(tx, signal));
     let _ = rx.recv().await;
 }
 /// System-relative time, in the column's short form.
@@ -376,8 +403,19 @@ pub fn open(log: Shared, cx: &mut App) {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Home, Log, LogRedactor, age, code};
+    use super::{Home, Log, LogRedactor, SIGNAL_QUIT, age, code, mark_signal_quit};
     use std::time::{Duration, SystemTime};
+    /// A quit a signal asked for leaves its marker for the next launch's
+    /// recovery offer to read; a plain quit leaves none.
+    #[test]
+    fn a_signal_quit_leaves_its_marker_and_a_plain_quit_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("diagnostics").join(SIGNAL_QUIT);
+        mark_signal_quit(dir.path(), false);
+        assert!(!marker.exists());
+        mark_signal_quit(dir.path(), true);
+        assert!(marker.exists());
+    }
     #[test]
     fn stored_rows_use_codes_and_hide_the_home_folder() {
         assert_eq!(code("Media Offline"), "Media-Offline");
