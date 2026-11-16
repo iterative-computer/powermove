@@ -79,6 +79,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.column_least` | Narrowest side column | 200 | 200 | 200 | 200 |
 | `metrics.column_most` | Widest side column | 760 | 760 | 760 | 760 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
+| `metrics.composer_tray` | Agent composer's tray around its field | 4 | 4 | 4 | 4 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
 | `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |
