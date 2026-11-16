@@ -330,7 +330,7 @@ impl Controller {
                 } => {
                     if v.session.is_none() && !v.opening {
                         if let Some(project) = &project {
-                            v.stage_poster(project);
+                            v.stage_open(project);
                         }
                         v.begin_ghost(&name, aspect, cx);
                     }

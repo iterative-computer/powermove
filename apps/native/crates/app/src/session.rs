@@ -84,6 +84,9 @@ pub struct Controller {
     /// The picture the viewer shows, kept as the last frame once it holds
     /// still (`poster::still`).
     pub(crate) last_frame_watch: crate::poster::StillWatch,
+    /// The opening project's saved workspace, laid out from the moment the
+    /// open is chosen until the project lands with it (PM-384).
+    pub(crate) opening_workspace: Option<pm_model::Value>,
     /// This window was in front at the last quit and is opening its
     /// project before the other restored windows (`release_front`).
     front_restore: bool,
@@ -904,6 +907,7 @@ impl Controller {
             ghost_poster: None,
             viewer_poster: None,
             last_frame_watch: Default::default(),
+            opening_workspace: None,
             front_restore: false,
             ghosted: Default::default(),
             revealed: Default::default(),
@@ -1093,6 +1097,7 @@ impl Controller {
     /// An open that ended without a project: the ghost goes, Home is back.
     pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
         self.release_front();
+        self.opening_workspace = None;
         self.opening_name = None;
         self.ghosted.clear();
         self.revealed.clear();
@@ -1172,7 +1177,7 @@ impl Controller {
         // Its picture stands in from the window's first frame, while the
         // library is read (PM-384).
         if keep {
-            self.stage_poster(&project);
+            self.stage_open(&project);
         }
         let front = self.host.borrow().restored_front;
         self.front_restore = front;
@@ -1203,7 +1208,7 @@ impl Controller {
                     && v.session.is_none()
                     && !v.opening
                 {
-                    v.stage_poster(id);
+                    v.stage_open(id);
                     v.begin_ghost(name, None, cx);
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_poster = None;
@@ -1925,7 +1930,7 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        self.stage_poster(&open_id);
+        self.stage_open(&open_id);
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
@@ -1966,13 +1971,18 @@ impl Controller {
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
-    /// The picture the viewer last showed for `project` stands in the
-    /// opening viewer until its first real frame; Home's poster where none
-    /// was kept (PM-384).
-    pub(crate) fn stage_poster(&mut self, project: &str) {
+    /// `project` opening: the picture its viewer last showed stands in the
+    /// opening viewer until its first real frame (Home's poster where none
+    /// was kept), and the window lays out its saved workspace (PM-384).
+    pub(crate) fn stage_open(&mut self, project: &str) {
         self.ghost_poster = crate::poster::opening_poster(&self.profile, project);
         self.viewer_poster = self.ghost_poster.clone();
         self.last_frame_watch.shown = None;
+        // Its own panels at their sizes, the viewer's slot included, not
+        // the layout another window saved last (a few kilobytes: read here
+        // so the first frame already has them).
+        self.opening_workspace =
+            pm_kernel::library::LibraryStore::open(&self.profile).saved_workspace(project);
     }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(
@@ -2001,7 +2011,7 @@ impl Controller {
             return;
         };
         if let ShellReply::Opened { session, .. } = &reply {
-            self.stage_poster(&session.project);
+            self.stage_open(&session.project);
         }
         // A library project's saved version is in the library, wherever its file went.
         self.settle_open(
