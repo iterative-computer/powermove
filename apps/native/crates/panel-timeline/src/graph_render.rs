@@ -81,9 +81,6 @@ pub const PLOT_BOTTOM: f64 = 16.;
 pub const VERTEX: f64 = 8.;
 pub const POINT_HIT: f64 = 8.;
 pub const HANDLE_HIT: f64 = 7.;
-/// v1's fixed marks: a selected key's ring, a selected key's handles.
-pub const SELECTED_RING: u32 = 0x62ee88;
-pub const SELECTED_HANDLE: u32 = 0xe7c84b;
 /// The plot inside a graph `region`: values map into it.
 pub fn plot(region: Rect) -> Rect {
     Rect::new(
@@ -92,16 +89,6 @@ pub fn plot(region: Rect) -> Rect {
         region.width,
         (region.height - PLOT_TOP - PLOT_BOTTOM).max(1.),
     )
-}
-/// v1's axis colours (`graphAxisColor`).
-pub fn axis_color(path: &str, index: usize) -> u32 {
-    let axis = path.rsplit('.').next().unwrap_or(path);
-    match axis {
-        "x" => 0xf36870,
-        "y" => 0x84cb78,
-        "z" => 0x6fa7ec,
-        _ => [0xdddfe3, 0xd6ac68, 0xae8cdd, 0x65beb5][index % 4],
-    }
 }
 /// Value lines about every 44 points (`graphValueTicks`).
 pub fn value_ticks(min: f64, max: f64, height: f64) -> Vec<f64> {
@@ -252,6 +239,7 @@ fn valid(p: Point) -> bool {
 /// speed jump at a key shows as one.
 pub fn sample(
     model: &crate::TimelineModel,
+    t: &Tokens,
     mut value: impl FnMut(&str, &str, f64) -> Option<f64>,
 ) -> Option<Graph> {
     const SAMPLES: usize = 48;
@@ -416,7 +404,8 @@ pub fn sample(
         curves.push(Curve {
             id: format!("{layer_id}:{}", channel.path),
             name: crate::property_label(&channel.path),
-            color: axis_color(&channel.path, curves.len()),
+            // v1's axis colours (`graphAxisColor`), in this appearance.
+            color: t.graph_curve(&channel.path, curves.len()),
             focused: true,
             segments,
             points,
@@ -813,7 +802,7 @@ impl Graph {
             for key in &curve.points[start..stop] {
                 let p = point(key.point);
                 // Tangents: dashed, a hollow knob; a selected key's in yellow.
-                let handle_ink = if key.selected { SELECTED_HANDLE } else { ink };
+                let handle_ink = if key.selected { t.graph_handle_selected() } else { ink };
                 for (side, handle) in &key.handles {
                     let h = point(*handle);
                     let side_name = side_name(*side);
@@ -845,7 +834,7 @@ impl Graph {
                     ink,
                 );
                 mark.detail =
-                    json!({"kind":key.shape.name(),"ring":key.selected.then_some(SELECTED_RING)});
+                    json!({"kind":key.shape.name(),"ring":key.selected.then(|| t.graph_key_selected())});
                 mark.clip = Some(body);
                 marks.push(mark);
             }
@@ -1105,10 +1094,24 @@ mod tests {
     }
     #[test]
     fn axes_keep_their_colours_and_keys_their_shapes() {
-        assert_eq!(axis_color("position.x", 3), 0xf36870);
-        assert_eq!(axis_color("position.y", 0), 0x84cb78);
-        assert_eq!(axis_color("position.z", 0), 0x6fa7ec);
-        assert_eq!(axis_color("opacity", 1), 0xd6ac68);
+        // X, Y and Z by axis, others in turn, from the appearance's tokens:
+        // each reads apart from its neighbours and from the plot's ground.
+        for scheme in [pm_design::Scheme::Light, pm_design::Scheme::Dark] {
+            let t = Tokens::new(scheme, Default::default());
+            let inks = [
+                t.graph_curve("position.x", 3),
+                t.graph_curve("position.y", 0),
+                t.graph_curve("position.z", 0),
+                t.graph_curve("opacity", 1),
+            ];
+            for (i, a) in inks.iter().enumerate() {
+                assert_ne!(*a, t.colors.panel, "{scheme:?}");
+                for b in &inks[i + 1..] {
+                    assert_ne!(a, b, "{scheme:?}");
+                }
+            }
+            assert_ne!(t.graph_key_selected(), t.graph_handle_selected());
+        }
         let key = |json: &str| KeyShape::of(&pm_model::json::parse(json).unwrap());
         assert_eq!(key(r#"{"outInterp":"hold"}"#), KeyShape::Hold);
         assert_eq!(key(r#"{"hold":true,"outInterp":"bezier"}"#), KeyShape::Hold);

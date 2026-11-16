@@ -106,6 +106,9 @@ pub struct TimelineModel {
     /// Hide Shy Layers: shy layers (and what a shy group holds) have no row.
     /// They still draw, play and export.
     pub hide_shy: bool,
+    /// The timeline panel does not hold the keyboard: selected rows take
+    /// the neutral selection fill, not the accent (PM-367).
+    pub panel_blurred: bool,
     pub search: String,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
@@ -346,11 +349,20 @@ impl TimelineModel {
         }
     }
     /// The property the graph plots: the focused curve, else the selected
-    /// layer's selected property, else the first revealed one.
+    /// layer's selected property, else the first revealed one. A revealed
+    /// row counts while it is animated or is the selected property (v1's
+    /// `drawGraph` rows): a static row first in the list must not leave the
+    /// graph empty.
     pub fn graph_property(&self) -> Option<(String, String)> {
         let mut candidates: Vec<(String, String)> = vec![];
         for row in self.rows() {
-            if let RowId::Property { layer_id, channel } = &row.id {
+            if let RowId::Property { layer_id, channel } = &row.id
+                && (self.selection.channel() == Some(channel.as_str())
+                    || self
+                        .track_channels(layer_id, channel)
+                        .iter()
+                        .any(|c| !c.keys.is_empty()))
+            {
                 candidates.push((layer_id.clone(), channel.clone()));
             }
         }

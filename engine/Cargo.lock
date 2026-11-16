@@ -2271,6 +2271,7 @@ dependencies = [
  "pm-text",
  "pm-time",
  "pm-vector",
+ "pm-wasm",
  "png",
  "pollster",
  "read-fonts 0.45.0",

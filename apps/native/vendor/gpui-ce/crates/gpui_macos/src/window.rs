@@ -566,6 +566,24 @@ pub(crate) fn convert_mouse_position(
     )
 }
 
+/// Moves a pointer event's position by `offset` (see `view_offset`).
+fn offset_position(event: &mut PlatformInput, offset: Point<Pixels>) {
+    if offset == Point::default() {
+        return;
+    }
+    let position = match event {
+        PlatformInput::MouseDown(e) => &mut e.position,
+        PlatformInput::MouseUp(e) => &mut e.position,
+        PlatformInput::MouseMove(e) => &mut e.position,
+        PlatformInput::MousePressure(e) => &mut e.position,
+        PlatformInput::MouseExited(e) => &mut e.position,
+        PlatformInput::ScrollWheel(e) => &mut e.position,
+        PlatformInput::Pinch(e) => &mut e.position,
+        _ => return,
+    };
+    *position = *position + offset;
+}
+
 /// Stores the cursor style on the active GPUI window and invalidates its cursor rects.
 ///
 /// # Safety
@@ -1075,8 +1093,14 @@ impl MacWindowState {
             if available.as_bool() && std::env::var_os("PM_GPUI_CV_DISPLAY_LINK").is_none() {
                 if self.ca_display_link.is_none() {
                     let link: Retained<Objc2Object>;
+                    // PM-310: the view's own display link paces frames. A
+                    // CAMetalDisplayLink schedules every drawable 41.6 ms ahead
+                    // on a 120 Hz display (five refreshes, whatever its frame
+                    // latency, drawable count or rate range), where a drawable
+                    // the view's link asks the layer for reaches the glass in
+                    // two or three. PM_GPUI_METAL_DISPLAY_LINK=1 measures the old way.
                     #[cfg(not(feature = "wgpu"))]
-                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none()
+                    if std::env::var_os("PM_GPUI_METAL_DISPLAY_LINK").is_some()
                         && self.direct_moved.is_none()
                     {
                         let allocated: *mut Objc2Object =
@@ -1267,10 +1291,27 @@ impl MacWindowState {
         )
     }
 
+    /// The size of GPUI's own view: the window's content when GPUI's view
+    /// fills it, the detail area when a split view hosts it.
     fn content_size(&self) -> Size<Pixels> {
-        let content_view: ObjcId = unsafe { msg_send![self.native_window, contentView] };
-        let frame: Objc2NSRect = unsafe { msg_send![content_view, frame] };
+        let frame: Objc2NSRect = unsafe { msg_send![self.native_view.as_ptr(), frame] };
         size(px(frame.size.width as f32), px(frame.size.height as f32))
+    }
+
+    /// What turns a position measured from the window's top-left (as the
+    /// events convert it, against `content_size`'s height) into one measured
+    /// from GPUI's view: zero while the view sits at the window's origin.
+    fn view_offset(&self) -> Point<Pixels> {
+        let view = self.native_view.as_ptr();
+        let bounds: Objc2NSRect = unsafe { msg_send![view, bounds] };
+        let r: Objc2NSRect =
+            unsafe { msg_send![view, convertRect: bounds, toView: std::ptr::null_mut::<Objc2Object>()] };
+        point(px(-r.origin.x as f32), px(r.origin.y as f32))
+    }
+
+    /// A point in the window's coordinates as a position in GPUI's view.
+    fn view_position(&self, location: Objc2NSPoint) -> Point<Pixels> {
+        convert_mouse_position(location, self.content_size().height) + self.view_offset()
     }
 
     fn scale_factor(&self) -> f32 {
@@ -1945,7 +1986,7 @@ impl PlatformWindow for MacWindow {
                 .native_window
                 .mouseLocationOutsideOfEventStream()
         };
-        convert_mouse_position(position, self.content_size().height)
+        self.0.lock().view_position(position)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -2731,6 +2772,12 @@ impl PlatformWindow for MacWindow {
             // AppKit keeps this frame's distance from the event's location as the drag image's
             // offset from the cursor, so it has to stay anchored on `event`.
             let location: Objc2NSPoint = msg_send![event, locationInWindow];
+            // The items' frames are in the dragging view's own coordinates.
+            let location: Objc2NSPoint = msg_send![
+                native_view,
+                convertPoint: location,
+                fromView: std::ptr::null_mut::<Objc2Object>()
+            ];
             let frame = Objc2NSRect::new(
                 Objc2NSPoint::new(location.x - 16., location.y - 16.),
                 NSSize::new(32., 32.),
@@ -3186,105 +3233,6 @@ fn directional_resize_spec(
     })
 }
 
-static MOVE_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-static ROTATE_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-static ZOOM_IN_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-static ZOOM_OUT_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-
-/// Powermove: a cursor AppKit offers under one of `selectors`, or one drawn
-/// from the SF Symbol `symbol` (black on a heavier white outline, centred hot
-/// spot), made once and kept. Arrow when neither exists.
-#[allow(dead_code)]
-unsafe fn extra_cursor(
-    cache: &std::sync::OnceLock<usize>,
-    selectors: &[Sel],
-    symbol: &str,
-) -> ObjcId {
-    let made = *cache.get_or_init(|| unsafe {
-        let cursor_class = class!(NSCursor);
-        for selector in selectors {
-            let has: Bool = msg_send![cursor_class, respondsToSelector: *selector];
-            if has.as_bool() {
-                let cursor: ObjcId = msg_send![cursor_class, performSelector: *selector];
-                if !cursor.is_null() {
-                    let _: ObjcId = msg_send![cursor, retain];
-                    return cursor as usize;
-                }
-            }
-        }
-        symbol_cursor(symbol) as usize
-    });
-    if made == 0 {
-        unsafe { msg_send![class!(NSCursor), arrowCursor] }
-    } else {
-        made as ObjcId
-    }
-}
-
-#[allow(dead_code)]
-unsafe fn symbol_cursor(symbol: &str) -> ObjcId {
-    unsafe {
-        let tinted = |weight: f64, white: bool| -> ObjcId {
-            let name = ns_string(symbol);
-            let image: ObjcId = msg_send![
-                class!(NSImage),
-                imageWithSystemSymbolName: &*name,
-                accessibilityDescription: std::ptr::null_mut::<Objc2Object>()
-            ];
-            if image.is_null() {
-                return image;
-            }
-            let color: ObjcId = if white {
-                msg_send![class!(NSColor), whiteColor]
-            } else {
-                msg_send![class!(NSColor), blackColor]
-            };
-            let colors: ObjcId = msg_send![class!(NSArray), arrayWithObject: color];
-            let size: ObjcId = msg_send![
-                class!(NSImageSymbolConfiguration),
-                configurationWithPointSize: 14.0f64,
-                weight: weight
-            ];
-            let palette: ObjcId = msg_send![
-                class!(NSImageSymbolConfiguration),
-                configurationWithPaletteColors: colors
-            ];
-            let config: ObjcId = msg_send![size, configurationByApplyingConfiguration: palette];
-            msg_send![image, imageWithSymbolConfiguration: config]
-        };
-        // NSFontWeightHeavy (0.56) for the outline, Regular (0) on top.
-        let (outline, glyph) = (tinted(0.56, true), tinted(0., false));
-        if outline.is_null() || glyph.is_null() {
-            return std::ptr::null_mut();
-        }
-        let side = 24.0f64;
-        let canvas: ObjcId = msg_send![class!(NSImage), alloc];
-        let canvas: ObjcId = msg_send![canvas, initWithSize: NSSize::new(side, side)];
-        let _: () = msg_send![canvas, lockFocus];
-        for image in [outline, glyph] {
-            let size: NSSize = msg_send![image, size];
-            let rect = Objc2NSRect::new(
-                Objc2NSPoint::new((side - size.width) / 2., (side - size.height) / 2.),
-                size,
-            );
-            let _: () = msg_send![
-                image,
-                drawInRect: rect,
-                fromRect: Objc2NSRect::ZERO,
-                operation: 2usize,
-                fraction: 1.0f64
-            ];
-        }
-        let _: () = msg_send![canvas, unlockFocus];
-        let cursor: ObjcId = msg_send![class!(NSCursor), alloc];
-        msg_send![
-            cursor,
-            initWithImage: canvas,
-            hotSpot: Objc2NSPoint::new(side / 2., side / 2.)
-        ]
-    }
-}
-
 /// Uses AppKit's directional frame cursors when available, with a legacy fallback.
 unsafe fn directional_resize_cursor(
     position: NSCursorFrameResizePosition,
@@ -3591,7 +3539,10 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
         }
         _ => {}
     }
-    let event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    let mut event = unsafe { platform_input_from_native(native_event.cast(), Some(window_height)) };
+    if let Some(event) = event.as_mut() {
+        offset_position(event, lock.view_offset());
+    }
 
     if let Some(mut event) = event {
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
@@ -4595,7 +4546,7 @@ fn drag_event_position(
     dragging_info: ObjcId,
 ) -> Point<Pixels> {
     let drag_location: Objc2NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
-    convert_mouse_position(drag_location, window_state.lock().content_size().height)
+    window_state.lock().view_position(drag_location)
 }
 
 fn with_input_handler<F, R>(window: &Objc2Object, f: F) -> Option<R>
@@ -4841,8 +4792,9 @@ unsafe extern "C" fn composition_make_first_responder(
         };
         let accepted: Bool = msg_send![super(this, base), makeFirstResponder: responder];
         if accepted.as_bool() {
-            let content: ObjcId = msg_send![this, contentView];
-            crate::composition_accessibility::responder_changed(content as usize);
+            crate::composition_accessibility::responder_changed(
+                crate::composition_accessibility::adapter_host(this),
+            );
         }
         accepted
     }
@@ -4856,9 +4808,10 @@ unsafe extern "C" fn composition_accessibility_hit_test(
     point: Objc2NSPoint,
 ) -> ObjcId {
     unsafe {
-        let window: ObjcId = msg_send![this, window];
-        let content: ObjcId = msg_send![window, contentView];
-        if crate::composition_accessibility::has_adapter(content as usize) {
+        // The adapter is on GPUI's view's parent (the window's content view,
+        // or the detail view of a split view that hosts it).
+        let content: ObjcId = msg_send![this, superview];
+        if !content.is_null() && crate::composition_accessibility::has_adapter(content as usize) {
             msg_send![content, accessibilityHitTest: point]
         } else {
             msg_send![super(this, class!(NSView)), accessibilityHitTest: point]
