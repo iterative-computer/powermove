@@ -345,11 +345,23 @@ impl EngineJobs {
         }))
     }
     fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
-        self.kernel
+        let published = self
+            .kernel
             .published(&frozen.project_id)
             .filter(|p| p.snapshot.doc_id == frozen.document_id && p.revision() == frozen.revision)
-            .ok_or_else(|| Error::conflict("The composition changed during engine work"))
+            .ok_or_else(|| Error::conflict("The composition changed during engine work"))?;
+        if let Some(comp) = frozen.project["compId"].as_str()
+            && published.snapshot.open_comp().as_deref() != Some(comp)
+        {
+            // Render a private projection, without publishing editor navigation.
+            let mut targeted = (*published).clone();
+            targeted.snapshot =
+                pm_mcp::automation::composition_snapshot(&published.snapshot, comp)?;
+            return Ok(Arc::new(targeted));
+        }
+        Ok(published)
     }
+
     fn start(
         &self,
         published: &Arc<Published>,
