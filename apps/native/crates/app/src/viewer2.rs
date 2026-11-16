@@ -1391,12 +1391,18 @@ mod guide_menu_tests {
     use super::*;
     #[test]
     fn guide_toggles_follow_their_independent_states() {
-        assert!(matches!(GUIDE_TOGGLES[0], ("Lock Guides", Action::LockGuides)));
+        assert!(matches!(
+            GUIDE_TOGGLES[0],
+            ("Lock Guides", Action::LockGuides)
+        ));
         assert!(matches!(GUIDE_TOGGLES[1], ("Snapping", Action::Snapping)));
         for locked in [false, true] {
             for snapping in [false, true] {
                 assert_eq!(guide_checked(GUIDE_TOGGLES[0].1, locked, snapping), locked);
-                assert_eq!(guide_checked(GUIDE_TOGGLES[1].1, locked, snapping), snapping);
+                assert_eq!(
+                    guide_checked(GUIDE_TOGGLES[1].1, locked, snapping),
+                    snapping
+                );
             }
         }
     }
