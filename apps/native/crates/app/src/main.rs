@@ -280,6 +280,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(debug_assertions))]
     let _ = lane_flags;
+    diag::trace_unhide();
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
