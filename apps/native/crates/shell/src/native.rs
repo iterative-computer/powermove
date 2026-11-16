@@ -138,12 +138,30 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
-/// Whether the window menu commands go to has a sheet up.
-fn editor_has_sheet() -> bool {
+/// Whether a sheet is up where the menu's commands would act: the key
+/// window is a sheet or has one (New Project over Home), the main window
+/// has one, or the window commands go to has one.
+fn sheet_up() -> bool {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-    editor_window_number()
-        .and_then(|n| app.windowWithWindowNumber(n))
-        .is_some_and(|w| w.attachedSheet().is_some())
+    app.keyWindow()
+        .is_some_and(|k| k.isSheet() || k.attachedSheet().is_some())
+        || app.mainWindow().is_some_and(|m| m.attachedSheet().is_some())
+        || editor_window_number()
+            .and_then(|n| app.windowWithWindowNumber(n))
+            .is_some_and(|w| w.attachedSheet().is_some())
+}
+/// Whether a text field in the key window is being edited (a sheet's name
+/// field): its own Undo, Cut, Copy and Paste then have something to act on.
+fn key_field_editing() -> bool {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    app.keyWindow()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| {
+            menu::owns_text_edit(
+                unsafe { msg_send![&*r, isKindOfClass: NSTextView::class()] },
+                &r.class().name().to_string_lossy(),
+            )
+        })
 }
 fn active_send(command: Command) {
     if let Some(n) = editor_window_number() {
@@ -683,9 +701,10 @@ define_class!(
                     n => item.setState(if state.checked.contains(n) {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
-                // A sheet on the editor window holds its commands (HIG).
+                // A sheet holds every command that acts on the window under it
+                // (HIG); the app's own and its fields' Edit commands stay.
                 !state.disabled.contains(name)
-                    && (menu::runs_beside_sheet(name) || !editor_has_sheet())
+                    && (!sheet_up() || menu::runs_beside_sheet(name, key_field_editing()))
             } else {
                 true
             }
