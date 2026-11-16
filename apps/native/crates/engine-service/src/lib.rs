@@ -339,10 +339,6 @@ pub struct FrameReport {
     pub display_host_seconds: Option<f64>,
     pub completion_host_seconds: Option<f64>,
     pub pixels: Option<Vec<[f64; 3]>>,
-    /// The picture this frame presented as the engine drew it, before the
-    /// display's overlays and clip: held until the next frame, so a still
-    /// of what the viewer shows costs no render ([`Picture::srgb8`]).
-    pub picture: Option<Picture>,
     pub worker_to_completion_ms: Option<f64>,
     pub input_host_seconds: Option<f64>,
     pub audio_host_seconds: Option<f64>,
@@ -357,31 +353,52 @@ pub struct FrameReport {
     /// whoever takes a viewer's picture for the delivered one asks this.
     pub settled: bool,
 }
-/// A presented frame's picture: the engine's surface for it, held (a held
-/// surface is never drawn into again), in extended linear Display P3.
+/// A viewer's last settled picture, copied out of the engine's surface as
+/// it was presented (the engine's output pool keeps none of it), in
+/// extended linear Display P3 half floats, with the stamp and time it
+/// shows: a still of what the viewer shows costs no render.
 #[derive(Clone)]
-pub struct Picture(Arc<pm_gpu::bridge_out::surface::ExportedSurface>);
+pub struct Picture {
+    pub stamp: Stamp,
+    pub time: Ticks,
+    width: usize,
+    height: usize,
+    row: usize,
+    bytes: Arc<[u8]>,
+}
 impl std::fmt::Debug for Picture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Picture({}×{})", self.0.size.width, self.0.size.height)
+        write!(f, "Picture({}×{} at {:?})", self.width, self.height, self.time)
     }
 }
 impl Picture {
-    /// The picture as 8-bit sRGB RGBA, opaque over black, box-scaled down
-    /// to at most `max_width` pixels wide, with its width and height.
-    /// Blocking (reads the surface on the CPU): call it off the main
-    /// thread. None for a surface that isn't half-float RGBA.
-    pub fn srgb8(&self, max_width: u32) -> Option<(u32, u32, Vec<u8>)> {
-        let surface = &self.0;
+    /// A copy of `surface` (half-float RGBA; none otherwise). Its GPU work
+    /// must have completed.
+    fn copy(
+        surface: &pm_gpu::bridge_out::surface::ExportedSurface,
+        stamp: Stamp,
+        time: Ticks,
+    ) -> Option<Self> {
         if surface.format != pm_protocol::interop::SurfaceFormat::Rgba16Float {
             return None;
         }
-        let (w, h) = (surface.size.width as usize, surface.size.height as usize);
+        let (width, height) = (surface.size.width as usize, surface.size.height as usize);
         let row = surface.iosurface.bytes_per_row() as usize;
         let bytes = surface.iosurface.read();
-        if w == 0 || h == 0 || row < w * 8 || bytes.len() < row * h {
-            return None;
-        }
+        (width > 0 && height > 0 && row >= width * 8 && bytes.len() >= row * height).then(|| Self {
+            stamp,
+            time,
+            width,
+            height,
+            row,
+            bytes: bytes.into(),
+        })
+    }
+    /// The picture as 8-bit sRGB RGBA, opaque over black, box-scaled down
+    /// to at most `max_width` pixels wide, with its width and height.
+    /// Blocking: call it off the main thread.
+    pub fn srgb8(&self, max_width: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let (w, h, row, bytes) = (self.width, self.height, self.row, &self.bytes);
         Some(srgb8(w, h, |x, y| {
             let at = y * row + x * 8;
             let c = |i: usize| half::f16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]]).to_f32();
@@ -451,6 +468,9 @@ pub struct ViewerStatus {
     /// Explicit Studio calibration for the current immutable viewer scene.
     pub export_estimate: ExportEstimateState,
     pub frame: Option<FrameReport>,
+    /// The last settled picture presented, copied out of the engine's pool
+    /// ([`Picture`]); kept until another settles.
+    pub settled_picture: Option<Picture>,
     pub clock: Option<ClockSample>,
     pub levels: Option<AudioLevels>,
     pub error: Option<String>,
@@ -2724,8 +2744,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     input_host_seconds: f.input,
                     audio_host_seconds: f.audio_host,
                     pixels: readback.map(|_| f.submission.pixels()).or(kept),
-                    picture: Some(Picture(f.submission.surface.clone())),
                 });
+                // A newly settled picture is copied out of the pool, once:
+                // the viewer's still (`Picture`), without pinning a surface.
+                if v.status.frame.as_ref().is_some_and(|r| r.settled && r.gpu_ok)
+                    && v.status.settled_picture.as_ref().is_none_or(|p| p.stamp != f.stamp || p.time != f.spec.time)
+                {
+                    v.status.settled_picture = Picture::copy(&f.submission.surface, f.stamp, f.spec.time);
+                }
                 // A stale, failed or dropped frame did not answer the input.
                 // Keep its origin through retries; never consume a newer one.
                 if t.gpu_ok
@@ -4577,6 +4603,26 @@ mod worker_tests {
                 .is_err()
         );
         drop(viewer);
+    }
+    /// A paused viewer's settled picture is copied out of the engine's pool
+    /// once, with the stamp and time of the frame it shows: a still of what
+    /// the viewer shows costs no render and pins no pool surface (PM-444).
+    #[test]
+    fn a_settled_picture_is_copied_out_of_the_pool() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-copy").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        let status = wait_for(&v, "a settled picture copied", |s| {
+            s.settled_picture.is_some()
+                && s.frame.as_ref().is_some_and(|f| f.settled && Some(f.stamp) == v.stamp())
+        });
+        let (picture, frame) = (status.settled_picture.unwrap(), status.frame.unwrap());
+        assert_eq!((picture.stamp, picture.time), (frame.stamp, frame.time));
+        let (w, h, rgba) = picture.srgb8(64).unwrap();
+        assert!(w <= 64 && w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Not copied again while the same picture is shown.
+        let again = v.status().settled_picture.unwrap();
+        assert!(Arc::ptr_eq(&again.bytes, &picture.bytes));
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
