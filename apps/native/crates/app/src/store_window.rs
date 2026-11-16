@@ -309,6 +309,7 @@ impl StoreWindow {
                     destructive: false,
                     inline: false,
                     quiet: false,
+                    pull: false,
                     tint: None,
                     symbol: None,
                     glass: true,
