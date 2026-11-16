@@ -49,7 +49,7 @@ export interface SurfaceProps {
    * (inline, or quiet: no wash), a row whose selection spans its whole band,
    * code (a command, path or tool output, in the monospaced face), or a
    * plate (the grading material a Colour panel group stands on). */
-  "data-pm-variant"?: "inline" | "quiet" | "band" | "code" | "plate";
+  "data-pm-variant"?: "inline" | "quiet" | "band" | "code" | "plate" | "glass";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
   /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports
