@@ -1033,6 +1033,12 @@ impl Controller {
                         return MenuEntry::separator();
                     }
                     let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
                     let mut entry = match row["children"].as_array() {
                         Some(children) if !children.is_empty() => {
                             MenuEntry::submenu(label, entries(children, token, next))
@@ -1041,6 +1047,9 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
+                    entry.curve = row["curve"].as_array().and_then(|c| {
+                        Some([c.first()?.as_f64()?, c.get(1)?.as_f64()?, c.get(2)?.as_f64()?, c.get(3)?.as_f64()?])
+                    });
                     entry
                 })
                 .collect()
