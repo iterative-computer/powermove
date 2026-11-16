@@ -21,6 +21,8 @@ use std::{
 #[derive(Default)]
 struct Recorder {
     lines: RefCell<Vec<OverlayLine>>,
+    /// The marks sent with them (handles, knob, anchor rings, keyline).
+    marks: RefCell<Vec<crate::gizmo_layer::Mark>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
     navigation: RefCell<Vec<Navigate>>,
@@ -148,6 +150,9 @@ impl Host for Recording {
     ) {
         *self.0.lines.borrow_mut() = lines;
         self.0.placements.borrow_mut().push(at);
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, _: &mut App) {
+        *self.0.marks.borrow_mut() = marks;
     }
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
@@ -352,10 +357,30 @@ impl Stage {
 }
 #[gpui::test]
 fn the_engine_receives_a_box_and_handles_for_the_selection(cx: &mut TestAppContext) {
+    use crate::gizmo_layer::Shape;
     let s = stage(cx);
     let lines = s.recorder.lines.borrow();
-    assert!(lines.len() >= 4 + 8 * 4, "{} lines", lines.len());
+    assert!(lines.len() >= 4, "{} lines", lines.len());
     assert!(lines.iter().all(|l| l.ends.iter().all(|v| v.is_finite())));
+    // viewer-chrome.md: eight accent-filled handles keylined dark, a round
+    // knob on the dark with an accent ring, the anchor's rings, and the
+    // box's dark keyline drawn under its accent line.
+    let marks = s.recorder.marks.borrow();
+    let t = tokens();
+    let accent = {
+        let c = t.colors.accent;
+        [((c >> 16) & 255) as f32 / 255., ((c >> 8) & 255) as f32 / 255., (c & 255) as f32 / 255., 1.]
+    };
+    let squares: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Square).collect();
+    assert_eq!(squares.len(), 8);
+    assert!(squares.iter().all(|m| m.fill == Some(accent) && m.stroke.is_some() && !m.under));
+    assert!(squares.iter().all(|m| m.size == t.metrics.gizmo_handle));
+    let circles: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Circle).collect();
+    assert_eq!(circles.len(), 3, "the knob and the anchor's two rings");
+    assert!(circles.iter().any(|m| m.fill.is_some() && m.stroke == Some(accent)), "the knob");
+    let keylines = marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).count();
+    assert_eq!(keylines, 4);
+    assert!(marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).all(|m| m.under));
 }
 #[gpui::test]
 fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContext) {

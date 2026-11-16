@@ -196,30 +196,29 @@ fn restore_session(cx: &mut App) {
     // frame (`native::front_restoring`).
     if plan.len() > 1 {
         native::set_front_restoring(front);
+        native::set_restore_arranging(true);
     }
     // The window (or tab group) that was in front opens last, so it lies
     // over the others from the start: separate windows each take the front
     // as they open.
-    let group = |s: &session::WindowState| s.tab_group.unwrap_or(s.id);
-    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
-    let (mut plan, last): (Vec<_>, Vec<_>) =
-        plan.into_iter().partition(|s| Some(group(s)) != front_group);
-    plan.extend(last);
-    for state in plan {
+    for state in session::front_first(plan, front) {
         let leader = state.tab_group;
         open_editor_window(cx, true, Some(state), leader);
     }
     // Once the tabs have joined their groups (a turn later), the window that
     // was in front comes forward again, its tab the one shown.
-    if let Some(id) = front {
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(300))
-                .await;
-            let _ = cx.update(|_| native::bring_session_window(id));
-        })
-        .detach();
-    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(300))
+            .await;
+        let _ = cx.update(|_| {
+            if let Some(id) = front {
+                native::bring_session_window(id);
+            }
+            native::set_restore_arranging(false);
+        });
+    })
+    .detach();
 }
 /// Every window and tab comes back on relaunch with its project, as v1
 /// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
@@ -305,6 +304,9 @@ fn open_editor_window(
                         }
                     }
                     None => {}
+                }
+                if let Some(s) = &restore {
+                    native::restore_tab_index(&h.window, s.tab_index);
                 }
                 if let Some(leader) = tab_leader {
                     h.join_tabs(leader);

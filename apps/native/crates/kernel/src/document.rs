@@ -543,6 +543,15 @@ impl DocumentStore {
         self.is_dirty() || self.metadata_token != self.saved_metadata_token
     }
 
+    /// Nothing a save would write differs from what was last read or
+    /// written: no unsaved change, the undo history (redo steps too) as
+    /// saved, and nothing upgraded on open.
+    pub fn as_saved(&self) -> bool {
+        !self.needs_save()
+            && self.history.saved_steps() == self.saved_steps
+            && !self.upgraded_on_open()
+    }
+
     /// Whether a save of this document is running.
     pub fn is_saving(&self) -> bool {
         self.save_ticket.strong_count() > 0

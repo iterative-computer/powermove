@@ -400,6 +400,8 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            // No panel shows its ghost any more: its picture goes.
+            self.ghost_retire();
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
             // Bound to the open that brought `project`: they run only if this
@@ -838,6 +840,13 @@ impl Controller {
         self.sync_keymap();
         if crate::first_run::take_workspace_request() {
             self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        }
+        // A restored tab behind the front one starts its panels, media probes
+        // and thumbnails with its project's open: its turn comes once the
+        // front tab shows its first frame and the person is idle, or when it
+        // is selected (`Controller::restore_waiting`).
+        if self.restore_waiting() {
+            return;
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
@@ -2691,6 +2700,9 @@ impl crate::gizmo::Host for ControllerDelegate {
         cx: &mut App,
     ) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.gizmo_marks = marks);
     }
     fn pick_surface(
         &self,
