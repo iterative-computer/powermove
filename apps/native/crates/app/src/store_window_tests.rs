@@ -1046,3 +1046,148 @@ fn offline_store_and_catalog_retry_without_exposing_transport_details() {
         cx_rows(v) == ["shot-notes"]
     });
 }
+
+/// A transport that holds every request until the test lets them through.
+struct Held {
+    inner: Loopback,
+    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+impl pm_services::store::StoreTransport for Held {
+    fn send(
+        &mut self,
+        request: pm_services::store::Request,
+        max: usize,
+    ) -> pm_services::Result<pm_services::store::Response> {
+        let (open, wake) = &*self.open;
+        let mut through = open.lock().unwrap();
+        while !*through {
+            through = wake.wait(through).unwrap();
+        }
+        drop(through);
+        self.inner.send(request, max)
+    }
+}
+type Gate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+fn held(f: &Fixture) -> (Services, Gate) {
+    let mut svc = services(f, true);
+    let gate: Gate = Arc::default();
+    let origin = f.origin;
+    svc.client = {
+        let gate = gate.clone();
+        Arc::new(move || {
+            let transport: Box<dyn pm_services::store::StoreTransport + Send> = Box::new(Held {
+                inner: Loopback { origin },
+                open: gate.clone(),
+            });
+            pm_services::store::StoreClient::new(origin, transport)
+        })
+    };
+    (svc, gate)
+}
+fn let_through(gate: &Gate) {
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+}
+fn shelf_titles(v: &StoreWindow) -> Option<Vec<String>> {
+    match &v.shelves {
+        crate::store_window::Load::Ready(shelves) => {
+            Some(shelves.iter().map(|(title, _)| title.clone()).collect())
+        }
+        _ => None,
+    }
+}
+
+/// The Store draws the storefront it last showed the moment it opens, and
+/// keeps it when the Store cannot be reached.
+#[::core::prelude::v1::test]
+fn the_storefront_last_seen_draws_at_once_and_stays_up_offline() {
+    let f = fixture();
+    let mut first = TestAppContext::single();
+    let (view, cx) = open(&mut first, services(&f, true));
+    settle(&view, cx, "storefront", |v| ready(&v.shelves));
+    let seen = view.read_with(cx, |v, _| shelf_titles(v)).unwrap();
+    assert!(!seen.is_empty());
+
+    let mut offline = services(&f, true);
+    offline.client = Arc::new(|| {
+        Err(pm_services::ServiceError::message(
+            pm_services::ServiceErrorCode::Offline,
+            "synthetic offline",
+        ))
+    });
+    let mut second = TestAppContext::single();
+    let (view, cx) = open(&mut second, offline);
+    assert_eq!(
+        view.read_with(cx, |v, _| shelf_titles(v)),
+        Some(seen.clone())
+    );
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        cx.run_until_parked();
+        let failed = view.update(cx, |_, cx| {
+            crate::error_log::shared(cx)
+                .borrow()
+                .entries
+                .iter()
+                .any(|e| e.message.contains("synthetic offline"))
+        });
+        if failed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(cx.debug_bounds("store-retry").is_none());
+    assert_eq!(view.read_with(cx, |v, _| shelf_titles(v)), Some(seen));
+}
+
+/// What the Store installed here is listed before the Store has answered
+/// which of it has updates; the update fills in after.
+#[::core::prelude::v1::test]
+fn the_library_lists_installs_before_the_store_answers() {
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &profile,
+        "native",
+        &store_install::Request {
+            release: GLOW_OLD,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.0.0",
+        },
+    )
+    .unwrap();
+    let (svc, gate) = held(&f);
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, svc);
+    settle(&view, cx, "installs while the Store is held", |v| {
+        matches!(&v.library, crate::store_window::Load::Ready(items)
+            if items.len() == 1 && items[0].update.is_none())
+    });
+    let_through(&gate);
+    settle(&view, cx, "the update filled in", |v| {
+        matches!(&v.library, crate::store_window::Load::Ready(items)
+            if items.len() == 1 && items[0].update.as_ref().is_some_and(|u| u.0 == "1.1.0"))
+    });
+}
+
+/// An extension's page opened while the storefront is still loading does
+/// not cost the storefront: Back finds it drawn.
+#[::core::prelude::v1::test]
+fn a_page_opened_while_the_storefront_loads_keeps_it() {
+    let f = fixture();
+    let (svc, gate) = held(&f);
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, svc);
+    let glow = pm_services::surfaces::store::Listing::from_value(&listing(GLOW_REPO)).unwrap();
+    view.update(cx, |v, cx| v.open_detail(glow, cx));
+    let_through(&gate);
+    settle(&view, cx, "detail", |v| {
+        v.detail.as_ref().is_some_and(|(_, load)| ready(load))
+    });
+    view.update(cx, |v, cx| v.back(cx));
+    settle(&view, cx, "storefront after Back", |v| ready(&v.shelves));
+}

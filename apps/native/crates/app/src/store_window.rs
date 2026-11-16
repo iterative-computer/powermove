@@ -202,6 +202,8 @@ pub struct StoreWindow {
     /// keeps no room for window buttons.
     pub embedded: bool,
     generation: u64,
+    /// The storefront's own requests: a page opened meanwhile keeps it.
+    shelves_generation: u64,
     tx: async_channel::Sender<Reply>,
 }
 
@@ -224,6 +226,8 @@ impl StoreWindow {
             }
         })
         .detach();
+        // The storefront last seen draws at once; a fresh one replaces it.
+        let shelves = cached_shelves(&services.profile).map_or(Load::Loading, Load::Ready);
         let mut window = Self {
             motion: Motion::default(),
             frame_kit: None,
@@ -233,7 +237,7 @@ impl StoreWindow {
             query: String::new(),
             search: None,
             focus: cx.focus_handle(),
-            shelves: Load::Loading,
+            shelves,
             catalog: Catalog::default(),
             detail: None,
             library: Load::Loading,
@@ -244,6 +248,7 @@ impl StoreWindow {
             message: None,
             embedded: false,
             generation: 0,
+            shelves_generation: 0,
             tx,
         };
         window.load_shelves();
@@ -285,25 +290,23 @@ impl StoreWindow {
             .ok();
     }
     fn load_shelves(&mut self) {
-        self.generation += 1;
-        let generation = self.generation;
+        self.shelves_generation += 1;
+        let generation = self.shelves_generation;
         if !matches!(self.shelves, Load::Ready(_)) {
             self.shelves = Load::Loading;
         }
+        let profile = self.services.profile.clone();
         self.run(move |client| {
             let result = client
                 .and_then(|mut c| c.browse())
                 .map_err(|error| error.to_string())
                 .map(|shelves| {
-                    shelves
-                        .into_iter()
-                        .map(|shelf| {
-                            let items =
-                                shelf.items.iter().filter_map(Listing::from_value).collect();
-                            (shelf.title, items)
-                        })
-                        .filter(|(_, items): &(String, Vec<Listing>)| !items.is_empty())
-                        .collect()
+                    keep_shelves(&profile, &shelves);
+                    shelves_of(
+                        shelves
+                            .iter()
+                            .map(|shelf| (shelf.title.as_str(), &shelf.items)),
+                    )
                 });
             Reply::Shelves(generation, result)
         });
@@ -336,8 +339,11 @@ impl StoreWindow {
     /// What the Store installed here, then which of those it has updates for.
     fn load_library(&mut self) {
         let profile = self.services.profile.clone();
+        let tx = self.tx.clone();
         self.run(move |client| {
             let mut installed = scan(&profile);
+            // What is on this Mac shows at once; updates fill in.
+            let _ = tx.send_blocking(Reply::Library(installed.clone(), yours(&profile), None));
             let releases: Vec<_> = installed
                 .iter()
                 .filter_map(|i| {
@@ -564,9 +570,11 @@ impl StoreWindow {
                 .push("Store", error);
         }
         match reply {
-            Reply::Shelves(generation, result) if generation == self.generation => {
+            Reply::Shelves(generation, result) if generation == self.shelves_generation => {
                 self.shelves = match result {
                     Ok(shelves) => Load::Ready(shelves),
+                    // Offline, the storefront last seen stays up.
+                    Err(_) if matches!(self.shelves, Load::Ready(_)) => return,
                     Err(error) => Load::Failed(error),
                 };
             }
@@ -1758,4 +1766,51 @@ impl StoreWindow {
     pub(crate) fn catalog_state_for_tests(&self) -> &CatalogState {
         &self.catalog.state
     }
+}
+/// Where the storefront last seen is kept (the admitted listings as served).
+fn shelves_file(profile: &std::path::Path) -> PathBuf {
+    profile.join("caches").join("store-shelves.json")
+}
+/// Titled shelves of listings, empty shelves dropped.
+fn shelves_of<'a>(
+    shelves: impl Iterator<Item = (&'a str, &'a Vec<Value>)>,
+) -> Vec<(String, Vec<Listing>)> {
+    shelves
+        .map(|(title, items)| {
+            let listings = items.iter().filter_map(Listing::from_value).collect();
+            (title.to_owned(), listings)
+        })
+        .filter(|(_, listings): &(String, Vec<Listing>)| !listings.is_empty())
+        .collect()
+}
+fn keep_shelves(profile: &std::path::Path, shelves: &[pm_services::store::Shelf]) {
+    let kept: Vec<Value> = shelves
+        .iter()
+        .map(|shelf| serde_json::json!({ "title": shelf.title, "items": shelf.items }))
+        .collect();
+    let file = shelves_file(profile);
+    let partial = file.with_extension("json.partial");
+    let written = file
+        .parent()
+        .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+        && serde_json::to_vec(&kept).is_ok_and(|bytes| std::fs::write(&partial, bytes).is_ok());
+    if written {
+        let _ = std::fs::rename(&partial, &file);
+    }
+}
+/// The storefront last seen, if there is one worth drawing.
+fn cached_shelves(profile: &std::path::Path) -> Option<Vec<(String, Vec<Listing>)>> {
+    let file = shelves_file(profile);
+    // The Store's own page limits keep it far below this.
+    if std::fs::metadata(&file).ok()?.len() > 4 << 20 {
+        return None;
+    }
+    let kept: Vec<Value> = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+    let shelves = shelves_of(kept.iter().filter_map(|shelf| {
+        Some((
+            shelf.get("title")?.as_str()?,
+            shelf.get("items")?.as_array()?,
+        ))
+    }));
+    (!shelves.is_empty()).then_some(shelves)
 }
