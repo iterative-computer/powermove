@@ -3275,11 +3275,9 @@ impl SurfaceView {
             element = element.w(px(self.natives.outline.column.get()));
         }
         if node.outline_retained && self.natives.outline.scene.borrow().is_some() {
-            let start = self.natives.outline.rows.get().0;
-            let top = self.natives.outline.scene.borrow().as_ref()
-                .and_then(|s| s.span(start).map(|(_, top, _)| top)).unwrap_or(0.);
-            element = element.absolute().left(px(0.)).right(px(0.))
-                .top(px(top as f32));
+            // Retained rows are placed at their scene tops below, so their
+            // container must stay at the content origin for every range.
+            element = element.absolute().left(px(0.)).right(px(0.)).top_0();
         } else if let Some(first) = &node.outline_first {
             element = element
                 .absolute()
@@ -3715,10 +3713,21 @@ impl SurfaceView {
             usize::MAX
         };
         // A standalone surface has no native timeline scene to supply a range.
-        let (start, end) = if node.outline_retained && self.natives.outline.scene.borrow().is_some() {
-            self.natives.outline.rows.get()
-        } else { (0, usize::MAX) };
-        for child in node.children.iter().take(shown.min(end)).skip(start) {
+        let retained_rows = if node.outline_retained {
+            self.natives.outline.scene.borrow().as_ref().map(|scene| {
+                let (start, end) = self.natives.outline.rows.get();
+                (start..end).filter_map(|index| scene.span(index))
+                    .map(|(row, _, _)| row.id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+        } else { None };
+        for child in node.children.iter().take(shown).filter(|child| {
+            retained_rows.as_ref().is_none_or(|rows| {
+                self.prepared.node(**child).and_then(|node| node.semantic.as_ref())
+                    .and_then(|id| id.strip_prefix("timeline:row:"))
+                    .is_some_and(|id| rows.contains(id))
+            })
+        }) {
             if let Some(stand_in) = self.cull.stand_in(*child) {
                 children.push(stand_in);
                 continue;
@@ -3788,13 +3797,12 @@ impl SurfaceView {
     /// out of the recursive render's.
     #[inline(never)]
     fn place_outline_row(&self, node: &NodeView, element: Stateful<Div>) -> Stateful<Div> {
-        let Some(first) = node
-            .parent
-            .and_then(|p| self.prepared.node(p))
-            .and_then(|p| p.outline_first.clone())
-        else {
+        let Some(parent) = node.parent.and_then(|p| self.prepared.node(p)) else {
             return element;
         };
+        if !parent.outline_retained && parent.outline_first.is_none() {
+            return element;
+        }
         let Some(row) = node
             .semantic
             .as_ref()
@@ -3812,7 +3820,9 @@ impl SurfaceView {
                 .absolute()
                 .left(px(0.))
                 .right(px(0.))
-                .top(px(top - outline.top(&first))),
+                .top(px(top - if parent.outline_retained { 0. } else {
+                    outline.top(parent.outline_first.as_ref().unwrap())
+                })),
             None => element.absolute().top(px(0.)).invisible(),
         }
     }
