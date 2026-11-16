@@ -30,6 +30,8 @@ pub(crate) struct Recorder {
     pub moved: std::cell::Cell<usize>,
     /// Effects dropped from the Effects panel.
     pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
+    /// Finder files and Project items dropped on the timeline.
+    pub media_drops: RefCell<Vec<crate::timeline_surface::MediaDrop>>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -54,6 +56,9 @@ impl Delegate for Recording {
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, _: &mut App) {
+        self.0.media_drops.borrow_mut().push(drop);
     }
     fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
         self.0.effect_drops.borrow_mut().push(drop);
@@ -1999,6 +2004,33 @@ fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_
         .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
     s.idle(cx);
     assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
+}
+/// Finder files dropped on the tracks land on the timeline (v1.2.0): the
+/// drag reaches the timeline through the window's file drop (the rows'
+/// scroll layer and the canvases over them do not take it).
+#[gpui::test]
+fn finder_files_dropped_on_the_tracks_reach_the_timeline(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let at = s.at(1, 1.0);
+    let paths = vec![
+        std::path::PathBuf::from("/media/drop-a.mov"),
+        std::path::PathBuf::from("/media/drop-b.png"),
+    ];
+    s.vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: gpui::ExternalPaths(paths.clone().into()),
+    });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Pending { position: at });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Submit { position: at });
+    s.idle(cx);
+    let drops = s.recorder.media_drops.borrow().clone();
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert!(
+        matches!(&drops[0].what, crate::timeline_surface::Dropped::Files { paths: p, .. } if *p == paths),
+        "{drops:?}"
+    );
 }
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays
