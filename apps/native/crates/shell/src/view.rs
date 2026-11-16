@@ -537,7 +537,9 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        layout::Panels::new(contributed)
+        layout::Panels::new(contributed).while_loading(
+            self.integration.as_ref().is_some_and(|i| i.panels_loading(cx)),
+        )
     }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);

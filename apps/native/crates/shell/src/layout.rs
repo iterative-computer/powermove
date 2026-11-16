@@ -1628,10 +1628,15 @@ pub fn empty_state(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Panels {
     contributed: Vec<(String, String)>,
+    loading: bool,
 }
 impl Panels {
     pub fn new(contributed: Vec<(String, String)>) -> Self {
-        Self { contributed }
+        Self { contributed, loading: false }
+    }
+    pub fn while_loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
     }
     pub fn ids(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = PANELS.to_vec();
@@ -1651,7 +1656,9 @@ impl Panels {
             .iter()
             .find(|(p, _)| p == id)
             .map(|(_, t)| t.as_str())
-            .unwrap_or_else(|| builtin_title(id))
+            .unwrap_or_else(|| {
+                if self.loading && !PANELS.contains(&id) { "Loading…" } else { builtin_title(id) }
+            })
     }
 }
 fn builtin_title(id: &str) -> &str {
@@ -1674,7 +1681,7 @@ fn builtin_title(id: &str) -> &str {
         "mixer" => "Mixer",
         "captions" => "Captions",
         "workspaces" => "Workspaces",
-        _ => "Loading…",
+        _ => id,
     }
 }
 /// The viewer is the one panel always open; it keeps its stack to itself.
@@ -1866,7 +1873,8 @@ mod restored_panel_title_tests {
     use super::Panels;
     #[test]
     fn restored_extension_tabs_wait_for_their_registered_title() {
-        assert_eq!(Panels::new(vec![]).title("pexels"), "Loading…");
+        assert_eq!(Panels::new(vec![]).while_loading(true).title("pexels"), "Loading…");
+        assert_eq!(Panels::new(vec![]).title("pexels"), "pexels");
         let panels = Panels::new(vec![("pexels".into(), "Pexels".into()), ("bird".into(), "Flappy Bird".into())]);
         assert_eq!(panels.title("pexels"), "Pexels");
         assert_eq!(panels.title("bird"), "Flappy Bird");
