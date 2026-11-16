@@ -150,7 +150,10 @@ impl TimelineModel {
             self.ui_seen = Some(published.ui_state.timeline.clone());
             self.restore_ui(&published.ui_state);
         }
-        if keys_changed || selection_step {
+        // Deleting the last selected key keeps key mode: a second Delete
+        // must not remove its layer. Explicit selection changes and history
+        // navigation still restore the mode from their selected keys.
+        if selection_step || (keys_changed && (!changed || !self.selection.keys().is_empty())) {
             self.key_selection_active = !self.selection.keys().is_empty();
         }
         if selection_changed {

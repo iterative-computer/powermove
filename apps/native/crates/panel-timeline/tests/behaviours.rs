@@ -2739,7 +2739,12 @@ fn selection_history_marquee_is_one_entry_and_restores_key_active_state() {
     assert!(c.model.key_selection_active);
     // A second Undo reaches the beginning: no individual sample entries.
     undo(&mut c);
-    assert!(matches!(block_on(c.call(HistoryCall::Undo.into())), Err(_)));
+    let history = &c.kernel.published("P").unwrap().history;
+    assert_eq!((history.entries, history.applied), (1, 0));
+    assert!(matches!(
+        block_on(c.call(HistoryCall::Undo.into())).unwrap().reply,
+        Reply::Bool(false)
+    ));
 }
 
 #[test]
