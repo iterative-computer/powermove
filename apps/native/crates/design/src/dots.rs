@@ -61,14 +61,14 @@ pub fn aurora(size:[f32;2],age:f32,accent:u32,text:u32,muted:u32)->Vec<Dot> {
         for j in 0..4 {let f=j as f32;
             let hem=0.04+0.25*f+0.09*(xn*(1.6+0.7*f)+age*(0.45+0.2*f)+f*2.1).sin()+0.09*(fbm([xn*1.4+age*0.12,f*3.7])-0.5);
             let above=up-hem;
-            let curtain=if above<0. {(above*30.).exp()} else {0.5*(-above*4.).exp()+0.5*(-above*16.).exp()};
-            let r=((fbm([xn*9.+age*0.35+f*5.,up*0.25-age*0.04])-0.22)/0.5).clamp(0.,1.);
-            let v=1.6*curtain*(0.25+0.75*r*r*(3.-2.*r))*(0.8+0.2*(xn*11.-age*2.2+f*1.3).sin())*(1.-0.1*f);
-            if v>swirl {swirl=v;rise=(above*2.2).clamp(0.,1.);}
+            let curtain=if above<0. {(above*65.).exp()} else {0.3*(-above*3.).exp()+0.7*(-above*40.).exp()};
+            let r=((fbm([xn*20.+age*0.2+f*5.,f*7.+up*0.025-age*0.02])-0.22)/0.5).clamp(0.,1.);
+            let v=2.2*curtain*(0.08+0.92*r*r*(3.-2.*r))*(0.8+0.2*(xn*11.-age*2.2+f*1.3).sin())*(1.-0.1*f);
+            if v>swirl {swirl=v;rise=(above*4.).clamp(0.,1.);}
         }
         let s=swirl.clamp(0.,1.);
         let color=super::mix(super::mix(gold,accent,(rise/0.35).clamp(0.,1.)),rose,((rise-0.45)/0.55).clamp(0.,1.)*0.45);
-        dots.push(Dot{center:[x as f32,y as f32],radius:0.7,alpha:(0.035+0.3*s+0.62*s.powi(3)).min(1.),color});
+        dots.push(Dot{center:[x as f32,y as f32],radius:0.7,alpha:(0.02+0.1*s+0.88*s.powi(4)).min(1.),color});
     }} dots
 }
 #[cfg(test)] mod tests {
