@@ -138,6 +138,13 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
+/// Whether the window menu commands go to has a sheet up.
+fn editor_has_sheet() -> bool {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    editor_window_number()
+        .and_then(|n| app.windowWithWindowNumber(n))
+        .is_some_and(|w| w.attachedSheet().is_some())
+}
 fn active_send(command: Command) {
     if let Some(n) = editor_window_number() {
         ROUTES.with(|r| {
@@ -676,7 +683,9 @@ define_class!(
                     n => item.setState(if state.checked.contains(n) {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
+                // A sheet on the editor window holds its commands (HIG).
                 !state.disabled.contains(name)
+                    && (menu::runs_beside_sheet(name) || !editor_has_sheet())
             } else {
                 true
             }
@@ -1859,6 +1868,13 @@ fn route(number: isize, name: String) {
 }
 /// After a relaunch: the window with session id `id` (the one that was in
 /// front) comes forward, its tab the one its group shows.
+/// The session id of the editor window in front (the key window, or the tab
+/// its group shows), if an editor window is key.
+pub fn front_window_id() -> Option<u64> {
+    let mtm = MainThreadMarker::new()?;
+    let key = NSApplication::sharedApplication(mtm).keyWindow()?;
+    WINDOW_IDS.with(|m| m.borrow().get(&key.windowNumber()).copied())
+}
 /// The session ids of the editor windows open now.
 pub fn live_window_ids() -> Vec<u64> {
     WINDOW_IDS.with(|m| m.borrow().values().copied().filter(|id| *id != 0).collect())
@@ -2472,6 +2488,9 @@ struct SlotGeometry {
     layer: NSRect,
     scale: f64,
     crop: Option<[u32; 4]>,
+    /// The continuous radius of the slot's bottom-left and bottom-right
+    /// corners (zero: square), where it meets its panel's rounded corners.
+    corners: [f64; 2],
 }
 /// The viewer layer's frame in a `slot` points wide and high, for a canvas
 /// zoomed to `canvas` points, centred on the slot and moved by `pan` (points,
@@ -2536,6 +2555,9 @@ pub struct Host {
     /// places the others' views), in content coordinates, top-left origin.
     pub viewer_split: Cell<u8>,
     pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
+    /// Whether the viewer slot's bottom-left and bottom-right corners are its
+    /// panel's (a Studio 3D split's first pane can stop short of one).
+    pub viewer_corners: Cell<[bool; 2]>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
     /// The keyboard moved the focus (Tab) since the last press of a button:
@@ -2745,6 +2767,7 @@ impl Host {
             viewer_rect: Rc::new(Cell::new(None)),
             viewer_split: Cell::new(1),
             viewer_tiles: Rc::default(),
+            viewer_corners: Cell::new([true, true]),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             keyboard_navigated: Cell::new(false),
@@ -4592,11 +4615,17 @@ impl Host {
                 ([r.w as f64, r.h as f64], [0., 0.])
             };
             let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale, pan);
+            // The slot sits a border inside its panel: its corners are the
+            // panel's less that.
+            let m = &self.tokens.metrics;
+            let radius = f64::from((m.panel_radius - m.border).max(0.));
+            let corners = self.viewer_corners.get().map(|on| if on { radius } else { 0. });
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
                 scale,
                 crop,
+                corners,
             }
         })
     }
@@ -4612,6 +4641,7 @@ impl Host {
             if let Some(g) = geometry {
                 viewer_slot::show(&self.viewer, &self.layer, true);
                 self.viewer.setFrame(g.frame);
+                viewer_slot::round(&self.viewer, g.corners);
                 // Without a transform the Metal layer is the view's own backing
                 // layer and AppKit sizes it; framing it here would move it to
                 // the content view's origin (the stray lower-left rectangle).
@@ -4661,9 +4691,31 @@ impl Host {
         gpui_macos::composition::publish_accessibility(&self.gpui, order);
         (moved || native).into()
     }
+    /// Where the window stands. A tab the group is not showing keeps the
+    /// frame it had when it was last shown: its group's frame is the shown
+    /// tab's, so a relaunch puts the group where it was (PM-292).
     pub fn frame(&self) -> [f64; 4] {
-        let f = self.window.frame();
+        let shown = unsafe {
+            let group: *mut AnyObject = msg_send![&*self.window, tabGroup];
+            let window: *mut NSWindow = if group.is_null() {
+                std::ptr::null_mut()
+            } else {
+                msg_send![group, selectedWindow]
+            };
+            window.as_ref().map(|w| w.frame())
+        };
+        let f = shown.unwrap_or_else(|| self.window.frame());
         [f.origin.x, f.origin.y, f.size.width, f.size.height]
+    }
+    /// The other tabs of this window's group record their state again (the
+    /// group moved or changed size: they share its frame).
+    pub fn persist_other_tabs(&self) {
+        let own = self.window.windowNumber();
+        for tab in tab_windows(&self.window) {
+            if tab.windowNumber() != own {
+                route(tab.windowNumber(), "persistSession".into());
+            }
+        }
     }
     pub fn is_fullscreen(&self) -> bool {
         self.window
@@ -7273,6 +7325,25 @@ pub mod viewer_slot {
             let _: () = msg_send![view, setLayer: &*root];
             let _: () = msg_send![&*root, addSublayer: foreign_types::ForeignTypeRef::as_ptr(content) as *mut AnyObject];
         }
+    }
+    /// Masks the slot's layer (the Metal layer, or the clipping root over it)
+    /// to continuous bottom-left and bottom-right corners of these radii:
+    /// the compositor clips the picture, nothing is redrawn for it.
+    pub fn round(view: &NSView, [left, right]: [f64; 2]) {
+        use objc2_quartz_core::CACornerMask;
+        let Some(layer) = view.layer() else { return };
+        let mut corners = CACornerMask::empty();
+        // A view's layer is y up: the bottom corners are its min-y ones.
+        if left > 0. {
+            corners |= CACornerMask::LayerMinXMinYCorner;
+        }
+        if right > 0. {
+            corners |= CACornerMask::LayerMaxXMinYCorner;
+        }
+        layer.setCornerRadius(left.max(right));
+        layer.setMaskedCorners(corners);
+        layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+        layer.setMasksToBounds(true);
     }
     /// Shows or hides the slot. Hiding a view hides its backing layer, and
     /// the content layer is that layer until it is clipped: a slot hidden
