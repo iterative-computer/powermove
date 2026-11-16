@@ -337,7 +337,7 @@ fn marquee_does_not_seek_and_preserves_additive_keys() {
     assert_eq!(c.model.selection.keys(), strings(&["a0", "b0"]));
 }
 #[test]
-fn group_disclosure_does_not_open_group_properties() {
+fn group_disclosure_opens_group_properties() {
     let mut v = fixture();
     let a = layer_mut(&mut v, 0);
     a.insert("type", Value::from("group"));
@@ -348,7 +348,7 @@ fn group_disclosure_does_not_open_group_properties() {
     m.toggle_disclosure("a").unwrap();
     assert!(m.row_position(&RowId::Layer("b".into())).is_some());
     assert!(
-        !m.rows()
+        m.rows()
             .iter()
             .any(|r| matches!(&r.id,RowId::Property { layer_id,.. } if layer_id=="a"))
     );
@@ -618,13 +618,21 @@ fn work_area_keeps_at_least_one_frame() {
     assert_eq!(c.model.index.work, [1., 9.]);
 }
 #[test]
-fn work_out_drag_can_extend_composition_and_cancel_restores_it() {
+fn work_out_drag_extends_live_keeps_peak_and_undo_restores_duration() {
     let (_a, mut c) = client();
+    let layer_duration = c.model.index.layer("a").unwrap().duration;
     block_on(c.begin_drag(DragKind::WorkOut)).unwrap();
-    block_on(c.drag(sample(5.))).unwrap();
-    assert_eq!(c.model.index.duration, 14.);
-    block_on(c.finish_drag(false)).unwrap();
+    for (delta, end) in [(5., 14.), (2., 11.), (-3., 6.)] {
+        block_on(c.drag(sample(delta))).unwrap();
+        assert_eq!(c.model.index.duration, 14.);
+        assert_eq!(c.model.index.work, [1., end]);
+        assert_eq!(c.model.index.layer("a").unwrap().duration, layer_duration);
+    }
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+    undo(&mut c);
     assert_eq!(c.model.index.duration, 10.);
+    assert_eq!(c.model.index.work, [1., 9.]);
 }
 #[test]
 fn work_move_clamps_as_rigid_range() {
@@ -2380,6 +2388,121 @@ fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
 }
 
 #[test]
+fn quick_offset_key_gesture_replaces_preview_and_undoes_in_one_step() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::QuickOffsetKeys {
+        groups: vec![strings(&["a0", "a2"]), strings(&["b0"])],
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.125))).unwrap();
+    block_on(c.drag(sample(0.25))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "a2"), 2.);
+    assert_eq!(key_time(&c, "b0"), 0.25);
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(key_time(&c, "b0"), 0.);
+}
+
+#[test]
+fn text_stagger_gesture_updates_animator_channels_and_undo_restores_both() {
+    let document = parse(r#"{"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[{"id":"text","type":"text","from":0,"dur":5,"p":{},"d":{"text":"Hello","animators":[{"id":"a","mode":"stagger","timingVersion":2,"p":{"delay":{"v":0.5,"kf":[]},"duration":{"v":1,"kf":[]},"stagger":{"v":0.1,"kf":[]}}}]}}]}"#).unwrap();
+    let (_actor, mut c) = client_with(document);
+    let band = stagger::Band {
+        layer: "text".into(),
+        animator: "a".into(),
+        delay: 0.5,
+        duration_value: 1.,
+        stagger: 0.1,
+        start: 0.5,
+        duration: 1.,
+        cascade: 0.4,
+        end: 1.9,
+        out: false,
+        legacy: false,
+    };
+    block_on(c.begin_drag(DragKind::TextStagger {
+        band,
+        end: true,
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.7))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.5)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.15)
+    );
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.duration")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(1.)
+    );
+    assert_eq!(
+        c.model
+            .index
+            .channel("text", "ta.a.stagger")
+            .unwrap()
+            .value
+            .as_f64(),
+        Some(0.1)
+    );
+}
+
+#[test]
+fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
+    let (_actor, mut c) = client_with(v);
+    select_keys(&mut c, &["sx", "sy"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "scale.x".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        let ch = c.model.index.channel("a", axis).unwrap();
+        assert_eq!(ch.keys.len(), 1);
+        assert_eq!(ch.keys[0].value, Value::Number(105.));
+        assert_eq!(ch.keys[0].time, 0.125);
+    }
+    block_on(c.finish_drag(false)).unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        assert_eq!(
+            c.model.index.channel("a", axis).unwrap().keys[0].value,
+            Value::Number(100.)
+        );
+    }
+}
+
+#[test]
 fn a_focused_axis_plots_its_whole_track_as_v1() {
     // v1 plots the focused track's every axis: Scale X brings Scale Y.
     let mut m = model(fixture());
@@ -2407,4 +2530,21 @@ fn a_graph_marquee_that_picks_nothing_keeps_the_layers_whose_curves_show() {
     assert_eq!(c.model.selection.layers(), strings(&["a"]));
     run(&mut c, marquee.finish());
     assert_eq!(c.model.selection.layers(), strings(&["a"]));
+}
+
+#[test]
+fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
+    let mut m = model(fixture());
+    let facts = PropertyFacts::default();
+    for start in [0, 1000] {
+        m.reveal_property('u', false, start, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 100, &facts).unwrap();
+        }
+        m.reveal_property('u', false, start + 400, &facts).unwrap();
+        if start == 1000 {
+            m.reveal_property('u', false, start + 500, &facts).unwrap();
+        }
+        assert!(m.reveal.layers.values().all(|d| d.collapsed));
+    }
 }

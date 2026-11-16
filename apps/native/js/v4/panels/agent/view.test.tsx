@@ -360,6 +360,98 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(asked.flat().some((o) => /^Default/.test(o.label))).toBe(false);
   root.dispose();
 });
+test("a provider pick keeps the model menu open and lists that provider's models in it", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = {
+    models: [["gpt-6", "GPT-6"]],
+    providers: [
+      ["chatgpt", "ChatGPT"],
+      ["claude", "Claude"],
+    ],
+    efforts: [],
+  };
+  p.snapshot.settings.model = "gpt-6";
+  const requests: Parameters<Menu>[0][] = [];
+  const answers = ["provider:claude", "model:sonnet"];
+  const menu: Menu = async (r) => {
+    requests.push(r);
+    return answers.shift() ?? null;
+  };
+  const send = (a: Action) => actions.push(a);
+  await root.render(<AgentView publication={p} menu={menu} send={send} />);
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  // Provider rows keep the menu up; model rows close it.
+  const first = requests[0]!.options;
+  expect(
+    first.filter((o) => o.category === "Provider").every((o) => o.stays),
+  ).toBe(true);
+  expect(first.filter((o) => o.category === "Model").some((o) => o.stays)).toBe(
+    false,
+  );
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
+  // The switch publishes Claude's models: they go to the same open menu,
+  // its default ticked, and a model pick there runs.
+  const q = structuredClone(p);
+  q.snapshot.settings.provider = "claude";
+  q.snapshot.settings.model = "opus";
+  q.snapshot.catalog.models = [
+    ["opus", "Opus 5.5"],
+    ["sonnet", "Sonnet 5.5"],
+  ];
+  await root.render(<AgentView publication={q} menu={menu} send={send} />);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  expect(requests.length).toBe(2);
+  expect(requests[1]!.update).toBe(true);
+  expect(
+    requests[1]!.options
+      .filter((o) => o.category === "Model")
+      .map((o) => [o.label, o.checked]),
+  ).toEqual([
+    ["Opus 5.5", true],
+    ["Sonnet 5.5", false],
+  ]);
+  expect(actions.at(-1)).toEqual({
+    type: "setModel",
+    model: "sonnet",
+    effort: q.snapshot.settings.effort,
+  });
+  root.dispose();
+});
+test("suggestions read as buttons: a raised fill with a hairline edge, the label in body text", async () => {
+  const { root } = mount();
+  await root.render(
+    <AgentView
+      publication={states.empty()}
+      menu={async () => null}
+      send={() => {}}
+    />,
+  );
+  const tokens = (v: unknown) => JSON.stringify(v);
+  for (const label of [
+    "Animate a title",
+    "Shape the scene",
+    "Arrange my workspace",
+  ]) {
+    const b = byLabel(root, label);
+    const style = b.props.style as Record<string, unknown>;
+    expect(b.props.role).toBe("button");
+    expect(tokens(style.background)).toContain("colors.raised");
+    expect(tokens(style.borderColor)).toContain("colors.hairline");
+    expect(tokens(style.minHeight)).toContain("metrics.control");
+    const parts = root
+      .inspect()
+      .nodes.filter((n: any) => b.children?.includes(n.id) ?? false);
+    const styles = tokens(parts.map((n: any) => n.props.style));
+    // Body-text label, secondary chevron: not the quiet faint pair.
+    expect(styles).toContain("colors.text");
+    expect(styles).toContain("colors.secondary");
+    expect(styles).not.toContain("colors.muted");
+  }
+  root.dispose();
+});
 const turn = (): Row[] => [
   {
     id: "history:u",

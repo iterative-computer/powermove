@@ -80,12 +80,7 @@ impl Page {
             Trust::Trusted,
             feedback.clone(),
             stores,
-            &pm_compat_runner::page_bundle(
-                false,
-                false,
-                false,
-                pm_shell::theme::tokens(pm_design::Scheme::Light, Default::default()).metrics.inset,
-            ),
+            &pm_compat_runner::page_bundle(false, false, false),
         )?;
         web.create(PanelSpec {
             id: PANEL,
@@ -239,6 +234,7 @@ impl Owner {
         for (key, page) in &mut self.pages {
             for event in page.feedback.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),

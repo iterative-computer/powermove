@@ -73,43 +73,37 @@
 </script>
 
 <div class="browser" aria-busy={busy !== null}>
-  <p class="help">Choose an image to make it available to the timeline.</p>
-  <ul aria-label="Available images">
+  <p class="help pm-caption">Choose an image to make it available to the timeline.</p>
+  <ul class="pm-list" aria-label="Available images">
     {#each items as item (item.id)}
-      <li
+      <li class="pm-list-item"
         draggable={Boolean(imported[item.id])}
         ondragstart={(event) => startDrag(event, item)}
         ondragend={endDrag}
       >
         <span>{item.name}</span>
         {#if imported[item.id]}
-          <span class="ready">Ready to drag</span>
+          <span class="ready pm-caption">Ready to drag</span>
         {:else}
-          <button type="button" disabled={busy !== null} onclick={() => importItem(item)}>
+          <button class="pm-button" type="button" disabled={busy !== null} onclick={() => importItem(item)}>
             {busy === item.id ? 'Importing' : 'Import'}
           </button>
         {/if}
       </li>
     {/each}
   </ul>
-  <button type="button" class="undo" onclick={undo}>Undo last timeline edit</button>
-  <p class="status" role="status" aria-live="polite">{message}</p>
+  <button type="button" class="undo pm-button pm-button--quiet" onclick={undo}>Undo last timeline edit</button>
+  <p class="status pm-caption" role="status" aria-live="polite">{message}</p>
 </div>
 
 <style>
-  .browser { display:flex; flex-direction:column; gap:10px; padding:8px; color:var(--tx); font-family:var(--f-ui); }
-  .help,.status { margin:0; color:var(--tx-3); font-size:var(--fs-xs); line-height:var(--lh); }
-  ul { display:flex; flex-direction:column; gap:2px; margin:0; padding:0; list-style:none; }
-  li { display:flex; min-height:var(--row-h); align-items:center; gap:8px; padding:4px 6px; border-radius:var(--r-sm); font-size:var(--fs-md); }
+  .browser { display:flex; flex-direction:column; gap:var(--pm-gap); padding:var(--pm-inset); }
+  .help,.status { margin:0; }
+  ul { display:flex; flex-direction:column; gap:var(--pm-space-xs); margin:0; padding:0; list-style:none; }
+  li { display:flex; align-items:center; gap:var(--pm-gap); padding:var(--pm-space-xs) var(--pm-gap); }
   li[draggable="true"] { cursor:grab; }
   li[draggable="true"]:active { cursor:grabbing; }
-  li:hover { background:var(--bg-row); }
   li > span:first-child { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .ready { flex:none; color:var(--tx-3); font-size:var(--fs-xs); }
-  button { min-height:var(--ctl-h); padding:0 8px; border-radius:var(--r-sm); background:var(--bg-field); color:var(--tx-2); box-shadow:var(--ctl-edge); font:inherit; cursor:default; }
-  button:hover:not(:disabled),button:focus-visible { color:var(--tx); background:var(--bg-hover); }
-  button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  button:disabled { opacity:.5; }
+  .ready { flex:none; }
   .undo { align-self:flex-start; }
-  .status { min-height:calc(var(--lh) * 1em); }
 </style>

@@ -533,7 +533,11 @@ fn a_displayed_decoder_displaces_cold_idle_state_before_reopening() {
         "the cold idle decoder evicted the displayed one"
     );
     current.frame(11).unwrap();
-    assert_eq!(current.stats().seeks, 1, "the displayed run should continue");
+    assert_eq!(
+        current.stats().seeks,
+        1,
+        "the displayed run should continue"
+    );
     drop(current);
     assert!(svc.usage().decoders <= budget);
 }
@@ -580,7 +584,11 @@ fn a_paused_clip_keeps_only_its_decoder() {
         s.frame(11).unwrap();
         assert_eq!(s.stats().seeks, seeks, "Play continues the paused run");
     }
-    assert_eq!(svc.kept_sessions(), 1, "still kept after Play's first frame");
+    assert_eq!(
+        svc.kept_sessions(),
+        1,
+        "still kept after Play's first frame"
+    );
     svc.release_kept();
     assert_eq!((svc.usage().sessions, svc.kept_sessions()), (0, 0));
 
@@ -598,4 +606,63 @@ fn a_paused_clip_keeps_only_its_decoder() {
         decoders: 0,
     });
     assert_eq!(svc.usage().sessions, 0);
+}
+
+#[test]
+fn hot_display_return_defers_eviction_but_the_next_fit_enforces_the_lease() {
+    let src = MediaSource::open(&fixtures_dir().join("vp9-opus.webm")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        pool_free_bytes: 0,
+        ..Default::default()
+    });
+    svc.note_display(src.id, 7);
+    let mut session = svc
+        .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    session.frame(0).unwrap();
+    let tiny = MediaLease {
+        frame_cache: 0,
+        decoders: 1,
+    };
+    svc.apply_lease(tiny);
+    drop(session);
+    assert_eq!(
+        svc.usage().sessions,
+        1,
+        "the current picture must not discard its decoder mid-render"
+    );
+    let cold = svc
+        .session_with(&src, 8, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    drop(cold);
+    assert_eq!(
+        svc.usage().sessions,
+        0,
+        "a cold return gets no deferred slot and its normal fit can evict the hot decoder"
+    );
+    let mut session = svc
+        .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    session.frame(0).unwrap();
+    drop(session);
+    assert_eq!(svc.usage().sessions, 1);
+    assert_eq!(
+        svc.apply_lease(tiny).sessions,
+        0,
+        "the next fit must enforce the bound"
+    );
+    let session = svc
+        .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
+    drop(session);
+    assert_eq!(
+        svc.usage().sessions,
+        0,
+        "zero shares close even the current display decoder"
+    );
 }

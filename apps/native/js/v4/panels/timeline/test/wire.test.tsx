@@ -69,10 +69,11 @@ describe("timeline: accepted six-op trees (provisional placeholders, not visual 
 test("one track-area focus stop, non-focusable rows, conditional graph menu and tabs", async () => {
   const { root, commits } = recorder();
   await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
-  // v1's order: the tab row (tabs, then Layers / Tracks), then the head over
+  // The tab row has tabs and their menus, then Layers / Tracks; the head over
   // the layer column (play, time, graph switch), then the tracks.
   expect(focusIds(root, replay(commits).at(-1).focusOrder)).toEqual([
     "timeline:tab:launch",
+    "timeline:tab-menu:launch",
     "P0-0:Layers",
     "timeline:play",
     "timeline:time",
@@ -178,9 +179,9 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   ).toMatchObject({
     timelineLayerDrag: { layer: "headline" },
   });
-  // At rest (not hovered, not selected): three columns, the parent link and
-  // visibility drawn (as v1), Lock held open. Shy and Solo have no button.
-  expect(switches.children.length).toBe(3);
+  // At rest (not hovered, not selected): five columns, the parent link and
+  // visibility drawn (as v1), Shy, Solo and Lock held open (PM-367).
+  expect(switches.children.length).toBe(5);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
   for (const name of ["shy", "solo", "lock"])
@@ -190,7 +191,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     expect(slot.props.style).toMatchObject({
       minWidth: { token: "metrics.hit" },
     });
-  // Hovered: every switch, in the same three columns; never Shy or Solo.
+  // Hovered: every switch, in the same five columns.
   await root.render(
     <TimelinePanel
       frame={frame({
@@ -200,11 +201,42 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     />,
   );
   const hovered = byId(root, "timeline:row:layer:headline").children[1];
-  expect(hovered.children.length).toBe(3);
-  for (const name of ["parent", "lock", "visibility"])
+  expect(hovered.children.length).toBe(5);
+  for (const name of ["parent", "shy", "solo", "lock", "visibility"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
-  for (const name of ["shy", "solo"])
-    expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
+  await root.dispose();
+});
+
+test("selected rows take the accent only while the timeline holds the keyboard (PM-367)", async () => {
+  const { root } = recorder();
+  const selected = { ...layer(), selected: true };
+  const style = () => byId(root, "timeline:row:layer:headline").props.style;
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 1, first: 0, rows: [selected] } })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.timeline_selected" },
+    color: { token: "colors.accent_text" },
+  });
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        focused: false,
+        window: { total: 1, first: 0, rows: [selected] },
+      })}
+      send={() => {}}
+    />,
+  );
+  expect(style()).toMatchObject({
+    background: { token: "colors.selected_fill" },
+  });
+  expect(style().color?.token).not.toBe("colors.accent_text");
+  expect(
+    byId(root, "timeline:name:layer:headline").props.style.color,
+  ).toMatchObject({ token: "colors.text" });
   await root.dispose();
 });
 
@@ -472,6 +504,72 @@ test("all sixteen scheme/accessibility token combinations accept the panel witho
       expect(result.accepted).toBe(true);
       expect(result.diagnostics).toEqual([]);
     }
+  }
+  await root.dispose();
+});
+
+test("joined property values expose separate native axis scrub targets", async () => {
+  const { root, commits } = recorder();
+  const f = states["scale-compound"]();
+  const row = f.window.rows.find(
+    (r) => r.kind === "property" && r.path === "scale",
+  )!;
+  if (row.kind !== "property") throw new Error("missing scale row");
+  row.axes = [
+    { path: "scale.x", readout: "100" },
+    { path: "scale.y", readout: "125" },
+  ];
+  await root.render(<TimelinePanel frame={f} send={() => {}} />);
+  for (const path of ["scale.x", "scale.y"]) {
+    const value = byId(root, `timeline:value:${row.id}:${path}`);
+    expect(value.props.metadata).toEqual({
+      timelineScrub: { layer: row.layer, path },
+    });
+  }
+  const native = replay(commits).at(-1);
+  expect(native.accepted).toBe(true);
+  expect(native.diagnostics).toEqual([]);
+  await root.dispose();
+});
+
+test("graph switch is icon-only and retains its accessible toggle", async () => {
+  const { root } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  const graph = byId(root, "timeline:graph");
+  expect(graph.props.label).toBe("Graph Editor");
+  expect(graph.props.title).toBe("Show Graph Editor (⇧F3)");
+  expect(graph.children.length).toBe(0);
+  await root.render(
+    <TimelinePanel frame={states["graph-empty"]()} send={() => {}} />,
+  );
+  expect(byId(root, "timeline:graph").props["aria-pressed"]).toBe(true);
+  await root.dispose();
+});
+
+test("group children retain the number column and shift right at depths 0/1/2", async () => {
+  const { root } = recorder();
+  for (const depth of [0, 1, 2]) {
+    const row = { ...layer(), depth };
+    await root.render(
+      <TimelinePanel
+        frame={{ ...frame(), window: { total: 1, first: 0, rows: [row] } }}
+        send={() => {}}
+      />,
+    );
+    const indents = [...root.host.nodes.values()].filter(
+      (n) =>
+        (n.props.metadata as Record<string, unknown> | undefined)
+          ?.timelineIndent !== undefined,
+    );
+    expect(indents.length).toBe(1);
+    const spacers = indents[0].children.filter(
+      (n) =>
+        (n.props.style as Record<string, { token?: string }> | undefined)?.width
+          ?.token === "metrics.timeline_indent",
+    );
+    expect(spacers.length).toBe(depth);
+    expect(spacers.length * 12).toBe([0, 12, 24][depth]);
+    expect(JSON.stringify(tree(root))).toContain("01");
   }
   await root.dispose();
 });

@@ -162,6 +162,11 @@ pub enum Kit {
         values: Vec<f64>,
         channel: usize,
     },
+    /// An easing curve `[x1, y1, x2, y2]`: the editor, or a thumbnail.
+    Ease {
+        curve: [f64; 4],
+        thumbnail: bool,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
@@ -212,6 +217,7 @@ pub struct NodeView {
     pub timeline_scrub: Option<(SharedString, SharedString)>,
     /// The timeline's layer name: a press there can lift into a reorder.
     pub timeline_layer_drag: Option<SharedString>,
+    pub timeline_parent_pick: Option<SharedString>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -851,6 +857,11 @@ fn compile(
                 SharedString::from(t.get("path")?.as_str()?.to_owned()),
             ))
         }),
+        timeline_parent_pick: meta
+            .and_then(|m| m.get("timelineParentPick"))
+            .and_then(|t| t.get("layer"))
+            .and_then(Value::as_str)
+            .map(|layer| SharedString::from(layer.to_owned())),
         timeline_layer_drag: meta
             .and_then(|m| m.get("timelineLayerDrag"))
             .and_then(|t| t.get("layer"))
@@ -1081,6 +1092,19 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 .unwrap_or(0)
                 .min(3) as usize,
         },
+        Some(component @ (Component::EaseCurve | Component::EaseThumbnail)) => {
+            let n = numbers(value);
+            let at = |i: usize, default: f64| {
+                n.get(i)
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            Kit::Ease {
+                curve: [at(0, 0.), at(1, 0.), at(2, 1.), at(3, 1.)],
+                thumbnail: component == Component::EaseThumbnail,
+            }
+        }
         Some(Component::DisclosureButton) => {
             Kit::Disclosure(node.props.get("aria-expanded") == Some(&Value::Bool(true)))
         }

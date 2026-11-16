@@ -18,7 +18,7 @@ pub mod properties {
     pub use crate::fields::{Field, environment};
     pub use crate::view::{
         NATURE, QUALITY, SKIES, about, add_layer, add_models, estimate_seconds_per_frame,
-        export_quality, new_menu, scatter_options, scene_summary, set_up_studio, shots,
+        export_quality, fly_camera, new_menu, scatter_options, scene_summary, set_up_studio, shots,
     };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};
@@ -666,6 +666,8 @@ impl Session {
         };
         lens.validate()?;
         let start = self.free_pose.unwrap_or(Pose {
+            ortho: false,
+            roll: 0.,
             position: resolved
                 .camera_position
                 .unwrap_or([n("x")?, n("y")?, n("z")?]),

@@ -53,6 +53,37 @@ mod mac {
             root.append(input,out);
           }});
         }";
+    /// PM-378: once an extension makes a viewer stage, the page over the
+    /// viewer takes the panels' ground in the panels' bodies only; the stage
+    /// shows the viewer through it (filled, a #808080 solid read #383838).
+    pub fn stage_ground() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mtm = MainThreadMarker::new().ok_or("main thread")?;
+        NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let (feedback, _messages) = mpsc::channel();
+        let page = Rc::new(Page(feedback, RefCell::new(vec![])));
+        let mut web = MacDomHost::new_remote_dom(
+            mtm,
+            Trust::Trusted,
+            page,
+            &mut StoreDataStores::default(),
+            PAGE_BUNDLE,
+        )?;
+        let viewport = Rect::new(0., 0., 640., 480.);
+        let (panel, stage) = (Rect::new(0., 0., 200., 480.), Rect::new(200., 0., 440., 480.));
+        web.set_regions_with_transparent_overlays(vec![panel], vec![stage])?;
+        web.set_fill(Some([0.12, 0.12, 0.13, 0.72]));
+        web.present(viewport)?;
+        assert!(web.ground_covers(100., 240.), "the panel's body has no ground");
+        for (x, y) in [(420., 240.), (201., 1.), (639., 479.)] {
+            assert!(!web.ground_covers(x, y), "the ground covers the stage at {x},{y}");
+        }
+        // With no stage the ground still stops at the panels.
+        web.set_regions_with_transparent_overlays(vec![panel], vec![])?;
+        web.present(viewport)?;
+        assert!(web.ground_covers(100., 240.) && !web.ground_covers(420., 240.));
+        println!("stage_ground: ok");
+        Ok(())
+    }
     /// A Store helper's view: its closures in the confined process, its document
     /// in a WebKit page of its own.
     fn store_view(
@@ -462,14 +493,14 @@ mod mac {
                         .ok_or("no synthetic press")?;
                         let left = Rect::new(0., 0., 200., 480.);
                         let right = Rect::new(400., 0., 240., 480.);
-                        web.set_regions(vec![left, right])?;
+                        web.set_regions_with_transparent_overlays(vec![left, right], vec![])?;
                         web.present(viewport)?;
                         web.web_view().mouseDown(&press);
                         assert!(window.makeFirstResponder(Some(web.web_view())));
-                        web.set_regions(vec![left])?;
+                        web.set_regions_with_transparent_overlays(vec![left], vec![])?;
                         web.present(viewport)?;
                         assert!(holds(&window, web.web_view()), "a panel still showing lost the keyboard");
-                        web.set_regions(vec![right])?;
+                        web.set_regions_with_transparent_overlays(vec![right], vec![])?;
                         web.present(viewport)?;
                         assert!(
                             holds(&window, &content),
@@ -478,7 +509,7 @@ mod mac {
                         // Two tabs of one group share a body: the page knows
                         // its panels by name, and a press belongs to the one
                         // shown there when it lands.
-                        web.set_regions(vec![left])?;
+                        web.set_regions_with_transparent_overlays(vec![left], vec![])?;
                         web.set_bodies(vec![("notes".into(), left)]);
                         web.present(viewport)?;
                         web.web_view().mouseDown(&press);
@@ -567,7 +598,7 @@ mod mac {
 }
 fn main() {
     #[cfg(target_os = "macos")]
-    if let Err(error) = objc2::rc::autoreleasepool(|_| mac::run()) {
+    if let Err(error) = objc2::rc::autoreleasepool(|_| mac::stage_ground().and_then(|_| mac::run())) {
         eprintln!("{error}");
         std::process::exit(1);
     }

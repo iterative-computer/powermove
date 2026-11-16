@@ -7,6 +7,7 @@ mod delta;
 mod disk;
 mod extension_import;
 pub mod extension_transfer;
+pub mod later;
 pub use extension_transfer::import_extensions;
 pub mod recovery;
 pub mod report;
@@ -161,7 +162,8 @@ pub enum Launch {
     Fresh,
     /// A source exists and bootstrap isn't finished: the gate runs.
     Migrate,
-    /// Bootstrap finished earlier: no gate, later changes come in behind it.
+    /// Bootstrap finished earlier: no gate and no wait on the original app.
+    /// Newer work there comes in only when the person asks (`later`).
     Later,
 }
 pub fn detect(config: &Config) -> Launch {

@@ -53,6 +53,9 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Accent-tinted timeline layer selection, with a stronger hovered state.
+    pub timeline_selected: u32,
+    pub timeline_selected_hover: u32,
     /// Soft neutral fill: segmented tracks, search fields, quiet wells
     /// (`text` ink at `translucency.hover` over `panel`).
     pub fill: u32,
@@ -355,6 +358,8 @@ pub struct Metrics {
     pub agent_gap: f32,
     /// Indent per outline level.
     pub tree_indent: f32,
+    /// Electron timeline nesting: 12 points per depth, capped at four levels.
+    pub timeline_indent: f32,
     /// Layer-kind badge square (timeline, Project list).
     pub kind_badge: f32,
     /// Minimum Project grid thumbnail width.
@@ -400,6 +405,29 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// Project media tiles (v1.2.0 `.asset-preview`): the inset of a
+    /// tile's badges and actions from its edges, a badge's side padding and
+    /// the space between a card's tile and its name.
+    pub media_inset: f32,
+    /// Height of a tile's duration and status badges.
+    pub media_badge_height: f32,
+    /// The selection ring inside a tile.
+    pub media_ring: f32,
+    /// A media kind's glyph centred on a tile without a picture.
+    pub media_glyph: f32,
+    /// The folder glyph on a folder's tile.
+    pub media_folder_glyph: f32,
+    /// A Project list row's leading thumbnail (16:9).
+    pub media_row_thumb_width: f32,
+    pub media_row_thumb_height: f32,
+    /// A composition's frame inside its tile (v1.2.0 `.comp-frame`).
+    pub media_comp_inset: f32,
+    /// The red (missing) or accent (in cloud) wash over a tile.
+    pub media_tint_opacity: f32,
+    /// A missing file's remembered picture, dimmed under its badge.
+    pub media_offline_opacity: f32,
+    /// A picture whose media is still loading.
+    pub media_loading_opacity: f32,
     /// The leading room a person's own message leaves free in the Agent
     /// conversation, so it reads as theirs (at most 84 % of the popover's
     /// content).
@@ -624,6 +652,8 @@ impl Colors {
             },
             selected_text: 0xffffff,
             selected_fill,
+            timeline_selected: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.18),
+            timeline_selected_hover: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.24),
             fill: 0,
             fill_strong: 0,
             hairline: 0,
@@ -850,6 +880,7 @@ impl Tokens {
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
+                timeline_indent: 12.,
                 kind_badge: 18.,
                 thumbnail_min: 120.,
                 sheet_inset: 20.,
@@ -876,6 +907,17 @@ impl Tokens {
                 },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                media_inset: space.xs,
+                media_badge_height: 16.,
+                media_ring: 2.,
+                media_glyph: 22.,
+                media_folder_glyph: 30.,
+                media_row_thumb_width: 32.,
+                media_row_thumb_height: 18.,
+                media_comp_inset: space.md,
+                media_tint_opacity: 0.1,
+                media_offline_opacity: 0.32,
+                media_loading_opacity: 0.55,
                 message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
@@ -1017,6 +1059,7 @@ impl Tokens {
         colors.viewer: color, colors.field: color, colors.floating: color,
         colors.hover: color, colors.separator: color, colors.text: color,
         colors.secondary: color, colors.muted: color, colors.accent: color,
+        colors.timeline_selected: color, colors.timeline_selected_hover: color,
         colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
         colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
         colors.warning: color, colors.success: color,
@@ -1030,6 +1073,7 @@ impl Tokens {
         typography.title: size, typography.reading: size, typography.heading: size,
         typography.display: size,
         colors.media_badge: color,
+        metrics.timeline_indent: size,
         metrics.kind_badge: size,
         metrics.thumbnail_min: size,
         metrics.status_dot: size,
@@ -1077,22 +1121,6 @@ impl Tokens {
             (self.colors.text, self.translucency.line)
         }
     }
-    /// The panel over the window ground, for a transparent native page below
-    /// the shell. This is the same two layers a built-in panel paints.
-    pub fn panel_backing(&self) -> [f64; 4] {
-        let (ground, ground_alpha) = self.ground();
-        let ground_alpha = f64::from(ground_alpha);
-        let panel_alpha = f64::from(self.translucency.panel);
-        let alpha = panel_alpha + ground_alpha * (1. - panel_alpha);
-        if alpha == 0. { return [0.; 4]; }
-        let channel = |shift: u32| {
-            let panel = f64::from((self.colors.panel >> shift) & 255) / 255.;
-            let ground = f64::from((ground >> shift) & 255) / 255.;
-            (panel * panel_alpha + ground * ground_alpha * (1. - panel_alpha)) / alpha
-        };
-        [channel(16), channel(8), channel(0), alpha]
-    }
-
     /// Window ground as (colour, alpha): the `ground` tint over the blur, or
     /// the solid `window` colour under Reduce Transparency.
     pub fn ground(&self) -> (u32, f32) {
@@ -1134,31 +1162,4 @@ pub mod workspace {
     pub const DEFAULT_RIGHT: f32 = 300.;
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
-}
-
-#[cfg(test)]
-mod native_panel_frame_tests {
-    use super::*;
-    #[test]
-    fn native_panel_backing_matches_the_builtin_two_layer_surface() {
-        for scheme in [Scheme::Light, Scheme::Dark] {
-            let t = Tokens::new(scheme, Accessibility::default());
-            let backing = t.panel_backing();
-            let (ground, ga) = t.ground();
-            let pa = f64::from(t.translucency.panel);
-            for underneath in [0., 0.5, 1.] {
-                for (i, shift) in [16, 8, 0].into_iter().enumerate() {
-                    let g = f64::from((ground >> shift) & 255) / 255.;
-                    let p = f64::from((t.colors.panel >> shift) & 255) / 255.;
-                    let builtin = p * pa + (g * f64::from(ga) + underneath * (1. - f64::from(ga))) * (1. - pa);
-                    let extension = backing[i] * backing[3] + underneath * (1. - backing[3]);
-                    assert!((builtin - extension).abs() < 1e-12);
-                }
-            }
-            if let Ok(dir) = std::env::var("PM_FRAME_CAPTURE_DIR") {
-                std::fs::write(std::path::Path::new(&dir).join(format!("{:?}-surface.json", scheme)),
-                    serde_json::to_string_pretty(&serde_json::json!({"surface": backing, "panel": t.colors.panel, "panel_alpha": t.translucency.panel, "radius": t.metrics.panel_radius, "padding": t.metrics.inset, "header": t.metrics.header})).unwrap()).unwrap();
-            }
-        }
-    }
 }
