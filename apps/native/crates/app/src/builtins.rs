@@ -1062,7 +1062,10 @@ impl Controller {
             self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();
+        let build=self.agent_panel_builds.iter().find(|(_,b)|b.target.as_deref()==Some(id))
+            .and_then(|(slot,_)|self.panel_builds.get(slot)).or_else(||self.panel_builds.get(id)).cloned();
         view.update(cx, |v, cx| {
+            v.set_panel_build(build,cx);
             v.attach(window, cx);
             if *v.tokens() != t {
                 v.retheme(t.clone(), cx);

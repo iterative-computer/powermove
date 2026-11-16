@@ -16,6 +16,8 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
+    alpha: Cell<Option<(u64,f64)>>,
+    staged_alpha: Cell<f64>,
 }
 impl State {
     fn key(&self) -> usize {
@@ -105,6 +107,8 @@ impl NativeControlSlot {
             control,
             geometry: Cell::new(None),
             staged: Cell::new(None),
+            alpha: Cell::new(None),
+            staged_alpha: Cell::new(1.),
         });
         SLOTS.with(|s| {
             s.borrow_mut()
@@ -118,9 +122,16 @@ impl NativeControlSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
+    pub fn stage_alpha(&self, alpha:f64) {
+        let alpha=alpha.clamp(0.,1.);
+        let paint=crate::composition::open_paint(self.state.key());
+        self.state.alpha.set(Some((paint,alpha)));
+        self.state.staged_alpha.set(alpha);
+    }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
         self.state.stage(self.state.staged.get());
+        self.stage_alpha(self.state.staged_alpha.get());
     }
     /// The control's wrapper, for tests that read where a present put it.
     #[doc(hidden)]
@@ -174,6 +185,7 @@ pub(crate) fn pending(key: usize) -> bool {
                 state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
+                    || state.alpha.get().is_some_and(|(paint,alpha)| Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha)
             }
         })
 }
@@ -197,6 +209,11 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         if state.control.frame() != local {
             state.control.setFrame(local);
             moved = true;
+        }
+        if let Some((paint,alpha))=state.alpha.get() {
+            if Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha {
+                state.control.setAlphaValue(alpha);moved=true;
+            }
         }
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {
             state.attach();

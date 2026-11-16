@@ -213,12 +213,12 @@ fn control_fraction(control: &Value, current: &Value) -> f32 {
     }
 }
 
-fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bool) -> f32 {
+pub(crate) fn control_opacity(build: Option<&panel_build::State>, index: usize, reduced: bool) -> f32 {
     let Some(build)=build else {return 1.;};
     if build.stage==panel_build::Stage::Ready {return 1.;}
     build.committed.get(&index).map_or(0.,|at| if reduced {panel_build::reveal(build.now().saturating_duration_since(*at).as_secs_f32(),true)} else {1.})
 }
-fn dot_filter(build: Option<&panel_build::State>, index: Option<usize>, t: &pm_design::Tokens) -> Vec<Filter> {
+pub(crate) fn dot_filter(build: Option<&panel_build::State>, index: Option<usize>, t: &pm_design::Tokens) -> Vec<Filter> {
     let Some(build)=build else {return vec![];};
     if t.accessibility.reduce_motion {return vec![];}
     let now=build.now();
@@ -1476,6 +1476,7 @@ pub(crate) struct AgentBuild {
     pub target: Option<String>,
     pub finishing: bool,
     pub owner: Option<String>,
+    pub snapshot: Option<(usize,std::sync::Arc<RenderImage>)>,
 }
 
 pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::Rect, window: &mut Window, cx: &mut Context<Controller>) -> Option<AnyElement> {
@@ -1492,7 +1493,10 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
                         shell.update(cx, |e, cx| { e.release_agent_panel(&id); cx.notify(); });
                     }
                     if let Some(build) = v.agent_panel_builds.remove(&id) {
-                        if let Some(target) = build.target { v.panel_builds.remove(&target); }
+                        if let Some(target) = build.target {
+                            if let Some(page)=v.extensions.page_of(&target){page.borrow_mut().finish_panel_build(&target);}
+                            v.panel_builds.remove(&target);
+                        }
                     }
                     v.panel_builds.remove(&id); cx.notify();
                     });
@@ -1502,12 +1506,42 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     }
     let mut content = None;
     let mut generated = false;
+    let mut native_tree=false;
+    let mut web_capture=None;
     if let Some(target) = &build.target {
         content = v.extension_panel(target, rect, cx);
-        if content.is_none() { content=v.builtin_panel(target,rect,window,cx); }
+        if content.is_none() { content=v.builtin_panel(target,rect,window,cx); native_tree=content.is_some(); }
         let rendered = if v.extensions.owns_panel(target) { v.extension_build_rendered(target) }
             else if content.is_some() { true }
             else { section(v, target).is_some() };
+        let rendered=if v.extensions.owns_panel(target) {
+            if let Some(page)=v.extensions.page_of(target) {
+                let state=v.panel_builds.get(id).cloned().unwrap_or_default();
+                let resolve=state.resolve(state.now());
+                let ready=(state.stage==panel_build::Stage::Ready).then_some(resolve);
+                let captured=build.snapshot.is_some();
+                let (_,live)=pm_design::dots::snapshot_visibility(captured,ready);
+                let revision=state.committed.values().max().map_or(0,|at|at.saturating_duration_since(state.started).as_nanos() as u64);
+                let mut capture_done=true;
+                if resolve>=1. {page.borrow_mut().finish_panel_build(target);}
+                else {
+                    let (done,image)=page.borrow_mut().panel_build_snapshot(target,revision,live);
+                    capture_done=done;
+                    if done && image.is_none(){v.agent_panel_builds.get_mut(id).unwrap().snapshot=None;}
+                    if let Some((source,image))=image {
+                        let key=(&*image as *const objc2_app_kit::NSImage) as usize;
+                        let cached=v.agent_panel_builds.get_mut(id).unwrap();
+                        if cached.snapshot.as_ref().map(|s|s.0)!=Some(key) {
+                            cached.snapshot=pm_shell::native_control::snapshot_image(&image).map(|image|(key,image));
+                        }
+                        web_capture=cached.snapshot.as_ref().map(|(_,image)|(source,image.clone()));
+                    }
+                    content=None;
+                    if !done && web_capture.is_none() {return Some(div().relative().size_full().child(build_surface(state,rect,&v.host.borrow().tokens.clone(),v.running(),0.5,window,cx)).into_any_element());}
+                }
+                rendered && capture_done
+            } else {rendered}
+        } else {rendered};
         if rendered && build.finishing {
             if let Some(state) = v.panel_builds.get_mut(id) { state.complete = true; }
         }
@@ -1528,9 +1562,12 @@ pub(crate) fn agent_slot(v: &mut Controller, id: &str, rect: pm_shell::layout::R
     let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
     let root_alpha=if state.stage==panel_build::Stage::Erase {1.-panel_build::fade(state.changed.elapsed().as_secs_f32(),0.36)}else{1.};
     let mut body=div().relative().size_full().overflow_hidden().opacity(root_alpha).bg(rgb(tokens.colors.panel)).child(overlay);
-    if let Some(content)=content {
-        body=body.child(div().size_full().child(content).filter(dot_filter(Some(&state),None,&tokens)));
-    } else {
+    if let Some((source,image))=web_capture {
+        body=body.child(div().absolute().inset_0().overflow_hidden().filter(dot_filter(Some(&state),None,&tokens))
+            .child(img(image).w(px(source.w as f32)).h(px(source.h as f32))));
+    } else if let Some(content)=content {
+        body=body.child(div().size_full().child(content).filter(if native_tree{vec![]}else{dot_filter(Some(&state),None,&tokens)}));
+    } else if build.target.is_none() {
         body=body.child(div().h(px(BUILD_HEADER)).px(px(16.)).filter(dot_filter(Some(&state),None,&tokens)).child(build.title.clone()));
         for (row,control) in build.planned.iter().enumerate() {
             body=body.child(div().h(px(BUILD_ROW)).px(px(16.))
@@ -1551,6 +1588,6 @@ pub(crate) fn extension_build(v: &mut Controller, id: &str, content: AnyElement,
     if state.stage==panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32()>=0.7 {return content;}
     let field=build_surface(state.clone(),rect,&t,v.running(),0.5,window,cx);
     div().relative().size_full().child(field)
-        .child(div().size_full().child(content).filter(dot_filter(Some(&state),Some(0),&t))
+        .child(div().size_full().child(content)
             .opacity(control_opacity(Some(&state),0,t.accessibility.reduce_motion))).into_any_element()
 }

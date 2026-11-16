@@ -92,3 +92,25 @@ pub fn aurora(size:[f32;2],age:f32,accent:u32,text:u32,muted:u32)->Vec<Dot> {
         assert!(a.iter().all(|d|d.radius==0.7));
     }
 }
+
+/// A successful texture owns every resolving frame; the live host takes over
+/// atomically at one. Failed captures use only the live host's ready crossfade.
+pub fn snapshot_visibility(captured: bool, ready: Option<f32>) -> (f32, f32) {
+    let resolve=ready.unwrap_or(0.).clamp(0.,1.);
+    if captured { if resolve>=1. {(0.,1.)}else{(1.,0.)} }
+    else {(0.,resolve)}
+}
+#[cfg(test)] mod snapshot_tests {
+    use super::*;
+    #[test] fn successful_handoff_has_exactly_one_visible_owner() {
+        for i in 0..=1000 { let (dots,live)=snapshot_visibility(true,Some(i as f32/1000.));
+            assert_eq!(dots+live,1.); assert_eq!(dots*live,0.);
+        }
+        assert_eq!(snapshot_visibility(true,None),(1.,0.));
+    }
+    #[test] fn failed_capture_only_crossfades_at_ready() {
+        assert_eq!(snapshot_visibility(false,None),(0.,0.));
+        assert_eq!(snapshot_visibility(false,Some(0.5)),(0.,0.5));
+        assert_eq!(snapshot_visibility(false,Some(1.)),(0.,1.));
+    }
+}

@@ -286,7 +286,34 @@ fn search_hint(field: &NSView, empty: bool) {
         hint.setHidden(!empty);
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+pub struct BuildSnapshot {
+    pub revision: Option<u64>,
+    pub ready: Option<f32>,
+    /// A row filters its label and snapshot together; standalone controls filter here.
+    pub filter: Option<Filter>,
+}
+#[derive(Default)]
+struct BuildPixels {
+    key: Option<(u64, [u32;4])>,
+    image: Option<std::sync::Arc<RenderImage>>,
+}
+/// PNG decoding normalizes AppKit bitmap layouts; GPUI sprites use straight BGRA.
+pub fn snapshot_bitmap(rep: &NSBitmapImageRep) -> Option<std::sync::Arc<RenderImage>> {
+    let properties=objc2_foundation::NSDictionary::new();
+    let data=unsafe {rep.representationUsingType_properties(NSBitmapImageFileType::PNG,&properties)}?;
+    let mut pixels=image::load_from_memory(unsafe {data.as_bytes_unchecked()}).ok()?.to_rgba8();
+    for pixel in pixels.pixels_mut() {pixel.0.swap(0,2);}
+    Some(std::sync::Arc::new(RenderImage::new([image::Frame::new(pixels)])))
+}
+pub fn snapshot_image(image: &NSImage) -> Option<std::sync::Arc<RenderImage>> {
+    let data=image.TIFFRepresentation()?;
+    let rep=NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(),&data)?;
+    snapshot_bitmap(&rep)
+}
 pub struct NativeControl {
+    build: Option<BuildSnapshot>,
+    build_pixels: Rc<std::cell::RefCell<BuildPixels>>,
     control: Control,
     slot: Rc<NativeControlSlot>,
     _target: Retained<Target>,
@@ -313,6 +340,15 @@ pub struct NativeControl {
 }
 impl EventEmitter<Value> for NativeControl {}
 impl NativeControl {
+    pub fn set_build_snapshot(&mut self, build: Option<BuildSnapshot>) -> bool {
+        let build=build.filter(|b| b.ready.unwrap_or(0.)<1.);
+        if self.build==build {return false;}
+        if build.is_none() {
+            *self.build_pixels.borrow_mut()=Default::default();
+        }
+        self.build=build;
+        true
+    }
     /// The width the control fits its title in.
     pub fn width(&self) -> f32 {
         self.width
@@ -718,6 +754,8 @@ impl NativeControl {
         })
         .detach();
         Self {
+            build: None,
+            build_pixels: Default::default(),
             control,
             slot,
             _target: target,
@@ -913,7 +951,14 @@ impl NativeControl {
     }
 }
 impl Render for NativeControl {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let build=self.build;
+        let pixels=self.build_pixels.clone();
+        let owner=cx.entity().downgrade();
+        let snapshot=build.and_then(|b| b.revision).and_then(|revision| {
+            let cached=pixels.borrow();
+            cached.key.filter(|(r,_)|*r==revision).and(cached.image.clone())
+        });
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
@@ -930,11 +975,33 @@ impl Render for NativeControl {
         root.relative().h(px(self.height)).child(
             canvas(
                 |_, _, _| (),
-                move |bounds, _, window, _| {
+                move |bounds, _, window, cx| {
                     let (bounds, clip) =
                         layer.painted(bounds, window.content_mask().bounds, window);
                     slot.stage(ns_rect(bounds), ns_rect(clip));
-                    if focus.get()
+                    if let Some(build)=build {
+                        if let Some(revision)=build.revision {
+                            let frame=[f32::from(bounds.origin.x).to_bits(),f32::from(bounds.origin.y).to_bits(),f32::from(bounds.size.width).to_bits(),f32::from(bounds.size.height).to_bits()];
+                            let key=(revision,frame);
+                            if pixels.borrow().key!=Some(key) {
+                                native.setFrameSize(NSSize::new(f32::from(bounds.size.width) as f64,f32::from(bounds.size.height) as f64));
+                                let previous_alpha=native.alphaValue();
+                                native.setAlphaValue(1.);
+                                let rect=native.bounds();
+                                let image=native.bitmapImageRepForCachingDisplayInRect(rect).and_then(|rep| {
+                                    native.cacheDisplayInRect_toBitmapImageRep(rect,&rep);
+                                    snapshot_bitmap(&rep)
+                                });
+                                native.setAlphaValue(previous_alpha);
+                                *pixels.borrow_mut()=BuildPixels{key:Some(key),image};
+                                let _=owner.update(cx,|_,cx|cx.notify());
+                            }
+                        }
+                        let captured=pixels.borrow().image.is_some();
+                        let (_,live)=pm_design::dots::snapshot_visibility(captured,build.ready);
+                        slot.stage_alpha(live as f64);
+                    } else {slot.stage_alpha(1.);}
+                    if build.is_none() && focus.get()
                         && let Some(window) = native.window()
                     {
                         focus.set(false);
@@ -944,7 +1011,10 @@ impl Render for NativeControl {
             )
             .absolute()
             .inset_0(),
-        )
+        ).children(snapshot.map(|image| {
+            let filters=build.and_then(|b|b.filter).into_iter().collect::<Vec<_>>();
+            div().absolute().inset_0().filter(filters).child(img(image).size_full())
+        }))
     }
 }
 /// A segment's content, drawn by us in the label ink. AppKit paints a title

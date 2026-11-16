@@ -214,6 +214,7 @@ struct Compiled {
     prepared: Prepared,
 }
 pub struct SurfaceView {
+    panel_build: Option<crate::generated_panel::panel_build::State>,
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
     table: Arc<TokenTable>,
@@ -328,6 +329,7 @@ impl SurfaceView {
         let table = Arc::new(TokenTable::new(tokens));
         let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
         let mut this = Self {
+            panel_build: None,
             runtime,
             publication,
             table,
@@ -390,6 +392,34 @@ impl SurfaceView {
         };
         this.reconcile(window, cx);
         this
+    }
+    fn build_rows(&self) -> Vec<Id> {
+        fn walk(view:&SurfaceView,id:Id,rows:&mut Vec<Id>) {
+            let Some(node)=view.prepared.node(id) else{return;};
+            if node.component==Some(Component::InspectorRow) {rows.push(id);}
+            for child in &node.children {walk(view,*child,rows);}
+        }
+        let mut rows=Vec::new();walk(self,0,&mut rows);rows
+    }
+    pub(crate) fn set_panel_build(&mut self, state:Option<crate::generated_panel::panel_build::State>,cx:&mut Context<Self>) {
+        let state=state.filter(|s|s.resolve(s.now())<1.);
+        let rows=self.build_rows();
+        let mut controls=self.controls.iter().collect::<Vec<_>>();controls.sort_by_key(|(id,_)|**id);
+        for (fallback,(id,control)) in controls.into_iter().enumerate() {
+            let mut parent=Some(*id);let mut row=None;
+            while let Some(id)=parent {if let Some(index)=rows.iter().position(|r|*r==id){row=Some(index);break;}parent=self.prepared.node(id).and_then(|n|n.parent);}
+            let index=row.unwrap_or(fallback);
+            let mode=state.as_ref().map(|s| {
+                let revision=s.committed.get(&index).map(|at|at.saturating_duration_since(s.started).as_nanos() as u64);
+                let ready=(s.stage==crate::generated_panel::panel_build::Stage::Ready).then(||s.resolve(s.now()));
+                let filter=if row.is_none(){crate::generated_panel::dot_filter(Some(s),Some(index),&self.table.tokens).into_iter().next()}else{None};
+                pm_shell::native_control::BuildSnapshot{revision,ready,filter}
+            });
+            control.update(cx,|control,cx|{if control.set_build_snapshot(mode){cx.notify();}});
+        }
+        let active=self.panel_build.is_some() || state.is_some();
+        self.panel_build=state;
+        if active {cx.notify();}
     }
     /// A reopened panel window keeps its view; later publications install
     /// there, and so does one that finished while no window was open.
@@ -2307,6 +2337,17 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if let Some(build)=&self.panel_build {
+            if node.component==Some(Component::InspectorRow) {
+                let index=self.build_rows().iter().position(|row|*row==id).unwrap_or(0);
+                element=element.filter(crate::generated_panel::dot_filter(Some(build),Some(index),&self.table.tokens))
+                    .opacity(crate::generated_panel::control_opacity(Some(build),index,self.table.tokens.accessibility.reduce_motion));
+            } else if node.text.is_some() {
+                let mut parent=node.parent;let mut in_row=false;
+                while let Some(id)=parent {let Some(n)=self.prepared.node(id) else{break;};if n.component==Some(Component::InspectorRow){in_row=true;break;}parent=n.parent;}
+                if !in_row {element=element.filter(crate::generated_panel::dot_filter(Some(build),None,&self.table.tokens));}
+            }
+        }
         // In a body that scrolls, the root and the panel fill the body by
         // growing into it, not as a share of a height that their content
         // sets (which would leave them their content's height).
