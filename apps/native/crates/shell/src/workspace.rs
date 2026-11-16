@@ -275,6 +275,7 @@ pub fn layout(record: &Value) -> Layout {
         .unwrap_or_default();
     for (index, d) in specs.iter().enumerate() {
         let mut groups: Vec<Group> = vec![];
+        let mut group_bases = std::collections::BTreeMap::new();
         for spec in d
             .get("panels")
             .and_then(Value::as_array)
@@ -289,14 +290,33 @@ pub fn layout(record: &Value) -> Layout {
                 ),
                 _ => continue,
             };
-            if id.is_empty() || RETIRED.contains(&id) || !seen.insert(id.to_owned()) {
-                continue;
-            }
             let flag = |k: &str| fields.is_some_and(|o| o.get(k) == Some(&Value::Bool(true)));
             if flag("flex") && !flag("tabbed") {
                 if let Some(basis) = size(fields.and_then(|o| o.get("size"))) {
-                    flex_bases.insert(id.to_owned(), basis);
+                    group_bases.insert(groups.len(), basis);
                 }
+            }
+            let new_group = || Group {
+
+                tabs: vec![id.to_owned()],
+                active: 0,
+                size: if flag("flex") {
+                    None
+                } else {
+                    size(fields.and_then(|o| o.get("size")))
+                },
+                collapsed: flag("collapsed") && id != VIEWER,
+            };
+            if id.is_empty() || RETIRED.contains(&id) || !seen.insert(id.to_owned()) {
+                if !flag("tabbed") {
+                    // Keep the saved boundary and geometry until we know whether
+                    // this removed head has surviving extension tabs. Otherwise
+                    // its first tab would join the preceding, unrelated group.
+                    let mut boundary = new_group();
+                    boundary.tabs.clear();
+                    groups.push(boundary);
+                }
+                continue;
             }
             match groups.last_mut() {
                 Some(g) if flag("tabbed") && stacks(id) && g.tabs.iter().all(|t| stacks(t)) => {
@@ -307,19 +327,15 @@ pub fn layout(record: &Value) -> Layout {
                         g.collapsed = flag("collapsed") && id != VIEWER;
                     }
                 }
-                _ => groups.push(Group {
-
-                    tabs: vec![id.to_owned()],
-                    active: 0,
-                    size: if flag("flex") {
-                        None
-                    } else {
-                        size(fields.and_then(|o| o.get("size")))
-                    },
-                    collapsed: flag("collapsed") && id != VIEWER,
-                }),
+                _ => groups.push(new_group()),
             }
         }
+        for (index, group) in groups.iter().enumerate() {
+            if let (Some(id), Some(basis)) = (group.tabs.first(), group_bases.get(&index)) {
+                flex_bases.insert(id.clone(), *basis);
+            }
+        }
+        groups.retain(|group| !group.tabs.is_empty());
         if groups.is_empty() {
             continue;
         }
@@ -606,8 +622,8 @@ impl Store {
         out
     }
     /// The record a window shows: its project's own workspace, else `preferred`
-    /// (the window's last choice), else, for a project without its own, the
-    /// default for new projects, else the last activated one (v1's `workspace`).
+    /// (the window's last choice), else the default for a project without its
+    /// own workspace; another window's current layout does not leak into it.
     pub fn active(&self, preferred: Option<&str>) -> Value {
         if let Some(p) = self.project.as_ref().filter(|p| usable(p)) {
             if self.deleted(p) {
@@ -860,5 +876,105 @@ mod tests {
         assert_eq!(record_id(&s.active(Some("broken"))), Some("design"));
         s.apply(&Write::Archive("mine".into()));
         assert!(s.get("mine").is_none());
+    }
+}
+
+#[cfg(test)]
+mod workspace_restore_tests {
+    use super::*;
+
+    // Private profile copies are supplied by the validation runner, never fixtures.
+    #[test]
+    fn copied_workspace_group_tree_round_trips() {
+        let Some(dir) = std::env::var_os("PM_WORKSPACE_REPRO") else { return; };
+        let dir = std::path::Path::new(&dir);
+        let kernel: Value = serde_json::from_slice(&std::fs::read(dir.join("kernel-state.json")).unwrap()).unwrap();
+        let mut records = kernel["settings"]["workspaces"].as_array().cloned().unwrap_or_default();
+        for entry in std::fs::read_dir(dir.join("store")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.starts_with("projectWorkspace.") {
+                let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                if usable(&record) { records.push(record); }
+            }
+        }
+        assert!(!records.is_empty());
+        for record in records {
+            let restored = layout(&record);
+            restored.validate().unwrap();
+            // Every non-tabbed saved panel starts a distinct group, including
+            // panels that have no registered provider in this headless harness.
+            for dock in record["layout"]["docks"].as_array().unwrap() {
+                let mut expected: Vec<Vec<String>> = Vec::new();
+                let mut boundary = true;
+                for spec in dock["panels"].as_array().unwrap() {
+                    if spec["tabbed"] != true { boundary = true; }
+                    let id = spec.as_str().or_else(|| spec["id"].as_str()).unwrap_or("");
+                    if id.is_empty() || RETIRED.contains(&id) { continue; }
+                    if spec["tabbed"] == true && !boundary && !expected.is_empty() {
+                        expected.last_mut().unwrap().push(id.into());
+                    } else { expected.push(vec![id.into()]); }
+                    boundary = false;
+                }
+                if let Some(actual) = restored.docks.iter().find(|d| d.id == dock["id"].as_str().unwrap()) {
+                    let tree: Vec<_> = actual.groups.iter().map(|g| g.tabs.clone()).collect();
+                    assert_eq!(tree, expected, "{} / {}", record["id"], dock["id"]);
+                }
+            }
+            eprintln!("restored {}: {:?}", record["id"], restored.docks.iter().map(|d| (&d.id, &d.groups)).collect::<Vec<_>>());
+            // The native writer stores geometry to tenths of a point. Imported
+            // Electron geometry can have finer precision; grouping is exact.
+            let mut quantized = restored.clone();
+            let tenths = |n: &mut Option<f32>| {
+                if let Some(v) = n { *v = rounded(*v).as_f64().unwrap() as f32; }
+            };
+            for basis in quantized.flex_bases.values_mut() { *basis = rounded(*basis).as_f64().unwrap() as f32; }
+            for dock in &mut quantized.docks {
+                tenths(&mut dock.size);
+                for group in &mut dock.groups {
+                    tenths(&mut group.size);
+                }
+            }
+            assert_eq!(layout(&write(&restored, &record)), quantized);
+        }
+    }
+
+    #[test]
+    fn cleanup_keeps_unknown_tabs_in_their_own_saved_area() {
+        for removed_head in ["library", "inspector"] {
+            let record = json!({"id":"cleanup", "layout":{"docks":[
+                {"id":"center","panels":[{"id":"viewer","flex":true}]},
+                {"id":"right","size":320,"panels":[
+                    {"id":"inspector","flex":true},
+                    {"id":removed_head,"size":210},
+                    {"id":"late.one","tabbed":true},
+                    {"id":"late.two","tabbed":true,"active":true},
+                    {"id":"notes","size":170}
+                ]}
+            ]}});
+            let restored = layout(&record);
+            restored.validate().unwrap();
+            let right = &restored.docks[1];
+            assert_eq!(right.groups.len(), 3);
+            assert_eq!(right.groups[0].tabs, ["inspector"]);
+            assert_eq!(right.groups[1].tabs, ["late.one", "late.two"]);
+            assert_eq!(right.groups[1].size, Some(210.));
+            assert_eq!(right.groups[1].active, 1);
+            assert_eq!(right.groups[2].tabs, ["notes"]);
+            assert_eq!(layout(&write(&restored, &record)), restored);
+        }
+    }
+
+    #[test]
+    fn old_project_falls_back_and_project_snapshots_stay_independent() {
+        let mut first = Store { records: seeded(&[]), current: Some("review".into()), project: Some(Value::Null), project_id: Some("one".into()), ..Default::default() };
+        let inherited = first.active(None);
+        assert_eq!(record_id(&inherited), Some("design"));
+        assert_eq!(record_id(&first.active(Some("review"))), Some("review"));
+        first.project = Some(inherited.clone());
+        let second = Store { project: Some(preset("edit").unwrap()), project_id: Some("two".into()), ..first.clone() };
+        first.current = Some("design".into());
+        assert_eq!(first.active(None), inherited);
+        assert_eq!(record_id(&second.active(None)), Some("edit"));
     }
 }

@@ -1554,13 +1554,16 @@ impl Layout {
     }
     /// Shows a panel: activates its tab and reopens its dock, or adds it back to
     /// the dock it occupies in this workspace's preset (else the right dock).
+    /// Plain Add creates its own area, like Electron. Only an explicit tab
+    /// placement (header +, tab drop, or agent tab_in) joins an existing group.
     pub fn show_panel(&mut self, id: &str, panels: &Panels) -> anyhow::Result<()> {
-        anyhow::ensure!(panels.contains(id), "Unknown panel");
         if let Some((di, gi, ti)) = self.find(id) {
             self.docks[di].groups[gi].active = ti;
             self.docks[di].collapsed = false;
             return Ok(());
         }
+        // A saved tab remains usable as a placeholder while its owner loads.
+        anyhow::ensure!(panels.contains(id), "Unknown panel");
         let preset = Layout::preset(&self.workspace);
         let home = preset
             .docks
@@ -1570,12 +1573,6 @@ impl Layout {
         let mut next = self.clone();
         let g = self::group(&[id], None);
         match next.docks.iter_mut().find(|d| d.id == home) {
-            Some(d) if !d.groups.is_empty() => {
-                d.collapsed = false;
-                let first = &mut d.groups[0];
-                first.tabs.push(id.into());
-                first.active = first.tabs.len() - 1;
-            }
             Some(d) => {
                 d.collapsed = false;
                 d.groups.push(g);
@@ -2302,4 +2299,52 @@ mod build_slot_tests {
         assert_eq!(l.docks[0].groups.len(),1); assert_eq!(l.docks[0].groups[0].size,Some(250.));
         assert_eq!(l.docks[0].groups[0].active(),"two");
     }
+}
+
+#[cfg(test)]
+mod dock_tabs_tests {
+    use super::*;
+    #[test]
+    fn plain_add_never_accumulates_panels_in_first_group() {
+        let mut layout = Layout::preset("design");
+        let panels = Panels::new((0..7).map(|i| (format!("extension-{i}"), format!("Extension {i}"))).collect());
+        let original = layout.docks.iter().find(|d| d.id == "right").unwrap().groups.clone();
+        for i in 0..7 { layout.show_panel(&format!("extension-{i}"), &panels).unwrap(); }
+        let right = layout.docks.iter().find(|d| d.id == "right").unwrap();
+        assert_eq!(&right.groups[..original.len()], original.as_slice());
+        assert_eq!(right.groups.len(), original.len() + 7);
+        assert!(right.groups[original.len()..].iter().all(|g| g.tabs.len() == 1));
+        let before = layout.clone();
+        layout.show_panel("extension-3", &panels).unwrap();
+        assert_eq!(layout, before, "Show does not relocate an open panel");
+        layout.place_relative("extension-3", "inspector", "group").unwrap();
+        let (d,g,_) = layout.find("inspector").unwrap();
+        assert_eq!(layout.docks[d].groups[g].tabs, ["inspector", "extension-3"]);
+        let saved = crate::workspace::write(&layout, &crate::workspace::preset("design").unwrap());
+        assert_eq!(crate::workspace::layout(&saved), layout);
+    }
+    #[test]
+    fn a_saved_unknown_tab_can_show_its_placeholder_before_registration() {
+        let record = serde_json::json!({"id":"late", "layout":{"docks":[
+            {"id":"center","panels":[{"id":"viewer","flex":true}]},
+            {"id":"right","size":320,"panels":[
+                {"id":"inspector","flex":true},
+                {"id":"late.panel","tabbed":true},
+                {"id":"notes","size":170}
+            ]}
+        ]}});
+        let mut layout = crate::workspace::layout(&record);
+        let place = layout.find("late.panel").unwrap();
+        let panels = Panels::default();
+        assert!(!panels.contains("late.panel"));
+        layout.show_panel("late.panel", &panels).unwrap();
+        assert_eq!(layout.find("late.panel"), Some(place));
+        assert_eq!(layout.docks[place.0].groups[place.1].active(), "late.panel");
+        assert_eq!(layout.docks[place.0].groups.len(), 2);
+        assert!(layout.show_panel("never-saved.panel", &panels).is_err());
+        let saved = crate::workspace::write(&layout, &record);
+        assert_eq!(crate::workspace::layout(&saved), layout);
+    }
+
+
 }
