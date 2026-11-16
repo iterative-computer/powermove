@@ -315,6 +315,33 @@ fn spring_retarget_preserves_value_and_velocity() {
     let (value, velocity) = s.sample(10.);
     assert!((value - 1.).abs() < 1e-9 && velocity.abs() < 1e-9);
 }
+/// PM-459: Escape typed into a text field behind keys still waiting to
+/// reach it comes after them; ahead of them it ended the edit early and the
+/// last keys landed on the canvas as shortcuts.
+#[test]
+fn escape_in_a_field_waits_behind_the_keys_typed_before_it() {
+    let typed = |token: u64, chord: &str| Key {
+        field: true,
+        ..key(token, chord)
+    };
+    let mentions = |effects: &[Effect], token: u64| {
+        effects.iter().any(|e| match e {
+            Effect::Replay(t) | Effect::Consumed(t) => *t == token,
+            Effect::Dispatch { token: t, .. } => *t == token,
+            _ => false,
+        })
+    };
+    let mut r = Resolver::new();
+    assert_eq!(r.submit(typed(1, "a")), [Effect::Replay(1)]);
+    assert!(r.submit(typed(2, "b")).is_empty(), "b waits for a");
+    assert!(r.submit(typed(3, "escape")).is_empty(), "Escape waits for a and b");
+    assert_eq!(r.replayed(1), [Effect::Replay(2)]);
+    let last = r.replayed(2);
+    assert!(mentions(&last, 3), "Escape comes after b: {last:?}");
+    // With nothing waiting, Escape in a field goes at once.
+    let mut r = Resolver::new();
+    assert!(mentions(&r.submit(typed(4, "escape")), 4));
+}
 #[test]
 fn escape_decline_bypasses_without_resolving_held_command() {
     let mut r = Resolver::new();

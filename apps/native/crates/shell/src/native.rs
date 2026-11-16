@@ -799,12 +799,17 @@ define_class!(
         #[unsafe(method(replayEvent:))]
         fn replay_event(&self,event:&NSEvent){
             let token=self.ivars().replays.borrow_mut().remove(&(event as *const NSEvent as usize));
-            REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});
+            let host=self.ivars().host.borrow().upgrade();
+            // Typed for a text that has since lost the keyboard (Escape or a
+            // click ended it, another app came forward): it goes nowhere, as
+            // keys held for a field that never came do; replayed now it would
+            // be a shortcut on the canvas.
+            let stale=token.is_some_and(|t|host.as_ref().and_then(|h|h.try_borrow_mut().ok()).is_some_and(|mut h|h.typed.remove(&t)&&!h.text_has_keyboard()));
+            if !stale{REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});}
             let Some(token)=token else{return};
             // The next key goes on now: a turn through the editor's queue per
             // key let typing fall behind a busy frame (and Escape or a click
             // overtake it). A host being changed hears it through the queue.
-            let host=self.ivars().host.borrow().upgrade();
             if let Some(mut host)=host.as_ref().and_then(|h|h.try_borrow_mut().ok()){
                 host.in_flight.remove(&token);
                 host.replayed(token);
@@ -3048,6 +3053,9 @@ pub struct Host {
     /// Keys posted for replay and not yet replayed, by token: a flush
     /// takes them back and hands them over at once.
     in_flight: HashMap<u64, Retained<NSEvent>>,
+    /// Keys typed while a text field had the keyboard: replayed after it
+    /// lost it, they go nowhere rather than act as shortcuts.
+    typed: std::collections::HashSet<u64>,
     /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
     releases: Rc<RefCell<HashMap<u16, Command>>>,
     /// Pending keys that came up before their command was answered.
@@ -3256,6 +3264,7 @@ impl Host {
             recording: false,
             events: HashMap::new(),
             in_flight: HashMap::new(),
+            typed: Default::default(),
             releases: Default::default(),
             up_early: Default::default(),
             next_token: 0,
@@ -3631,6 +3640,9 @@ impl Host {
                         up: e.r#type() == NSEventType::KeyUp,
                         compat: false,
                     };
+                    if field {
+                        h.typed.insert(token);
+                    }
                     h.events
                         .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
                     let effects = h.resolver.submit(key);
@@ -3819,6 +3831,7 @@ impl Host {
                 }
                 Effect::Consumed(token) => {
                     self.events.remove(&token);
+                    self.typed.remove(&token);
                 }
             }
         }
@@ -5087,6 +5100,12 @@ impl Host {
             h.replayed(token);
         }
     }
+    /// Whether a text field in this window has the keyboard.
+    fn text_has_keyboard(&self) -> bool {
+        self.window.firstResponder().is_some_and(|r| unsafe {
+            msg_send![&*r, isKindOfClass: NSTextView::class()]
+        })
+    }
     /// The key posted for replay that has not reached the window yet, its
     /// posting withdrawn; one already replayed completes here and the next
     /// is looked at.
@@ -5102,6 +5121,7 @@ impl Host {
                 .remove(&(Retained::as_ptr(&event) as usize))
                 .is_some();
             if posted {
+                self.typed.remove(&token);
                 unsafe {
                     let _: () = msg_send![
                         NSObject::class(),
