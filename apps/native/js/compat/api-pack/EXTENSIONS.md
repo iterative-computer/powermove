@@ -861,31 +861,60 @@ They must still reproduce the native control's look and behavior with theme
 tokens, not invent a new one.
 
 **Match the native look.**
-- Use the theme tokens for color, radius, type, row and control height
-  (`--row-h`, `--ctl-h`, `--fs-md`, `--r-base`, `--f-ui`). Do not hardcode
-  colors or sizes, and do not add a palette of your own.
-- Lay out label and control rows like Properties. Labels sit in `--tx-2`;
-  values and controls align to the same column.
-- Buttons are flat tonal fills or transparent. Do not add outlines, bevels,
-  gradients or raised shadows. A choice among a few options is a segmented
-  control on a sunken track, with the selected segment shown as a tonal fill.
-  Never use separate outlined pills or an accent-colored ring for it.
-- Group content with spacing and `--bg-panel-2`/`--bg-sunken` fills, not
-  hairline dividers, nested cards or a second title bar.
-- Leave out helper captions, attribution footers, status sentences and
-  implementation details. Report results in the content itself or with
-  `api.ui.toast`. Put recovery actions inside the error surface they act on.
-- Inherit light and dark themes, and keep hover, selected, disabled and keyboard
-  focus states visible.
-- Keep controls source-connected and undoable.
 
-Before you finish, capture the panel next to a built-in panel at a normal and a
-narrow width and fix every visible difference. See
-[the interface language](design-language.md).
+Prefer v4 (`powermove/ui`) for new panels when the job needs no DOM or web features; it is native by construction.
 
-## Theme tokens (subset; the full set is `@powermove/tokens/tokens.css`)
+Web panels get `pm-native.css` automatically. Build from the `pm-*` classes; write your own CSS only for layout (flex/grid/gaps). Never set font-family, font-size, colours, borders or radii outside tokens. Selected = `--pm-fill-strong` (segments) or `--pm-selected-fill` (rows/cards); `--pm-accent` only for the primary action and focus. No `border-color: var(--accent)` for state. The focus ring itself follows the native neutral `--pm-focus` recipe.
 
-`--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
+The kit styles bare controls too. All defaults are in `@layer pm-base`, so your unlayered CSS wins. Page and contribution roots are transparent: the native dock material supplies the ground, matching neighbouring native panels. Keep those roots transparent; use `--pm-ground` and the other surface tokens for inner cards, fields and raised surfaces. Do not add backdrop blur. The host updates both schemes from the active theme and accessibility settings and selects the app's appearance without relying on the system media query. Reduced Motion makes `--pm-dur` zero.
+
+| Class | Native counterpart | Look |
+|---|---|---|
+| `.pm-button` (+ `.pm-button--primary`, `--quiet`) | `powermove/ui` button / toolbar button | `--pm-ctl-h`, tonal `--pm-fill`, no border, hover `--pm-hover`; primary = `--pm-accent` fill + `--pm-accent-text`; quiet = transparent |
+| `.pm-icon-button` | panel-header icon buttons (Project list/grid/search/+) | square `--pm-ctl-h`, transparent, `--pm-text-2` |
+| `.pm-segmented` > `button` / `[role=radio]` | `Segmented` (the 2D/3D control, Project list/grid) | track `--pm-fill`, radius control; segments equal width, transparent; **selected (`aria-pressed=true` / `aria-checked=true` / `.is-selected`) = `--pm-fill-strong` fill, `--pm-text`, no outline, never accent** |
+| `.pm-field`, `input[type=search].pm-search` | `TextField`; Project search | `--pm-ctl-h`, `--pm-fill`, no border, radius control, placeholder `--pm-text-3`; search gets a leading magnifier (CSS mask) |
+| `.pm-select` | `SelectField` | field look + chevron |
+| `.pm-section` / `.pm-section-header` | `Section` | header: `--pm-fs-caption`, medium, `--pm-text-2`, height `--pm-row-h`; no rule lines |
+| `.pm-row` (+ `.pm-row-label`, `.pm-row-value`) | `Row` (Properties) | label column `--pm-text-2`, value column aligned, `--pm-row-h` |
+| `.pm-list` > `.pm-list-item` | Project list rows | `--pm-row-h`, hover `--pm-hover`, selected `--pm-selected-fill`/`--pm-selected-text` |
+| `.pm-grid` > `.pm-card` (`.pm-card-media`, `.pm-card-title`, `.pm-card-meta`, `.pm-badge`) | Project grid card | `grid-template-columns:repeat(auto-fill,minmax(var(--pm-thumb-min),1fr))`, gap `--pm-gap`; media radius card, `--pm-ground-2`; title body/medium one line ellipsis; meta caption `--pm-text-2`; badge = media-badge capsule; selected = `--pm-selected-fill` ring 2px **of the selection colour, not accent-orange outline on the button** |
+| `.pm-empty` | native empty state | centred, `--pm-text-2`, title `--pm-fs-title`, one optional `.pm-button` |
+| `.pm-toolbar` | panel header strip below the title | flex row, `--pm-header-h`, gap `--pm-gap`, padding `--pm-inset` |
+| `.pm-caption`, `.pm-muted` | `Text::Caption` | caption size, `--pm-text-2` |
+
+
+See `samples/kit-panel.svelte` for toolbar, search, segments, cards, and an empty state. The media-browser sample uses the same kit.
+
+Set `<html data-pm-style="tokens-only">` to retain variables without defaults, or `data-pm-style="none"` to remove both. The manifest accepts `"nativeStyle": "full"` (default), `"tokens-only"`, or `"none"`; it applies to that extension's contribution roots, including sandboxed panels. This avoids changing other extensions in a shared document. Document attributes can change at runtime.
+
+## Theme tokens
+
+Use `--pm-*`. The v1–3 names below remain legacy aliases. Colours come from the active resolved `pm-design` theme; lengths are px. There is no need to inject a theme stylesheet.
+
+| `--pm-*` | v1–3 alias | pm-design source |
+|---|---|---|
+| `--pm-ground` | `--bg-panel` | `colors.panel` |
+| `--pm-ground-2` | `--bg-panel-2`, `--bg-sunken` | `colors.panel_secondary` |
+| `--pm-window` | `--bg-window` | `colors.window` |
+| `--pm-fill` | `--bg-field` | `colors.fill` (tracks, search fields, wells) |
+| `--pm-fill-strong` | — | `colors.fill_strong` (selected segment / tab / toggle) |
+| `--pm-hover` | — | `colors.hover` |
+| `--pm-hairline` | `--line` | `colors.hairline` |
+| `--pm-separator` | — | `colors.separator` |
+| `--pm-text` / `--pm-text-2` / `--pm-text-3` | `--tx` / `--tx-2` / — | `colors.text` / `secondary` / `muted` |
+| `--pm-accent` / `--pm-accent-text` / `--pm-accent-wash` | `--accent` | `colors.accent` / `accent_text` / `accent_wash` |
+| `--pm-selected-fill` / `--pm-selected-text` | — | `colors.selected_fill` / `selected_text` (selected row) |
+| `--pm-focus` | — | `colors.focus` + `recipe::focus_ring()` width/offset |
+| `--pm-danger` `--pm-warning` `--pm-success` | — | same-named colours |
+| `--pm-media-badge` | — | `media_badge` @ `metrics.media_badge_opacity` |
+| `--pm-font` / `--pm-font-mono` | `--f-ui` / `--f-mono` | `-apple-system, system-ui` / `ui-monospace, "SF Mono"` |
+| `--pm-fs-caption` `-body` `-title` `-heading` | `--fs-md` = body | `type.minimum`(11) `body`(12) `title`(13) `heading`(15); weights `regular/medium/semibold_weight` |
+| `--pm-space-xs…xl`, `--pm-gap`, `--pm-inset` | — | `space.*`, `metrics.gap`, `metrics.inset` |
+| `--pm-r-control` `--pm-r-card` `--pm-r-capsule` | `--r-base` = control | `metrics.control_radius`, `radii.md`, `metrics.capsule_radius` |
+| `--pm-row-h` / `--pm-ctl-h` / `--pm-header-h` | `--row-h` / `--ctl-h` | `metrics.row` / `control` / `header` |
+| `--pm-thumb-min` | — | `metrics.thumbnail_min` (120) |
+| `--pm-dur` / `--pm-ease` | `--dur-2` / `--ease` | `motion` (respect Reduce Motion → 0ms) |
 
 ## Variables
 

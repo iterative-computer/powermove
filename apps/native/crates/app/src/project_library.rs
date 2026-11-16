@@ -19,7 +19,7 @@ use gpui::{prelude::*, *};
 use pm_design::{Elevation, Text, Tokens, motion::Preset};
 use pm_kernel::{KernelHandle, session::ShellReply};
 use pm_shell::{
-    kit::{self, Button, Item, Kit, Recipes, ink},
+    kit::{self, Button, Kit, Recipes, ink},
     native_control::{ControlSpec, Kind, NativeControl},
     symbol::Weight,
 };
@@ -669,32 +669,8 @@ impl ProjectLibrary {
         count: Option<usize>,
         selected: bool,
     ) -> Stateful<Div> {
-        let t = &kit.t;
-        let (c, m) = (&t.colors, &t.metrics);
-        kit.row(id, selected)
+        kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
-            .text_size(px(t.typography.reading))
-            .role(Role::Button)
-            .aria_label(match count {
-                Some(n) => format!("{label}, {n}"),
-                None => label.clone(),
-            })
-            .child(kit.symbol(
-                symbol,
-                m.symbol_panel,
-                Weight::Regular,
-                if selected { c.text } else { c.muted },
-            ))
-            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
-            .children(count.map(|n| {
-                div()
-                    .flex_none()
-                    .text_role(t, Text::Caption)
-                    .font_features(kit::tabular())
-                    // On system glass: a step that reads over any desktop.
-                    .text_color(rgb(c.muted))
-                    .child(n.to_string())
-            }))
     }
     /// Opens or closes a button menu; it enters on the `Enter` spring.
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
@@ -1557,6 +1533,8 @@ impl Render for ProjectLibrary {
             .opening()
             .map(|name| format!("Opening “{name}”…"))
             .or_else(|| self.notice.clone());
+        // Newer work in the original app: one quiet line, never in the way.
+        let recent = opening.is_none() && crate::recent_work::newer();
         let tr = t.translucency;
         if self.new_project.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
@@ -1713,63 +1691,12 @@ impl Render for ProjectLibrary {
             .detach();
             self.view_switch = Some(switch);
         }
-        let list = self.layout == Layout::List;
-        let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .relative()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .w(px(VIEW_CELL.0))
-                .h(px(VIEW_CELL.1))
-                .role(Role::RadioButton)
-                .aria_label(label)
-                .aria_selected(on)
-                .tooltip(kit::tooltip(&t, label))
-                .child(kit.symbol(
-                    symbol,
-                    m.symbol_toolbar,
-                    Weight::Regular,
-                    if on { c.text } else { c.secondary },
-                ))
-        };
-        // The on fill glides between the two cells.
-        let at = kit
-            .animate(kit::key("home-view"), f32::from(list), Some(Preset::Layout))
-            .clamp(-0.1, 1.1);
+        // Until the window can host the system's control (the first frame),
+        // its place stays empty: no drawn stand-in (PM-409).
         let view_switch = div()
-            .id("home-layout")
-            .relative()
-            .flex()
             .flex_none()
-            .items_center()
-            .gap(px(t.space.hair))
-            .p(px(m.border))
-            .rounded(px(t.radius.md))
-            .bg(rgb(c.raised))
-            .elevated(&t, Elevation::Raised)
-            .role(Role::RadioGroup)
-            .aria_label("Project layout")
-            .child(
-                div()
-                    .absolute()
-                    .top(px(m.border))
-                    .left(px(m.border + at * (VIEW_CELL.0 + t.space.hair)))
-                    .w(px(VIEW_CELL.0))
-                    .h(px(VIEW_CELL.1))
-                    .rounded(px(t.radius.nested(t.radius.md, m.border + t.space.hair)))
-                    .bg(ink(c.text, tr.selected)),
-            )
-            .child(
-                cell("home-grid", "square.grid.2x2", "Grid view", !list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::Grid, cx))),
-            )
-            .child(
-                cell("home-list", "list.bullet", "List view", list)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_layout(Layout::List, cx))),
-            );
+            .w(px(2. * VIEW_CELL.0 + t.space.hair + 2. * m.border))
+            .h(px(VIEW_CELL.1 + 2. * m.border));
         let controls_row = div()
             .flex()
             .flex_none()
@@ -1796,6 +1723,37 @@ impl Render for ProjectLibrary {
                     .role(Role::Status)
                     .aria_label(name.clone())
                     .child(name)
+            }))
+            .children(recent.then(|| {
+                div()
+                    .id("home-recent-work")
+                    .debug_selector(|| "home-recent-work".into())
+                    .flex()
+                    .min_w(px(0.))
+                    .gap(px(t.space.sm))
+                    .text_role(&t, Text::Body)
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{} {}",
+                        crate::recent_work::NOTICE,
+                        crate::recent_work::NOTICE_ACTION
+                    ))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(rgb(c.secondary))
+                            .child(crate::recent_work::NOTICE),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(c.accent))
+                            .child(crate::recent_work::NOTICE_ACTION),
+                    )
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        (v.sink)(Outbound::Command("bringInRecentWork"), cx)
+                    }))
             }))
             .child(div().flex_1())
             // The sort is a text action: it opens our menu.
@@ -2040,7 +1998,7 @@ impl Render for ProjectLibrary {
                                 quiet: false,
                                 tint,
                                 symbol: None,
-                                glass: false,
+                                glass: true,
                                 well: false,
                             },
                             &tokens,
@@ -2109,7 +2067,6 @@ impl ProjectLibrary {
                 )
         };
         let line = || div().flex().flex_wrap().items_center().gap(px(t.space.md));
-        let none = |_: usize, _: &mut Window, _: &mut App| {};
         let buttons = |disabled: bool| {
             let row = line()
                 .child(kit.button(
@@ -2244,41 +2201,13 @@ impl ProjectLibrary {
                     .child(buttons(true)),
             )
             .child(
-                section("Icon buttons, segmented control, tabs")
+                section("Icon buttons")
                     .child(
                         line()
                             .child(kit.icon_button("g-icon-a", "magnifyingglass", "Search", false))
                             .child(kit.icon_button("g-icon-b", "plus", "Add", false))
-                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true))
-                            .child(kit.segmented(
-                                "g-seg-symbols",
-                                &[
-                                    Item::Symbol("square.grid.2x2", "Grid view"),
-                                    Item::Symbol("list.bullet", "List view"),
-                                ],
-                                0,
-                                false,
-                                none,
-                            ))
-                            .child(kit.segmented(
-                                "g-seg-titles",
-                                &[Item::Title("Layers"), Item::Title("Tracks")],
-                                0,
-                                false,
-                                none,
-                            )),
-                    )
-                    .child(kit.segmented(
-                        "g-tabs",
-                        &[
-                            Item::Title("Project"),
-                            Item::Title("Effect Controls"),
-                            Item::Title("Notes"),
-                        ],
-                        0,
-                        true,
-                        none,
-                    )),
+                            .child(kit.icon_button("g-icon-c", "sidebar.leading", "Sidebar", true)),
+                    ),
             )
             .child(
                 section("Search, switch, checkbox, radio, slider, progress")

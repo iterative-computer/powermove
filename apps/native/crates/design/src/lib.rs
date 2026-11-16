@@ -11,6 +11,7 @@
 //! [`Elevation`]); motion is springs ([`motion`]); the timeline's strips are a
 //! drawn material ([`Strip`]).
 pub mod color;
+pub mod corner;
 pub mod motion;
 mod recipe;
 mod strip;
@@ -53,6 +54,9 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Accent-tinted timeline layer selection, with a stronger hovered state.
+    pub timeline_selected: u32,
+    pub timeline_selected_hover: u32,
     /// Soft neutral fill: segmented tracks, search fields, quiet wells
     /// (`text` ink at `translucency.hover` over `panel`).
     pub fill: u32,
@@ -355,6 +359,8 @@ pub struct Metrics {
     pub agent_gap: f32,
     /// Indent per outline level.
     pub tree_indent: f32,
+    /// Electron timeline nesting: 12 points per depth, capped at four levels.
+    pub timeline_indent: f32,
     /// Layer-kind badge square (timeline, Project list).
     pub kind_badge: f32,
     /// Minimum Project grid thumbnail width.
@@ -400,6 +406,29 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// Project media tiles (v1.2.0 `.asset-preview`): the inset of a
+    /// tile's badges and actions from its edges, a badge's side padding and
+    /// the space between a card's tile and its name.
+    pub media_inset: f32,
+    /// Height of a tile's duration and status badges.
+    pub media_badge_height: f32,
+    /// The selection ring inside a tile.
+    pub media_ring: f32,
+    /// A media kind's glyph centred on a tile without a picture.
+    pub media_glyph: f32,
+    /// The folder glyph on a folder's tile.
+    pub media_folder_glyph: f32,
+    /// A Project list row's leading thumbnail (16:9).
+    pub media_row_thumb_width: f32,
+    pub media_row_thumb_height: f32,
+    /// A composition's frame inside its tile (v1.2.0 `.comp-frame`).
+    pub media_comp_inset: f32,
+    /// The red (missing) or accent (in cloud) wash over a tile.
+    pub media_tint_opacity: f32,
+    /// A missing file's remembered picture, dimmed under its badge.
+    pub media_offline_opacity: f32,
+    /// A picture whose media is still loading.
+    pub media_loading_opacity: f32,
     /// The leading room a person's own message leaves free in the Agent
     /// conversation, so it reads as theirs (at most 84 % of the popover's
     /// content).
@@ -624,6 +653,8 @@ impl Colors {
             },
             selected_text: 0xffffff,
             selected_fill,
+            timeline_selected: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.18),
+            timeline_selected_hover: mix(panel, if dark { 0xff6b1a } else { 0xf0580a }, 0.24),
             fill: 0,
             fill_strong: 0,
             hairline: 0,
@@ -850,6 +881,7 @@ impl Tokens {
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
+                timeline_indent: 12.,
                 kind_badge: 18.,
                 thumbnail_min: 120.,
                 sheet_inset: 20.,
@@ -876,6 +908,17 @@ impl Tokens {
                 },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                media_inset: space.xs,
+                media_badge_height: 16.,
+                media_ring: 2.,
+                media_glyph: 22.,
+                media_folder_glyph: 30.,
+                media_row_thumb_width: 32.,
+                media_row_thumb_height: 18.,
+                media_comp_inset: space.md,
+                media_tint_opacity: 0.1,
+                media_offline_opacity: 0.32,
+                media_loading_opacity: 0.55,
                 message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
@@ -1017,6 +1060,7 @@ impl Tokens {
         colors.viewer: color, colors.field: color, colors.floating: color,
         colors.hover: color, colors.separator: color, colors.text: color,
         colors.secondary: color, colors.muted: color, colors.accent: color,
+        colors.timeline_selected: color, colors.timeline_selected_hover: color,
         colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
         colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
         colors.warning: color, colors.success: color,
@@ -1030,6 +1074,7 @@ impl Tokens {
         typography.title: size, typography.reading: size, typography.heading: size,
         typography.display: size,
         colors.media_badge: color,
+        metrics.timeline_indent: size,
         metrics.kind_badge: size,
         metrics.thumbnail_min: size,
         metrics.status_dot: size,

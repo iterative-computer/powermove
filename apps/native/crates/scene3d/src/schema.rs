@@ -652,9 +652,13 @@ pub fn light(mut v: Value) -> Result<Value> {
     Ok(v)
 }
 pub fn camera(mut v: Value) -> Result<Value> {
-    strict(&v, &["projection", "p"])?;
+    strict(&v, &["projection", "autoOrient", "p"])?;
     default(&mut v, "projection", json!("perspective"));
     choice(&v["projection"], &["perspective", "orthographic"])?;
+    // Absent means "target": the two-node camera every earlier project has.
+    if v.get("autoOrient").is_some() {
+        choice(&v["autoOrient"], &["target", "off"])?;
+    }
     v["p"] = properties("camera", v.get("p"))?;
     if v["p"]["far"]["v"].as_f64() <= v["p"]["near"]["v"].as_f64() {
         return fail("Camera far plane must be beyond its near plane");

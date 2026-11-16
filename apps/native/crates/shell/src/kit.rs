@@ -10,7 +10,7 @@
 //!   on pointer-down; a gliding selection keeps its velocity when retargeted.
 //! - The cursor stays an arrow. Focus rings are neutral and keyboard-only.
 use crate::{
-    motion::{Glide, Motion, animate},
+    motion::{Motion, animate},
     symbol::{Weight, rasterize},
     text::TextField,
 };
@@ -94,7 +94,6 @@ pub enum Item<'a> {
     Symbol(&'a str, &'a str),
     Title(&'a str),
 }
-type Select = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Reports a control (by key) hovered or left.
 type Hover = Rc<dyn Fn(u64, bool, &mut App)>;
 
@@ -103,7 +102,6 @@ pub struct Kit {
     pub t: Tokens,
     scale: f32,
     washes: HashMap<u64, f32>,
-    glides: Rc<RefCell<HashMap<u64, Glide>>>,
     values: Rc<RefCell<HashMap<u64, Animated<1>>>>,
     hover: Hover,
 }
@@ -122,7 +120,6 @@ impl Kit {
             t: t.clone(),
             scale: window.scale_factor(),
             washes: motion.washes(),
-            glides: motion.glides.clone(),
             values: motion.values.clone(),
             hover: Rc::new(move |key, hovered, cx| {
                 let _ = weak.update(cx, |view, cx| {
@@ -265,6 +262,25 @@ impl Kit {
         label: impl Into<SharedString>,
         selected: bool,
     ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, selected, None)
+    }
+    /// Destructive actions share the icon-button recipe, with danger ink on hover.
+    pub fn destructive_icon_button(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+    ) -> Stateful<Div> {
+        self.icon_button_tinted(id, symbol, label, false, Some(self.t.colors.danger))
+    }
+    fn icon_button_tinted(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: impl Into<SharedString>,
+        selected: bool,
+        hover_ink: Option<u32>,
+    ) -> Stateful<Div> {
         let (t, id, label) = (&self.t, id.into(), label.into());
         let (c, m) = (&t.colors, &t.metrics);
         let k = key(&id);
@@ -285,7 +301,13 @@ impl Kit {
                 symbol,
                 m.symbol_panel,
                 Weight::Regular,
-                if selected { c.text } else { c.secondary },
+                if selected {
+                    c.text
+                } else if self.hovered(k) > 0.01 {
+                    hover_ink.unwrap_or(c.secondary)
+                } else {
+                    c.secondary
+                },
             ))
             .when(selected, |d| {
                 d.bg(rgb(c.raised)).elevated(t, Elevation::Raised)
@@ -300,152 +322,11 @@ impl Kit {
         };
         self.focusable(d)
     }
-    /// Segments in a soft pill track; the raised selection glides between
-    /// them. `flat` draws quiet text tabs instead: no track, a neutral fill.
-    pub fn segmented(
-        &self,
-        group: &str,
-        items: &[Item],
-        selected: usize,
-        flat: bool,
-        select: impl Fn(usize, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
-        let t = &self.t;
-        let (c, m, tr) = (&t.colors, &t.metrics, t.translucency);
-        let (group_key, select): (u64, Select) = (key(group), Rc::new(select));
-        let item_key = |i: usize| key(&format!("{group}:{i}"));
-        let travelling = self
-            .glides
-            .borrow()
-            .get(&group_key)
-            .is_some_and(|g| g.travelling(item_key(selected)));
-        let (inset, radius, height) = if flat {
-            (0., m.control_radius, m.tab)
-        } else {
-            (
-                m.pill_inset,
-                m.segment_radius,
-                m.control - 2. * m.pill_inset,
-            )
-        };
-        let on_fill = if flat {
-            ink(c.text, tr.selected)
-        } else {
-            rgb(c.raised)
-        };
-        let on_shadow = if flat {
-            vec![]
-        } else {
-            shadows(t, Elevation::Raised)
-        };
-        // The glider: drawn under the labels while the selection travels.
-        let glider = {
-            let (glides, shadow) = (self.glides.clone(), on_shadow.clone());
-            canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    let Some(bounds) = glides.borrow().get(&group_key).and_then(Glide::bounds)
-                    else {
-                        return;
-                    };
-                    if travelling {
-                        let corners = Corners::all(px(radius));
-                        window.paint_drop_shadows(bounds, corners, 0., &shadow);
-                        window.paint_quad(
-                            PaintQuad::new(bounds)
-                                .background(on_fill)
-                                .corner_radii(corners),
-                        );
-                        window.request_animation_frame();
-                    }
-                },
-            )
-            .absolute()
-            .size_full()
-        };
-        let mut track = div()
-            .id(SharedString::from(group.to_string()))
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(if flat { t.space.hair } else { inset }))
-            .role(Role::RadioGroup)
-            .when(!flat, |d| {
-                d.h(px(m.control))
-                    .p(px(inset))
-                    .rounded(px(m.pill_radius))
-                    .bg(ink(c.text, tr.hover))
-            })
-            .child(glider);
-        for (i, item) in items.iter().enumerate() {
-            let on = i == selected;
-            let k = item_key(i);
-            let fg = if on { c.text } else { c.muted };
-            let (label, content): (SharedString, AnyElement) = match *item {
-                Item::Symbol(symbol, label) => (
-                    label.to_string().into(),
-                    self.symbol(symbol, m.symbol_panel, Weight::Regular, fg),
-                ),
-                Item::Title(title) => (
-                    title.to_string().into(),
-                    div().child(title.to_string()).into_any_element(),
-                ),
-            };
-            let select = select.clone();
-            let mut seg = div()
-                .id(SharedString::from(format!("{group}:{i}")))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .h(px(height))
-                .rounded(px(radius))
-                .text_role(t, Text::Label)
-                .text_color(rgb(fg))
-                .role(Role::RadioButton)
-                .aria_label(label.clone())
-                .aria_selected(on)
-                .when(matches!(item, Item::Symbol(..)), |d| {
-                    d.w(px(height + t.space.xs)).tooltip(tooltip(t, label))
-                })
-                .when(matches!(item, Item::Title(_)), |d| {
-                    d.px(px(t.space.md + 2.))
-                })
-                .when(on && !travelling, |d| {
-                    d.bg(on_fill).shadow(on_shadow.clone())
-                })
-                .child(content)
-                .on_click(move |_, window, cx| select(i, window, cx));
-            if on {
-                // The selected item reports where the glider rests or is going.
-                let (glides, tokens) = (self.glides.clone(), t.clone());
-                seg = seg.relative().child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            let mut glides = glides.borrow_mut();
-                            let glide = glides.entry(group_key).or_default();
-                            glide.to(k, bounds, &tokens);
-                            if glide.travelling(k) {
-                                window.request_animation_frame();
-                            }
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
-                );
-            } else {
-                seg = self.wash(seg, k, radius);
-            }
-            track = track.child(self.focusable(seg));
-        }
-        track
-    }
     /// A search field: a soft fill with no edge, a magnifier, the native
     /// field, and a right-aligned shortcut hint.
     pub fn search(&self, field: Option<Entity<TextField>>, hint: Option<&str>) -> Div {
         let t = &self.t;
+        let missing = field.is_none();
         let (c, m) = (&t.colors, &t.metrics);
         div()
             .flex()
@@ -458,7 +339,20 @@ impl Kit {
             .rounded(px(m.control_radius))
             .bg(ink(c.text, t.translucency.hover))
             .child(self.symbol("magnifyingglass", m.symbol_inline, Weight::Medium, c.muted))
-            .child(div().flex_1().min_w(px(0.)).children(field))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .children(field)
+                    .when(missing, |d| {
+                        d.child(
+                            div()
+                                .text_role(t, Text::Body)
+                                .text_color(rgb(c.faint))
+                                .child("Search"),
+                        )
+                    }),
+            )
             .children(hint.map(|hint| {
                 div()
                     .flex_none()
@@ -763,6 +657,139 @@ impl Kit {
                     .child(keys.to_string())
             }))
     }
+    /// Shared chrome for secondary windows. Content is inset 24 pt; callers
+    /// supply rows, actions and content so commands stay owned by the view.
+    pub fn utility_window(
+        &self,
+        title: &str,
+        sidebar: Option<AnyElement>,
+        actions: Vec<AnyElement>,
+        content: AnyElement,
+        footer: Vec<AnyElement>,
+    ) -> Div {
+        let t = &self.t;
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(t.colors.window))
+            .text_color(rgb(t.colors.text))
+            .text_role(t, Text::Body)
+            .font_family(pm_design::TEXT_FONT)
+            .children(sidebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.utility_toolbar(title, actions))
+                    .child(self.utility_content().child(content))
+                    .when(!footer.is_empty(), |d| {
+                        d.child(self.utility_footer().children(footer))
+                    }),
+            )
+    }
+    pub fn utility_toolbar(&self, title: &str, actions: Vec<AnyElement>) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(t.space.md))
+            .min_h(px(t.metrics.toolbar))
+            .px(px(t.space.xxl))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_role(t, Text::Heading)
+                    .child(title.to_owned()),
+            )
+            .children(actions)
+    }
+    pub fn utility_content(&self) -> Div {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .p(px(self.t.space.xxl))
+    }
+    pub fn utility_sidebar(&self) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(t.metrics.settings_sidebar))
+            .h_full()
+            .p(px(t.space.md))
+            .gap(px(t.space.hair))
+            .bg(rgb(t.colors.panel))
+            .elevated(t, Elevation::Well)
+    }
+    pub fn utility_footer(&self) -> Div {
+        let t = &self.t;
+        div()
+            .flex()
+            .flex_none()
+            .justify_end()
+            .items_center()
+            .gap(px(t.space.md))
+            .px(px(t.space.xxl))
+            .py(px(t.space.lg))
+    }
+    /// The same source-list row in Home and utility windows.
+    pub fn nav_row(
+        &self,
+        id: impl Into<SharedString>,
+        symbol: &str,
+        label: String,
+        count: Option<usize>,
+        selected: bool,
+    ) -> Stateful<Div> {
+        let t = &self.t;
+        self.row(id, selected)
+            .text_size(px(t.typography.reading))
+            .role(Role::Button)
+            .aria_label(match count {
+                Some(n) => format!("{label}, {n}"),
+                None => label.clone(),
+            })
+            .child(self.symbol(
+                symbol,
+                t.metrics.symbol_panel,
+                Weight::Regular,
+                if selected {
+                    t.colors.text
+                } else {
+                    t.colors.muted
+                },
+            ))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .children(count.map(|n| {
+                div()
+                    .flex_none()
+                    .text_role(t, Text::Caption)
+                    .font_features(tabular())
+                    .text_color(rgb(t.colors.muted))
+                    .child(n.to_string())
+            }))
+    }
+    pub fn vertical_separator(&self) -> Div {
+        div()
+            .flex_none()
+            .w(px(1. / self.scale))
+            .bg(ink(self.t.colors.text, self.t.translucency.hover))
+    }
+    /// A physical-pixel hairline, shared by grouped rows.
+    pub fn separator(&self) -> Div {
+        div()
+            .flex_none()
+            .h(px(1. / self.scale))
+            .bg(ink(self.t.colors.text, self.t.translucency.hover))
+    }
     /// A Settings-anatomy card: rows grouped on a soft fill, no outline.
     pub fn card(&self) -> Div {
         let t = &self.t;
@@ -836,33 +863,7 @@ impl Kit {
     /// A centred empty state: one quiet glyph, a title, one line, and the
     /// caller may append a single action.
     pub fn empty_state(&self, symbol: &str, title: &str, detail: &str) -> Div {
-        let t = &self.t;
-        let c = &t.colors;
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(t.space.xs))
-            .child(div().mb(px(t.space.md)).child(self.symbol(
-                symbol,
-                28.,
-                Weight::Regular,
-                c.faint,
-            )))
-            .child(
-                div()
-                    .text_role(t, Text::Heading)
-                    .text_color(rgb(c.text))
-                    .child(title.to_string()),
-            )
-            .child(
-                div()
-                    .max_w(px(t.metrics.sheet_width - 2. * t.metrics.sheet_inset))
-                    .text_center()
-                    .text_role(t, Text::Reading)
-                    .text_color(rgb(c.muted))
-                    .child(detail.to_string()),
-            )
+        empty_state_at_scale(&self.t, self.scale, symbol, title, detail)
     }
     /// A toast or inline banner: a raised strip with a state glyph.
     pub fn banner(&self, symbol: &str, tint: u32, text: impl Into<SharedString>) -> Div {
@@ -962,3 +963,47 @@ pub static GALLERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 pub fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
+
+/// Shared empty-state anatomy for callers without a frame's Kit.
+pub fn empty_state(t: &Tokens, symbol: &str, title: &str, detail: &str) -> Div {
+    empty_state_at_scale(t, 2., symbol, title, detail)
+}
+fn empty_symbol(scale: f32, name: &str, points: f32, weight: Weight, color: u32) -> AnyElement {
+    match rasterize(name, points, weight, color, scale) {
+        Some(image) => img(ImageSource::Render(image))
+            .flex_none()
+            .size(px(points))
+            .into_any_element(),
+        None => div().size(px(points)).into_any_element(),
+    }
+}
+fn empty_state_at_scale(t: &Tokens, scale: f32, symbol: &str, title: &str, detail: &str) -> Div {
+    let c = &t.colors;
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(t.space.xs))
+        .child(div().mb(px(t.space.md)).child(empty_symbol(
+            scale,
+            symbol,
+            28.,
+            Weight::Regular,
+            c.faint,
+        )))
+        .child(
+            div()
+                .text_role(t, Text::Heading)
+                .text_color(rgb(c.text))
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .max_w(px(t.metrics.sheet_width - 2. * t.metrics.sheet_inset))
+                .text_center()
+                .text_role(t, Text::Reading)
+                .text_color(rgb(c.muted))
+                .child(detail.to_string()),
+        )
+}
+

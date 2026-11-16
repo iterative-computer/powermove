@@ -33,6 +33,10 @@ pub struct Pose {
     pub position: Vec3,
     pub target: Vec3,
     pub zoom: f64,
+    #[serde(default)]
+    pub ortho: bool,
+    #[serde(default)]
+    pub roll: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Lens {
@@ -95,6 +99,7 @@ impl Pose {
             .iter()
             .chain(self.target.iter())
             .all(|x| x.is_finite())
+            || !self.roll.is_finite()
             || !self.zoom.is_finite()
             || self.zoom <= 0.
         {
@@ -114,6 +119,7 @@ pub fn orbit(start: Pose, dx: f64, dy: f64) -> Pose {
     };
     let phi = (phi - dy * 0.008).clamp(0.01, std::f64::consts::PI - 0.01);
     Pose {
+        ortho: false,
         position: add(
             start.target,
             [
@@ -125,8 +131,21 @@ pub fn orbit(start: Pose, dx: f64, dy: f64) -> Pose {
         ..start
     }
 }
+pub fn view_lens(pose: Pose, lens: Lens) -> Lens {
+    if pose.ortho {
+        if let Lens::Perspective { fov, aspect, .. } = lens {
+            let height =
+                2. * length(sub(pose.position, pose.target)) * (fov.to_radians() / 2.).tan();
+            return Lens::Orthographic {
+                width: height * aspect,
+                height,
+            };
+        }
+    }
+    lens
+}
 pub fn pan(start: Pose, dx: f64, dy: f64, lens: Lens, height: f64, right: Vec3, up: Vec3) -> Pose {
-    let scale = match lens {
+    let scale = match view_lens(start, lens) {
         Lens::Perspective { fov, .. } => {
             2. * length(sub(start.position, start.target)) * (fov.to_radians() / 2.).tan()
                 / start.zoom
@@ -142,7 +161,7 @@ pub fn pan(start: Pose, dx: f64, dy: f64, lens: Lens, height: f64, right: Vec3, 
 }
 pub fn dolly(start: Pose, delta: f64, lens: Lens) -> Pose {
     let factor = (delta * 0.005).clamp(-2., 2.).exp();
-    match lens {
+    match view_lens(start, lens) {
         Lens::Orthographic { .. } => Pose {
             zoom: (start.zoom / factor).clamp(0.01, 1000.),
             ..start
@@ -162,6 +181,72 @@ pub fn dolly(start: Pose, delta: f64, lens: Lens) -> Pose {
                 ..start
             }
         }
+    }
+}
+/// Blender's zoom step: one wheel notch (or numpad + / −) brings the view
+/// 1.2 times closer, toward the view centre.
+pub const ZOOM_STEP: f64 = 1.2;
+/// Blender's numpad orbit step (Preferences ▸ Navigation ▸ Rotation Angle).
+pub const ORBIT_STEP: f64 = 15.;
+/// `notches` steps closer (negative: further), toward the view centre.
+pub fn zoom_step(start: Pose, notches: f64, lens: Lens) -> Pose {
+    let factor = ZOOM_STEP.powf(notches.clamp(-20., 20.));
+    match view_lens(start, lens) {
+        Lens::Orthographic { .. } => Pose {
+            zoom: (start.zoom * factor).clamp(0.01, 1000.),
+            ..start
+        },
+        Lens::Perspective { near, far, .. } => {
+            let mut o = sub(start.position, start.target);
+            if length(o) < 1e-9 {
+                o = [0., 0., 1.];
+            }
+            let d = (length(o).max(0.05) / factor)
+                .min(far * 0.8)
+                .max(near * 2.)
+                .max(0.05);
+            Pose {
+                position: add(start.target, mul(normalize(o), d)),
+                ..start
+            }
+        }
+    }
+}
+/// Turntable orbit by degrees around the view centre: `yaw` about world
+/// vertical (positive turns the view to the right), `pitch` up and down
+/// (positive looks from higher up).
+pub fn orbit_by(start: Pose, yaw: f64, pitch: f64) -> Pose {
+    orbit(start, yaw.to_radians() / 0.008, pitch.to_radians() / 0.008)
+}
+/// Blender's numpad views, from the side they look at (Blender is Z-up; this
+/// scene is Y-up with the shot looking down −Z: Front looks down −Z).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Front,
+    Back,
+    Right,
+    Left,
+    Top,
+    Bottom,
+}
+/// Looking at the view centre from `side`, as far away as before.
+pub fn side_view(start: Pose, side: Side) -> Pose {
+    let d = length(sub(start.position, start.target)).max(0.05);
+    // Straight up or down has no heading: a hair off, as orbit's own limit.
+    let (s, c) = (0.01f64.sin(), 0.01f64.cos());
+    let dir = match side {
+        Side::Front => [0., 0., 1.],
+        Side::Back => [0., 0., -1.],
+        Side::Right => [1., 0., 0.],
+        Side::Left => [-1., 0., 0.],
+        Side::Top => [0., c, s],
+        Side::Bottom => [0., -c, s],
+    };
+    Pose {
+        ortho: true,
+        roll: 0.,
+        position: add(start.target, mul(dir, d)),
+        ..start
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,8 +279,10 @@ pub fn frame(start: Pose, b: Bounds, lens: Lens) -> Pose {
     } else {
         normalize(o)
     };
-    match lens {
+    match view_lens(start, lens) {
         Lens::Orthographic { width, height } => Pose {
+            ortho: start.ortho,
+            roll: start.roll,
             position: add(target, mul(dir, length(o).max(1.))),
             target,
             zoom: width.min(height) / 2. / (radius * 1.25),

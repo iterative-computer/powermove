@@ -955,6 +955,39 @@ mod source {
         result
     }
 
+    /// A content mask's coverage at a window-space position: its edge fades
+    /// times its rounded (continuous) shape. Only pixels within a corner's
+    /// reach can fall outside the shape, so every other pixel skips the corner
+    /// evaluation.
+    pub fn content_mask_alpha(mask: ContentMask, position: Vec2f) -> f32 {
+        let fade = ContentMask::alpha(mask, position);
+        let radii = mask.corner_radii;
+        if Corners::is_zero(radii) {
+            return fade;
+        }
+        let shape = mask.shape;
+        let largest = max(
+            max(radii.top_left, radii.top_right),
+            max(radii.bottom_right, radii.bottom_left),
+        );
+        let reach = largest * (1.0 + mask.corner_smoothing) + 1.0;
+        let from_start = position - shape.origin;
+        let from_end = shape.origin + shape.size - position;
+        let near = min(from_start, from_end);
+        if near.x > reach || near.y > reach {
+            return fade;
+        }
+        let prepared = prepare_corners(shape.size, radii, mask.corner_smoothing, true);
+        let distance = prepared_corner_signed_distance(
+            position,
+            shape,
+            radii,
+            mask.corner_smoothing,
+            prepared,
+        );
+        fade * antialiased_coverage(distance)
+    }
+
     pub fn prepared_corner_signed_distance(
         point: Vec2f,
         bounds: Bounds,

@@ -1,0 +1,929 @@
+/* Zero-specificity guards scope manifest opt-outs on macOS 14 WebKit,
+   where CSS @scope is unavailable. Unlayered author rules always win. */
+@layer pm-base {
+  html:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  body:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    margin: 0;
+    background: transparent;
+    color: var(--pm-text);
+    font: var(--pm-fs-body) / 1.35 var(--pm-font);
+    font-weight: var(--pm-weight-regular);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  [data-pm-contribution]:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    background: transparent;
+  }
+
+  button:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-button:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-icon-button:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  /* Text fields only: a checkbox, radio, slider, colour well or file
+     button keeps the system control the built-in panels draw. */
+  input:not(
+      [type="checkbox"],
+      [type="radio"],
+      [type="range"],
+      [type="color"],
+      [type="file"]
+    ):where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  select:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  textarea:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-field:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-select:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    box-sizing: border-box;
+    font: inherit;
+    color: inherit;
+    border: 0;
+    border-radius: var(--pm-r-control);
+    background: var(--pm-fill);
+    min-height: var(--pm-ctl-h);
+    padding: 0 var(--pm-gap);
+  }
+
+  button:not(:disabled):hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  .pm-list-item:hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: var(--pm-hover);
+  }
+
+  .pm-button--primary:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    background: var(--pm-accent);
+    color: var(--pm-accent-text);
+  }
+
+  .pm-button--quiet:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-icon-button:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    background: transparent;
+  }
+  .pm-icon-button:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    width: var(--pm-ctl-h);
+    color: var(--pm-text-2);
+  }
+
+  button:disabled:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  input:disabled:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  select:disabled:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  textarea:disabled:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    color: var(--pm-text-3);
+    cursor: default;
+  }
+
+  input[type="search"].pm-search:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    appearance: searchfield;
+    padding-left: var(--pm-gap);
+  }
+  input[type="search"].pm-search:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-search-decoration {
+    appearance: none;
+    display: block;
+    width: 14px;
+    height: 14px;
+    margin-right: var(--pm-gap);
+    background: var(--pm-text-3);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='black' stroke-width='1.5'%3E%3Ccircle cx='6.5' cy='6.5' r='4.5'/%3E%3Cpath d='m10 10 4 4'/%3E%3C/g%3E%3C/svg%3E")
+      center / contain no-repeat;
+  }
+
+  select:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-select:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    appearance: none;
+    padding-right: var(--pm-ctl-h);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='m3 4 3 3 3-3' fill='none' stroke='%23808080' stroke-width='1.5'/%3E%3C/svg%3E");
+    background-size: 12px;
+    background-position: right var(--pm-gap) center;
+    background-repeat: no-repeat;
+  }
+
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::placeholder {
+    color: var(--pm-text-3);
+  }
+
+  .pm-segmented:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  [role="group"]:has(> button[aria-pressed]):where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    display: flex;
+    background: var(--pm-fill);
+    border-radius: var(--pm-r-control);
+  }
+
+  .pm-segmented
+    > button:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  [role="group"]
+    > button[aria-pressed]:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    flex: 1;
+    background: transparent;
+  }
+
+  .pm-segmented
+    > :is([aria-pressed="true"], [aria-checked="true"], .is-selected):where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  [role="group"]
+    > button[aria-pressed="true"]:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: var(--pm-fill-strong);
+    color: var(--pm-text);
+    border: 0;
+  }
+
+  .pm-toolbar:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    align-items: center;
+    height: var(--pm-header-h);
+    box-sizing: border-box;
+    gap: var(--pm-gap);
+    padding: 0 var(--pm-inset);
+  }
+
+  .pm-section-header:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-caption:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-muted:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  .pm-card-meta:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    font-size: var(--pm-fs-caption);
+    color: var(--pm-text-2);
+  }
+
+  .pm-section-header:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    min-height: var(--pm-row-h);
+    font-weight: var(--pm-weight-medium);
+  }
+
+  .pm-row:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    min-height: var(--pm-row-h);
+  }
+  .pm-row-label:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    color: var(--pm-text-2);
+  }
+
+  .pm-list-item:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    min-height: var(--pm-row-h);
+  }
+  .pm-list-item:is([aria-selected="true"], .is-selected):where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: var(--pm-selected-fill);
+    color: var(--pm-selected-text);
+  }
+
+  .pm-grid:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--pm-thumb-min), 1fr));
+    gap: var(--pm-gap);
+  }
+
+  .pm-card:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    background: transparent;
+    padding: 0;
+    min-width: 0;
+    text-align: left;
+  }
+  .pm-card-media:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    position: relative;
+    border-radius: var(--pm-r-card);
+    background: var(--pm-ground-2);
+    overflow: hidden;
+  }
+  .pm-card-media
+    img:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    width: 100%;
+    object-fit: contain;
+  }
+
+  .pm-card-title:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: block;
+    font-size: var(--pm-fs-body);
+    font-weight: var(--pm-weight-medium);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .pm-card:is(
+      [aria-pressed="true"],
+      [aria-selected="true"],
+      .is-selected
+    ):where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    box-shadow: 0 0 0 2px var(--pm-selected-fill);
+  }
+
+  .pm-badge:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    background: var(--pm-media-badge);
+    color: var(--pm-selected-text);
+    font-size: var(--pm-fs-caption);
+    padding: 0 var(--pm-gap);
+    border-radius: var(--pm-r-capsule);
+  }
+
+  .pm-empty:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    text-align: center;
+    color: var(--pm-text-2);
+    padding: var(--pm-inset);
+  }
+  .pm-empty
+    h2:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  h3:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    font-size: var(--pm-fs-title);
+  }
+  h1:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ),
+  h2:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    font-size: var(--pm-fs-heading);
+  }
+  a:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    color: var(--pm-accent-text);
+  }
+  hr:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    border: 0;
+    border-top: 1px solid var(--pm-separator);
+  }
+
+  :focus-visible:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    outline: var(--pm-focus-width) solid var(--pm-focus);
+    outline-offset: var(--pm-focus-offset);
+  }
+
+  /* The one rule an extension's own CSS does not win (an important layered
+     declaration beats an unlayered one): a field's or a button's focus ring
+     is the neutral one the built-in fields draw, never the accent (owner
+     rule: no accent focus rings). Opted-out panels keep their own. */
+  :is(input, textarea, select, button, [contenteditable]):focus-visible:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    outline: var(--pm-focus-width) solid var(--pm-focus) !important;
+    outline-offset: var(--pm-focus-offset) !important;
+  }
+
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    background: transparent;
+    background-clip: padding-box;
+    border-radius: var(--pm-r-capsule);
+  }
+  :hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-scrollbar-thumb,
+  .pm-scrolling:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--pm-text) 28%, transparent);
+  }
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-track,
+  :where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  )::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  [data-pm-style="none"],
+  [data-pm-style="tokens-only"] {
+    font: initial;
+    color: initial;
+  }
+
+  .pm-segmented
+    > [role="radio"]:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--pm-ctl-h);
+    border-radius: var(--pm-r-control);
+  }
+  .pm-section:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--pm-gap);
+  }
+  .pm-row-value:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    min-width: 0;
+  }
+
+  .pm-scrolling
+    *:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    )::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--pm-text) 28%, transparent);
+  }
+
+  .pm-list:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .pm-list-item:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    align-items: center;
+    padding: 0 var(--pm-inset);
+  }
+  .pm-section-header:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    align-items: center;
+  }
+  .pm-empty:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--pm-gap);
+    min-height: var(--pm-thumb-min);
+  }
+
+  button.pm-button--primary:not(:disabled):hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: var(--pm-accent);
+    color: var(--pm-accent-text);
+  }
+  .pm-segmented
+    > :is(
+      [aria-pressed="true"],
+      [aria-checked="true"],
+      .is-selected
+    ):hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ),
+  [role="group"]
+    > button[aria-pressed="true"]:hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: var(--pm-fill-strong);
+    color: var(--pm-text);
+  }
+  button.pm-card:hover:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    background: transparent;
+  }
+
+  .pm-card:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--pm-space-xs);
+  }
+  .pm-card-media:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    width: 100%;
+    aspect-ratio: 16/9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pm-card-media
+    img:where(
+      :not(
+        [data-pm-style="none"],
+        [data-pm-style="none"] *,
+        [data-pm-style="tokens-only"],
+        [data-pm-style="tokens-only"] *
+      )
+    ) {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  .pm-card-title:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    max-width: 100%;
+  }
+  .pm-card-meta:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    display: block;
+  }
+}

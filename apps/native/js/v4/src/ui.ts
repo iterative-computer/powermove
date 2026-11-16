@@ -3,6 +3,7 @@ import { h, type ComponentChildren } from "preact";
 import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "./jsx-runtime";
 import { Label } from "./label";
+import { SegmentedControl } from "./components/index";
 import type { Json, SurfaceEvent } from "./protocol";
 // The v1-3 control math, frozen at the tagged revision: v4 fields parse and
 // convert exactly as the controls users already know.
@@ -168,60 +169,20 @@ export interface SegmentOption {
   id: string;
   label: string;
 }
+/** Short exclusive choices: the app's one segmented control, the Liquid Glass
+ * capsule every built-in panel uses (PM-409). */
 export function Segmented(props: {
   options: SegmentOption[];
   value: string;
   onChange: (id: string) => void;
   label?: string;
 }) {
-  const [focusRequest, setFocusRequest] = useState<string | undefined>();
-  const group = useId();
-  const choose = (index: number) => {
-    if (!props.options.length) return;
-    const next =
-      props.options[(index + props.options.length) % props.options.length];
-    props.onChange(next.id);
-    setFocusRequest(`${group}:${next.id}`);
-  };
-  const keys = [
-    "ArrowLeft",
-    "ArrowUp",
-    "ArrowRight",
-    "ArrowDown",
-    "Home",
-    "End",
-  ];
-  return h(
-    "div",
-    { control: "segmented", role: "tablist", label: props.label, focusRequest },
-    props.options.map((option, i) =>
-      h(
-        "button",
-        {
-          key: option.id,
-          id: `${group}:${option.id}`,
-          role: "tab",
-          label: option.label,
-          "aria-selected": option.id === props.value,
-          tabIndex: option.id === props.value ? 0 : -1,
-          preventDefault: { keydown: keys },
-          onClick: () => choose(i),
-          onKeyDown: (event: SurfaceEvent) => {
-            const target: Record<string, number> = {
-              ArrowLeft: i - 1,
-              ArrowUp: i - 1,
-              ArrowRight: i + 1,
-              ArrowDown: i + 1,
-              Home: 0,
-              End: props.options.length - 1,
-            };
-            if (event.key && event.key in target) choose(target[event.key]);
-          },
-        },
-        option.label,
-      ),
-    ),
-  );
+  return SegmentedControl({
+    label: props.label ?? "",
+    value: props.value,
+    options: props.options,
+    onChange: props.onChange,
+  });
 }
 export interface MenuItem {
   id: string;
