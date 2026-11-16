@@ -42,6 +42,9 @@ pub fn route_sigterm() {
                     // No window yet, so nothing is open to close.
                     std::process::exit(0);
                 }
+                // Bounded here, not on the main thread: a quit already under
+                // way and stuck there would otherwise never hear it.
+                crate::quit_limit::signalled();
                 let _ = tx.try_send(());
             }
         });
