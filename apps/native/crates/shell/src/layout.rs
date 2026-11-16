@@ -1,7 +1,7 @@
 //! Workspace geometry; bottom spans all columns except the full-height right dock.
 use pm_design::{Tokens, workspace::*};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
@@ -47,12 +47,25 @@ pub fn outside(area: Rect, holes: &[Rect]) -> Vec<Rect> {
     out
 }
 impl Rect {
+    pub fn intersection(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        Self {
+            x,
+            y,
+            w: ((self.x + self.w).min(other.x + other.w) - x).max(0.),
+            h: ((self.y + self.h).min(other.y + other.h) - y).max(0.),
+        }
+    }
     pub fn contains(self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Group {
+    /// A resized fluid side panel keeps a basis while still filling spare room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flex_basis: Option<f32>,
     pub tabs: Vec<String>,
     pub active: usize,
     pub size: Option<f32>,
@@ -135,6 +148,7 @@ pub struct Divider {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
+    pub side_docks: std::collections::BTreeMap<usize, Rect>,
     pub panels: Vec<Placement>,
     pub dividers: Vec<Divider>,
     /// The tabs (or the lone title) each header shows, as drawn: per
@@ -148,6 +162,7 @@ fn dock_for(id: &str, g: Group) -> Dock {
 }
 fn group(ids: &[&str], size: Option<f32>) -> Group {
     Group {
+        flex_basis: None,
         tabs: ids.iter().map(|s| s.to_string()).collect(),
         active: 0,
         size,
@@ -190,6 +205,7 @@ impl Layout {
                     g.size.is_none_or(|n| n.is_finite() && n > 0.),
                     "Invalid panel size"
                 );
+                anyhow::ensure!(g.flex_basis.is_none_or(|n| n.is_finite() && n >= 0.), "Invalid fluid panel basis");
                 for id in &g.tabs {
                     anyhow::ensure!(
                         !id.is_empty() && ids.insert(id),
@@ -233,6 +249,16 @@ impl Layout {
     }
 
     pub fn geometry(&self, bounds: Rect, t: &Tokens) -> Geometry {
+        self.geometry_with_panel_heights(bounds, t, &BTreeMap::new())
+    }
+
+    /// Natural panel heights are transient measurements, never saved layout sizes.
+    pub fn geometry_with_panel_heights(
+        &self,
+        bounds: Rect,
+        t: &Tokens,
+        natural: &BTreeMap<String, f32>,
+    ) -> Geometry {
         let mut out = Geometry::default();
         let gap = t.metrics.dock_gap;
         let shown = |d: &&Dock| !d.collapsed && !d.groups.is_empty();
@@ -367,7 +393,18 @@ impl Layout {
             let rect = rects[&di];
             let n = d.groups.len();
             let space = (rect.h - gap * (n - 1) as f32).max(0.);
-            let heights = group_heights(&d.groups, space, t);
+            let heights = if matches!(d.id.as_str(), "left" | "right") {
+                out.side_docks.insert(di, rect);
+                side_group_heights(
+                    &d.groups,
+                    space,
+                    bounds.h + t.metrics.toolbar + t.metrics.status + t.metrics.dock_gap,
+                    t,
+                    natural,
+                )
+            } else {
+                group_heights(&d.groups, space, t)
+            };
             let mut y = rect.y;
             for (gi, _) in d.groups.iter().enumerate() {
                 let h = heights[gi];
@@ -490,7 +527,18 @@ impl Layout {
     /// its least height), so nothing overlaps or scales the other docks, and
     /// dragging back to where it began gives the layout it began with.
     pub fn resize(&mut self, divider: &Divider, delta: f32, bounds: Rect, t: &Tokens) {
-        let geometry = self.geometry(bounds, t);
+        self.resize_with_panel_heights(divider, delta, bounds, t, &BTreeMap::new());
+    }
+
+    pub fn resize_with_panel_heights(
+        &mut self,
+        divider: &Divider,
+        delta: f32,
+        bounds: Rect,
+        t: &Tokens,
+        natural: &BTreeMap<String, f32>,
+    ) {
+        let geometry = self.geometry_with_panel_heights(bounds, t, natural);
         let min = t.metrics.min_panel;
         let height = |dock: usize, group: usize| {
             geometry
@@ -504,14 +552,30 @@ impl Layout {
                 return;
             };
             let total = a + b;
+            let side = matches!(self.docks[divider.dock].id.as_str(), "left" | "right");
             let groups = &self.docks[divider.dock].groups;
-            let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[i + 1], t));
+            let least = |g: &Group| {
+                let floor = group_least(g, t);
+                if side && !g.collapsed && g.size.is_none() { floor.max(200.) } else { floor }
+            };
+            let (least_a, least_b) = (least(&groups[i]), least(&groups[i + 1]));
             let upper = if total >= least_a + least_b {
                 (a + delta).clamp(least_a, total - least_b)
             } else {
                 a
             };
             let d = &mut self.docks[divider.dock];
+            if side {
+                // A side stack can exceed its viewport. Record the requested
+                // adjacent heights; never turn a fixed neighbour into a fluid
+                // filler, or it would shrink as soon as this splitter moves.
+                for (index, height) in [(i, upper), (i + 1, total - upper)] {
+                    let group = &mut d.groups[index];
+                    if group.size.is_none() { group.flex_basis = Some(height); }
+                    else { group.size = Some(height); }
+                }
+                return;
+            }
             // Every group at the height it shows; the first that was flexible
             // stays so (it takes exactly that height, and a window resize).
             let flexible = d
@@ -546,10 +610,7 @@ impl Layout {
             let other: f32 = geometry
                 .panels
                 .iter()
-                .filter(|p| {
-                    p.dock != divider.dock
-                        && is_band(&self.docks[p.dock].id)
-                })
+                .filter(|p| p.dock != divider.dock && is_band(&self.docks[p.dock].id))
                 .map(|p| p.rect.h + gap)
                 .sum();
             // The original app: at least `band_least` (and its panels'
@@ -627,9 +688,11 @@ impl Layout {
     ) -> Option<DropPreview> {
         // A folded panel is not a zone (its header is all there is of it):
         // the dock around it places the panel above or below it.
-        if let Some(p) = geometry.panels.iter().find(|p| {
-            p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed
-        }) {
+        if let Some(p) = geometry
+            .panels
+            .iter()
+            .find(|p| p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed)
+        {
             return Some(self.panel_zone(geometry, p, x, y, t, true));
         }
         self.off_panel_target(geometry, bounds, x, y, t)
@@ -825,9 +888,9 @@ impl Layout {
                     h: (a.y + a.h).max(b.y + b.h) - a.y.min(b.y),
                 });
                 column.is_some_and(near)
-                    || panels.iter().any(|r| {
-                        (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM
-                    })
+                    || panels
+                        .iter()
+                        .any(|r| (y - r.y).abs().min((y - r.y - r.h).abs()) <= FLOATING_SEAM)
             }
             _ => false,
         };
@@ -948,9 +1011,10 @@ impl Layout {
         let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
         // Over the very stack being moved: it is already there.
         if whole
-            && geometry.panels.iter().any(|p| {
-                (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1)
-            })
+            && geometry
+                .panels
+                .iter()
+                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
         {
             return DropOutcome::Here;
         }
@@ -1124,6 +1188,7 @@ impl Layout {
         };
         let moved = if stack {
             Group {
+                flex_basis: source.flex_basis.filter(|_| same_dock),
                 tabs: std::mem::take(&mut source.tabs),
                 active: source.active,
                 size: source.size.filter(|_| same_dock),
@@ -1347,18 +1412,9 @@ impl Layout {
         if (upper - a).abs() < 0.5 {
             return false;
         }
-        let d = &mut self.docks[divider.dock];
-        let flexible = d
-            .groups
-            .iter()
-            .position(|g| g.size.is_none())
-            .unwrap_or(d.groups.len() - 1);
-        for (gi, g) in d.groups.iter_mut().enumerate() {
-            g.size = height(gi);
-        }
-        d.groups[i].size = Some(upper);
-        d.groups[i + 1].size = Some(total - upper);
-        d.groups[flexible].size = None;
+        // Use the same adjacent-height update as a drag, including the
+        // transient basis of fluid side panels and fixed neighbours.
+        self.resize(divider, upper - a, bounds, t);
         true
     }
     pub fn reset_dock(&mut self, divider: &Divider) -> bool {
@@ -1459,7 +1515,9 @@ impl Layout {
                     None => self.add_dock(dock_for(edge.dock_id(), single())),
                 }
             }
-            DropTarget::Beside { dock, .. } => self.insert_at(id, DropTarget::Split { dock, group: 0 }),
+            DropTarget::Beside { dock, .. } => {
+                self.insert_at(id, DropTarget::Split { dock, group: 0 })
+            }
         }
     }
     /// Adds a dock where its id puts it: a left dock is the first column.
@@ -1563,10 +1621,62 @@ fn dock_floor(d: &Dock, t: &Tokens) -> f32 {
         .sum::<f32>()
         + t.metrics.dock_gap * d.groups.len().saturating_sub(1) as f32
 }
-/// The heights of a dock's groups in `space`: sized groups keep their size,
-/// flexible ones share the rest, and every group keeps its least height
-/// while there is room for it (sized groups give way first, then flexible
-/// ones share what is left). Nothing overlaps or is lost.
+/// Electron's minimum for a fluid side panel, before content preference.
+pub const SIDE_FLUID_FLOOR: f32 = 200.;
+
+/// The automatic floor includes useful content space, capped before long lists
+/// take over the window. A saved splitter basis or fixed size remains authoritative.
+pub fn side_group_floor(g: &Group, window_height: f32, t: &Tokens, natural: Option<f32>) -> f32 {
+    if g.collapsed {
+        return t.metrics.header;
+    }
+    if let Some(size) = g.size {
+        return size.max(group_least(g, t));
+    }
+    if let Some(basis) = g.flex_basis {
+        return basis.max(SIDE_FLUID_FLOOR);
+    }
+    let initial = match g.active() {
+        "inspector" | "properties" => 360.,
+        "fxbrowser" | "effects" | "agent" | "threads" | "chat" => 400.,
+        "easing" | "assets" | "project" | "layer-effects" => 320.,
+        _ => SIDE_FLUID_FLOOR,
+    };
+    natural
+        .filter(|h| h.is_finite() && *h > 0.)
+        .unwrap_or(initial)
+        .clamp(
+            SIDE_FLUID_FLOOR,
+            (window_height * 0.6).max(SIDE_FLUID_FLOOR),
+        )
+}
+
+fn side_group_heights(
+    groups: &[Group],
+    space: f32,
+    window_height: f32,
+    t: &Tokens,
+    natural: &BTreeMap<String, f32>,
+) -> Vec<f32> {
+    let mut heights: Vec<f32> = groups
+        .iter()
+        .map(|g| side_group_floor(g, window_height, t, natural.get(g.active()).copied()))
+        .collect();
+    let flex = groups
+        .iter()
+        .filter(|g| !g.collapsed && g.size.is_none())
+        .count();
+    let extra = (space - heights.iter().sum::<f32>()).max(0.);
+    if flex > 0 {
+        for (g, h) in groups.iter().zip(&mut heights) {
+            if !g.collapsed && g.size.is_none() {
+                *h += extra / flex as f32;
+            }
+        }
+    }
+    heights
+}
+
 fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
     // A folded group is its header, however the rest share the room.
     if groups.iter().any(|g| g.collapsed) {
@@ -1964,7 +2074,12 @@ mod view_tile_tests {
     use super::*;
     #[test]
     fn four_views_tile_two_by_two_with_gaps() {
-        let r = Rect { x: 10., y: 20., w: 402., h: 202. };
+        let r = Rect {
+            x: 10.,
+            y: 20.,
+            w: 402.,
+            h: 202.,
+        };
         let t = view_tiles(r, 4, 2.);
         assert_eq!(t.len(), 4);
         assert_eq!((t[0].w, t[0].h), (200., 100.));

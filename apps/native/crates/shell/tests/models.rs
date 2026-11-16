@@ -50,7 +50,11 @@ fn every_preset_and_small_window_is_bounded() {
             for p in g.panels {
                 assert!(p.rect.w >= 0. && p.rect.h >= 0., "{id}");
                 assert!(p.rect.x + p.rect.w <= w + 0.01);
-                assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                if !g.side_docks.contains_key(&p.dock) {
+                    assert!(p.rect.y + p.rect.h <= h + 0.01, "{id}: {:?}", p.rect);
+                } else {
+                    assert!(p.rect.h >= tokens().metrics.header);
+                }
             }
         }
     }
@@ -500,6 +504,147 @@ fn the_palette_opens_inside_its_key_press_so_no_typing_is_lost() {
     // the palette's field is first responder before the next key is read.
     assert!(pm_shell::opens_in_place("palette"));
     assert!(!pm_shell::opens_in_place("save"));
+}
+#[test]
+fn overflowing_side_splitter_tracks_the_drag_and_keeps_fixed_neighbours() {
+    let t = tokens();
+    let bounds = Rect { x: 0., y: 0., w: 1000., h: 400. };
+    for first in [None, Some(300.)] {
+        let mut layout = Layout::preset("design");
+        let di = layout.docks.iter().position(|dock| dock.id == "right").unwrap();
+        layout.docks[di].groups = ["inspector", "easing", "fxbrowser"].into_iter().enumerate().map(|(i, id)| Group {
+            flex_basis: None,
+            tabs: vec![id.into()], active: 0, size: if i == 0 { first } else { Some(300.) }, collapsed: false,
+        }).collect();
+        let before = layout.geometry(bounds, &t);
+        let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
+        let heights = |g: &Geometry| g.panels.iter().filter(|p| p.dock == di).map(|p| p.rect).collect::<Vec<_>>();
+        let original = heights(&before);
+        layout.resize(divider, 40., bounds, &t);
+        let resized = heights(&layout.geometry(bounds, &t));
+        assert_eq!(layout.docks[di].groups[0].size.is_none(), first.is_none(), "resizing preserves fluid sizing");
+        let saved = pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+        let restored = pm_shell::workspace::layout(&saved);
+        assert_eq!(restored.docks[di].groups.len(), layout.docks[di].groups.len());
+        for (actual, expected) in restored.docks[di].groups.iter().zip(&layout.docks[di].groups) {
+            let mut expected = expected.clone();
+            if let Some(basis) = expected.flex_basis {
+                assert!((actual.flex_basis.unwrap() - basis).abs() <= 0.05, "saved basis keeps workspace precision");
+                expected.flex_basis = actual.flex_basis;
+            }
+            assert_eq!(actual, &expected, "workspace keeps fixed heights and fluid sizing");
+        }
+        assert_eq!(pm_shell::workspace::write(&restored, &saved), saved);
+        if first.is_none() {
+            let larger = layout.geometry(Rect { h: 1400., ..bounds }, &t);
+            assert!(heights(&larger)[0].h > resized[0].h, "fluid panel still fills a taller window");
+        }
+        assert_eq!(resized[0].h, original[0].h + 40.);
+        assert_eq!(resized[1].h, original[1].h - 40.);
+        assert_eq!(resized[2], original[2], "unrelated fixed panel stays in place and keeps its height");
+    }
+}
+
+#[test]
+fn properties_easing_effects_scroll_at_normal_height_without_squeezing() {
+    let t = tokens();
+    let bounds = Rect {
+        x: 0.,
+        y: 0.,
+        w: 1248.,
+        h: 705. - t.metrics.toolbar - t.metrics.status - t.metrics.dock_gap,
+    };
+    let mut layout = Layout::preset("design");
+    let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+    layout.docks[di].groups = ["inspector", "easing", "fxbrowser"]
+        .into_iter()
+        .map(|id| Group {
+            tabs: vec![id.into()],
+            active: 0,
+            size: None,
+            flex_basis: None,
+            collapsed: false,
+        })
+        .collect();
+    let geometry = layout.geometry(bounds, &t);
+    let viewport = geometry.side_docks[&di];
+    let panels: Vec<_> = geometry.panels.iter().filter(|p| p.dock == di).collect();
+    assert!(
+        panels.last().unwrap().rect.y + panels.last().unwrap().rect.h > viewport.y + viewport.h
+    );
+    for (p, usable_floor) in panels.iter().zip([360., 320., 400.]) {
+        assert!(p.rect.h >= usable_floor);
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR);
+    }
+    let natural = std::collections::BTreeMap::from([
+        ("inspector".into(), 2000.),
+        ("easing".into(), 360.),
+        ("fxbrowser".into(), 5000.),
+    ]);
+    let measured = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    for p in measured.panels.iter().filter(|p| p.dock == di) {
+        assert!(p.rect.h >= SIDE_FLUID_FLOOR && p.rect.h <= 705. * 0.6 + 0.01);
+    }
+    // The splitter starts from the same measured geometry; a saved size wins
+    // over automatic natural-content sizing and remains a fluid basis.
+    let divider = measured
+        .dividers
+        .iter()
+        .find(|d| d.dock == di && d.group == Some(0))
+        .unwrap();
+    let before = measured
+        .panels
+        .iter()
+        .find(|p| p.dock == di && p.group == 0)
+        .unwrap()
+        .rect
+        .h;
+    layout.resize_with_panel_heights(divider, -40., bounds, &t, &natural);
+    let resized = layout.geometry_with_panel_heights(bounds, &t, &natural);
+    assert_eq!(
+        resized
+            .panels
+            .iter()
+            .find(|p| p.dock == di && p.group == 0)
+            .unwrap()
+            .rect
+            .h,
+        before - 40.
+    );
+    assert!(layout.docks[di].groups[0].size.is_none());
+    layout.docks[di].groups[1].size = Some(240.);
+    layout.docks[di].groups[1].flex_basis = None;
+    assert_eq!(
+        side_group_floor(&layout.docks[di].groups[1], bounds.h, &t, Some(5000.)),
+        240.
+    );
+    let record =
+        pm_shell::workspace::write(&layout, &pm_shell::workspace::preset("design").unwrap());
+    let restored = pm_shell::workspace::layout(&record);
+    assert!(restored.docks[di].groups[0].size.is_none());
+    assert!((restored.docks[di].groups[0].flex_basis.unwrap() - layout.docks[di].groups[0].flex_basis.unwrap()).abs() <= 0.05);
+    assert_eq!(restored.docks[di].groups[1].size, Some(240.));
+    assert_eq!(pm_shell::workspace::write(&restored, &record), record);
+}
+
+#[test]
+fn resetting_a_side_split_updates_fluid_bases_without_moving_its_neighbour() {
+    let t = tokens();
+    let bounds = Rect { x: 0., y: 0., w: 1000., h: 500. };
+    let mut layout = Layout::preset("design");
+    let di = layout.docks.iter().position(|d| d.id == "right").unwrap();
+    layout.docks[di].groups = [("a", 400.), ("b", 300.), ("c", 400.)].into_iter().map(|(id, basis)| Group {
+        tabs: vec![id.into()], active: 0, size: None, flex_basis: Some(basis), collapsed: false,
+    }).collect();
+    let before = layout.geometry(bounds, &t);
+    let divider = before.dividers.iter().find(|d| d.dock == di && d.group == Some(0)).unwrap();
+    assert!(layout.reset_split(divider, bounds, &t));
+    let after = layout.geometry(bounds, &t);
+    let panels: Vec<_> = after.panels.iter().filter(|p| p.dock == di).collect();
+    assert_eq!(panels[0].rect.h, 350.);
+    assert_eq!(panels[1].rect.h, 350.);
+    assert_eq!(panels[2].rect, before.panels.iter().find(|p| p.dock == di && p.group == 2).unwrap().rect);
+    assert!(layout.docks[di].groups.iter().all(|g| g.size.is_none()));
 }
 
 #[test]

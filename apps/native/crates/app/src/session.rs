@@ -395,6 +395,12 @@ impl pm_shell::integration::Integration for Bridge {
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).unavailable_commands()
     }
+    fn natural_panel_height(&self, id: &str, cx: &App) -> Option<f32> {
+        let controller = self.0.read(cx);
+        let view = controller.builtins.views.get(id)?;
+        let height = view.read(cx).natural_body_height();
+        (height > 0.).then(|| height + controller.host.borrow().tokens.metrics.header)
+    }
     fn panel(
         &self,
         id: &str,

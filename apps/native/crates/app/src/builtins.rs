@@ -1167,7 +1167,7 @@ impl Controller {
             .scrolled_at
             .get(id)
             .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = shown
+        let thumb = (shown || !cx.should_auto_hide_scrollbars())
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
