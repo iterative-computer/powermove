@@ -303,6 +303,26 @@ impl LibraryStore {
         self.rows("projectTrash")
     }
 
+    /// The name project `id` was given while no window had it open: its
+    /// row's (in the index or the trash) when the row is marked
+    /// [`crate::persistence::RENAMED`]; its body has the one before.
+    pub fn renamed(&self, id: &str) -> Result<Option<String>, LibraryError> {
+        for key in ["projects", "projectTrash"] {
+            if let Some(Value::Array(rows)) = self.read(key)?
+                && let Some(name) = rows
+                    .iter()
+                    .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                    .filter(|r| {
+                        r.get(crate::persistence::RENAMED).and_then(Value::as_bool) == Some(true)
+                    })
+                    .and_then(|r| r.get("name")?.as_str())
+            {
+                return Ok(Some(name.to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
     /// `R.getAsync(id)` + `R.getStateAsync(id)` + the workspace slot.
     pub fn load(&self, id: &str) -> Result<Option<LibraryProject>, LibraryError> {
         if !valid_id(id) {
