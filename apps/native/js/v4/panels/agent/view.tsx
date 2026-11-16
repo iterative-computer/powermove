@@ -347,7 +347,26 @@ function Para({ runs, style }: { runs: Run[]; style?: Style }) {
   );
 }
 /** Markdown as native text: paragraphs, headings, lists, quotes and code. */
-function Prose({ text, style = reading }: { text: string; style?: Style }) {
+const Prose = memo(function Prose({
+  text,
+  style = reading,
+  source,
+  children,
+  code = false,
+}: {
+  code?: boolean;
+  text: string;
+  style?: Style;
+  children?: ComponentChildren;
+  source?: {
+    id: string;
+    label: string;
+    tabIndex: number;
+    metadata: Record<string, Json>;
+    onSelect: (e: SurfaceEvent) => void;
+    onKeyDown: (e: SurfaceEvent) => void;
+  };
+}) {
   // As v1 reads: paragraphs apart, a list's items close together.
   const groups: Block[][] = [];
   for (const block of markdown(text)) {
@@ -356,18 +375,37 @@ function Prose({ text, style = reading }: { text: string; style?: Style }) {
     else groups.push([block]);
   }
   return (
-    <div style={{ ...column, ...shrink, gap: t("metrics.inset") }}>
-      {groups.map((g, i) =>
-        g.length === 1 ? (
-          <ProseBlock key={i} block={g[0]!} style={style} />
-        ) : (
-          <div key={i} style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}>
-            {g.map((b, j) => (
-              <ProseBlock key={j} block={b} style={style} />
-            ))}
-          </div>
-        ),
+    <div
+      {...source}
+      style={{
+        ...column,
+        ...shrink,
+        gap: t("metrics.inset"),
+        ...(source ? { ...target, position: "relative" } : {}),
+      }}
+    >
+      {code ? (
+        <text
+          metadata={{ quoteText: text }}
+          data-pm-variant="code"
+          style={style}
+        >
+          {breakable(text)}
+        </text>
+      ) : (
+        groups.map((g, i) =>
+          g.length === 1 ? (
+            <ProseBlock key={i} block={g[0]!} style={style} />
+          ) : (
+            <div key={i} style={{ ...column, ...shrink, gap: t("metrics.pill_inset") }}>
+              {g.map((b, j) => (
+                <ProseBlock key={j} block={b} style={style} />
+              ))}
+            </div>
+          ),
+        )
       )}
+      {children}
     </div>
   );
 });

@@ -26631,6 +26631,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     8,
     9,
     10,
+    13,
+    19,
     24,
     26,
     27,
@@ -26814,9 +26816,27 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       ],
       "id": 13,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 12,
       "props": {
+        "id": "quote-source-history:message-0",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:history:message-0",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -26824,8 +26844,16 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -26839,6 +26867,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "listeners": {},
       "parent": 13,
       "props": {
+        "metadata": {
+          "quoteText": "Make the headline",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -26930,9 +26961,27 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       ],
       "id": 19,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 18,
       "props": {
+        "id": "quote-source-live:text-1",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:live:text-1",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -26940,8 +26989,16 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -26993,6 +27050,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "listeners": {},
       "parent": 19,
       "props": {
+        "metadata": {
+          "quoteText": "Done. Headline now scales from 92 % …",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -28061,7 +28121,14 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -28080,7 +28147,14 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -28230,6 +28304,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     8,
     9,
     10,
+    13,
+    19,
     24,
     26,
     27,
@@ -28413,9 +28489,27 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       ],
       "id": 13,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 12,
       "props": {
+        "id": "quote-source-history:message-0",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:history:message-0",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -28423,8 +28517,16 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -28438,6 +28540,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "listeners": {},
       "parent": 13,
       "props": {
+        "metadata": {
+          "quoteText": "Make the headline",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -28529,9 +28634,27 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       ],
       "id": 19,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 18,
       "props": {
+        "id": "quote-source-live:text-1",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:live:text-1",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -28539,8 +28662,16 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -28592,6 +28723,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "listeners": {},
       "parent": 19,
       "props": {
+        "metadata": {
+          "quoteText": "Done. Headline now scales from 92 % …",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -29660,7 +29794,14 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -29679,7 +29820,14 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -29828,6 +29976,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
   "focusOrder": [
     8,
     9,
+    12,
+    18,
     23,
     25,
     26,
@@ -29947,9 +30097,27 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 12,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 11,
       "props": {
+        "id": "quote-source-history:message-0",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:history:message-0",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -29957,8 +30125,16 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -29972,6 +30148,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "listeners": {},
       "parent": 12,
       "props": {
+        "metadata": {
+          "quoteText": "Make the headline",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -30063,9 +30242,27 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
+        "id": "quote-source-live:text-1",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:live:text-1",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -30073,8 +30270,16 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -30088,6 +30293,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "listeners": {},
       "parent": 18,
       "props": {
+        "metadata": {
+          "quoteText": "Done. Headline now scales from 92 % …",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -31205,7 +31413,14 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -31224,7 +31439,14 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -31373,6 +31595,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
   "focusOrder": [
     8,
     9,
+    12,
+    18,
     23,
     25,
     26,
@@ -31492,9 +31716,27 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 12,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 11,
       "props": {
+        "id": "quote-source-history:message-0",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:history:message-0",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -31502,8 +31744,16 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -31517,6 +31767,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "listeners": {},
       "parent": 12,
       "props": {
+        "metadata": {
+          "quoteText": "Make the headline",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -31608,9 +31861,27 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       ],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "select": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
+        "id": "quote-source-live:text-1",
+        "label": "Transcript text",
+        "metadata": {
+          "quoteSource": "thread:live:text-1",
+        },
         "style": {
           "display": "flex",
           "flexDirection": "column",
@@ -31618,8 +31889,16 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
           "overflow": "hidden",
+          "position": "relative",
         },
+        "tabIndex": 0,
       },
       "text": "",
       "type": "div",
@@ -31633,6 +31912,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "listeners": {},
       "parent": 18,
       "props": {
+        "metadata": {
+          "quoteText": "Done. Headline now scales from 92 % …",
+        },
         "style": {
           "color": {
             "token": "colors.text",
@@ -32750,7 +33032,14 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
@@ -32769,7 +33058,14 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "create",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
     "create",
+    "setProps",
     "setProps",
     "create",
     "setText",
