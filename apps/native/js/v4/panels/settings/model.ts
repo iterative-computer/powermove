@@ -365,7 +365,7 @@ export class SettingsModel {
     this.window.announce(
       this.matches.count
         ? `${this.matches.count} settings found`
-        : "No settings found",
+        : "No Results. Try a different search.",
     );
     this.changed();
   }

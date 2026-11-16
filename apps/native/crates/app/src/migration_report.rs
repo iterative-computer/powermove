@@ -1,14 +1,22 @@
 //! Window ▸ Migration Report (N003): a standard window, like the Error Log.
 use gpui::{prelude::*, *};
 use pm_first_launch::surfaces::migration::{Report, about_native_files};
-use pm_shell::tokens;
+use pm_shell::{
+    kit::{Button, Kit, Recipes},
+    motion::Motion,
+    tokens,
+};
 use std::path::PathBuf;
 
 pub struct ReportWindow {
+    motion: Motion<u64>,
     report: Report,
     profile: PathBuf,
 }
 impl ReportWindow {
+    fn motion(&mut self) -> &mut Motion<u64> {
+        &mut self.motion
+    }
     fn action(&self, id: &str) {
         match id {
             "show_library" => crate::platform::reveal(&self.profile),
@@ -44,83 +52,73 @@ fn copy_text(text: &str) {
 }
 impl Render for ReportWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
         let t = tokens();
-        let (c, m) = (&t.colors, &t.metrics);
+        let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         let mut body = div()
             .id("migration-report")
-            .flex_1()
+            .size_full()
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(m.inset))
-            .p(px(m.sheet_inset));
+            .gap(px(t.space.lg));
         if let Some((title, line)) = self.report.empty_copy() {
-            body = body
-                .items_center()
-                .justify_center()
-                .child(pm_shell::symbol::symbol(
-                    "checkmark.circle",
-                    t.typography.display,
-                    pm_shell::symbol::Weight::Medium,
-                    c.secondary,
-                    window,
-                ))
-                .child(div().text_size(px(t.typography.title)).child(title))
-                .child(div().text_color(rgb(c.secondary)).child(line));
+            body = body.items_center().justify_center().child(kit.empty_state(
+                "checkmark.circle.fill",
+                title,
+                line,
+            ));
         }
         for (kind, rows) in self.report.sections() {
             let (section, action) = kind.section();
-            let mut card = div()
-                .flex()
-                .flex_col()
-                .rounded(px(m.group_radius))
-                .bg(rgb(c.panel));
-            for row in rows {
+            // Report sections describe exceptions; a clean report shows the success state.
+            let mut card = kit.card().elevated(&t, pm_design::Elevation::Well);
+            for (index, row) in rows.into_iter().enumerate() {
+                if index > 0 {
+                    card = card.child(kit.separator());
+                }
                 card = card.child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .p(px(m.gap))
-                        .child(row.display_name.clone())
-                        .child(div().text_color(rgb(c.secondary)).child(action)),
+                    kit.form_row(
+                        &row.display_name,
+                        Some(action),
+                        kit.symbol(
+                            "exclamationmark.triangle.fill",
+                            t.metrics.symbol_panel,
+                            pm_shell::symbol::Weight::Regular,
+                            t.colors.warning,
+                        )
+                        .into_any_element(),
+                    ),
                 );
             }
             body = body.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(m.gap))
-                    .child(div().text_size(px(t.typography.title)).child(section))
+                    .gap(px(t.space.md))
+                    .child(div().text_role(&t, pm_design::Text::Heading).child(section))
                     .child(card),
             );
         }
-        let mut footer = div().flex().gap(px(m.gap)).p(px(m.inset));
-        for button in self.report.footer_actions() {
-            let id = button.id;
-            footer = footer.child(
-                div()
-                    .id(id)
-                    .debug_selector(|| format!("report-{id}"))
-                    .px(px(m.inset))
-                    .h(px(m.row))
-                    .flex()
-                    .items_center()
-                    .rounded(px(m.control_radius))
-                    .bg(rgb(c.panel_secondary))
-                    .child(button.label)
-                    .on_click(cx.listener(move |v, _, _, _| v.action(id))),
-            );
-        }
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(c.window))
-            .text_color(rgb(c.text))
-            .text_size(px(t.typography.body))
-            .font_family(pm_design::TEXT_FONT)
-            .child(body)
-            .child(footer)
+        let footer = self
+            .report
+            .footer_actions()
+            .into_iter()
+            .map(|button| {
+                let id = button.id;
+                kit.button(id, button.label, Button::Neutral, None, None)
+                    .debug_selector(move || format!("report-{id}"))
+                    .on_click(cx.listener(move |v, _, _, _| v.action(id)))
+                    .into_any_element()
+            })
+            .collect();
+        kit.utility_window(
+            "Migration Report",
+            None,
+            vec![],
+            body.into_any_element(),
+            footer,
+        )
     }
 }
 const UNREADABLE: &str = "The Migration Report couldn’t be read.";
@@ -163,9 +161,41 @@ pub fn open(profile: PathBuf, cx: &mut App) {
                         point(px(t.metrics.toolbar), px(t.metrics.toolbar)),
                         size(px(t.metrics.settings_width), px(t.metrics.settings_height)),
                     )))),
-                |_, cx| cx.new(|_| ReportWindow { report, profile }),
+                |_, cx| {
+                    cx.new(|_| ReportWindow {
+                        motion: Motion::default(),
+                        report,
+                        profile,
+                    })
+                },
             )
         });
     })
     .detach();
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_utility_migration() {
+    use pm_first_launch::surfaces::migration::{ReportKind, ReportRow};
+    crate::utility_capture_tests::capture("migration-report", |_, cx| {
+        cx.new(|_| ReportWindow {
+            motion: Motion::default(),
+            report: Report {
+                rows: vec![
+                    ReportRow {
+                        id: "synthetic".into(),
+                        display_name: "Opening Sequence".into(),
+                        kind: ReportKind::History,
+                    },
+                    ReportRow {
+                        id: "synthetic-missing".into(),
+                        display_name: "Archive Footage".into(),
+                        kind: ReportKind::Media,
+                    },
+                ],
+            },
+            profile: std::env::temp_dir(),
+        })
+    });
 }

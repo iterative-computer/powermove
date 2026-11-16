@@ -65,7 +65,7 @@ fn low_disk_during_transcode_pauses_then_resumes_the_same_generation() {
                 if call == 0 || resume.load(Ordering::SeqCst) {
                     40 * gib
                 } else {
-                    19 * gib
+                    4 * gib
                 },
                 100 * gib,
             ))

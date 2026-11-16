@@ -41,6 +41,8 @@ fn world_camera(r: &pm_scene3d::service::ResolvedScene) -> Option<(String, nav::
     let position = r.camera_position?;
     let target = *r.targets.get(&id)?;
     let pose = nav::Pose {
+        ortho: false,
+        roll: 0.,
         position,
         target,
         zoom: num("zoom", 1.),

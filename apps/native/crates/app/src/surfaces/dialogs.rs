@@ -371,6 +371,7 @@ pub struct PrecomposeDraft {
     pub can_leave: bool,
     pub leave: bool,
     pub adjust_duration: bool,
+    pub size_to_selection: bool,
     pub open_after: bool,
 }
 impl PrecomposeDraft {
@@ -423,6 +424,16 @@ impl PrecomposeDraft {
                 leave,
                 move_all,
                 adjust,
+                {
+                    let mut size = Field::new(
+                        "size",
+                        "Fit size to layers",
+                        NativePiece::Checkbox,
+                        vec![self.size_to_selection.to_string()],
+                    );
+                    size.enabled = !self.leave || !self.can_leave;
+                    size
+                },
                 Field::new(
                     "open",
                     "Open New Composition",

@@ -256,7 +256,7 @@ fn window_edges_dock_where_no_dock_stands_and_overshooting_still_counts() {
     let t = tokens();
     let bounds = SIZES[1];
     let mut l = Layout::preset("design");
-    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline"] {
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline", "easing"] {
         l.close_panel(id).unwrap();
     }
     let g = l.geometry(bounds, &t);
@@ -438,7 +438,7 @@ fn the_top_edge_docks_a_band_above_the_columns() {
         for (zone, x, y) in spots(target.rect, &t) {
             if let Some(p) = top.drop_target_for(&g, bounds, (x, y), &t, "inspector", false) {
                 let mut next = top.clone();
-                next.move_panel_to("inspector", p.target).unwrap();
+                next.apply_drop("inspector", &p, false).unwrap();
                 sound(&next, bounds, zone);
                 assert!(close(rect_of(&next, bounds, "inspector"), p.rect), "{zone}");
             }
