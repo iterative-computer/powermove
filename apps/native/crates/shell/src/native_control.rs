@@ -37,6 +37,9 @@ pub enum Kind {
     /// back to the window's content and are sent as `{"key": …}` (`Enter`,
     /// `Escape`, `ArrowDown`) for the view to act on.
     Search,
+    /// AppKit's colour well in its minimal style (a swatch with a chevron
+    /// that opens the system's colours): the value is `#rrggbb`.
+    Well,
 }
 /// A slider's value range. A logarithmic one moves its track in ln(value),
 /// so each equal pull multiplies the value (brightness, size).
@@ -139,6 +142,7 @@ define_class!(
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
                 Kind::Push=>Value::Null,
+                Kind::Well=>sender.downcast_ref::<NSColorWell>().map_or(Value::Null,|w|json!(colour_hex(&w.color()))),
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
             let _=self.ivars().sender.try_send(value);
@@ -197,6 +201,7 @@ enum Control {
     Segmented(Retained<NSSegmentedControl>),
     Slider(Retained<NSSlider>),
     Search(Retained<NSSearchField>),
+    Well(Retained<NSColorWell>),
 }
 impl Control {
     fn view(&self) -> &NSView {
@@ -207,6 +212,7 @@ impl Control {
             Self::Segmented(v) => v.as_ref(),
             Self::Slider(v) => v.as_ref(),
             Self::Search(v) => v.as_ref(),
+            Self::Well(v) => v.as_ref(),
         }
     }
     fn enabled(&self, enabled: bool) {
@@ -217,6 +223,7 @@ impl Control {
             Self::Segmented(v) => v.setEnabled(enabled),
             Self::Slider(v) => v.setEnabled(enabled),
             Self::Search(v) => v.setEnabled(enabled),
+            Self::Well(v) => v.setEnabled(enabled),
         }
     }
     fn value(&self, value: &Value, options: &[Value]) {
@@ -243,6 +250,11 @@ impl Control {
             }),
             Self::Segmented(v) => {
                 v.setSelectedSegment(value.as_i64().map_or(-1, |i| i as isize));
+            }
+            Self::Well(v) => {
+                if let Some(colour) = value.as_str().and_then(hex_colour) {
+                    v.setColor(&colour);
+                }
             }
             Self::Slider(v) => {
                 let range = Range::of(options);
@@ -628,6 +640,15 @@ impl NativeControl {
                     v.addSubview(&hint);
                 }
                 Control::Search(v)
+            }
+            Kind::Well => {
+                let v = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
+                v.setColorWellStyle(NSColorWellStyle::Minimal);
+                unsafe {
+                    v.setTarget(Some(&target));
+                    v.setAction(Some(sel!(act:)));
+                }
+                Control::Well(v)
             }
             Kind::Switch => {
                 let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
@@ -1201,5 +1222,25 @@ pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
             f32::from(b.size.width) as f64,
             f32::from(b.size.height) as f64,
         ),
+    )
+}
+
+/// `#rrggbb` as an sRGB colour.
+fn hex_colour(hex: &str) -> Option<Retained<NSColor>> {
+    let v = u32::from_str_radix(hex.trim_start_matches('#').get(..6)?, 16).ok()?;
+    let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
+    Some(NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.))
+}
+/// A colour as `#rrggbb` in sRGB.
+fn colour_hex(colour: &NSColor) -> String {
+    let srgb = colour
+        .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+        .unwrap_or_else(|| objc2::Message::retain(colour));
+    let c = |v: f64| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        c(srgb.redComponent()),
+        c(srgb.greenComponent()),
+        c(srgb.blueComponent())
     )
 }

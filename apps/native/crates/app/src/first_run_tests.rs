@@ -927,3 +927,24 @@ fn synthetic_runs_can_disable_original_discovery() {
         .is_none()
     );
 }
+
+#[test]
+fn pm348_refused_worker_updates_without_a_window() {
+    let (_temp, home) = home();
+    let support = home.join(APPLICATION_SUPPORT);
+    source(&support);
+    let isolated = home.join("synthetic-review-profile");
+    let plan = Plan::resolve(
+        Some(isolated.clone()),
+        Some(support.join("Powermove")),
+        Some(home.as_os_str().to_owned()),
+    )
+    .unwrap();
+    assert_eq!(plan.launch, Launch::Migrate);
+    let mut flow = Flow::new(plan);
+    assert!(start(&mut flow).is_empty());
+    titled(&flow.frame(), "Powermove Can’t Start");
+    assert!(!flow.frame().spinner);
+    assert!(flow.frame().details.is_some());
+    assert!(!isolated.exists());
+}

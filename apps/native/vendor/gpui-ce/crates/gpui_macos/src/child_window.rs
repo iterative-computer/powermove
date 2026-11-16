@@ -192,6 +192,7 @@ pub fn forget(window: &NSWindow) {
 /// show now.
 pub fn show_pending() {
     let waiting = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    let mut parents = Vec::new();
     for entry in waiting {
         let Some(window) = entry.window.load() else {
             continue;
@@ -202,6 +203,20 @@ pub fn show_pending() {
             .is_some_and(|p| p.load().is_none_or(|p| !p.isVisible()));
         if !parent_gone {
             order_front(&window, entry.key);
+            parents.extend(window.parentWindow());
+        }
+    }
+    // A question asked on a window (a sheet: the recovery prompt after a
+    // forced quit) stays over the windows that showed on it just now, and
+    // keeps the keyboard: one of them ordered over it took its clicks and its
+    // Return (PM-337). The main window counts too: AppKit brings back the
+    // windows that hid on deactivation over it on its own.
+    if let Some(mtm) = MainThreadMarker::new() {
+        parents.extend(NSApplication::sharedApplication(mtm).mainWindow());
+    }
+    for parent in parents {
+        if let Some(question) = parent.attachedSheet() {
+            question.makeKeyAndOrderFront(None);
         }
     }
     #[cfg(debug_assertions)]

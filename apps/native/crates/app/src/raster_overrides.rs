@@ -65,13 +65,29 @@ const WAITING_SHOWN: Duration = Duration::from_secs(2);
 struct Progress {
     steps: Option<u64>,
     at: Instant,
+    /// When this waiter last looked.
+    seen: Instant,
 }
+/// A waiter that looks every 50 ms and finds this long gone was not running
+/// itself (the app paused, or starved by a machine swapping): the realm, in
+/// the same process, had no time to move either.
+const PAUSED: Duration = Duration::from_secs(5);
 impl Progress {
     fn new(now: Instant) -> Self {
-        Self { steps: None, at: now }
+        Self {
+            steps: None,
+            at: now,
+            seen: now,
+        }
     }
-    /// The realm has taken `steps` by `now`: whether nothing moved for `stall`.
+    /// The realm has taken `steps` by `now`: whether nothing moved for `stall`
+    /// of the time this waiter was running.
     fn stalled(&mut self, steps: u64, now: Instant, stall: Duration) -> bool {
+        let gap = now.saturating_duration_since(self.seen);
+        if gap > PAUSED {
+            self.at += gap;
+        }
+        self.seen = now;
         if self.steps != Some(steps) {
             self.steps = Some(steps);
             self.at = now;
@@ -672,18 +688,28 @@ mod tests {
         let start = Instant::now();
         let at = |s: u64| start + Duration::from_secs(s);
         let mut slow = Progress::new(start);
-        // A step every 30 s, for ten minutes: never stalled.
-        for (i, s) in (0..600).step_by(30).enumerate() {
-            assert!(!slow.stalled(i as u64, at(s), EXPORT_STALL), "at {s} s");
-            assert!(!slow.stalled(i as u64, at(s + 29), EXPORT_STALL));
+        // A step every 30 s, for ten minutes, looked at every second: never stalled.
+        for s in 0..600 {
+            assert!(!slow.stalled(s / 30, at(s), EXPORT_STALL), "at {s} s");
         }
         // No step at all: stalled once the whole stall has passed, not before.
         let mut stopped = Progress::new(start);
-        assert!(!stopped.stalled(7, at(0), EXPORT_STALL));
-        assert!(!stopped.stalled(7, at(119), EXPORT_STALL));
+        for s in 0..120 {
+            assert!(!stopped.stalled(7, at(s), EXPORT_STALL), "at {s} s");
+        }
         assert!(stopped.stalled(7, at(120), EXPORT_STALL));
         // A step resets it.
         assert!(!stopped.stalled(8, at(121), EXPORT_STALL));
+        // The app itself paused 100 s (it did not look in that time): those
+        // 100 s are not the extensions' to have moved in.
+        let mut paused = Progress::new(start);
+        for s in 0..=60 {
+            assert!(!paused.stalled(7, at(s), EXPORT_STALL));
+        }
+        for s in 160..220 {
+            assert!(!paused.stalled(7, at(s), EXPORT_STALL), "at {s} s");
+        }
+        assert!(paused.stalled(7, at(220), EXPORT_STALL));
     }
     /// A project no window has open is answered by the host its jobs run;
     /// a window that opens it takes over with its own state untouched, and

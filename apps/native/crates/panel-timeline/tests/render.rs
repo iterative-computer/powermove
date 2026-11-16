@@ -201,6 +201,34 @@ fn sixty_thousand_rows_have_bounded_paint_ax_and_id_navigation() {
         assert_eq!(f.playhead(1. + tick as f64 / 120., &t).unwrap().len(), 2);
     }
 }
+/// A surface that replays its rows shifted while it scrolls records them a
+/// viewport past each edge: the rows there are prepared for the same view
+/// (above it at negative y), the ruler's ops are the view's own, and the
+/// rows in view are drawn as `prepare` draws them.
+#[test]
+fn a_reaching_prepare_adds_the_rows_past_each_edge_for_the_same_view() {
+    let t = tokens();
+    let s = large_scene(600, &t);
+    let mut v = viewport(&t);
+    let row = t.metrics.track_row as f64;
+    v.scroll_y = 300. * row;
+    let tracks = v.height - t.metrics.ruler as f64;
+    let near = s.prepare(v, &t).unwrap();
+    let far = s.prepare_reaching(v, &t, tracks).unwrap();
+    assert_eq!(near.ops[..near.fixed], far.ops[..far.fixed]);
+    assert!(far.range.start < near.range.start && far.range.end > near.range.end);
+    let rows = (tracks / row).floor() as usize;
+    assert!(near.range.start - far.range.start >= rows);
+    assert!(far.range.end - near.range.end >= rows);
+    let row_op = |f: &Frame, id: &str| f.ops.iter().find(|o| o.id == id).cloned();
+    let shown = format!("clip:clip-{}", near.range.start + 1);
+    // The same op, its clip reaching as far as the rows do.
+    let (a, b) = (row_op(&near, &shown).unwrap(), row_op(&far, &shown).unwrap());
+    assert_eq!((a.bounds, a.color, &a.text), (b.bounds, b.color, &b.text));
+    let above = row_op(&far, &format!("clip:clip-{}", far.range.start + 1)).unwrap();
+    assert!(above.bounds.y < 0.);
+    assert!(above.clip.is_some_and(|c| c.y <= above.bounds.y));
+}
 #[test]
 fn malformed_geometry_and_nan_never_reach_native_painter() {
     let t = tokens();

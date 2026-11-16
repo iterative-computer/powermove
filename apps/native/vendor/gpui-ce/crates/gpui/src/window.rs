@@ -4008,6 +4008,7 @@ impl Window {
         &mut self,
         offset: &Rc<RefCell<Point<Pixels>>>,
         reach: Point<Pixels>,
+        driven: bool,
     ) -> Option<crate::scroll_layer::ScrollLayerKey> {
         let key = crate::scroll_layer::key(offset);
         let frame_now = self.scroll_layer_frame;
@@ -4015,7 +4016,7 @@ impl Window {
             return None;
         }
         self.scroll_layer_rest.remove(&key);
-        if let Some(layer) = self.scroll_layers.get_mut(&key) {
+        if !driven && let Some(layer) = self.scroll_layers.get_mut(&key) {
             let idle = layer.frame + 1 == frame_now && layer.generation == layer.recorded_at;
             layer.idle_records = if idle { layer.idle_records + 1 } else { 0 };
             if layer.idle_records >= crate::scroll_layer::IDLE_RECORDS {
@@ -4162,6 +4163,33 @@ impl Window {
     ) -> Option<(Point<Pixels>, Bounds<Pixels>)> {
         let layer = self.scroll_layers.get(&layer.0)?;
         Some((layer.current() - layer.recorded, layer.clip.bounds))
+    }
+
+    /// A step its owner makes on a driven scroll layer
+    /// ([`crate::StatefulInteractiveElement::scroll_layer_driven`]) tracked by
+    /// `handle`: the offset moves to `offset`, and when the recording covers
+    /// it the frame replays the layer shifted without notifying its view (the
+    /// view draws in full once the steps stop). False when the view needs to
+    /// draw again for the new offset (the owner notifies it then).
+    pub fn step_scroll_layer(
+        &mut self,
+        handle: &crate::ScrollHandle,
+        offset: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        let cell = handle.offset_cell();
+        *cell.borrow_mut() = offset;
+        if !crate::scroll_layer::enabled() {
+            return false;
+        }
+        let key = crate::scroll_layer::key(&cell);
+        let Some(view) = self.scroll_layers.get(&key).map(|l| l.view) else {
+            if crate::view::draw_trace_enabled() {
+                eprintln!("PM_LAYER {{\"refused\":\"unrecorded\"}}");
+            }
+            return false;
+        };
+        self.scroll_layer_step(key, view, cx)
     }
 
     /// A wheel step on a scroll layer that only moves its offset: when the
