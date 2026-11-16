@@ -5168,6 +5168,7 @@ dependencies = [
  "gpui_ce_apple",
  "gpui_ce_macos",
  "gpui_ce_parley",
+ "image",
  "libc",
  "metal",
  "objc2 0.6.5",

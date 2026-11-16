@@ -873,18 +873,22 @@ mod captures {
     }
     struct Scene {
         gizmo: Entity<GizmoSurface>,
-        image: Arc<Image>,
+        image: Arc<RenderImage>,
     }
     impl Render for Scene {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let gizmo = self.gizmo.clone();
 
+            // Match the green picker fixture's explicit window backdrop.
             div()
                 .size_full()
+                .bg(rgb(self.gizmo.read(cx).tokens.colors.window))
                 .relative()
                 .child(
-                    img(ImageSource::Image(self.image.clone()))
+                    img(ImageSource::Render(self.image.clone()))
                         .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
                         .size_full(),
                 )
                 .children(self.gizmo.read(cx).effects_picker_element(cx))
@@ -970,6 +974,15 @@ mod captures {
                 .into_iter()
                 .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
                 .collect();
+            let red_at = |x: usize, y: usize| pixels[(y * 640 + x) * 4];
+            assert!(
+                red_at(600, 300) > 200,
+                "rendered layer must contain the light end of the ramp"
+            );
+            assert!(
+                red_at(160, 140) < 150,
+                "rendered layer must contain the dark end of the ramp"
+            );
             let mut bytes = vec![];
             {
                 let mut png = png::Encoder::new(&mut bytes, 640, 360);
@@ -980,12 +993,29 @@ mod captures {
                     .write_image_data(&pixels)
                     .unwrap();
             }
-            let image = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
+            std::fs::write(
+                format!(
+                    "{dir}/layer-{}.png",
+                    if radial { "radial" } else { "linear" }
+                ),
+                &bytes,
+            )
+            .unwrap();
+            // GPUI RenderImage uses BGRA. Upload the real engine pixels directly;
+            // an asynchronous PNG asset must not leave the capture background blank.
+            let mut bgra = pixels;
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+                image::RgbaImage::from_raw(640, 360, bgra).unwrap(),
+            )]));
 
             let mut cx = HeadlessAppContext::with_platform(
-                Arc::new(gpui_parley::ParleyTextSystem::new(
-                    gpui_parley::SystemFonts::Load,
-                )),
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
                 Arc::new(()),
                 || {
                     Some(Box::new(
@@ -1017,12 +1047,29 @@ mod captures {
                     cx.new(|_| Scene { gizmo, image })
                 })
                 .unwrap();
-            for _ in 0..20 {
-                cx.run_until_parked();
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.run_until_parked();
+            let screenshot = cx.capture_screenshot(window.into()).unwrap();
+            let red_at = |x: u32, y: u32| {
+                screenshot
+                    .get_pixel(x * screenshot.width() / 640, y * screenshot.height() / 360)
+                    .0[0]
+            };
+            let light = if picker {
+                red_at(50, 340)
+            } else {
+                red_at(600, 300)
+            };
+            assert!(
+                light > 200,
+                "capture must show the actual rendered layer, not a black backdrop"
+            );
+            if !picker {
+                assert!(
+                    red_at(160, 140) < 150,
+                    "capture must retain the ramp's dark end"
+                );
             }
-            cx.capture_screenshot(window.into())
-                .unwrap()
+            screenshot
                 .save(format!(
                     "{dir}/{}.png",
                     if picker {
