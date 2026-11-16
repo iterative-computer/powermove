@@ -3224,9 +3224,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let quality = if capture {
                 1.
             } else {
+                // A layer being dragged is drawn as sharp as at rest (v1's,
+                // PM-395); only a playhead scrub adapts.
                 v.quality.scale(
                     &r.auto,
-                    if moment == Moment::Scrub && !v.adapt_drags {
+                    if moment == Moment::Scrub && (!v.adapt_drags || v.editing) {
                         Moment::Paused
                     } else {
                         moment
@@ -3240,7 +3242,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // frames keep their policy. (A play waiting for its audio start
             // draws as it is.)
             let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
-            let text_grid = (quality == 1. && moment != Moment::Scrub)
+            let text_grid = (quality == 1. && (moment != Moment::Scrub || v.editing))
                 .then(|| engine.text_grid_scale(&scene, &v.config.output))
                 .flatten();
             let (scale, settled) = if capture {
@@ -5091,6 +5093,37 @@ mod worker_tests {
             "{:?}",
             &drawn()[from..]
         );
+    }
+
+    /// PM-395: a layer being dragged is drawn as sharp as at rest, even on a
+    /// project slower than a refresh (only a playhead scrub draws reduced).
+    #[test]
+    fn a_dragged_layer_is_drawn_as_sharp_as_at_rest() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-drag-sharp").unwrap()).unwrap();
+        let config = shapes_config(None);
+        let snapshot = config.snapshot.clone();
+        let v = service.viewer(config).unwrap();
+        v.adapt_drags(true).unwrap();
+        service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
+        wait_for(&v, "the first picture", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok));
+        v.editing(true).unwrap();
+        let mut dragged = None;
+        for revision in 2..60u64 {
+            v.snapshot(Snapshot {
+                revision,
+                document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), revision)),
+                ..snapshot.clone()
+            })
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(frame) = v.status().frame.filter(|f| f.moment == Moment::Scrub && f.gpu_ok) {
+                dragged = Some(frame);
+                break;
+            }
+        }
+        let frame = dragged.expect("a frame drawn while the layer is dragged");
+        assert!(frame.scale >= 1., "a dragged layer drawn reduced: {frame:?}");
+        v.retire();
     }
 
     /// An edit left resting with its gesture still open (text being typed,

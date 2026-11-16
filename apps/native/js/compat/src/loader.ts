@@ -93,25 +93,34 @@ export function planLoad(records: Data[]): {
         break;
       }
   }
-  const pending = new Set([...candidates].sort());
+  // In the order the host asks for (the extensions the project draws with
+  // first, each group by id), each right after what it depends on: sorted
+  // by id alone, a real project's first frame waited for nearly every
+  // extension before its own (PM-384). One in a cycle, or depending on one,
+  // never activates.
   const order: string[] = [];
-  while (pending.size) {
-    const next = [...pending]
-      .filter((id) =>
-        (byId.get(id)?.manifest?.dependsOn ?? []).every(
-          (dep: string) => !pending.has(dep),
-        ),
-      )
-      .sort()[0];
-    if (!next) break;
-    pending.delete(next);
-    order.push(next);
-  }
-  for (const id of pending)
-    skipped.push({
-      id,
-      health: { state: "activation-error", error: "dependency cycle" },
-    });
+  const done = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (done.has(id)) return true;
+    if (visiting.has(id)) return false;
+    visiting.add(id);
+    const ready = (byId.get(id)?.manifest?.dependsOn ?? []).every(
+      (dep: string) => !candidates.has(dep) || visit(dep),
+    );
+    visiting.delete(id);
+    if (!ready) return false;
+    done.add(id);
+    order.push(id);
+    return true;
+  };
+  for (const id of candidates) visit(id);
+  for (const id of candidates)
+    if (!done.has(id))
+      skipped.push({
+        id,
+        health: { state: "activation-error", error: "dependency cycle" },
+      });
   return { order, skipped };
 }
 

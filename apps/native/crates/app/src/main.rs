@@ -99,6 +99,7 @@ mod render_frames;
 mod recent_work;
 mod rows;
 mod session;
+mod region_attach;
 mod settings_window;
 mod shader_panel;
 mod shape_tool;
@@ -279,6 +280,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(debug_assertions))]
     let _ = lane_flags;
+    diag::trace_unhide();
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
@@ -357,6 +359,7 @@ fn main() -> Result<()> {
             fonts: jobs_broker,
         });
         mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
+        tools.keep_for_stills();
         {
             let mut automation = tools.automation.lock().unwrap();
             automation.surfaces = Some(Arc::new(bridge));

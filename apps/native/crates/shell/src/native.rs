@@ -922,6 +922,16 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
 /// above the app's own front editor window, or behind, as `present` puts an
 /// inactive app's window.
 fn select_in_background(window: &NSWindow) {
+    // Picking a tab orders its window in, which unhides a hidden app.
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_in_background(&window);
+            }
+        });
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -1103,6 +1113,26 @@ const SHAPE_SEGMENT: isize = 5;
 /// A tool segment's width, and the room AppKit's menu indicator takes in one.
 const TOOL_SEGMENT: f64 = 34.;
 const TOOL_MENU_INDICATOR: f64 = 12.;
+/// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
+/// item's tag), symbol, label.
+const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
+    ("agent", "sparkles", "Agent"),
+    ("export", "square.and.arrow.up", "Export"),
+    ("panelLibrary", "square.grid.2x2", "Panels"),
+    ("settings", "gearshape", "Settings"),
+];
+#[cfg(test)]
+mod toolbar_tag_tests {
+    /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
+    /// one without would stop the window from opening.
+    #[test]
+    fn every_toolbar_button_has_a_slot() {
+        assert!(super::TOOLBAR.contains(&"home"));
+        for (name, ..) in super::TOOLBAR_BUTTONS {
+            assert!(super::TOOLBAR.contains(&name), "{name}");
+        }
+    }
+}
 const TOOLBAR: [&str; 8] = [
     "home",
     "title",
@@ -1756,6 +1786,15 @@ const TAB_SHOWN: &str = "PMShellTabShown";
 /// this way while the app is inactive gets no activation, so nothing else
 /// makes it hide AppKit's tab row or draw its own strip for the new state.
 fn show_in_tab_group(window: &NSWindow) {
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                show_in_tab_group(&window);
+            }
+        });
+        return;
+    }
     unsafe {
         let group: *mut AnyObject = msg_send![window, tabGroup];
         if group.is_null() {
@@ -1819,6 +1858,9 @@ fn select_tab(window: &NSWindow, by: isize) {
         return;
     }
     let next = &group[((at as isize + by).rem_euclid(count)) as usize];
+    if gpui_macos::child_window::app_hidden() {
+        return;
+    }
     unsafe {
         let tab_group: *mut AnyObject = msg_send![window, tabGroup];
         if !tab_group.is_null() {
@@ -1897,6 +1939,15 @@ pub fn bring_session_window(id: u64) {
 }
 /// Brings `window`'s tab forward in its group.
 fn select_window_tab(window: &NSWindow) {
+    if gpui_macos::child_window::app_hidden() {
+        let window = objc2::rc::Weak::from(window);
+        gpui_macos::child_window::when_shown(move || {
+            if let Some(window) = window.load() {
+                select_window_tab(&window);
+            }
+        });
+        return;
+    }
     unsafe {
         let group: *mut AnyObject = msg_send![window, tabGroup];
         if !group.is_null() {
@@ -2316,13 +2367,9 @@ impl ToolbarDelegate {
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
-        let (sym, label) = match name.as_str() {
-            "agent" => ("sparkles", "Agent"),
-            "export" => ("square.and.arrow.up", "Export"),
-            "panelLibrary" => ("square.grid.2x2", "Panels"),
-            "settings" => ("gearshape", "Settings"),
-            _ => return None,
-        };
+        let &(_, sym, label) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|(n, ..)| *n == name.as_str())?;
         item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
