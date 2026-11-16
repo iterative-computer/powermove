@@ -1630,8 +1630,23 @@ impl Controller {
         }
         // The viewer's clock lands later (always so for a viewer bound a
         // moment ago, as on open): record the time asked for, so MCP's
-        // playhead and the saved transport never read the old one.
-        let _ = self.write_ui_at(target.unwrap_or_else(|| self.time()));
+        // playhead and the saved transport never read the old one. A ruler
+        // scrub writes it once it ends: each write republishes every panel
+        // that shows the time (PM-310), and the viewer, the playhead and
+        // timecode layers, extensions and Properties follow the scrub as it
+        // goes.
+        let time = target.unwrap_or_else(|| self.time());
+        if self.builtins.scrubbing {
+            self.builtins.scrub_time = Some(time);
+        } else {
+            let _ = self.write_ui_at(time);
+        }
+    }
+    /// A ruler scrub ended: the kernel records where it left the time.
+    pub fn finish_scrub(&mut self) {
+        if let Some(time) = self.builtins.scrub_time.take() {
+            let _ = self.write_ui_at(time);
+        }
     }
     pub fn persist_ui(&self) {
         let _ = self.write_ui();
