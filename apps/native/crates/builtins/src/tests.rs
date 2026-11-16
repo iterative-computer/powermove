@@ -2361,6 +2361,7 @@ fn only_built_in_realms_skip_the_quota_for_queue_operations() {
         "host.poll",
         "platform.enqueue",
         "platform.poll",
+        "surface.chunk",
     ] {
         assert!(!broker.metered(&realm("inspector"), op), "{op}");
         assert!(broker.metered(&realm("synthetic-surface"), op), "{op}");

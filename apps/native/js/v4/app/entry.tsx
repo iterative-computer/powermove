@@ -1,5 +1,6 @@
 /** Production V8 worker entry. Every built-in owns a separate extension isolate. */
 import * as preact from "preact";
+import { chunkedSurfaceTransport } from "./surface-transfer";
 import * as preactHooks from "preact/hooks";
 import * as runtimeModule from "../src";
 import { createRoot } from "../src";
@@ -84,8 +85,7 @@ function environment(panel: string): BuiltinEnv {
     return reply(() => native("host.poll", request.requestId));
   });
   const rootOptions = { generation: identity.generation };
-  const transport: Transport = async (commit) =>
-    native("surface.commit", commit);
+  const transport: Transport = chunkedSurfaceTransport(native);
   return {
     panel,
     native,

@@ -170,11 +170,14 @@ pub struct PlatformRequest {
     pub operation: String,
     pub input: Value,
 }
+mod surface_transfer;
+
 struct Entry {
     generation: u64,
     backend: Arc<Mutex<Backend>>,
     router: HostRouter<HostDataService<data::Data>>,
     surface: Surface,
+    transfer: surface_transfer::Transfer,
     interaction: Interaction,
     /// A v4 extension's viewer overlay (`overlays.viewer`), display only.
     overlay: Surface,
@@ -2126,13 +2129,14 @@ impl Broker {
     }
 }
 impl EngineProxy for Broker {
-    /// Request queues are bounded here (256 host, 128 platform), so a
+    /// Request queues and surface staging are bounded here (256 host,
+    /// 128 platform, and the existing surface byte limit), so a
     /// built-in panel awaiting one reply per property row stays within its
     /// task quota. Extensions mounted through this broker stay metered.
     fn metered(&self, generation: &Generation, operation: &str) -> bool {
         let queue = matches!(
             operation,
-            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll" | "surface.chunk"
         );
         !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
     }
@@ -2190,6 +2194,7 @@ impl EngineProxy for Broker {
                     backend,
                     router,
                     surface: Surface::default(),
+                    transfer: Default::default(),
                     overlay: Surface::default(),
                     interaction: Interaction::default(),
                 })),
@@ -2202,6 +2207,18 @@ impl EngineProxy for Broker {
             return Err(Error::StaleGeneration);
         }
         let entry = &mut *entry;
+        let assembled;
+        let input = if operation == "surface.chunk" {
+            match entry.transfer.push(input, entry.surface.limits.bytes).map_err(Error::Host)? {
+                Some(value) => {
+                    assembled = value;
+                    &assembled
+                }
+                None => return Ok(json!({"accepted":true,"staged":true,"revision":entry.surface.revision()})),
+            }
+        } else {
+            input
+        };
         match operation {
             "tokens.row" => Ok(json!(
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
@@ -2332,7 +2349,8 @@ impl EngineProxy for Broker {
                 (self.wake)();
                 Ok(Value::Null)
             }
-            "surface.commit" => {
+            "surface.commit" | "surface.chunk" => {
+                entry.transfer.clear();
                 let started = std::time::Instant::now();
                 let commit = serde_json::from_value(input.clone())
                     .map_err(|e| Error::Host(e.to_string()))?;
