@@ -824,6 +824,11 @@ impl Controller {
         if v.opening || v.settling.is_some() {
             off.retain(|name| !crate::layer_commands::waits_for_project(name));
         }
+        // Home in front of the window's project: nothing to export (v1 dims
+        // File ▸ Export there), its keys included (PM-472).
+        if v.home_visible {
+            off.insert("export".to_owned());
+        }
         off
     }
 }

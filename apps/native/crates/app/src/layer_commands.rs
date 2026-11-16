@@ -1722,6 +1722,9 @@ pub fn disabled(
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
         off.insert("studio.view".into());
         off.insert("text.editSelected".into());
+        // Nothing to export without a project (v1's File ▸ Export, dimmed
+        // over Home): its row and its keys are off (PM-472).
+        off.insert("export".into());
         return off;
     };
     // Runs on every publication, so the selection is looked up, never scanned for.
