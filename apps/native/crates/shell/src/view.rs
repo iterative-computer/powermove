@@ -50,6 +50,10 @@ pub struct Editor {
     /// Parked panels: where each goes back, and the tab that was showing in
     /// its stack if it wasn't that panel, which shows again when it returns.
     parked: HashMap<String, (DropTarget, Option<String>)>,
+    /// The app's extension panels are still coming in (launch, a project
+    /// opening): a tab whose panel has not registered yet keeps its place
+    /// with a quiet body, not "Panel Unavailable" (`panels:waiting/ready`).
+    awaiting_panels: bool,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -128,6 +132,7 @@ impl Editor {
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
+            awaiting_panels: true,
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -610,6 +615,11 @@ impl Editor {
             return false;
         };
         let rest = parts.next().unwrap_or("");
+        if kind == "panels" && matches!(verb, "waiting" | "ready") {
+            self.awaiting_panels = verb == "waiting";
+            cx.notify();
+            return true;
+        }
         let panels = self.panels(cx);
         let result = match (kind, verb) {
             ("panel", "toggle") => {
@@ -2611,8 +2621,11 @@ impl Render for Editor {
                 panel = panel.child(content);
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
+                let coming = !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
                 let (heading, line, action) = if panels.contains(&id) {
                     layout::empty_state(&id)
+                } else if coming {
+                    ("", "", None)
                 } else {
                     ("Panel Unavailable", unknown.as_str(), None)
                 };
