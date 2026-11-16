@@ -169,6 +169,64 @@ pub(crate) fn write(
     Some(png)
 }
 
+/// Width of a stored last frame: it stands in the viewer, larger than a card.
+const LAST_WIDTH: u32 = 1280;
+/// The picture the viewer last showed for a project: rendered at the
+/// playhead after a save and at a close, kept under the profile
+/// (`caches/last-frame/<project>.png`, its `.stamp` naming the revision and
+/// time it shows). A launch shows it in the viewer until the project's first
+/// real frame (PM-384). Home's card keeps its own poster.
+pub(crate) fn last_frame_files(profile: &Path, id: &str) -> (PathBuf, PathBuf) {
+    files(&profile.join("caches").join("last-frame"), id)
+}
+/// What a last frame shows: the project's revision and the playhead's time,
+/// by this build.
+pub(crate) fn last_frame_mark(revision: u64, time: f64) -> String {
+    format!("{revision}\n{time:.4}\n{}", identity())
+}
+/// Whether the stored last frame already shows `mark`.
+pub(crate) fn last_frame_current(profile: &Path, id: &str, mark: &str) -> bool {
+    let (image, stamp) = last_frame_files(profile, id);
+    image.is_file() && std::fs::read_to_string(stamp).is_ok_and(|s| s == mark)
+}
+/// Renders `published` at `time` and stores it as `id`'s last frame with
+/// `mark`. Blocking: call it off the main thread. Whether it was stored.
+pub(crate) fn write_last_frame(
+    renderer: &FrameRenderer,
+    published: Arc<pm_kernel::Published>,
+    profile: &Path,
+    id: &str,
+    time: f64,
+    (w, h): (u32, u32),
+    mark: &str,
+) -> bool {
+    fn never() -> bool {
+        false
+    }
+    let width = LAST_WIDTH.min(w.max(2));
+    let height = (width as f64 * h as f64 / w.max(1) as f64).round().max(2.) as u32;
+    let Ok(png) = renderer(&FrameRequest {
+        time,
+        width,
+        height,
+        motion_blur: false,
+        stop: &never,
+        published: Some(published),
+    }) else {
+        return false;
+    };
+    let (image, stamp) = last_frame_files(profile, id);
+    let Some(dir) = image.parent() else {
+        return false;
+    };
+    // Written beside and renamed over: a launch never reads half a picture.
+    let partial = image.with_extension("png.partial");
+    std::fs::create_dir_all(dir).is_ok()
+        && std::fs::write(&partial, &png).is_ok()
+        && std::fs::rename(&partial, &image).is_ok()
+        && std::fs::write(&stamp, mark).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +246,25 @@ mod tests {
         writer.write_image_data(&pixels).unwrap();
         drop(writer);
         out
+    }
+
+    /// A last frame is current only for the revision and time it shows; a
+    /// close or save with another one renders it again (PM-384).
+    #[test]
+    fn a_last_frame_is_current_for_its_revision_and_time() {
+        let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+        let mark = last_frame_mark(7, 12.04);
+        assert!(!last_frame_current(&profile, "file-1", &mark), "none stored yet");
+        let (image, stamp) = last_frame_files(&profile, "file-1");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&stamp, &mark).unwrap();
+        assert!(image.ends_with("caches/last-frame/file_1.png"));
+        assert!(last_frame_current(&profile, "file-1", &mark));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(8, 12.04)));
+        assert!(!last_frame_current(&profile, "file-1", &last_frame_mark(7, 3.)));
+        std::fs::remove_dir_all(&profile).unwrap();
     }
 
     #[test]
