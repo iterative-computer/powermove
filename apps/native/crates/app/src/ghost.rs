@@ -69,7 +69,14 @@ pub fn body_size(bounds: Rect, t: &Tokens) -> (f32, f32) {
 }
 /// The body under a panel's header in `bounds` (the panel's rect): the same
 /// box the real body takes, so nothing moves when it arrives.
-pub fn body(id: &str, bounds: Rect, aspect: Option<f32>, t: &Tokens) -> AnyElement {
+/// `poster`: the project's Home poster, shown in the viewer's frame.
+pub fn body(
+    id: &str,
+    bounds: Rect,
+    aspect: Option<f32>,
+    poster: Option<&std::path::Path>,
+    t: &Tokens,
+) -> AnyElement {
     let m = &t.metrics;
     let (w, h) = body_size(bounds, t);
     let wash = ink(t.colors.text, t.translucency.hover);
@@ -102,7 +109,19 @@ pub fn body(id: &str, bounds: Rect, aspect: Option<f32>, t: &Tokens) -> AnyEleme
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(div().w(px(fw)).h(px(fh)).rounded(px(m.control_radius)).bg(wash))
+                .child(
+                    div()
+                        .w(px(fw))
+                        .h(px(fh))
+                        .rounded(px(m.control_radius))
+                        .overflow_hidden()
+                        .bg(wash)
+                        .children(poster.map(|poster| {
+                            img(poster.to_path_buf())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                        })),
+                )
         }
         Shape::Timeline => {
             let name_column = (w * 0.3).clamp(m.value_column, m.value_column * 2.);
