@@ -154,6 +154,13 @@ fn append_menu(
         if let Some(tooltip) = option.get("tooltip").and_then(Value::as_str) {
             item.setToolTip(Some(&NSString::from_str(tooltip)));
         }
+        // An ease row shows its curve beside its name (v1's ease menu).
+        if let Some(curve) = option.get("curve").and_then(Value::as_array)
+            && let [x1, y1, x2, y2] = curve.as_slice()
+            && let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1.as_f64(), y1.as_f64(), x2.as_f64(), y2.as_f64())
+        {
+            item.setImage(Some(&curve_image([x1, y1, x2, y2])));
+        }
         unsafe {
             item.setTarget(Some(target));
         }
@@ -165,6 +172,34 @@ fn append_menu(
         }
         menu.addItem(&item);
     }
+}
+/// An ease's curve as a menu item's template image (it takes the menu's text
+/// colour, and the highlight's): the curve from (0, 0) to (1, 1) through its
+/// two handles, scaled to show an overshoot.
+fn curve_image(curve: [f64; 4]) -> Retained<objc2_app_kit::NSImage> {
+    use objc2_app_kit::{NSBezierPath, NSColor, NSImage};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    let low = curve[1].min(curve[3]).min(0.);
+    let high = curve[1].max(curve[3]).max(1.);
+    let handler = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let inset = 1.5;
+        let (w, h) = (rect.size.width - 2. * inset, rect.size.height - 2. * inset);
+        let at = |x: f64, y: f64| NSPoint::new(inset + x * w, inset + (y - low) / (high - low) * h);
+        let path = NSBezierPath::bezierPath();
+        path.moveToPoint(at(0., 0.));
+        path.curveToPoint_controlPoint1_controlPoint2(
+            at(1., 1.),
+            at(curve[0], curve[1]),
+            at(curve[2], curve[3]),
+        );
+        path.setLineWidth(1.4);
+        NSColor::blackColor().setStroke();
+        path.stroke();
+        objc2::runtime::Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(18., 14.), false, &handler);
+    image.setTemplate(true);
+    image
 }
 /// The same winning providers and saved recents used by the Effects panel.
 pub fn effect_options(state: &pm_kernel::state::StateSnapshot) -> Vec<Value> {
