@@ -268,6 +268,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     v.update_builtins(cx);
                 }
                 v.tell_presented(status.frame.as_ref());
+                let contributions = v.extensions.host.as_ref().and_then(|host| host.contributions());
+                record_layer_failures(&mut v.errors.borrow_mut(), &status.layer_failures, |failure| {
+                    layer_failure_source(failure, v.published.as_deref(), contributions.as_deref())
+                });
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
                 // One readable line; a longer report goes to Window ▸ Error Log.
@@ -477,5 +481,62 @@ mod shown_at_tests {
         assert_eq!(scrub_shown(paused, false, None), paused);
         let playing = sample(TransportState::Playing, 1_000_000, 3);
         assert_eq!(scrub_shown(playing, true, Some(4.5)), playing);
+    }
+}
+
+/// Per-layer compilation failures are not viewer-wide errors: record them
+/// before Properties points the person at the Error Log.
+fn record_layer_failures(
+    log: &mut crate::error_log::Log,
+    failures: &[pm_render::LayerFailure],
+    source: impl Fn(&pm_render::LayerFailure) -> String,
+) {
+    for failure in failures {
+        let source = source(failure);
+        if !log.entries.iter().any(|entry| entry.source == source && entry.message == failure.message) {
+            log.push(&source, &failure.message);
+        }
+    }
+}
+fn definition_failure_source(layer: &str, definition: &str, contributions: Option<&serde_json::Value>) -> String {
+    let owner = contributions.and_then(|value| value["layers"].as_array())
+        .and_then(|layers| layers.iter().find(|item| item["id"] == definition))
+        .and_then(|item| item["owner"].as_str()).unwrap_or(definition);
+    format!("Extension {owner} ({definition}), layer {layer}")
+}
+fn layer_failure_source(
+    failure: &pm_render::LayerFailure,
+    published: Option<&pm_kernel::Published>,
+    contributions: Option<&serde_json::Value>,
+) -> String {
+    let layer = published.and_then(|p| {
+        let root = p.snapshot.root()?;
+        let comp = pm_kernel::model::comp_node(root, Some(&failure.composition)).unwrap_or(root);
+        let at = pm_kernel::model::find_layer(comp, &failure.layer)?;
+        Some(pm_kernel::model::layer_at(comp, &at)?.to_value())
+    });
+    match layer.as_ref().and_then(|layer| layer.get("d"))
+        .and_then(|data| data.get("definition")).and_then(pm_model::Value::as_str) {
+        Some(definition) => definition_failure_source(&failure.layer, definition, contributions),
+        None => format!("Layer {}", failure.layer),
+    }
+}
+#[cfg(test)]
+mod extension_compile_log_tests {
+    use super::*;
+    #[test]
+    fn failed_extension_layers_log_the_owner_and_full_compiler_message_once() {
+        let contributions = serde_json::json!({"layers":[{"id":"macos.cursor","owner":"macos-cursor"}]});
+        let source = definition_failure_source("cursor-1", "macos.cursor", Some(&contributions));
+        assert!(source.contains("macos-cursor"));
+        let failures = vec![pm_render::LayerFailure {
+            composition: "main".into(), layer: "cursor-1".into(),
+            message: "shader compile failed\nline 33: cannot compare bool and float".into(),
+        }];
+        let mut log = crate::error_log::Log::default();
+        for _ in 0..3 { record_layer_failures(&mut log, &failures, |_| source.clone()); }
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].message, failures[0].message);
+        assert_eq!(log.entries[0].source, source);
     }
 }
