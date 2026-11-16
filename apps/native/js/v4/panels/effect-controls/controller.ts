@@ -11,6 +11,7 @@ import {
   type Projection,
   type EffectHeader,
   type MenuItem,
+  type PointRow,
 } from "./contract";
 
 /** All model mutations run on the worker through the acknowledged host service. */
@@ -44,25 +45,31 @@ export class EffectsController {
     if (this.disposed) return;
     const next = projection(json(value));
     if (next.revision < this.current.revision) return;
-    // A parameter's binding, and each one a summary row edits (a wheel's
-    // master field).
-    const editable = new Map<string, string>();
+    // A parameter's binding, each one a summary, point or gradient row
+    // edits (a wheel's master, a point's fields, a gradient's midpoint),
+    // and a point's X and Y together (its pad: one write for both).
+    const editable = new Map<string, string[]>();
     if (!next.locked)
       for (const r of next.rows) {
         const list =
           r.kind === "parameter"
             ? [r.parameter]
-            : r.kind === "summary" || r.kind === "point"
+            : r.kind === "summary" || r.kind === "point" || r.kind === "ramp"
               ? r.parameters
               : [];
         for (const parameter of list)
           if (!parameter.readonly)
-            editable.set(parameter.binding, parameter.id);
+            editable.set(parameter.binding, [parameter.id]);
+        if (r.kind === "point" && r.parameters.every((p) => !p.readonly))
+          editable.set(
+            pointBinding(r),
+            r.parameters.map((p) => p.id),
+          );
       }
     const wanted = new Set(editable.keys());
-    for (const [handle, id] of editable)
+    for (const [handle, ids] of editable)
       if (!this.bindings.has(handle)) {
-        await this.host.registerBinding(handle, [id]);
+        await this.host.registerBinding(handle, ids);
         this.bindings.add(handle);
       }
     // Native binding disposal must cancel any captured gesture before retirement.
@@ -256,4 +263,9 @@ export class EffectsController {
     this.bindings.clear();
     this.listeners.clear();
   }
+}
+/** A point row's X and Y as one binding (its pad): the host knows it as the
+ * two parameters' bindings joined. */
+export function pointBinding(row: PointRow): string {
+  return row.parameters.map((p) => p.binding).join("+");
 }

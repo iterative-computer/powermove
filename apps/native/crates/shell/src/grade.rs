@@ -1073,6 +1073,131 @@ fn fill(b: Bounds<Pixels>, color: impl Into<Background>) -> PaintQuad {
     PaintQuad::new(b).background(color)
 }
 /// A circle in `b` (a square), filled and stroked.
+/// Where a point stands on its pad, 0 to 1 across and down (v1's pad: the
+/// least X at the left, the least Y at the top), held to the pad.
+pub fn pad_unit(point: [f64; 2], min: [f64; 2], max: [f64; 2]) -> (f64, f64) {
+    let at = |i: usize| {
+        let span = max[i] - min[i];
+        if span.is_finite() && span > 0. {
+            ((point[i] - min[i]) / span).clamp(0., 1.)
+        } else {
+            0.5
+        }
+    };
+    (at(0), at(1))
+}
+/// The point a place on the pad (0 to 1 across and down) stands for.
+pub fn pad_point(unit: (f64, f64), min: [f64; 2], max: [f64; 2]) -> [f64; 2] {
+    [
+        min[0] + unit.0.clamp(0., 1.) * (max[0] - min[0]),
+        min[1] + unit.1.clamp(0., 1.) * (max[1] - min[1]),
+    ]
+}
+/// v1's point pad: a field with its centre lines, and the point as a dot
+/// (ringed while it is held).
+pub fn paint_pad(bounds: Bounds<Pixels>, at: (f64, f64), look: Look, t: &Tokens, window: &mut Window) {
+    let c = &t.colors;
+    let alpha = if look.disabled { 0.5 } else { 1. };
+    let radius = px(t.metrics.control_radius);
+    window.paint_quad(
+        PaintQuad::new(bounds)
+            .corner_radii(Corners::all(radius))
+            .background(crate::kit::ink(c.field, alpha))
+            .border_widths(px(t.metrics.border))
+            .border_color(crate::kit::ink(c.separator, alpha)),
+    );
+    let line = px(t.metrics.border);
+    let mid = bounds.center();
+    for b in [
+        Bounds::new(point(bounds.left(), mid.y - line / 2.), size(bounds.size.width, line)),
+        Bounds::new(point(mid.x - line / 2., bounds.top()), size(line, bounds.size.height)),
+    ] {
+        window.paint_quad(PaintQuad::new(b).background(crate::kit::ink(c.separator, alpha)));
+    }
+    let dot = px(t.metrics.status_dot.max(8.));
+    let centre = point(
+        bounds.left() + bounds.size.width * at.0 as f32,
+        bounds.top() + bounds.size.height * at.1 as f32,
+    );
+    let ring = if look.active { dot * 2. } else { dot };
+    window.paint_quad(round(
+        Bounds::new(centre - point(ring / 2., ring / 2.), size(ring, ring)),
+        if look.active { crate::kit::ink(c.accent, 0.25 * alpha) } else { crate::kit::ink(c.text, alpha) },
+        if look.active { 1.5 } else { 0. },
+        crate::kit::ink(c.accent, alpha),
+    ));
+    if look.active {
+        window.paint_quad(round(
+            Bounds::new(centre - point(dot / 2., dot / 2.), size(dot, dot)),
+            crate::kit::ink(c.text, alpha),
+            0.,
+            gpui::transparent_black(),
+        ));
+    }
+}
+/// v1's gradient bar: the start colour to the end colour (meeting halfway
+/// between them at the midpoint, 0 to 1, when there is one), and the
+/// midpoint as a diamond on the bar.
+pub fn paint_ramp(
+    bounds: Bounds<Pixels>,
+    start: u32,
+    end: u32,
+    midpoint: Option<f64>,
+    look: Look,
+    t: &Tokens,
+    window: &mut Window,
+) {
+    let c = &t.colors;
+    let alpha = if look.disabled { 0.5 } else { 1. };
+    let radius = px(t.metrics.control_radius);
+    let half = |a: u32, b: u32| {
+        let ch = |s: u32| ((a >> s & 0xff) + (b >> s & 0xff)) / 2;
+        ch(16) << 16 | ch(8) << 8 | ch(0)
+    };
+    let m = midpoint.unwrap_or(0.5).clamp(0.01, 0.99) as f32;
+    let split = bounds.size.width * m;
+    let left = Bounds::new(bounds.origin, size(split, bounds.size.height));
+    let right = Bounds::new(
+        point(bounds.left() + split, bounds.top()),
+        size(bounds.size.width - split, bounds.size.height),
+    );
+    let middle = half(start, end);
+    let corners = |l: bool| Corners {
+        top_left: if l { radius } else { px(0.) },
+        bottom_left: if l { radius } else { px(0.) },
+        top_right: if l { px(0.) } else { radius },
+        bottom_right: if l { px(0.) } else { radius },
+    };
+    for (b, from, to, l) in [(left, start, middle, true), (right, middle, end, false)] {
+        window.paint_quad(
+            PaintQuad::new(b).corner_radii(corners(l)).background(linear_gradient(
+                90.,
+                linear_color_stop(crate::kit::ink(from, alpha), 0.),
+                linear_color_stop(crate::kit::ink(to, alpha), 1.),
+            )),
+        );
+    }
+    window.paint_quad(
+        PaintQuad::new(bounds)
+            .corner_radii(Corners::all(radius))
+            .background(gpui::transparent_black())
+            .border_widths(px(t.metrics.border))
+            .border_color(crate::kit::ink(c.separator, alpha)),
+    );
+    if midpoint.is_some() {
+        let side = px(if look.active { 9. } else { 7. });
+        let at = point(bounds.left() + split, bounds.top() + bounds.size.height / 2.);
+        let mut diamond = PathBuilder::fill();
+        diamond.move_to(at - point(px(0.), side));
+        diamond.line_to(at + point(side, px(0.)));
+        diamond.line_to(at + point(px(0.), side));
+        diamond.line_to(at - point(side, px(0.)));
+        diamond.close();
+        if let Ok(path) = diamond.build() {
+            window.paint_path(path, crate::kit::ink(if look.active { c.accent } else { c.text }, alpha));
+        }
+    }
+}
 fn round(
     b: Bounds<Pixels>,
     fill: impl Into<Background>,
@@ -1086,6 +1211,21 @@ fn round(
         .border_color(stroke)
 }
 
+#[cfg(test)]
+mod pad_tests {
+    use super::{pad_point, pad_unit};
+    /// v1's pad: the least X at the left, the least Y at the top; a point
+    /// past its bounds stands at the edge, and a place maps back to it.
+    #[test]
+    fn a_point_and_its_place_on_the_pad_map_both_ways() {
+        let (min, max) = ([-100., -50.], [100., 50.]);
+        assert_eq!(pad_unit([0., 0.], min, max), (0.5, 0.5));
+        assert_eq!(pad_unit([-100., 50.], min, max), (0., 1.));
+        assert_eq!(pad_unit([500., -500.], min, max), (1., 0.));
+        assert_eq!(pad_point((0.25, 0.75), min, max), [-50., 25.]);
+        assert_eq!(pad_unit([3., 4.], [0., 0.], [0., 0.]), (0.5, 0.5), "no span: the middle");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
