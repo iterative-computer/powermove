@@ -1194,12 +1194,25 @@ mod toolbar_tag_tests {
             assert!(super::TOOLBAR.contains(&name), "{name}");
         }
     }
+    /// The bar shows every slot but Home (the strip's first cell) once, in
+    /// the order the toolbar lays out.
+    #[test]
+    fn the_toolbar_order_holds_every_slot_once() {
+        let shown: Vec<_> = super::TOOLBAR_ORDER
+            .iter()
+            .filter(|s| !s.starts_with('\0'))
+            .copied()
+            .collect();
+        let slots: Vec<_> = super::TOOLBAR.iter().skip(1).copied().collect();
+        assert_eq!(shown, slots);
+    }
 }
-const TOOLBAR: [&str; 8] = [
+const TOOLBAR: [&str; 9] = [
     "home",
     "title",
     "tools",
     "add",
+    "tasks",
     "agent",
     "export",
     "panelLibrary",
@@ -1498,6 +1511,31 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             track_tab(self, event);
+        }
+        /// The middle button is the tab's own: it closes on release.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            if event.buttonNumber() != 2 {
+                unsafe {
+                    let _: () = msg_send![super(self), otherMouseDown: event];
+                }
+            }
+        }
+        /// Middle-click closes the tab, or the page, as v1's tabs did.
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            let local = self.convertPoint_fromView(event.locationInWindow(), None);
+            if event.buttonNumber() != 2 || !self.mouse_inRect(local, self.bounds()) {
+                return;
+            }
+            let close = match self.action() {
+                Some(a) if a == sel!(selectTab:) => sel!(closeTab:),
+                Some(a) if a == sel!(selectPage:) => sel!(closePage:),
+                _ => return,
+            };
+            unsafe {
+                let _: bool = msg_send![self, sendAction: close, to: self.target().as_deref()];
+            }
         }
     }
 );
@@ -2112,7 +2150,8 @@ fn tab_tooltip(tab: &Tab) -> String {
             };
             format!("{}\n{shown}", tab.title)
         }
-        None => tab.title.clone(),
+        // Kept in the library, as v1 said it.
+        None => format!("{}\nNot saved to a file", tab.title),
     }
 }
 fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
@@ -2245,19 +2284,38 @@ define_class!(
         }
     }
 );
+/// The toolbar's items in order. Home and the tabs lead; the tools and Add
+/// stand in the middle between two flexible spaces; the task pill (only
+/// while a task runs), Agent, Export, a space, then Panels and Settings
+/// trail. Home is the strip's first cell, not an item of its own. A space
+/// keeps the pill its own capsule (side by side, the system joins two
+/// items' glass into one); while the pill is hidden the flexible space
+/// before it takes that room, so nothing else moves.
+const TOOLBAR_ORDER: [&str; 12] = [
+    "title",
+    FLEXIBLE,
+    "tools",
+    "add",
+    FLEXIBLE,
+    "tasks",
+    SPACE,
+    "agent",
+    "export",
+    SPACE,
+    "panelLibrary",
+    "settings",
+];
+const FLEXIBLE: &str = "\u{0}flexible";
+const SPACE: &str = "\u{0}space";
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
-    let mut v: Vec<_> = TOOLBAR.iter().map(|s| NSString::from_str(s)).collect();
-    let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
-    // Home and the tabs lead; the tools and Add stand in the middle between
-    // two flexible spaces; Export, a space, then Panels and Settings trail.
-    // Home is the strip's first cell, not an item of its own.
-    v.remove(0);
-    v.insert(1, NSString::from_str(&f.to_string()));
-    v.insert(4, NSString::from_str(&f.to_string()));
-    v.insert(
-        7,
-        NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
-    );
+    let v: Vec<_> = TOOLBAR_ORDER
+        .iter()
+        .map(|s| match *s {
+            FLEXIBLE => NSString::from_str(&unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string()),
+            SPACE => NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
+            name => NSString::from_str(name),
+        })
+        .collect();
     NSArray::from_retained_slice(&v)
 }
 fn symbol(s: &str, label: &str) -> Retained<NSImage> {
@@ -2424,6 +2482,24 @@ impl ToolbarDelegate {
             item.setToolTip(Some(&NSString::from_str("Add Layer or Media")));
             return Some(Retained::into_super(item));
         }
+        if name == "tasks" {
+            // v1's task pill: a ring and the share done while media
+            // imports, its menu the detail and Cancel. Hidden until a task
+            // runs (`Host::set_task`).
+            let item = objc2_app_kit::NSMenuToolbarItem::initWithItemIdentifier(
+                objc2_app_kit::NSMenuToolbarItem::alloc(mtm),
+                id,
+            );
+            let menu = NSMenu::new(mtm);
+            menu.setAutoenablesItems(false);
+            item.setMenu(&menu);
+            item.setShowsIndicator(false);
+            item.setImage(Some(&task_toolbar_image(&TaskStatus::default(), 0., t)));
+            item.setBordered(true);
+            item.setLabel(&NSString::from_str("Tasks"));
+            item.setHidden(true);
+            return Some(Retained::into_super(item));
+        }
         if name == "title" {
             // Home and the open projects, as v1 had them in its title bar:
             // quiet cells straight on the bar, so the item is unbordered
@@ -2482,6 +2558,98 @@ impl AgentStatus {
             "Ask the Agent".into()
         }
     }
+}
+/// The toolbar's task pill (v1's TaskPill, which showed imports): a ring
+/// filling with the share done and its percentage, a turning arc while the
+/// share is unknown, a check and "Done" once it ends; its menu says what
+/// runs and offers Cancel.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaskStatus {
+    /// "Importing 3 of 12"; empty: no task, the pill hides.
+    pub title: String,
+    /// The file being read.
+    pub detail: String,
+    /// The share done (0 to 1), when known.
+    pub progress: Option<f32>,
+    pub finished: bool,
+    /// The Cancel row's label and command, while it can be cancelled.
+    pub cancel: Option<(String, String)>,
+}
+impl TaskStatus {
+    /// The pill's own text: the share done, or "Done".
+    pub fn pill(&self) -> String {
+        if self.finished {
+            "Done".into()
+        } else {
+            self.progress
+                .map(|p| format!("{}%", (p.clamp(0., 1.) * 100.).round() as u32))
+                .unwrap_or_default()
+        }
+    }
+    /// What VoiceOver and the tooltip say.
+    pub fn spoken(&self) -> String {
+        if self.finished {
+            return "Tasks finished".into();
+        }
+        match self.progress {
+            Some(_) => format!("{}, {}", self.title, self.pill()),
+            None => self.title.clone(),
+        }
+    }
+}
+/// The pill's glyph: a track with the share done drawn over it from the
+/// top, a quarter arc at `turn` when the share is unknown, or a check.
+fn task_toolbar_image(status: &TaskStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
+    let size = t.metrics.symbol_toolbar as f64;
+    let (ink, track) = (t.colors.accent, t.colors.separator);
+    let (finished, progress) = (status.finished, status.progress);
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
+        let radius = rect.size.width / 2. - 1.5;
+        if finished {
+            let path = NSBezierPath::bezierPath();
+            let w = rect.size.width;
+            path.moveToPoint(NSPoint::new(w * 0.22, w * 0.5));
+            path.lineToPoint(NSPoint::new(w * 0.42, w * 0.3));
+            path.lineToPoint(NSPoint::new(w * 0.78, w * 0.7));
+            path.setLineWidth(1.75);
+            path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+            path.setLineJoinStyle(objc2_app_kit::NSLineJoinStyle::Round);
+            native_color(ink).setStroke();
+            path.stroke();
+            return objc2::runtime::Bool::YES;
+        }
+        let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(centre.x - radius, centre.y - radius),
+            NSSize::new(radius * 2., radius * 2.),
+        ));
+        ring.setLineWidth(1.75);
+        native_color(track).setStroke();
+        ring.stroke();
+        let (start, sweep) = match progress {
+            Some(p) => (90., p.clamp(0., 1.) as f64 * 360.),
+            None => (90. - turn * 360., 90.),
+        };
+        if sweep > 0. {
+            let arc = NSBezierPath::bezierPath();
+            arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                centre,
+                radius,
+                start,
+                start - sweep,
+                true,
+            );
+            arc.setLineWidth(1.75);
+            arc.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+            native_color(ink).setStroke();
+            arc.stroke();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
+    image.setAccessibilityDescription(Some(&NSString::from_str(&status.spoken())));
+    image
 }
 /// The Agent item's glyph: the toolbar symbol in accent ink with a three-
 /// quarter ring at `turn` (working), or with a dot at its top trailing
@@ -2585,6 +2753,96 @@ impl Host {
             self.agent_timer = Some(timer);
         }
         self.agent_status = status;
+    }
+}
+impl Host {
+    /// Shows the running task on the toolbar's pill, or hides the pill
+    /// (`None`, or an empty title). The arc of an unknown share turns, still
+    /// under Reduce Motion.
+    pub fn set_task(&mut self, status: Option<TaskStatus>) {
+        let status = status.filter(|s| !s.title.is_empty());
+        if status == self.task_status {
+            return;
+        }
+        let Some(item) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "tasks")
+        else {
+            return;
+        };
+        let Ok(item) = item.clone().downcast::<objc2_app_kit::NSMenuToolbarItem>() else {
+            return;
+        };
+        let tokens = self.tokens.clone();
+        let Some(shown) = status.clone() else {
+            if let Some(timer) = self.task_timer.take() {
+                timer.invalidate();
+            }
+            item.setHidden(true);
+            self.task_status = None;
+            return;
+        };
+        item.setHidden(false);
+        item.setTitle(&NSString::from_str(&shown.pill()));
+        item.setToolTip(Some(&NSString::from_str(&shown.spoken())));
+        // The menu: what runs, the file, then Cancel.
+        let mtm = MainThreadMarker::from(&*item);
+        let menu = item.menu();
+        menu.removeAllItems();
+        let line = |text: &str| {
+            let row = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(text),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            row.setEnabled(false);
+            row
+        };
+        menu.addItem(&line(if shown.finished { "Done" } else { shown.title.as_str() }));
+        if !shown.detail.is_empty() && !shown.finished {
+            menu.addItem(&line(&shown.detail));
+        }
+        if let (Some((label, command)), false) = (&shown.cancel, shown.finished) {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let row = named_item(mtm, label, command);
+            unsafe { row.setTarget(Some(&self._target)) };
+            menu.addItem(&row);
+        }
+        let turning = !shown.finished
+            && shown.progress.is_none()
+            && !tokens.accessibility.reduce_motion;
+        if !turning {
+            if let Some(timer) = self.task_timer.take() {
+                timer.invalidate();
+            }
+            item.setImage(Some(&task_toolbar_image(&shown, 0., &tokens)));
+        } else if self.task_timer.is_none() {
+            let started = std::time::Instant::now();
+            let item = item.clone();
+            let step =
+                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    let turn = started.elapsed().as_secs_f64() % 1.;
+                    item.setImage(Some(&task_toolbar_image(&shown, turn, &tokens)));
+                });
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+                    1. / 30.,
+                    true,
+                    &step,
+                )
+            };
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            }
+            self.task_timer = Some(timer);
+        }
+        self.task_status = status;
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -2695,6 +2953,10 @@ pub struct Host {
     /// working ring.
     agent_status: AgentStatus,
     agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
+    /// What the toolbar's task pill shows, and the timer that turns its
+    /// arc while the share is unknown.
+    task_status: Option<TaskStatus>,
+    task_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2900,6 +3162,8 @@ impl Host {
             last_geometry: None,
             _toolbar: toolbar,
             agent_status: AgentStatus::default(),
+            task_status: None,
+            task_timer: None,
             agent_timer: None,
             _delegate: delegate,
             _target: target,
@@ -7711,6 +7975,7 @@ mod tab_layout_tests {
             file: None,
         };
         let twins = [library(1), library(2)];
+        assert_eq!(tab_tooltip(&twins[0]), "Run6\nNot saved to a file");
         assert_eq!(tab_label(&twins[0], &twins).0, "Run6");
         assert_eq!(tab_label(&twins[1], &twins).0, "Run6 (2)");
         let runs = [
