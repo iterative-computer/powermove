@@ -24902,6 +24902,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
+                              "timelineLayerDrag": null,
                             },
                             "preventDefault": {
                               "keydown": [

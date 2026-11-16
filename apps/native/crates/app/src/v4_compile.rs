@@ -863,11 +863,20 @@ fn compile(
             .and_then(|t| t.get("layer"))
             .and_then(Value::as_str)
             .map(|layer| SharedString::from(layer.to_owned())),
-        timeline_layer_drag: meta
-            .and_then(|m| m.get("timelineLayerDrag"))
-            .and_then(|t| t.get("layer"))
-            .and_then(Value::as_str)
-            .map(|layer| SharedString::from(layer.to_owned())),
+        timeline_layer_drag: meta.and_then(|m| {
+            // nativeRow already carries the collision-free layer identity.
+            // Reuse it instead of adding another drag object to every row's
+            // initial wire commit (which is bounded by the host argument quota).
+            let layer = if let Some(drag) = m.get("timelineLayerDrag") {
+                drag.get("layer")?.as_str()?.to_owned()
+            } else {
+                match pm_panel_timeline::v4::parse_row(m.get("nativeRow")?.as_str()?).ok()? {
+                    pm_panel_timeline::RowId::Layer(id) => id,
+                    _ => return None,
+                }
+            };
+            Some(SharedString::from(layer))
+        }),
         outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
         outline_first: meta
             .and_then(|m| m.get("nativeFirstRow"))

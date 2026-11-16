@@ -1,5 +1,6 @@
 //! Native timeline host element. Pointer input runs Rust gesture sessions against
 //! the kernel on a worker; JS keeps the outline and hears about it by publication.
+//! Layer-header reorders share the native pointer gesture lifecycle.
 //! No sample waits on V8, and the main thread never waits on the kernel.
 use crate::v4_view::Outline;
 use gpui::{prelude::*, *};
@@ -366,8 +367,8 @@ enum Gesture {
     Rows {
         grab: f64,
     },
-    /// A layer's name pressed in the layer list: a click stays the row's
-    /// (it selects on release); past v1's 5 pt it lifts into a reorder.
+    /// A layer header pressed in the layer list: a click stays the row's
+    /// (it selects on release); past 4 pt it lifts into a reorder.
     LayerPress {
         layer: String,
         origin: Point<Pixels>,
@@ -376,6 +377,7 @@ enum Gesture {
     /// where they would land.
     Reorder {
         moving: Vec<String>,
+        at: Point<Pixels>,
         drop: Option<LayerDrop>,
     },
 }
@@ -387,9 +389,7 @@ struct LayerDrop {
     /// The insertion line (before/after) and its left end (the depth cue).
     line: f64,
     left: f64,
-    /// The target row (an inside drop washes it).
-    top: f64,
-    height: f64,
+    /// The target label for the insertion cue.
     name: String,
 }
 pub struct TimelineSurface {
@@ -470,6 +470,7 @@ pub struct TimelineSurface {
     /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
     tip: Option<(SharedString, (f64, f64))>,
     tip_wait: Option<Task<()>>,
+    row_scroll: Option<Task<()>>,
     /// A wheel or pinch view change waiting for the gesture to rest.
     idle_persist: Option<Task<()>>,
     /// Extension clip decorations by clip id (`timeline.paint`), and what
@@ -580,6 +581,7 @@ impl TimelineSurface {
             cursor: CursorStyle::Arrow,
             tip: None,
             tip_wait: None,
+            row_scroll: None,
             idle_persist: None,
             decorations: Default::default(),
             painted: None,
@@ -783,6 +785,7 @@ impl TimelineSurface {
     }
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        self.row_scroll = None;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
             Gesture::Dragging { .. } => {
@@ -2025,12 +2028,46 @@ impl TimelineSurface {
             at: event.position,
         };
     }
-    /// The layer list's name area was pressed (the JSX outline): a reorder
+    /// The layer header was pressed (the JSX outline): a reorder
     /// starts here if the pointer travels.
     pub fn press_layer_row(&mut self, layer: String, origin: Point<Pixels>) {
         if matches!(self.gesture, Gesture::Idle) {
             self.gesture = Gesture::LayerPress { layer, origin };
         }
+    }
+    /// The outline captures its own pointer. Accept that stream here as well
+    /// as the native canvas listener, without ever taking a bar/key gesture.
+    pub fn move_layer_row(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        ) {
+            self.on_move(event, window, cx);
+        }
+    }
+    pub fn release_layer_row(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        ) {
+            self.on_up(cx);
+        }
+    }
+    #[cfg(test)]
+    pub fn row_drag_active(&self) -> bool {
+        matches!(
+            self.gesture,
+            Gesture::LayerPress { .. } | Gesture::Reorder { .. }
+        )
+    }
+    #[cfg(test)]
+    pub fn invalidate_row_frame_for_test(&mut self) {
+        self.frame = None;
     }
     /// v1's `layerDrop` over the scene: the target layer, before / after /
     /// into a group (its middle half, past the disclosure), and the cue.
@@ -2040,8 +2077,10 @@ impl TimelineSurface {
             return None;
         };
         let (x, y) = self.local(position);
-        let (frame, scene) = (self.frame.as_ref()?, self.scene.as_ref()?);
-        let at = scene.layer_row_at(frame.viewport, &self.tokens, y)?;
+        // Hit testing needs current geometry, not a cached paint frame:
+        // edge scrolling deliberately invalidates that frame before we get here.
+        let scene = self.scene.as_ref()?;
+        let at = scene.layer_row_at(self.viewport()?, &self.tokens, y)?;
         let pm_panel_timeline::RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&at.id).ok()?
         else {
             return None;
@@ -2064,22 +2103,22 @@ impl TimelineSurface {
         Some(LayerDrop {
             target: id,
             mode,
-            line: if mode == DropMode::After {
+            line: if mode == DropMode::Inside {
+                at.top + at.height
+            } else if mode == DropMode::After {
                 at.end
             } else {
                 at.top
             },
             left: m.inset as f64 + (at.depth + inside as usize) as f64 * m.tree_indent as f64,
-            top: at.top,
-            height: at.height,
             name: layer.name.to_string_lossy(),
         })
     }
     /// A reorder held past the list's top or bottom scrolls the rows.
     fn autoscroll_rows(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (_, y) = self.local(position);
-        let top = self.tokens.metrics.ruler as f64;
-        let bottom = f32::from(self.bounds.size.height) as f64 - self.bar_height();
+        let top = self.tokens.metrics.ruler as f64 + 24.;
+        let bottom = f32::from(self.bounds.size.height) as f64 - self.bar_height() - 24.;
         let over = if y < top {
             y - top
         } else if y > bottom {
@@ -2087,9 +2126,12 @@ impl TimelineSurface {
         } else {
             return;
         };
-        self.view.scroll_y = (self.view.scroll_y + over * 0.25).max(0.);
+        let before = self.view.scroll_y;
+        self.view.scroll_y = (before + over.clamp(-48., 48.) * 0.25).max(0.);
         self.clamp_scroll();
-        self.changed(false, cx);
+        if self.view.scroll_y != before {
+            self.changed(false, cx);
+        }
     }
     pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>) {
         let selected = self.model.selection.layers();
@@ -2442,29 +2484,18 @@ impl TimelineSurface {
         }
         if let Gesture::LayerPress { layer, origin } = &self.gesture {
             let delta = event.position - *origin;
-            if f32::from(delta.x).hypot(f32::from(delta.y))
-                < self.tokens.metrics.panel_drag_threshold
-            {
+            if f32::from(delta.x).hypot(f32::from(delta.y)) < 4. {
                 return false;
             }
             // v1: the pressed layer joins the selection it moves with, or
             // becomes it; a locked layer (or group) is not reordered.
             let layer = layer.clone();
             let selected = self.model.selection.layers().to_vec();
+            // A click reaches the row's normal selection path on release.
+            // A drag selects only after its successful Move layers transaction.
             let moving = if selected.contains(&layer) {
                 selected
             } else {
-                self.queue.push_back(Job::Apply(Plan {
-                    calls: vec![
-                        SelectionCall::Layers {
-                            ids: vec![layer.clone()],
-                            add: false,
-                        }
-                        .user()
-                        .into(),
-                    ],
-                    ..Default::default()
-                }));
                 vec![layer]
             };
             let index = &self.model.index;
@@ -2474,18 +2505,50 @@ impl TimelineSurface {
                 .any(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
             if !locked {
                 self.cursor = CursorStyle::ClosedHand;
+                self.outline.layer_dragged.set(true);
             }
             self.gesture = if locked {
                 Gesture::Idle
             } else {
-                Gesture::Reorder { moving, drop: None }
+                Gesture::Reorder {
+                    moving,
+                    at: event.position,
+                    drop: None,
+                }
             };
             self.pump(cx);
+            if matches!(self.gesture, Gesture::Reorder { .. }) {
+                self.row_scroll = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(16))
+                            .await;
+                        let active = this
+                            .update(cx, |s, cx| {
+                                let Gesture::Reorder { at, .. } = s.gesture else {
+                                    return false;
+                                };
+                                s.autoscroll_rows(at, cx);
+                                let next = s.layer_drop(at);
+                                if let Gesture::Reorder { drop, .. } = &mut s.gesture {
+                                    *drop = next;
+                                }
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !active {
+                            break;
+                        }
+                    }
+                }));
+            }
         }
         if matches!(self.gesture, Gesture::Reorder { .. }) {
             self.autoscroll_rows(event.position, cx);
             let next = self.layer_drop(event.position);
-            if let Gesture::Reorder { drop, .. } = &mut self.gesture {
+            if let Gesture::Reorder { drop, at, .. } = &mut self.gesture {
+                *at = event.position;
                 *drop = next;
             }
             cx.notify();
@@ -2818,6 +2881,7 @@ impl TimelineSurface {
         self.pump(cx);
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
+        self.row_scroll = None;
         self.transform = None;
         self.readout = None;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
@@ -2841,7 +2905,7 @@ impl TimelineSurface {
             // A click on a name stays the row's own (it selects).
             Gesture::LayerPress { .. } => return false,
             // One undo step ("Move layers"), through the model's drop.
-            Gesture::Reorder { moving, drop } => {
+            Gesture::Reorder { moving, drop, .. } => {
                 if let Some(drop) = drop {
                     let time = self.delegate.time(cx);
                     match self.model.drop_layers(
@@ -2851,7 +2915,18 @@ impl TimelineSurface {
                         time,
                         pm_kernel::Origin::Interface,
                     ) {
-                        Ok(plan) => self.queue.push_back(Job::Apply(plan)),
+                        Ok(mut plan) => {
+                            // Keep plain Selection adjacent: the selection-history
+                            // client's TransactWithSelection fold can absorb it later.
+                            plan.calls.push(
+                                SelectionCall::Layers {
+                                    ids: moving,
+                                    add: false,
+                                }
+                                .into(),
+                            );
+                            self.queue.push_back(Job::Apply(plan));
+                        }
                         Err(error) => self.delegate.report(error.to_string(), cx),
                     }
                 }
@@ -4259,7 +4334,7 @@ impl Render for TimelineSurface {
             ]
         });
         // v1's reorder cue: an accent line with a dot at its depth, or a
-        // washed row for into a group, and what the drop will do.
+        // insertion line for a group, and what the drop will do.
         let reorder = match &self.gesture {
             Gesture::Reorder { drop: Some(d), .. } => Some(d.clone()),
             _ => None,
@@ -4270,34 +4345,22 @@ impl Render for TimelineSurface {
             let accent = t.colors.accent;
             let width = self.bounds.size.width;
             let left = px(d.left as f32);
-            let cue = if d.mode == DropMode::Inside {
-                div()
-                    .absolute()
-                    .left(left)
-                    .top(px(d.top as f32))
-                    .w(width - left)
-                    .h(px(d.height as f32))
-                    .bg(rgba((accent << 8) | 0x29))
-                    .border(px(t.metrics.drop_stroke))
-                    .border_color(rgb(accent))
-            } else {
-                div()
-                    .absolute()
-                    .left(left)
-                    .top(px(d.line as f32 - 1.))
-                    .w(width - left)
-                    .h(px(2.))
-                    .bg(rgb(accent))
-            };
-            let dot = (d.mode != DropMode::Inside).then(|| {
+            let cue = div()
+                .absolute()
+                .left(left)
+                .top(px(d.line as f32 - 1.))
+                .w(width - left)
+                .h(px(2.))
+                .bg(rgb(accent));
+            let dot = Some(
                 div()
                     .absolute()
                     .left(left - px(3.))
                     .top(px(d.line as f32 - 3.))
                     .size(px(6.))
                     .rounded_full()
-                    .bg(rgb(accent))
-            });
+                    .bg(rgb(accent)),
+            );
             let verb = match d.mode {
                 DropMode::Inside => "Move into",
                 DropMode::Before => "Move before",
