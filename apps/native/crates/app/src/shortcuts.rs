@@ -29,6 +29,10 @@ fn row_id(command: &str, args: &[Value]) -> String {
 fn key_only_label(command: &str, args: &[Value]) -> Option<String> {
     let number = |i: usize| args.get(i).and_then(Value::as_f64).unwrap_or(0.);
     Some(match command {
+        "agent.pause" => "Pause or Resume Agent".into(),
+        "agent.stop" => "Stop Agent".into(),
+        "agent.undoTurn" => "Undo Agent Turn".into(),
+        "agent.steer" => "Steer Agent…".into(),
         "undo" => "Undo".into(),
         "redo" => "Redo".into(),
         "copyLayers" => "Copy".into(),
