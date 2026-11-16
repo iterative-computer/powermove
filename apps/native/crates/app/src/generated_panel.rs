@@ -1127,7 +1127,7 @@ fn render(
                 }),
             },
         };
-        body = body.child(div().child(element).filter(dot_filter(build.as_ref(),Some(index),&t)).opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
+        body = body.child(div().flex_none().w_full().child(element).filter(dot_filter(build.as_ref(),Some(index),&t)).opacity(control_opacity(build.as_ref(), index, t.accessibility.reduce_motion)));
     }
     if let Some(overlay) = over { body = body.child(overlay); }
     body.into_any_element()
