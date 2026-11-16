@@ -593,7 +593,8 @@ fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
         gpui::CursorStyle::ResizeLeftRight
     );
     let key = op_center(&mut s, "key:");
-    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::PointingHand);
+    // The owner's rule: no pointing hand; a key keeps the arrow.
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::Arrow);
     let body = s.at(1, 1.5);
     assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
 }
