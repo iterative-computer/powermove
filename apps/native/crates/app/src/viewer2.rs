@@ -202,7 +202,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 37] = [
+    const ALL: [Action; 39] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -240,6 +240,8 @@ impl Action {
         Action::Rulers,
         Action::Grid,
         Action::ClearGuides,
+        Action::LockGuides,
+        Action::Snapping,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -1370,6 +1372,35 @@ mod tests {
         for action in Action::ALL {
             assert_eq!(Action::from_tag(action.tag()), Some(action));
         }
+        // Every kind of action has a tag: a menu item without one panicked
+        // building the View menu, at launch (Lock Guides and Snapping). The
+        // match has no wildcard, so a new kind fails to compile until it is
+        // named here, and then this until it is in `Action::ALL`.
+        let kind = |a: Action| match a {
+            Action::Output(_) => 0,
+            Action::Channels(_) => 1,
+            Action::Rulers => 2,
+            Action::Grid => 3,
+            Action::ClearGuides => 4,
+            Action::LockGuides => 5,
+            Action::Snapping => 6,
+            Action::SafeAreas => 7,
+            Action::Guides => 8,
+            Action::Popout => 9,
+            Action::Media(_) => 10,
+            Action::ToggleProxies => 11,
+            Action::ApplyLut => 12,
+            Action::Interpret(_) => 13,
+            Action::InterpretFootage => 14,
+            Action::CleanAperture => 15,
+            Action::RenderSelection => 16,
+            Action::KeepRendered => 17,
+            Action::DeleteRendered => 18,
+            Action::Skimming => 19,
+            Action::AudioSkimming => 20,
+        };
+        let listed: std::collections::BTreeSet<u8> = Action::ALL.into_iter().map(kind).collect();
+        assert_eq!(listed, (0..=20).collect());
         assert_eq!(Action::from_tag(-1), None);
         assert_eq!(Action::from_tag(99), None);
     }
