@@ -54,7 +54,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem,
-    ops::{DerefMut, Range},
+    ops::{Add, DerefMut, Range, Sub},
     rc::Rc,
     sync::{
         Arc, Weak,
@@ -194,9 +194,12 @@ impl WindowInvalidator {
         if inner.draw_phase == DrawPhase::None {
             #[cfg(feature = "profiler")]
             let dirty_at = Self::record_frame_dirty(&mut inner);
+            #[cfg(feature = "profiler")]
             let became_dirty = !inner.dirty;
             inner.dirty = true;
-            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+            // Each new invalidation renews demand, even if a platform tick
+            // was deferred while this window was already dirty.
+            let waker = inner.platform_waker.clone();
             #[cfg(feature = "profiler")]
             let window_id = inner.window_id;
             drop(inner);
@@ -220,6 +223,7 @@ impl WindowInvalidator {
 
     pub fn set_dirty(&self, dirty: bool) {
         let mut inner = self.inner.borrow_mut();
+        #[cfg(feature = "profiler")]
         let became_dirty = dirty && !inner.dirty;
         inner.dirty = dirty;
         if dirty {
@@ -227,7 +231,7 @@ impl WindowInvalidator {
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+        let waker = dirty.then(|| inner.platform_waker.clone()).flatten();
         #[cfg(feature = "profiler")]
         let window_id = inner.window_id;
         drop(inner);
@@ -1829,6 +1833,9 @@ impl Window {
                 if draw_in_progress() {
                     log::debug!("deferring re-entrant window draw request");
                     deferred_force_render |= request_frame_options.force_render;
+                    // The idle platform may pause after this callback. Keep
+                    // the deferred draw armed even when it was already dirty.
+                    invalidator.wake_platform();
                     return;
                 }
                 // Take the deferred flag first: `||` short-circuits, and leaving
@@ -1911,9 +1918,11 @@ impl Window {
                         handle
                             .update(&mut cx, |_, window, cx| {
                                 if force_render {
-                                    // Bypass cached view reuse so we don't replay stale
-                                    // atlas tile references after a GPU device recovery.
-                                    window.refresh();
+                                    // Bypass cached views after GPU recovery or
+                                    // surface changes. Reread native bounds in
+                                    // case a resize/scale callback was temporarily
+                                    // taken by a reentrant AppKit update.
+                                    window.bounds_changed(cx);
                                 }
                                 let arena_clear_needed = measure("GPUI tree", || window.draw(cx));
                                 window.present();
@@ -1942,7 +1951,10 @@ impl Window {
                 // after this frame (the window was re-invalidated mid-draw, or
                 // animations scheduled next-frame callbacks), re-arm the frame
                 // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                if invalidator.is_dirty()
+                    || !next_frame_callbacks.borrow().is_empty()
+                    || input_rate_tracker.borrow_mut().is_high_rate()
+                {
                     invalidator.wake_platform();
                 }
             }
@@ -2223,9 +2235,11 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future. Edge fades are evaluated in
-/// window space against these axis-aligned bounds and are not transform-aware.
+/// rendered: outside its `bounds`, and outside its rounded `shape` when that has corner radii (an
+/// element that hides its overflow and has rounded corners clips its children to that shape, with
+/// the continuous-corner smoothing of `Style::corner_smoothing`). The shape keeps its own rectangle,
+/// so a clip inset inside a rounded one still takes the outer corner. Edge fades are evaluated in
+/// window space against the axis-aligned bounds and are not transform-aware.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2233,6 +2247,57 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Edge fade distances. A zero distance leaves that edge fully opaque.
     pub fade_out: Edges<P>,
+    /// The rounded rectangle content is clipped to (unused while its radii are zero).
+    pub shape: Bounds<P>,
+    /// Radii of the shape's corners (zero: no rounded clip).
+    pub corner_radii: Corners<P>,
+    /// Continuous-corner smoothing of those corners, as a ratio held in `P`'s
+    /// float (0: circular arcs); never scaled.
+    pub corner_smoothing: P,
+    /// GPU layout padding (a uniform buffer member is a multiple of 16 bytes).
+    pub padding: [P; 3],
+}
+
+impl<P> ContentMask<P>
+where
+    P: Copy + Debug + Default + PartialEq + PartialOrd + Add<Output = P> + Sub<Output = P>,
+{
+    /// Whether the mask clips to rounded corners.
+    pub fn is_rounded(&self) -> bool {
+        let r = self.corner_radii;
+        let zero = P::default();
+        r.top_left > zero || r.top_right > zero || r.bottom_right > zero || r.bottom_left > zero
+    }
+
+    /// The rounded shape the intersection with `inner` (a clip nested in this
+    /// one) keeps; a rounded rectangle holds one. The inner shape when it lies
+    /// within this one's (a rounded card inside a rounded panel): inside the
+    /// bounds and, at each corner, rounded at least as much as this corner
+    /// still reaches past the inset; otherwise this, the outer, shape.
+    pub(crate) fn shape_within(&self, inner: &Self) -> (Bounds<P>, Corners<P>, P) {
+        let outer = (self.shape, self.corner_radii, self.corner_smoothing);
+        let nested = (inner.shape, inner.corner_radii, inner.corner_smoothing);
+        if !inner.is_rounded() {
+            return outer;
+        }
+        if !self.is_rounded() {
+            return nested;
+        }
+        let (o, i) = (self.shape, inner.shape);
+        let (o_end, i_end) = (o.bottom_right(), i.bottom_right());
+        let inside = i.origin.x >= o.origin.x
+            && i.origin.y >= o.origin.y
+            && i_end.x <= o_end.x
+            && i_end.y <= o_end.y;
+        let min = |a: P, b: P| if a < b { a } else { b };
+        let covers = |inset: P, inner_r: P, outer_r: P| inner_r + inset >= outer_r;
+        let (ro, ri) = (self.corner_radii, inner.corner_radii);
+        let corners_inside = covers(min(i.origin.x - o.origin.x, i.origin.y - o.origin.y), ri.top_left, ro.top_left)
+            && covers(min(o_end.x - i_end.x, i.origin.y - o.origin.y), ri.top_right, ro.top_right)
+            && covers(min(o_end.x - i_end.x, o_end.y - i_end.y), ri.bottom_right, ro.bottom_right)
+            && covers(min(i.origin.x - o.origin.x, o_end.y - i_end.y), ri.bottom_left, ro.bottom_left);
+        if inside && corners_inside { nested } else { outer }
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -2241,13 +2306,18 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             fade_out: self.fade_out.scale(factor),
+            shape: self.shape.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
+            corner_smoothing: ScaledPixels(self.corner_smoothing.0),
+            padding: [ScaledPixels(0.); 3],
         }
     }
 
-    /// Intersect the content mask with the given content mask.
+    /// Intersect the content mask with the given content mask (one nested in it).
     ///
     /// For each edge, the mask that actually clips at that edge contributes its
     /// fade; when both masks clip at the same coordinate, the stronger fade wins.
+    /// The rounded shape is [`ContentMask::shape_within`].
     pub fn intersect(&self, other: &Self) -> Self {
         fn edge_fade(
             a: Pixels,
@@ -2265,8 +2335,13 @@ impl ContentMask<Pixels> {
             }
         }
 
+        let (shape, corner_radii, corner_smoothing) = self.shape_within(other);
         ContentMask {
             bounds: self.bounds.intersect(&other.bounds),
+            shape,
+            corner_radii,
+            corner_smoothing,
+            padding: [Pixels::ZERO; 3],
             fade_out: Edges {
                 top: edge_fade(
                     self.bounds.top(),
@@ -2312,6 +2387,7 @@ mod content_mask_tests {
                 left: px(fade_left),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -3186,7 +3262,7 @@ impl Window {
         let mask = self.content_mask();
         ContentMask {
             bounds: self.cover_bounds(mask.bounds),
-            fade_out: mask.fade_out.scale(self.scale_factor()),
+            ..mask.scale(self.scale_factor())
         }
     }
 
@@ -4491,6 +4567,7 @@ impl Window {
             content_mask: ContentMask {
                 bounds,
                 fade_out: Edges::default(),
+                ..Default::default()
             },
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,
@@ -5180,7 +5257,7 @@ impl Window {
                 self.next_frame.scene.insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
-                        ..Default::default()
+                        ..quad.content_mask
                     },
                     ..quad
                 });
@@ -9177,6 +9254,188 @@ mod tests {
             test_window.frame_wake_count() > baseline,
             "scheduling a next-frame callback in an idle window must wake the frame source"
         );
+    }
+
+    #[gpui::test]
+    fn test_finished_animation_stays_idle(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform = cx.test_window(window.into());
+        let frame = || RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        };
+        platform.simulate_frame_request(frame());
+        let ran = Rc::new(Cell::new(false));
+        window.update(cx, {
+            let ran = ran.clone();
+            move |_, window, _| window.on_next_frame(move |window, _| {
+                ran.set(true);
+                window.on_next_frame(|_, _| {});
+            })
+        }).unwrap();
+        platform.simulate_frame_request(frame());
+        assert!(ran.get());
+        platform.simulate_frame_request(frame());
+        let settled = platform.frame_wake_count();
+        for _ in 0..120 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(platform.frame_wake_count(), settled,
+            "a settled animation must not request any more frames");
+    }
+
+    /// Model a paused source: tests deliver only frames that were requested.
+    #[gpui::test]
+    fn pm406_idle_resize_and_scale_present_the_new_surface(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let idle = platform.frame_wake_count();
+        let count = platform.presented_sizes().len();
+        for _ in 0..10 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(platform.frame_wake_count(), idle);
+        assert_eq!(platform.presented_sizes().len(), count);
+
+        platform.simulate_resize(size(px(800.), px(600.)));
+        let first = platform.frame_wake_count();
+        assert!(first > idle);
+        window
+            .update(cx, |_, window, cx| {
+                window.bounds_changed(cx);
+                let first = platform.frame_wake_count();
+                window.bounds_changed(cx);
+                assert!(
+                    platform.frame_wake_count() > first,
+                    "renew a resize wake before the preceding resize has been served"
+                );
+            })
+            .unwrap();
+        // Live resize can deliver another size while the first is still dirty.
+        // Renew the wake: the source may have paused on a deferred callback.
+        platform.simulate_resize(size(px(640.), px(480.)));
+        assert!(platform.frame_wake_count() > first);
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(size(DevicePixels(1280), DevicePixels(960)))
+        );
+        assert!(platform.presented_sizes().len() > count);
+
+        let before = platform.frame_wake_count();
+        platform.simulate_scale_change(1.0);
+        assert!(platform.frame_wake_count() > before);
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(size(DevicePixels(640), DevicePixels(480)))
+        );
+        let idle = platform.frame_wake_count();
+        let count = platform.presented_sizes().len();
+        for _ in 0..120 {
+            platform.simulate_frame_request(RequestFrameOptions::default());
+        }
+        assert_eq!(
+            platform.frame_wake_count(),
+            idle,
+            "return to idle after the new frame"
+        );
+        assert_eq!(platform.presented_sizes().len(), count);
+    }
+
+    #[gpui::test]
+    fn pm406_forced_frame_recovers_a_missed_resize_callback(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let new_size = size(px(777.), px(333.));
+        // Change the actual view while its resize callback is unavailable.
+        platform.resize(new_size);
+        platform.simulate_frame_request(RequestFrameOptions {
+            force_render: true,
+            require_presentation: true,
+            ..Default::default()
+        });
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(
+                    window.viewport_size(),
+                    new_size,
+                    "forced surface redraw must reread the native view size"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            platform.presented_sizes().last().copied(),
+            Some(new_size.to_device_pixels(2.0))
+        );
+    }
+
+    #[gpui::test]
+    fn pm406_layout_changes_renew_pending_frame_demand(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let id = window.entity(cx).unwrap().entity_id();
+        window
+            .update(cx, |_, window, cx| {
+                window.invalidator.invalidate_view(id, cx);
+                let first = platform.frame_wake_count();
+                window.invalidator.invalidate_view(id, cx);
+                assert!(
+                    platform.frame_wake_count() > first,
+                    "a second dock/comp update must renew the wake while dirty"
+                );
+            })
+            .unwrap();
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        let idle = platform.frame_wake_count();
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(platform.frame_wake_count(), idle);
+    }
+
+    #[gpui::test]
+    fn pm406_reentrant_frame_request_keeps_the_idle_source_awake(cx: &mut TestAppContext) {
+        struct Nested {
+            paint: Rc<RefCell<Option<Box<dyn FnOnce()>>>>,
+        }
+        impl Render for Nested {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let paint = self.paint.clone();
+                div().size_full().child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, _, _| {
+                            if let Some(paint) = paint.borrow_mut().take() {
+                                paint();
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+            }
+        }
+        let paint = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let paint = paint.clone();
+            move |_, _| Nested { paint }
+        });
+        let platform = cx.test_window(window.into());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        *paint.borrow_mut() = Some(Box::new(move || {
+            let before = platform.frame_wake_count();
+            platform.simulate_frame_request(RequestFrameOptions::default());
+            assert!(
+                platform.frame_wake_count() > before,
+                "a request deferred during paint still needs a later tick"
+            );
+        }));
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
     }
 
     /// A frame request that arrives while next-frame callbacks are pending

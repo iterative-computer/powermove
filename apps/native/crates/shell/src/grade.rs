@@ -227,7 +227,7 @@ fn rim(
         window.with_content_mask(
             Some(ContentMask {
                 bounds: band,
-                fade_out: Default::default(),
+                ..Default::default()
             }),
             |window| window.paint_quad(ring(top)),
         );
