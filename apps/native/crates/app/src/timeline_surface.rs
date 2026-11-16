@@ -425,6 +425,18 @@ pub struct TimelineSurface {
     /// then at their left edge: a step's offset is that less the time
     /// scrolled since.
     drawn: (f32, f64),
+    /// The layers' own view, made on the first render.
+    layers: Option<Entity<Layers>>,
+    /// Bumped by every render that draws the layers again (their element's
+    /// id: a new id draws the cached view anew).
+    layers_generation: u64,
+    /// What the layers last drew from, with the steps since folded in.
+    layers_key: Option<LayersKey>,
+    /// The render asked for is the skimmer's alone (a sideways step under
+    /// it): the layers are reused as drawn, replayed at the step's offset.
+    skim_render: bool,
+    /// How many times the layers drew (tests).
+    layers_drawn: u64,
     /// The clip under the pointer and the pointer's x in the panel: its strip
     /// draws hovered, with the trim grip inside the nearer edge.
     hover_clip: Option<(String, f64)>,
@@ -541,6 +553,11 @@ impl TimelineSurface {
             ruler_handle: ScrollHandle::new(),
             sideways: false,
             drawn: (0., view.scroll_time),
+            layers: None,
+            layers_generation: 0,
+            layers_key: None,
+            skim_render: false,
+            layers_drawn: 0,
             bounds: Bounds::default(),
             body: Bounds::default(),
             lit: None,
@@ -1026,8 +1043,6 @@ impl TimelineSurface {
             || self.media_over.is_some()
             || self.effect_over.is_some()
             || self.tip.is_some()
-            // Its line stands at its time: it moves with the tracks.
-            || (sideways && self.skimmer.is_some())
             // Recorded no further than the view.
             || (sideways && !self.rows.as_ref().is_some_and(|(_, _, reach)| *reach > 0.))
         {
@@ -1053,6 +1068,11 @@ impl TimelineSurface {
         };
         if !stepped {
             return false;
+        }
+        // What the layers show now (the key a render compares).
+        let view = self.view;
+        if let Some(key) = &mut self.layers_key {
+            key.view = (view.scroll_time, view.scroll_y);
         }
         self.frame = None;
         let bounds = self.bounds;
@@ -2792,8 +2812,16 @@ impl TimelineSurface {
             self.view.scroll_time -= travel / self.view.pps;
             self.clamp_time();
             self.sideways = true;
-            if self.skimmer.is_none() {
-                self.scrolled_while_hot(true, window, cx);
+            if self.step_layers(true, window, cx) {
+                // The skimmer stays under the pointer, its timecode the time
+                // there now: the panel draws for it alone, the layers as
+                // drawn.
+                if self.skimmer.is_some() {
+                    self.skim_render = true;
+                    self.reskim(x, cx);
+                    cx.notify();
+                }
+                self.persist_when_idle(false, cx);
                 return;
             }
             self.reskim(x, cx);
@@ -3248,6 +3276,10 @@ impl TimelineSurface {
         self.view.pps
     }
     #[cfg(test)]
+    /// How many times the scroll layers drew.
+    pub fn layers_drawn(&self) -> u64 {
+        self.layers_drawn
+    }
     pub fn scroll_time(&self) -> f64 {
         self.view.scroll_time
     }
@@ -3969,6 +4001,30 @@ fn build(
         wanted: presenter.wanted.into_inner(),
     })
 }
+/// The timeline's scroll layers as a view of their own: a render of the
+/// panel for the skimmer alone (it stays under the pointer while the time
+/// scrolls under it) reuses them as drawn, replayed at the step's offset.
+pub(crate) struct Layers(WeakEntity<TimelineSurface>);
+impl Render for Layers {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0
+            .update(cx, |s, cx| s.layers_element(cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+/// What the layers drew from (see `TimelineSurface::layers_key`).
+#[derive(Clone, PartialEq)]
+struct LayersKey {
+    scene: usize,
+    decorations: usize,
+    view: (f64, f64),
+    zoom: (f64, f64),
+    body: Size<Pixels>,
+    hover: Option<(String, f64)>,
+    region: Option<Rect>,
+    sideways: bool,
+    painters: Option<u64>,
+}
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
@@ -4127,29 +4183,21 @@ impl Render for TimelineSurface {
         // leaves the frame it prepared here for the clips' accessible elements.
         let shown: Shown = Rc::default();
         let prepared = shown.clone();
-        let ruler = self.tokens.metrics.ruler;
-        let rows_ruler = ruler;
         let layout_bar = Self::bar_of(self.body, &self.tokens);
         let fixed_tokens = self.tokens.clone();
-        let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
-        let scroll_y = self.view.scroll_y as f32;
-        self.rows_handle.set_offset(point(px(0.), px(-scroll_y)));
-        // The tracks and the ruler draw `SIDEWAYS` of their widths in, the
-        // time at their left edge now.
-        let track_w = (f32::from(self.body.size.width) - column as f32).max(0.);
-        let tracks_x = -(SIDEWAYS as f32) * track_w;
-        self.drawn = (tracks_x, self.view.scroll_time);
-        let wide = track_w * (2. * SIDEWAYS as f32 + 1.);
-        self.tracks_handle.set_offset(point(px(tracks_x), px(-scroll_y)));
-        self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
-        let rows_weak = this.clone();
-        let tracks_weak = this.clone();
-        let ruler_weak = this.clone();
-        let rows_tokens = self.tokens.clone();
-        let tracks_tokens = self.tokens.clone();
-        let ruler_tokens = self.tokens.clone();
-        let tracks_handle = self.tracks_handle.clone();
-        let ruler_handle = self.ruler_handle.clone();
+        // The layers draw again unless this render is the skimmer's alone
+        // and nothing they draw from changed.
+        let key = self.layers_key();
+        let skim = self.skim_render;
+        let reuse = std::mem::take(&mut self.skim_render) && self.layers_key.as_ref() == Some(&key);
+        if skim { eprintln!("DBG skim render reuse={reuse} same_view={} same_hover={} same_painters={} same_scene={}", self.layers_key.as_ref().map(|k| k.view)==Some(key.view), self.layers_key.as_ref().map(|k| k.hover.clone())==Some(key.hover.clone()), self.layers_key.as_ref().map(|k| k.painters)==Some(key.painters), self.layers_key.as_ref().map(|k| k.scene)==Some(key.scene)); }
+        if !reuse {
+            self.layers_generation += 1;
+        }
+        let layers = self
+            .layers
+            .get_or_insert_with(|| cx.new(|_| Layers(this.clone())))
+            .clone();
         div()
             .id("native-timeline")
             .relative()
@@ -4321,6 +4369,261 @@ impl Render for TimelineSurface {
                 )
                 .size_full(),
             )
+            // The rows, the tracks and the ruler: a view of their own.
+            .child(
+                div()
+                    .id(ElementId::NamedInteger("timeline-layers".into(), self.layers_generation))
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(layers.cached(StyleRefinement::default().size_full())),
+            )
+            // The graph, the bottom bar and the marquee, over the rows.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        if let Some(r) = region {
+                            let (edge, alpha) = tokens.line();
+                            window.paint_quad(
+                                PaintQuad::new(Bounds::new(
+                                    bounds.origin + point(px(r.x as f32), px(r.y as f32)),
+                                    size(px(r.width as f32), px(tokens.metrics.border)),
+                                ))
+                                .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
+                            );
+                        }
+                        for op in graph.iter().flatten() {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        // A graph with no curve says how to get one.
+                        if let (Some(r), None) = (region, &graph) {
+                            let note = graph_render::empty_note(r, &tokens);
+                            paint(&note, bounds.origin, &tokens, window, cx);
+                        }
+                        // The bottom bar and the row thumb, over the tracks.
+                        let started = crate::diag::enabled().then(std::time::Instant::now);
+                        let bar = this
+                            .upgrade()
+                            .map(|s| s.read(cx).bar_ops())
+                            .unwrap_or_default();
+                        for op in &bar {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        if let Some(started) = started {
+                            crate::diag::line(serde_json::json!({"span":"timeline.bar","ms":started.elapsed().as_secs_f64() * 1000.,"ops":bar.len()}));
+                        }
+                        if let Some(area) = marquee {
+                            window.paint_quad(
+                                PaintQuad::new(area)
+                                    .border_widths(1f32)
+                                    .border_color(rgb(tokens.colors.secondary)),
+                            );
+                        }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
+                            if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
+                                // v1 installParentPickwhip: the same cubic and target label.
+                                let mut line = PathBuilder::stroke(px(2.));
+                                line.move_to(*origin);
+                                line.cubic_bezier_to(*at, *origin + point(px(60.), px(0.)), *at - point(px(60.), px(0.)));
+                                if let Ok(line) = line.build() { window.paint_path(line, rgb(tokens.colors.accent)); }
+                                let label = target.as_ref().and_then(|id| surface.model.index.layer(id)).map(|l| format!("Parent to {}", l.name.to_string_lossy())).unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
+                                if target.is_some() {
+                                    if let (Some(scene), Some(frame)) = (&surface.scene, &surface.frame) {
+                                        let (_, y) = surface.local(*at);
+                                        if let Some(row) = scene.layer_row_at(frame.viewport, &tokens, y) {
+                                            window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(0.), px(row.top as f32)), size(bounds.size.width, px(row.height as f32)))).background(rgba((tokens.colors.accent << 8) | 0x29)));
+                                        }
+                                    }
+                                }
+                                let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                let text = window.text_system().shape_line(label.into(), px(12.), &runs);
+                                let label_at = point((at.x + px(12.)).min(surface.bounds.right() - px(200.)), at.y - px(12.));
+                                let _ = text.paint(label_at, px(16.), TextAlign::Left, None, window, cx);
+                            }
+                        }
+                        let moved = this.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = moved.update(cx, |s, cx| {
+                                    if s.on_move(e, cx) {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    let over = s.over_bar(e.position, cx);
+                                    if s.bounds.contains(&e.position) && !over {
+                                        s.hover(e.position, cx);
+                                    } else {
+                                        s.set_skimmer(None, cx);
+                                    }
+                                });
+                            }
+                        });
+                        let exited = this.clone();
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = exited.update(cx, |s, cx| {
+                                    s.pointer = None;
+                                    s.set_skimmer(None, cx);
+                                });
+                            }
+                        });
+                        let released = this.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = released.update(cx, |s, cx| {
+                                    if let Gesture::ParentPick { ids, .. } = &s.gesture {
+                                        let next = s.parent_target(ids, event.position);
+                                        if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
+                                            *target = next;
+                                            *at = event.position;
+                                        }
+                                    }
+                                    s.on_up(cx);
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            // Over the canvas.
+            .children(landing.into_iter().flatten())
+            .children(reorder.into_iter().flatten().flatten())
+            .children(effect_row)
+            .children(tip)
+            .children(self.skimmer_marks())
+            .children(self.graph_readout_element())
+    }
+}
+impl TimelineSurface {
+    /// The graph's readout while keys are dragged (v1): one key reads where
+    /// it is, value and time; several read the offset the whole group moved
+    /// by. The Speed Graph's axis is a rate, so it reads the time alone.
+    fn graph_readout_element(&self) -> Option<AnyElement> {
+        if !matches!(self.gesture, Gesture::Dragging { .. }) {
+            return None;
+        }
+        let quick = match &self.gesture {
+            Gesture::Dragging {
+                quick: Some(quick), ..
+            } => Some(*quick),
+            _ => None,
+        };
+        if let Some((at, total, count)) = quick {
+            let local = at - self.bounds.origin;
+            let t = &self.tokens;
+            let left = (f32::from(local.x) + 14.)
+                .max(self.view.layer_column as f32 + 8.)
+                .min(
+                    (f32::from(self.bounds.size.width) - 222.)
+                        .max(self.view.layer_column as f32 + 8.),
+                );
+            let top = (f32::from(local.y) + 14.)
+                .max(t.metrics.ruler + 8.)
+                .min((f32::from(self.bounds.size.height) - 53.).max(t.metrics.ruler + 8.));
+            let column = |left, label: &'static str, value: f64| {
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(6.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(t.colors.muted))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(t.colors.text))
+                            .child(format!(
+                                "{}{}",
+                                if value < 0. { "−" } else { "+" },
+                                crate::captions_panel::timecode(value.abs(), self.model.index.fps)
+                            )),
+                    )
+            };
+            return Some(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(214.))
+                    .h(px(45.))
+                    .rounded(px(7.))
+                    .bg(rgb(t.colors.floating))
+                    .border(px(t.metrics.border))
+                    .border_color(rgb(t.colors.separator))
+                    .child(column(10., "TOTAL OFFSET", total))
+                    .child(column(112., "PER LAYER", total / (count - 1) as f64))
+                    .into_any_element(),
+            );
+        }
+        let (text, x, y) = self.readout.as_ref()?;
+        Some(div().absolute().left(px(*x as f32 + 14.)).top(px(*y as f32 - 26.))
+            .px(px(self.tokens.metrics.gap)).py(px(2.)).rounded(px(3.))
+            .bg(rgb(self.tokens.colors.accent)).text_color(rgb(0xffffff))
+            .child(text.clone()).into_any_element())
+    }
+    /// The key the layers' draw depends on, but for the scroll the steps
+    /// move: a render for the skimmer alone reuses them only while it holds.
+    fn layers_key(&self) -> LayersKey {
+        LayersKey {
+            scene: self.scene.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize),
+            decorations: Arc::as_ptr(&self.decorations) as usize,
+            view: (self.view.scroll_time, self.view.scroll_y),
+            zoom: (self.view.pps, self.view.layer_column),
+            body: self.body.size,
+            hover: self.hover_clip.clone(),
+            region: self.graph_region(),
+            sideways: self.sideways,
+            painters: self.painted.as_ref().map(|(r, _)| *r),
+        }
+    }
+    /// The outline column's rows, the tracks and the ruler in their driven
+    /// scroll layers ([`Layers`]), recorded for the view now.
+    fn layers_element(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.layers_key = Some(self.layers_key());
+        self.layers_drawn += 1;
+        eprintln!("DBG layers drawn {}", self.layers_drawn);
+        let this = cx.entity().downgrade();
+        let column = self.view.layer_column;
+        let ruler = self.tokens.metrics.ruler;
+        let rows_ruler = ruler;
+        let layout_bar = Self::bar_of(self.body, &self.tokens);
+        let region = self.graph_region();
+        let decorations = self.decorations.clone();
+        let hover_clip = self.hover_clip.clone();
+        let skimmer = self.skimmer_at();
+        let content = self.scene.as_ref().map_or(0., |s| s.content_height()) as f32;
+        let scroll_y = self.view.scroll_y as f32;
+        self.rows_handle.set_offset(point(px(0.), px(-scroll_y)));
+        // The tracks and the ruler draw `SIDEWAYS` of their widths in, the
+        // time at their left edge now.
+        let track_w = (f32::from(self.body.size.width) - column as f32).max(0.);
+        let tracks_x = -(SIDEWAYS as f32) * track_w;
+        self.drawn = (tracks_x, self.view.scroll_time);
+        let wide = track_w * (2. * SIDEWAYS as f32 + 1.);
+        self.tracks_handle.set_offset(point(px(tracks_x), px(-scroll_y)));
+        self.ruler_handle.set_offset(point(px(tracks_x), px(0.)));
+        let rows_weak = this.clone();
+        let tracks_weak = this.clone();
+        let ruler_weak = this.clone();
+        let rows_tokens = self.tokens.clone();
+        let tracks_tokens = self.tokens.clone();
+        let ruler_tokens = self.tokens.clone();
+        let tracks_handle = self.tracks_handle.clone();
+        let ruler_handle = self.ruler_handle.clone();
+        div()
+            .size_full()
             // The outline column's fills and the column's edge in a layer
             // the wheel moves up and down; a step inside what it recorded
             // replays it shifted, with no render (P-SCROLL-LAYER).
@@ -4523,199 +4826,7 @@ impl Render for TimelineSurface {
                         .h(px(ruler)),
                     ),
             )
-            // The graph, the bottom bar and the marquee, over the rows.
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, cx| {
-                        if let Some(r) = region {
-                            let (edge, alpha) = tokens.line();
-                            window.paint_quad(
-                                PaintQuad::new(Bounds::new(
-                                    bounds.origin + point(px(r.x as f32), px(r.y as f32)),
-                                    size(px(r.width as f32), px(tokens.metrics.border)),
-                                ))
-                                .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
-                            );
-                        }
-                        for op in graph.iter().flatten() {
-                            paint(op, bounds.origin, &tokens, window, cx);
-                        }
-                        // A graph with no curve says how to get one.
-                        if let (Some(r), None) = (region, &graph) {
-                            let note = graph_render::empty_note(r, &tokens);
-                            paint(&note, bounds.origin, &tokens, window, cx);
-                        }
-                        // The bottom bar and the row thumb, over the tracks.
-                        let started = crate::diag::enabled().then(std::time::Instant::now);
-                        let bar = this
-                            .upgrade()
-                            .map(|s| s.read(cx).bar_ops())
-                            .unwrap_or_default();
-                        for op in &bar {
-                            paint(op, bounds.origin, &tokens, window, cx);
-                        }
-                        if let Some(started) = started {
-                            crate::diag::line(serde_json::json!({"span":"timeline.bar","ms":started.elapsed().as_secs_f64() * 1000.,"ops":bar.len()}));
-                        }
-                        if let Some(area) = marquee {
-                            window.paint_quad(
-                                PaintQuad::new(area)
-                                    .border_widths(1f32)
-                                    .border_color(rgb(tokens.colors.secondary)),
-                            );
-                        }
-                        if let Some(surface) = this.upgrade() {
-                            let surface = surface.read(cx);
-                            if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
-                                // v1 installParentPickwhip: the same cubic and target label.
-                                let mut line = PathBuilder::stroke(px(2.));
-                                line.move_to(*origin);
-                                line.cubic_bezier_to(*at, *origin + point(px(60.), px(0.)), *at - point(px(60.), px(0.)));
-                                if let Ok(line) = line.build() { window.paint_path(line, rgb(tokens.colors.accent)); }
-                                let label = target.as_ref().and_then(|id| surface.model.index.layer(id)).map(|l| format!("Parent to {}", l.name.to_string_lossy())).unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
-                                if target.is_some() {
-                                    if let (Some(scene), Some(frame)) = (&surface.scene, &surface.frame) {
-                                        let (_, y) = surface.local(*at);
-                                        if let Some(row) = scene.layer_row_at(frame.viewport, &tokens, y) {
-                                            window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(0.), px(row.top as f32)), size(bounds.size.width, px(row.height as f32)))).background(rgba((tokens.colors.accent << 8) | 0x29)));
-                                        }
-                                    }
-                                }
-                                let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
-                                let text = window.text_system().shape_line(label.into(), px(12.), &runs);
-                                let label_at = point((at.x + px(12.)).min(surface.bounds.right() - px(200.)), at.y - px(12.));
-                                let _ = text.paint(label_at, px(16.), TextAlign::Left, None, window, cx);
-                            }
-                        }
-                        let moved = this.clone();
-                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ = moved.update(cx, |s, cx| {
-                                    if s.on_move(e, cx) {
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-                                    let over = s.over_bar(e.position, cx);
-                                    if s.bounds.contains(&e.position) && !over {
-                                        s.hover(e.position, cx);
-                                    } else {
-                                        s.set_skimmer(None, cx);
-                                    }
-                                });
-                            }
-                        });
-                        let exited = this.clone();
-                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ = exited.update(cx, |s, cx| {
-                                    s.pointer = None;
-                                    s.set_skimmer(None, cx);
-                                });
-                            }
-                        });
-                        let released = this.clone();
-                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ = released.update(cx, |s, cx| {
-                                    if let Gesture::ParentPick { ids, .. } = &s.gesture {
-                                        let next = s.parent_target(ids, event.position);
-                                        if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
-                                            *target = next;
-                                            *at = event.position;
-                                        }
-                                    }
-                                    s.on_up(cx);
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
-            // Over the canvas.
-            .children(landing.into_iter().flatten())
-            .children(reorder.into_iter().flatten().flatten())
-            .children(effect_row)
-            .children(tip)
-            .children(self.skimmer_marks())
-            .children(self.graph_readout_element())
-    }
-}
-impl TimelineSurface {
-    /// The graph's readout while keys are dragged (v1): one key reads where
-    /// it is, value and time; several read the offset the whole group moved
-    /// by. The Speed Graph's axis is a rate, so it reads the time alone.
-    fn graph_readout_element(&self) -> Option<AnyElement> {
-        if !matches!(self.gesture, Gesture::Dragging { .. }) {
-            return None;
-        }
-        let quick = match &self.gesture {
-            Gesture::Dragging {
-                quick: Some(quick), ..
-            } => Some(*quick),
-            _ => None,
-        };
-        if let Some((at, total, count)) = quick {
-            let local = at - self.bounds.origin;
-            let t = &self.tokens;
-            let left = (f32::from(local.x) + 14.)
-                .max(self.view.layer_column as f32 + 8.)
-                .min(
-                    (f32::from(self.bounds.size.width) - 222.)
-                        .max(self.view.layer_column as f32 + 8.),
-                );
-            let top = (f32::from(local.y) + 14.)
-                .max(t.metrics.ruler + 8.)
-                .min((f32::from(self.bounds.size.height) - 53.).max(t.metrics.ruler + 8.));
-            let column = |left, label: &'static str, value: f64| {
-                div()
-                    .absolute()
-                    .left(px(left))
-                    .top(px(6.))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(t.colors.muted))
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(t.colors.text))
-                            .child(format!(
-                                "{}{}",
-                                if value < 0. { "−" } else { "+" },
-                                crate::captions_panel::timecode(value.abs(), self.model.index.fps)
-                            )),
-                    )
-            };
-            return Some(
-                div()
-                    .absolute()
-                    .left(px(left))
-                    .top(px(top))
-                    .w(px(214.))
-                    .h(px(45.))
-                    .rounded(px(7.))
-                    .bg(rgb(t.colors.floating))
-                    .border(px(t.metrics.border))
-                    .border_color(rgb(t.colors.separator))
-                    .child(column(10., "TOTAL OFFSET", total))
-                    .child(column(112., "PER LAYER", total / (count - 1) as f64))
-                    .into_any_element(),
-            );
-        }
-        let (text, x, y) = self.readout.as_ref()?;
-        Some(div().absolute().left(px(*x as f32 + 14.)).top(px(*y as f32 - 26.))
-            .px(px(self.tokens.metrics.gap)).py(px(2.)).rounded(px(3.))
-            .bg(rgb(self.tokens.colors.accent)).text_color(rgb(0xffffff))
-            .child(text.clone()).into_any_element())
+            .into_any_element()
     }
     /// The skimmer: a hairline of text ink across the ruler and tracks
     /// (the playhead is the accent), with its timecode on the ruler.

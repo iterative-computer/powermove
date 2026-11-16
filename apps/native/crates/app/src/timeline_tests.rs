@@ -1774,15 +1774,25 @@ fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
     assert!(renders(&s) > rendered);
     settle(&mut s);
     s.idle(cx);
-    // The skimmer showing: every step draws.
+    // The skimmer showing: every step draws the panel for it (it stays
+    // under the pointer, at the time there now), the layers as drawn.
     s.recorder.skimming.set(true);
     s.vcx
         .simulate_mouse_move(at + point(px(3.), px(0.)), None, Modifiers::none());
     settle(&mut s);
-    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some());
-    let rendered = renders(&s);
-    wheel(&mut s, point(px(30.), px(0.)), Modifiers::none());
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
+    let drawn = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.layers_drawn());
+    let (rendered, layers) = (renders(&s), drawn(&s));
+    wheel(&mut s, point(px(120.), px(0.)), Modifiers::none());
     assert!(renders(&s) > rendered);
+    assert_eq!(drawn(&s), layers, "the layers replay");
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now < skimmed, "the time under the pointer: earlier after a scroll back");
+    // Once the steps stop, the layers draw at the time there.
+    settle(&mut s);
+    assert!(drawn(&s) > layers);
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
