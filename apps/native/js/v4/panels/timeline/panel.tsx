@@ -455,8 +455,6 @@ function Layer({
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
-    { name: "shy" as const, on: !!row.shy, label: "Toggle Shy", symbol: "face.dashed", active: row.shy, always: true },
-    { name: "solo" as const, on: row.solo, label: "Toggle Solo", symbol: "s.circle", active: row.solo, always: true },
     ...(row.transformable
       ? [
           {
