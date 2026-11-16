@@ -4400,7 +4400,7 @@ impl Render for TimelineSurface {
             ops
         });
         let snap_target = match &self.gesture {
-            Gesture::Scrub(scrub) => scrub.snap_target(),
+            Gesture::Scrub(scrub, _) => scrub.snap_target(),
             Gesture::Dragging { .. } => self.snap_guide,
             _ => None,
         };
@@ -5296,7 +5296,7 @@ fn paint_agent_tracks(
         let area = Bounds::new(origin + point(px(b.x as f32), px(b.y as f32)), size(px(b.width as f32), px(b.height as f32)));
         if above.is_some_and(|mask| area.origin.y >= mask.bottom()) { continue; }
         let mask = above.map_or(area, |m| Bounds::from_corners(area.origin, point(area.right(), area.bottom().min(m.bottom()))));
-        window.with_content_mask(Some(ContentMask { bounds: mask, fade_out: Default::default() }), |window| {
+        window.with_content_mask(Some(ContentMask { bounds: mask, ..Default::default() }), |window| {
             if group.pending {
                 window.paint_quad(PaintQuad::new(area).background(rgb(tokens.colors.accent)).corner_radii(px(1.35)));
                 return;
