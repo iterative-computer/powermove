@@ -207,7 +207,8 @@ impl McpSession {
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
-                _ => host.open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
+                _ => host
+                    .open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
             };
         }
         let session = self
@@ -511,6 +512,18 @@ impl McpSession {
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }
+        if catalog::COMPOSITION_TOOLS.contains(&name) {
+            if let Some(value) = args.get("compositionId") {
+                let comp = value
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::invalid("compositionId must be a nonempty string"))?;
+                host.composition = Some(comp.to_owned());
+                if let Some(id) = session.project.as_deref() {
+                    host.view(id)?;
+                }
+            }
+        }
         if name == "export_video" {
             let id = session
                 .project
@@ -634,10 +647,11 @@ impl McpSession {
                 // The captions land in this run's transaction, as one step.
                 let command = result["command"].take();
                 let label = args["label"].as_str().unwrap_or("Generate Captions");
-                self.dispatch(
-                    "apply_commands",
-                    &json!({"commands":[command.clone()],"label":label}),
-                )?;
+                let mut edit = json!({"commands":[command.clone()],"label":label});
+                if let Some(comp) = args.get("compositionId") {
+                    edit["compositionId"] = comp.clone();
+                }
+                self.dispatch("apply_commands", &edit)?;
                 Ok(json!({"status":"done","layerId":command["id"],
                     "cues":result["cues"],"language":result["language"]}))
             }
@@ -702,7 +716,10 @@ impl McpSession {
                     match crate::media::layer_for(&project, &imported, at) {
                         Some((layer, command)) => {
                             drop(host);
-                            let commands = json!({"commands":[command],"label":"Import Media"});
+                            let mut commands = json!({"commands":[command],"label":"Import Media"});
+                            if let Some(comp) = args.get("compositionId") {
+                                commands["compositionId"] = comp.clone();
+                            }
                             self.dispatch("apply_commands", &commands)?;
                             result["layerId"] = json!(layer);
                         }
@@ -810,16 +827,22 @@ impl McpSession {
                 } else {
                     None
                 };
-                let scene_assets = if name == "edit_3d" && (pm_scene3d::geometry::needs_geometry(args) || args["keepRealWorldScale"] == true) {
+                let scene_assets = if name == "edit_3d"
+                    && (pm_scene3d::geometry::needs_geometry(args)
+                        || args["keepRealWorldScale"] == true)
+                {
                     Some(host.scene_geometry(&id)?)
-                } else { None };
+                } else {
+                    None
+                };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
                         &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         host.playhead(&id),
-                        scene_assets.as_deref()
+                        scene_assets
+                            .as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
                 } else if strips.is_none() && video.is_none() {
@@ -835,7 +858,7 @@ impl McpSession {
                 };
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
-                        snapshot: view.snapshot.clone(),
+                        snapshot: host.original_view(&id)?.snapshot,
                         mark: host.history_mark(&id, self.writer)?,
                         revision,
                         changed: false,
@@ -1018,7 +1041,7 @@ impl McpSession {
                 " Extension staging is inert: nothing here activates."
             };
             result["instructions"] = json!(format!(
-                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying.{extensions}"
+                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying.{extensions}"
             ));
             Some(root)
         };
@@ -1266,7 +1289,7 @@ fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -
         if tx.changed {
             tx.interleaved = true;
         } else {
-            tx.snapshot = host.view(id)?.snapshot;
+            tx.snapshot = host.original_view(id)?.snapshot;
             tx.mark = host.history_mark(id, writer)?;
         }
         tx.revision = revision;
@@ -1301,7 +1324,7 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
         tx.revision,
         writer,
     )?;
-    tx.snapshot = host.view(id)?.snapshot;
+    tx.snapshot = host.original_view(id)?.snapshot;
     tx.revision = host.revision(id)?;
     tx.mark = host.history_mark(id, writer)?;
     tx.changed = false;

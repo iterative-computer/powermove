@@ -627,6 +627,22 @@
     outline-offset: var(--pm-focus-offset);
   }
 
+  /* The one rule an extension's own CSS does not win (an important layered
+     declaration beats an unlayered one): a field's or a button's focus ring
+     is the neutral one the built-in fields draw, never the accent (owner
+     rule: no accent focus rings). Opted-out panels keep their own. */
+  :is(input, textarea, select, button, [contenteditable]):focus-visible:where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    outline: var(--pm-focus-width) solid var(--pm-focus) !important;
+    outline-offset: var(--pm-focus-offset) !important;
+  }
+
   :where(
     :not(
       [data-pm-style="none"],

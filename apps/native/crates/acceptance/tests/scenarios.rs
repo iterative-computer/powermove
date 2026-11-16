@@ -53,6 +53,17 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ),
     ("native.newNull", "cmd+alt+shift+y", "newNull", "[]"),
     ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull", "[]"),
+    ("native.newCamera", "cmd+alt+shift+c", "newCamera", "[]"),
+    ("native.renameLayer", "enter", "renameLayer", "[]"),
+    // Menu-only commands: shipped without a key, so the person can assign one.
+    ("native.saveTake", "", "native.saveTake", "[]"),
+    (
+        "native.addCompositionToTimeline",
+        "",
+        "native.addCompositionToTimeline",
+        "[]",
+    ),
+    ("native.addLayerFromAsset", "", "native.addLayerFromAsset", "[]"),
     // Transport: the shuttle is tried before the keys' shipped meanings.
     ("native.shuttleBackward", "j", "shuttleBackward", "[]"),
     ("native.shuttleStop", "k", "shuttleStop", "[]"),
@@ -431,7 +442,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
 fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 287);
+    assert_eq!(shipped.len(), 292);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
