@@ -84,6 +84,14 @@ pub(crate) fn release(then: Option<objc2::rc::Retained<objc2_app_kit::NSEvent>>)
     }
 }
 
+/// The keys held for a field, taken in order to hand over at once (the
+/// field has the keyboard and its edit is ending). The wait is over.
+#[cfg(target_os = "macos")]
+pub(crate) fn take_held() -> Vec<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    EXPECTED.with(|e| e.set(None));
+    HELD.with(|h| std::mem::take(&mut *h.borrow_mut()))
+}
+
 /// The field the person opened has the keyboard (its view saw it take it):
 /// anything held for it goes to it now.
 #[cfg(target_os = "macos")]

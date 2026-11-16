@@ -255,6 +255,10 @@ impl Resolver {
             vec![]
         }
     }
+    /// The key posted for replay that has not been reported replayed.
+    pub fn waiting_replay(&self) -> Option<u64> {
+        self.waiting_replay
+    }
     pub fn pending_token(&self) -> Option<u64> {
         self.pending.as_ref().map(|p| p.0.token)
     }

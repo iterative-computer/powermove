@@ -56,6 +56,10 @@ pub trait TextInput {
     fn marked_range(&self) -> Option<(usize, usize)>;
     fn take_events(&self) -> Vec<TextEvent>;
     fn on_event(&self, wake: Rc<dyn Fn()>);
+    /// Keys typed for this text that have not reached it yet (still queued
+    /// in the window, or held while it took the keyboard) reach it now, in
+    /// order: read before the edit ends, its value holds every key typed.
+    fn take_pending(&self);
 }
 
 /// A press this close to the frame (display points) still edits.
@@ -894,6 +898,9 @@ impl GizmoSurface {
         };
         s.finishing = true;
         if let Some(input) = s.input.take() {
+            // Fast typing ended by Escape, Command-Return, a click or another
+            // tool: the last keys may still be on their way. They count.
+            input.take_pending();
             let value = input.value().replace('\r', "");
             if value != s.written {
                 s.written = value.clone();
@@ -1513,6 +1520,9 @@ impl TextInput for NativeInput {
     }
     fn on_event(&self, wake: Rc<dyn Fn()>) {
         self.0.on_event(wake);
+    }
+    fn take_pending(&self) {
+        pm_shell::flush_typing();
     }
 }
 pub fn native_input(initial: &str, window: &Window) -> Option<Rc<dyn TextInput>> {

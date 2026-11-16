@@ -52,6 +52,9 @@ pub(crate) struct FakeInput {
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     focused: Cell<bool>,
+    /// Typed but not yet handed to the editor (the window's key queue
+    /// behind a busy frame): it arrives when asked, or after the edit.
+    pending: RefCell<String>,
 }
 impl FakeInput {
     fn send(&self, event: TextEvent) {
@@ -69,6 +72,10 @@ impl FakeInput {
     }
     fn key(&self, key: &'static str) {
         self.send(TextEvent::Key(key));
+    }
+    /// Keys typed faster than they are handed over: still on their way.
+    fn type_queued(&self, text: &str) {
+        self.pending.borrow_mut().push_str(text);
     }
 }
 impl TextInput for FakeInput {
@@ -110,6 +117,12 @@ impl TextInput for FakeInput {
     }
     fn on_event(&self, wake: Rc<dyn Fn()>) {
         *self.wake.borrow_mut() = Some(wake);
+    }
+    fn take_pending(&self) {
+        let queued = std::mem::take(&mut *self.pending.borrow_mut());
+        if !queued.is_empty() {
+            self.type_text(&queued);
+        }
     }
 }
 struct Recording(Rc<Recorder>);
@@ -1164,6 +1177,84 @@ fn the_text_tool_types_a_new_layer_in_one_undo_step(cx: &mut TestAppContext) {
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
     assert!(layer_value(&s.rig.kernel, "l0").is_some());
+}
+/// How a fast typist ends a text edit.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    /// Escape, which the window's key handling sends ahead of queued keys.
+    Escape,
+    /// Command-Return in the text.
+    CommandReturn,
+    /// A click on the canvas away from the text.
+    ClickOutside,
+    /// Another tool from the toolbar: the text loses the keyboard.
+    ToolSwitch,
+}
+/// Types "Hello", then " there" faster than it is handed to the editor (it
+/// is still on its way when the edit ends), ends the edit `ending`'s way and
+/// returns what the layer holds.
+fn fast_typing_then(cx: &mut TestAppContext, ending: Ending) -> Option<String> {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let id = s.rig.kernel.published(PROJECT).unwrap().selection.layers()[0].clone();
+    let input = s.recorder.input.borrow().clone().unwrap();
+    input.type_text("Hello");
+    cx.run_until_parked();
+    input.type_queued(" there");
+    match ending {
+        Ending::Escape => {
+            assert!(s.surface.update(&mut s.vcx, |g, cx| g.cancel(cx)));
+        }
+        Ending::CommandReturn => input.key("commit"),
+        Ending::ClickOutside => {
+            let away = s.point_of([40., 40.]);
+            s.vcx.simulate_click(away, Modifiers::none());
+        }
+        Ending::ToolSwitch => {
+            s.recorder.tool.set(Some(Tool::Hand));
+            input.focused.set(false);
+            input.send(TextEvent::Blurred);
+        }
+    }
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.text_open().is_none()));
+    assert!(input.pending.borrow().is_empty(), "{ending:?}: a key was left over");
+    layer_value(&s.rig.kernel, &id).and_then(|l| text_of(&l))
+}
+// PM-459: typing fast and ending the edit at once keeps every key typed before the
+// end, however it ends; none is left to land on the canvas as a shortcut.
+#[gpui::test]
+fn fast_typing_then_escape_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(fast_typing_then(cx, Ending::Escape).as_deref(), Some("Hello there"));
+}
+#[gpui::test]
+fn fast_typing_then_command_return_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::CommandReturn).as_deref(),
+        Some("Hello there")
+    );
+}
+#[gpui::test]
+fn fast_typing_then_a_click_outside_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::ClickOutside).as_deref(),
+        Some("Hello there")
+    );
+}
+#[gpui::test]
+fn fast_typing_then_another_tool_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::ToolSwitch).as_deref(),
+        Some("Hello there")
+    );
 }
 /// Leaving a fresh layer empty leaves no layer and no history entry.
 #[gpui::test]
