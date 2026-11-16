@@ -47,6 +47,7 @@ mod tests {
         assert_eq!(curves[2][2], (10., 20. + k));
         // The middle segment is mirrored about the diagonal.
         let [p, q, _] = curves[1];
+        let (p, q) = ((p.0 - 10., p.1 - 20.), (q.0 - 10., q.1 - 20.));
         assert!((p.0 - q.1).abs() < 1e-9 && (p.1 - q.0).abs() < 1e-9);
     }
 
