@@ -1024,7 +1024,11 @@ impl SurfaceView {
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
         }
-        control.update(cx, |v, _| v.picture_with(&self.pictures));
+        // The header stays put while the body scrolls: its controls are
+        // never pictured.
+        if !self.in_header(id) {
+            control.update(cx, |v, _| v.picture_with(&self.pictures));
+        }
         self.controls.insert(id, control);
     }
     /// The ink a panel gave a field's value (the accent on a value an
@@ -1261,7 +1265,9 @@ impl SurfaceView {
                 f.begin_editing_selecting_all(cx);
             });
         }
-        field.update(cx, |f, _| f.picture_with(&self.pictures));
+        if !self.in_header(id) {
+            field.update(cx, |f, _| f.picture_with(&self.pictures));
+        }
         self.fields.insert(id, field);
     }
     /// Ask JS for the row window that covers native scroll, when it left the
@@ -1729,6 +1735,21 @@ impl SurfaceView {
             });
         })
         .detach();
+    }
+    /// Whether a node is the panel's header or inside it.
+    fn in_header(&self, mut id: Id) -> bool {
+        let Some(header) = self.prepared.header else {
+            return false;
+        };
+        loop {
+            if id == header {
+                return true;
+            }
+            match self.prepared.node(id).and_then(|n| n.parent) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
     }
     fn hold_changed(&self, cx: &mut Context<Self>) {
         for control in self.controls.values() {
