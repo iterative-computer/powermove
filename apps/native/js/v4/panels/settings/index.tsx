@@ -860,8 +860,9 @@ function Keycaps({ keys }: { keys: string }) {
             paddingRight: t("metrics.gap"),
             borderRadius: t("metrics.inner_radius"),
             borderWidth: t("metrics.border"),
-            borderColor: t("colors.hairline"),
-            background: t("colors.fill"),
+            borderColor: t("colors.separator"),
+            // A keycap stands on the card as a button does.
+            background: t("colors.raised"),
           }}
         >
           <text style={text}>{cap}</text>
