@@ -740,26 +740,14 @@ impl GizmoSurface {
             f64::from(f32::from(frame.origin.x)) + p[0] * frame.scale,
             f64::from(f32::from(frame.origin.y)) + p[1] * frame.scale,
         ];
-        let view = if self.bounds.size.width > px(0.) {
-            [
-                f64::from(f32::from(self.bounds.origin.x)),
-                f64::from(f32::from(self.bounds.origin.y)),
-                f64::from(f32::from(self.bounds.size.width)),
-                f64::from(f32::from(self.bounds.size.height)),
-            ]
-        } else {
-            [0., 0., 640., 360.]
-        };
-        let w = f64::from(self.tokens.metrics.color_picker_width);
-        let h = 320.;
+        // Give the shared anchored element the stop itself as its anchor;
+        // GPUI snaps its measured size to the window, including status rows.
         Some(Bounds::new(
-            point(
-                px(anchor[0].clamp(view[0], (view[0] + view[2] - w).max(view[0])) as f32),
-                px((anchor[1] + 18.).min((view[1] + view[3] - h).max(view[1])) as f32),
-            ),
-            size(px(w as f32), px(h as f32)),
+            point(px(anchor[0] as f32), px((anchor[1] + 18.) as f32)),
+            size(px(self.tokens.metrics.color_picker_width), px(320.)),
         ))
     }
+
     pub(super) fn effects_open_colour(
         &mut self,
         i: usize,
