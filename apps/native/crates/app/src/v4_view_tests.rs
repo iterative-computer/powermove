@@ -1889,3 +1889,26 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
         }
     }
 }
+/// A deep panel tree renders on a test thread's 2 MB stack: each level of
+/// the recursive render keeps a small frame (what a node is before and after
+/// its children is built in frames of its own). One frame per level was
+/// 180 KB in a debug build, and ten levels with a symbol drawn under them
+/// overflowed.
+#[gpui::test]
+fn a_deep_panel_tree_renders_within_a_small_stack(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    const DEPTH: u64 = 40;
+    let mut ops = vec![];
+    for level in 1..=DEPTH {
+        let props = if level == DEPTH {
+            json!({"id":"deepest","style":{"width":20,"height":20}})
+        } else {
+            json!({"style":{"display":"flex","padding":1}})
+        };
+        ops.extend(node_ops(level, level - 1, "div", props, &["click"]));
+    }
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    assert!(bounds(&mut vcx, "deepest").size.width > px(0.));
+}
