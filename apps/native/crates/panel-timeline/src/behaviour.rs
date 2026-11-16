@@ -533,11 +533,7 @@ impl TimelineModel {
             true
         };
         Ok((
-            vec![
-                pm_kernel::SelectionCall::Layers { ids, add: false }
-                    .user()
-                    .into(),
-            ],
+            vec![pm_kernel::SelectionCall::Layers { ids, add: false }.into()],
             drag,
         ))
     }
@@ -561,11 +557,7 @@ impl TimelineModel {
             TrackHeaderAction::Select => {
                 self.key_selection_active = false;
                 Plan {
-                    calls: vec![
-                        pm_kernel::SelectionCall::Layers { ids, add: false }
-                            .user()
-                            .into(),
-                    ],
+                    calls: vec![pm_kernel::SelectionCall::Layers { ids, add: false }.into()],
                     ..Default::default()
                 }
             }

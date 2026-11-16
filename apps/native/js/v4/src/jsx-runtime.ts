@@ -26,6 +26,7 @@ export interface SurfaceProps {
   onFocus?: (event: SurfaceEvent) => void;
   onBlur?: (event: SurfaceEvent) => void;
   onPointerDown?: (event: SurfaceEvent) => void;
+  onPointerDownCapture?: (event: SurfaceEvent) => void;
   title?: string;
   metadata?: Record<string, Json>;
   control?: string;

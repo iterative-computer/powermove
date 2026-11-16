@@ -48,7 +48,11 @@ fn body_bands_and_middle_group_follow_main() {
             )
             .unwrap();
         assert_eq!(p.target, expected);
-        assert!(p.rect.x >= r.x && p.rect.y >= r.y && p.rect.y + p.rect.h <= r.y + r.h);
+        // Side-panel floors can grow the scrollable column on a split.
+        // The preview must describe the actual landing, including that growth.
+        let mut landed = l.clone();
+        landed.move_panel_to("assets", p.target).unwrap();
+        assert_eq!(p.rect, panel(&landed, "assets"));
     }
 }
 #[test]

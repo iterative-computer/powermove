@@ -438,9 +438,7 @@ impl Controller {
                             let ids = reply.hit.map(|h| vec![h.layer]).unwrap_or_default();
                             let _ = this.update(cx, |v, cx| {
                                 v.call(
-                                    pm_kernel::SelectionCall::Layers { ids, add: false }
-                                        .user()
-                                        .into(),
+                                    pm_kernel::SelectionCall::Layers { ids, add: false }.into(),
                                     cx,
                                 )
                             });

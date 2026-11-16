@@ -1,0 +1,217 @@
+import { test, expect } from "bun:test";
+import { createRoot, type Commit } from "../../src";
+import { AgentView } from "./view";
+import { citationLabel, quoteSelection, isCitation } from "./citations";
+import { breakable } from "./present";
+import { withRows } from "./fixtures";
+
+test("UTF-16 quote offsets and Unicode truncation", () => {
+  expect(quoteSelection("m", "A😀 exact", 1, 9)).toEqual({
+    messageId: "m",
+    text: "😀 exact",
+    start: 1,
+    end: 9,
+    comment: "",
+  });
+  expect(quoteSelection("m", "abc", 3, 1)).toBeNull();
+  expect(citationLabel("😀".repeat(33))).toBe("😀".repeat(32) + "…");
+  expect(citationLabel("short")).toBe("short");
+  expect(quoteSelection("m", "😀", 0, 1)).toBeNull();
+  expect(
+    isCitation({ messageId: "m", text: "😀", start: 0, end: 1, comment: "" }),
+  ).toBe(false);
+});
+test("select, cite, comment, jump, remove and sent history", async () => {
+  const commits: Commit[] = [];
+  const p = withRows([
+    {
+      id: "history:m",
+      commandId: "m",
+      chosen: {},
+      open: false,
+      value: {
+        role: "assistant",
+        text: "If you've already picked a mode for your project, keep it.",
+      },
+    },
+  ]);
+  const root = createRoot(async (c) => {
+    commits.push(structuredClone(c));
+    return { accepted: true, revision: c.baseRevision + 1 };
+  });
+  const render = () =>
+    root.render(
+      <AgentView
+        publication={p}
+        send={(a) => {
+          if (a.type === "citations") p.snapshot.draft.citations = a.citations;
+        }}
+      />,
+    );
+  const node = (label: string) => {
+    const n = root
+      .inspect()
+      .nodes.find((n) => n.props.label === label && n.props.role !== "group");
+    if (!n) throw Error(label);
+    return n;
+  };
+  const capture = async (name: string) => {
+    if (process.env.PM_CITE_STATES)
+      await Bun.write(
+        `${process.env.PM_CITE_STATES}/${name}.json`,
+        JSON.stringify(commits),
+      );
+  };
+  await render();
+  await capture("after-idle");
+  await root.drive(node("Transcript text").id, "select", {
+    selection: [0, 40],
+  });
+  await capture("cite-pill");
+  await root.drive(node("Cite selection").id, "click");
+  await render();
+  expect(p.snapshot.draft.citations?.[0]?.end).toBe(40);
+  expect(p.snapshot.draft.citations?.[0]?.text).toBe(
+    String(p.snapshot.rows.items[0]!.value.text).slice(0, 40),
+  );
+  await capture("chips");
+  await root.drive(node("Edit comment").id, "click");
+  expect(
+    (node("Add a comment about this quote").props.metadata as any).focusOnMount,
+  ).toBe(true);
+  await capture("comment");
+  await root.drive(node("Add a comment about this quote").id, "input", {
+    value: "Explain this choice",
+  });
+  await root.drive(node("Add a comment about this quote").id, "keydown", {
+    key: "Enter",
+  });
+  await render();
+  expect(p.snapshot.draft.citations?.[0]?.comment).toBe("Explain this choice");
+  await root.drive(
+    node(`Quoted: ${p.snapshot.draft.citations![0]!.text}`).id,
+    "click",
+  );
+  expect((node("Transcript text").props.metadata as any).revealQuote).toEqual([
+    0, 40, 1,
+  ]);
+  await capture("jump");
+  await root.drive(node("Edit comment").id, "click");
+  await root.drive(node("Add a comment about this quote").id, "input", {
+    value: "Discard this",
+  });
+  await root.drive(node("Add a comment about this quote").id, "keydown", {
+    key: "Escape",
+  });
+  expect(p.snapshot.draft.citations?.[0]?.comment).toBe("Explain this choice");
+  const quotes = structuredClone(p.snapshot.draft.citations!);
+  await root.drive(node("Remove quote").id, "click");
+  expect(p.snapshot.draft.citations).toEqual([]);
+  await render();
+  await root.drive(node("Transcript text").id, "select", { selection: [1, 6] });
+  await root.drive(node("Transcript text").id, "keydown", {
+    key: ".",
+    metaKey: true,
+    shiftKey: true,
+  });
+  expect(p.snapshot.draft.citations?.[0]?.text).toBe("f you");
+  await render();
+  await root.drive(node("Remove quote").id, "click");
+  p.snapshot.rows.items.push({
+    id: "history:u",
+    commandId: "u",
+    chosen: {},
+    open: false,
+    value: {
+      role: "user",
+      text: "Help me understand",
+      citations: quotes as any,
+    },
+  });
+  p.snapshot.rows.count++;
+  await render();
+  expect(
+    root.inspect().nodes.some((n) => n.text === "Explain this choice"),
+  ).toBe(true);
+  await capture("sent");
+  root.dispose();
+});
+
+test("selectable prose keeps breakable display text and exact source metadata", async () => {
+  const text = 'https://example.com/path/to/file.json?value={"long":"a/b/c"}';
+  const root = createRoot(async (c) => ({
+    accepted: true,
+    revision: c.baseRevision + 1,
+  }));
+  const p = withRows([
+    {
+      id: "history:m",
+      commandId: "m",
+      chosen: {},
+      open: false,
+      value: { role: "assistant", text },
+    },
+  ]);
+  let citation: unknown;
+  await root.render(
+    <AgentView
+      publication={p}
+      send={(a) => {
+        if (a.type === "citations") citation = a.citations[0];
+      }}
+    />,
+  );
+  const leaf = root
+    .inspect()
+    .nodes.find((n) => (n.props.metadata as any)?.quoteText === text);
+  expect(leaf).toBeDefined();
+  const displayed =
+    (leaf?.props.metadata as any)?.runs?.map((r: any) => r.t).join("") ??
+    leaf?.children
+      .map((id) => root.inspect().nodes.find((n) => n.id === id)?.text ?? "")
+      .join("");
+  expect(displayed).toBe(breakable(text));
+  expect(displayed).toContain("\u200b");
+  const source = root
+    .inspect()
+    .nodes.find((n) => n.props.label === "Transcript text")!;
+  await root.drive(source.id, "select", {
+    value: text,
+    selection: [8, text.length],
+  });
+  const cite = root
+    .inspect()
+    .nodes.find((n) => n.props.label === "Cite selection")!;
+  await root.drive(cite.id, "click");
+  expect(citation).toEqual({
+    messageId: "history:m",
+    text: text.slice(8),
+    start: 8,
+    end: text.length,
+    comment: "",
+  });
+  root.dispose();
+});
+
+test("a stable quote source cites through the latest publication and sender", async () => {
+  const p = withRows([{ id: "history:m", commandId: "m", chosen: {}, open: false,
+    value: { role: "assistant", text: "Exact source text" } }]);
+  const root = createRoot(async (c) => ({ accepted: true, revision: c.baseRevision + 1 }));
+  let oldCalls = 0;
+  await root.render(<AgentView publication={p} send={() => { oldCalls++; }} />);
+  const next = structuredClone(p);
+  const existing = quoteSelection("other", "Already quoted", 0, 7)!;
+  next.sequence++;
+  next.snapshot.draft.citations = [existing];
+  let citations: unknown;
+  await root.render(<AgentView publication={next} send={(a) => {
+    if (a.type === "citations") citations = a.citations;
+  }} />);
+  const source = root.inspect().nodes.find((n) => n.props.label === "Transcript text")!;
+  await root.drive(source.id, "select", { selection: [0, 5] });
+  const cite = root.inspect().nodes.find((n) => n.props.label === "Cite selection")!;
+  await root.drive(cite.id, "click");
+  expect(oldCalls).toBe(0);
+  expect(citations).toEqual([existing, quoteSelection("history:m", "Exact source text", 0, 5)]);
+  await root.dispose();
+});

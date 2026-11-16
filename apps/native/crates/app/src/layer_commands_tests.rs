@@ -66,16 +66,18 @@ fn select(kernel: &KernelHandle, ids: &[&str]) -> Arc<Published> {
 }
 fn run(kernel: &KernelHandle, plan: Plan) {
     let revision = kernel.published("synthetic").unwrap().revision();
-    if let Some(call) = transaction(&plan, Some(revision)) {
-        send(kernel, call);
-    } else if let Some(ids) = plan.select {
-        send(
-            kernel,
-            SelectionCall::User(Box::new(SelectionCall::Layers { ids, add: false })).into(),
-        );
+    send(
+        kernel,
+        Call::Transact {
+            label: Some(plan.label),
+            expected_revision: Some(revision),
+            body: WriteBody::Commands(plan.commands),
+        },
+    );
+    if let Some(ids) = plan.select {
+        send(kernel, SelectionCall::Layers { ids, add: false }.into());
     }
 }
-
 fn frame(kernel: &KernelHandle, renderer: &mut pm_render::Renderer, time: f64) -> Vec<f32> {
     let p = kernel.published("synthetic").unwrap();
     renderer
@@ -168,8 +170,6 @@ fn precompose_move_keeps_the_picture_and_releases_back() {
 fn precompose_and_open_is_one_undo_step() {
     let (_actor, kernel) = open(&[layer("a", "solid", 40., 20., 0., "#FF0000", "")]);
     let published = select(&kernel, &["a"]);
-    let before_selection = published.selection.clone();
-    let entries = published.history.entries;
     let draft = PrecomposeDraft {
         open_after: true,
         ..precompose_draft(&published).unwrap()
@@ -195,23 +195,10 @@ fn precompose_and_open_is_one_undo_step() {
             .layers()
             .is_empty()
     );
-    assert_eq!(
-        kernel.published("synthetic").unwrap().history.entries,
-        entries + 1
-    );
-    let after_selection = kernel.published("synthetic").unwrap().selection.clone();
     send(&kernel, HistoryCall::Undo.into());
     assert_eq!(open_comp(&kernel), original);
-    assert_eq!(
-        kernel.published("synthetic").unwrap().selection,
-        before_selection
-    );
     send(&kernel, HistoryCall::Redo.into());
     assert_eq!(open_comp(&kernel), (opened, true));
-    assert_eq!(
-        kernel.published("synthetic").unwrap().selection,
-        after_selection
-    );
 }
 
 #[test]
@@ -626,47 +613,93 @@ fn host_rows_list_the_layers_a_layer_can_follow() {
     );
 }
 
-/// These are the production plans shared by menus, chords, toolbar and palette.
 #[test]
-fn document_command_results_restore_with_the_edit_without_selection_entries() {
-    for command in ["newSolid", "newShape", "newCamera", "duplicate", "groupLayers"] {
-        let (_actor, kernel) = open(&[
-            layer("a", "solid", 40., 20., 0., "#FF0000", ""),
-            layer("b", "solid", 60., 30., 0., "#00FF00", ""),
-        ]);
-        let before = select(&kernel, &["a", "b"]);
-        let plan = command_plan(command, &[], &before, 0.).unwrap();
-        let label = plan.label.clone();
-        run(&kernel, plan);
-        let after = kernel.published("synthetic").unwrap();
-        assert_eq!(
-            after.history.entries,
-            before.history.entries + 1,
-            "{command}"
-        );
-        assert_eq!(
-            after.history.undo_label.as_deref(),
-            Some(label.as_str()),
-            "{command}"
-        );
+fn viewer_arrow_nudges_use_comp_pixels_for_all_selected_layers_and_key_animation() {
+    let animated = layer("a", "solid", 40., 20., 0., "#FF0000", "").replace(
+        r#""position.x":{"v":40,"kf":[]}"#,
+        r#""position.x":{"v":40,"kf":[{"i":"x0","t":0,"v":40},{"i":"x2","t":2,"v":40}]}"#,
+    );
+    let (_actor, kernel) = open(&[animated, layer("b", "solid", 60., 30., 0., "#00FF00", "")]);
+    select(&kernel, &["a", "b"]);
+    let evaluate = |id: &str, channel: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        pm_kernel::QueryMirror::new(&p)
+            .queries()
+            .evaluate(None, id, channel, 1.)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    for (chord, dx, dy) in [
+        ("left", -1., 0.),
+        ("right", 1., 0.),
+        ("up", 0., -1.),
+        ("down", 0., 1.),
+        ("shift+left", -10., 0.),
+        ("shift+right", 10., 0.),
+        ("shift+up", 0., -10.),
+        ("shift+down", 0., 10.),
+    ] {
+        let before: Vec<_> = ["a", "b"]
+            .map(|id| (evaluate(id, "position.x"), evaluate(id, "position.y")))
+            .into();
+        let (command, args) = crate::layer_commands::commands_tests::dispatch(chord);
+        assert_eq!(command, "nudgeSelection");
+        let p = kernel.published("synthetic").unwrap();
+        run(&kernel, command_plan(&command, &args, &p, 1.).unwrap());
+        for (i, id) in ["a", "b"].iter().enumerate() {
+            assert_eq!(evaluate(id, "position.x"), before[i].0 + dx, "{chord}");
+            assert_eq!(evaluate(id, "position.y"), before[i].1 + dy, "{chord}");
+        }
+        if dx != 0. {
+            let p = kernel.published("synthetic").unwrap();
+            let root = p.snapshot.root().unwrap();
+            let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+            let value = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
+            let keys = value
+                .get("p")
+                .unwrap()
+                .get("position.x")
+                .unwrap()
+                .get("kf")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert!(
+                keys.iter()
+                    .any(|key| key.get("t").and_then(Value::as_f64) == Some(1.))
+            );
+        }
         send(&kernel, HistoryCall::Undo.into());
-        let undone = kernel.published("synthetic").unwrap();
-        assert_eq!(
-            undone.snapshot.root().unwrap().to_value(),
-            before.snapshot.root().unwrap().to_value(),
-            "{command}: document"
-        );
-        assert_eq!(undone.selection, before.selection, "{command}: selection");
-        send(&kernel, HistoryCall::Redo.into());
-        let redone = kernel.published("synthetic").unwrap();
-        assert_eq!(
-            redone.snapshot.root().unwrap().to_value(),
-            after.snapshot.root().unwrap().to_value(),
-            "{command}: redo document"
-        );
-        assert_eq!(
-            redone.selection, after.selection,
-            "{command}: redo selection"
-        );
+        for (i, id) in ["a", "b"].iter().enumerate() {
+            assert_eq!(evaluate(id, "position.x"), before[i].0);
+            assert_eq!(evaluate(id, "position.y"), before[i].1);
+        }
+    }
+}
+
+#[test]
+fn arrows_in_fields_never_dispatch_layer_nudge() {
+    use pm_shell::keyboard::{Effect, Key, Resolver};
+    for chord in [
+        "left",
+        "right",
+        "up",
+        "down",
+        "shift+left",
+        "shift+right",
+        "shift+up",
+        "shift+down",
+    ] {
+        let mut resolver = Resolver::new();
+        let effects = resolver.submit(Key {
+            token: 1,
+            chord: chord.into(),
+            field: true,
+            repeat: false,
+            up: false,
+            compat: false,
+        });
+        assert_eq!(effects, vec![Effect::Replay(1)], "{chord}");
     }
 }

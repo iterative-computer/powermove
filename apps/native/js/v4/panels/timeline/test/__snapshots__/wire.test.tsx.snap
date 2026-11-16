@@ -1450,6 +1450,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -2162,7 +2219,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.muted",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -2186,7 +2243,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         },
                                         "style": {
                                           "color": {
-                                            "token": "colors.accent_text",
+                                            "token": "colors.muted",
                                           },
                                           "minHeight": {
                                             "token": "metrics.hit",
@@ -2236,7 +2293,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -2274,7 +2331,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -2314,6 +2371,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -2325,7 +2439,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2353,7 +2467,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2381,7 +2495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2438,10 +2552,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.timeline_selected",
+                                "token": "colors.fill_strong",
                               },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -3188,6 +3302,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -4068,6 +4239,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -4939,6 +5167,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -6055,6 +6340,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -6971,6 +7313,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -7702,7 +8101,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.muted",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -7726,7 +8125,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         },
                                         "style": {
                                           "color": {
-                                            "token": "colors.accent_text",
+                                            "token": "colors.muted",
                                           },
                                           "minHeight": {
                                             "token": "metrics.hit",
@@ -7776,7 +8175,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -7814,7 +8213,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -7854,6 +8253,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -7865,7 +8321,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7911,7 +8367,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7968,10 +8424,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.timeline_selected",
+                                "token": "colors.fill_strong",
                               },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -8008,7 +8464,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.muted",
                                       },
                                       "flexShrink": 0,
                                       "fontSize": {
@@ -8032,7 +8488,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         },
                                         "style": {
                                           "color": {
-                                            "token": "colors.accent_text",
+                                            "token": "colors.muted",
                                           },
                                           "minHeight": {
                                             "token": "metrics.hit",
@@ -8082,7 +8538,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.inner_radius",
                                       },
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "display": "flex",
                                       "flexShrink": 0,
@@ -8120,7 +8576,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.text",
                                       },
                                       "flexGrow": 1,
                                       "fontSize": {
@@ -8160,6 +8616,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:kicker",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:kicker",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:kicker",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -8171,7 +8684,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -8217,7 +8730,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.accent_text",
+                                        "token": "colors.secondary",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -8274,10 +8787,10 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "style": {
                               "alignItems": "center",
                               "background": {
-                                "token": "colors.timeline_selected",
+                                "token": "colors.fill_strong",
                               },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "display": "flex",
                               "flexDirection": "row",
@@ -9032,6 +9545,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -9899,6 +10469,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29990",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29990",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-29990",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -10199,6 +10826,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29991",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29991",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -10505,6 +11189,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29992",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29992",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-29992",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -10805,6 +11546,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29993",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29993",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -11111,6 +11909,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29994",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29994",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-29994",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -11411,6 +12266,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29995",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29995",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -11717,6 +12629,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29996",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29996",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-29996",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -12017,6 +12986,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29997",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29997",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -12323,6 +13349,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29998",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29998",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-29998",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -12623,6 +13706,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-29999",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-29999",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -12929,6 +14069,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30000",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30000",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30000",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -13229,6 +14426,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30001",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30001",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -13535,6 +14789,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30002",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30002",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30002",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -13835,6 +15146,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30003",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30003",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -14141,6 +15509,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30004",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30004",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30004",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -14441,6 +15866,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30005",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30005",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -14747,6 +16229,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30006",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30006",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30006",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -15047,6 +16586,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30007",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30007",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -15353,6 +16949,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30008",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30008",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30008",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -15653,6 +17306,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30009",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30009",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -15959,6 +17669,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30010",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30010",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30010",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -16259,6 +18026,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30011",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30011",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -16565,6 +18389,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30012",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30012",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30012",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -16865,6 +18746,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30013",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30013",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -17171,6 +19109,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30014",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30014",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30014",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -17471,6 +19466,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30015",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30015",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -17777,6 +19829,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30016",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30016",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30016",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -18077,6 +20186,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30017",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30017",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -18383,6 +20549,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30018",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30018",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:row-30018",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -18683,6 +20906,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:row-30019",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:row-30019",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -19580,6 +21860,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -20471,6 +22808,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             {
                               "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
@@ -22111,6 +24505,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -23148,6 +25599,63 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -23246,7 +25754,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "designTodo": "T4",
                               "media": "ready",
                               "nativeRow": "layer:headline",
-                              "timelineLayerDrag": null,
                             },
                             "preventDefault": {
                               "keydown": [

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
+import { createContext } from "preact";
+import { useContext, useEffect, useState } from "preact/hooks";
 import { memo } from "../../src/memo";
 import type { ComponentChildren } from "preact";
 import * as UI from "../../src/components";
@@ -13,6 +14,8 @@ import type {
 } from "./model";
 import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
+
+const TimelineFocused = createContext(false);
 
 type Send = (intent: Intent) => void;
 const t = UI.token;
@@ -444,11 +447,13 @@ function Layer({
   // names truncate at the same place on every row and nothing moves under
   // the pointer. Visibility and the parent link always show; Lock shows
   // when set, or under the pointer, keyboard focus or a single selected
-  // layer. Shy and Solo are the Layer menu's and the row menu's (the owner
-  // took their row buttons out).
+  // layer. Shy and Solo stay reachable on each layer row.
+  const focusedSelection = useContext(TimelineFocused) && row.selected;
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
+    { name: "shy" as const, on: !!row.shy, label: "Toggle Shy", symbol: "face.dashed", active: row.shy, always: true },
+    { name: "solo" as const, on: row.solo, label: "Toggle Solo", symbol: "s.circle", active: row.solo, always: true },
     ...(row.transformable
       ? [
           {
@@ -497,7 +502,7 @@ function Layer({
         {row.index !== null && (
           <text
             style={{
-              color: t(row.selected ? "colors.accent_text" : "colors.muted"),
+              color: t(focusedSelection ? "colors.accent_text" : "colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
               flexShrink: 0,
@@ -528,7 +533,7 @@ function Layer({
               label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
               symbol={row.expanded ? "chevron.down" : "chevron.right"}
               quiet
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               tabIndex={-1}
               send={send}
               intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -567,7 +572,7 @@ function Layer({
                 ? `colors.labels.${row.labelColor}`
                 : "colors.field",
             ),
-            color: t(row.selected ? "colors.accent_text" : "colors.text"),
+            color: t(focusedSelection ? "colors.accent_text" : "colors.text"),
             symbolSize: t("metrics.symbol_inline"),
           }}
         />
@@ -599,7 +604,7 @@ function Layer({
             metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
-              ...(row.selected ? { color: t("colors.accent_text") } : {}),
+              ...(focusedSelection ? { color: t("colors.accent_text") } : {}),
               flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -620,7 +625,7 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={row.selected ? "colors.accent_text" : undefined}
+              tint={focusedSelection ? "colors.accent_text" : undefined}
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -727,13 +732,31 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
             id={`timeline:value:${row.id}`}
             label={row.label}
             {...row.numeric}
+            binding={
+              typeof row.numeric.binding === "string"
+                ? row.numeric.binding
+                : row.numeric.binding.handle
+            }
             disabled={row.locked}
             tabIndex={-1}
           />
         ) : (
           (row.axes ?? [{ path: row.path, readout: row.readout }]).map(
             (axis) =>
-              axis.editor ? (
+              axis.numeric ? (
+                <UI.NumberField
+                  id={`timeline:value:${row.id}:${axis.path}`}
+                  label={`${row.label} ${axis.path.split(".").at(-1)}`}
+                  {...axis.numeric}
+                  binding={
+                    typeof axis.numeric.binding === "string"
+                      ? axis.numeric.binding
+                      : axis.numeric.binding.handle
+                  }
+                  disabled={row.locked}
+                  tabIndex={-1}
+                />
+              ) : axis.editor ? (
                 <UI.TextField
                   id={`timeline:value-edit:${row.id}:${axis.path}`}
                   label={`${row.label} ${axis.path.split(".").at(-1)}`}
@@ -808,6 +831,7 @@ const TimelineRow = memo(
     key?: string;
   }) {
     const [hover, setHover] = useState(false);
+    const timelineFocused = useContext(TimelineFocused);
     if (published.kind === "heading")
       return (
         <div
@@ -848,14 +872,7 @@ const TimelineRow = memo(
           nativeRow: row.id,
           depth: row.depth,
           designTodo: "T4",
-          ...(row.kind === "layer"
-            ? {
-                media: row.media,
-                // The native host derives the drag source from nativeRow.
-                // An open field explicitly opts out until rename is finished.
-                ...(row.nameEditor ? { timelineLayerDrag: null } : {}),
-              }
-            : {}),
+          ...(row.kind === "layer" ? { media: row.media } : {}),
         }}
         onClickCapture={(event) => {
           clickModifiers = modifiers(event);
@@ -874,7 +891,7 @@ const TimelineRow = memo(
               ? "metrics.property_row"
               : "metrics.track_row",
           ),
-          ...(row.selected
+          ...(row.selected && timelineFocused
             ? {
                 background: t(
                   row.hovered
@@ -883,7 +900,9 @@ const TimelineRow = memo(
                 ),
                 color: t("colors.accent_text"),
               }
-            : row.hovered
+            : row.selected
+              ? { background: t("colors.fill_strong") }
+              : row.hovered
               ? { background: t("colors.hover") }
               : {}),
         }}
@@ -987,9 +1006,14 @@ export function TimelinePanel({
   frame: TimelineFrame;
   send: Send;
 }) {
+  const [focused, setFocused] = useState(false);
   return (
+    <TimelineFocused.Provider value={focused}>
     <div
       id="timeline"
+      onPointerDownCapture={() => setFocused(true)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => setFocused(typeof event.value === "string" && event.value.startsWith("timeline"))}
       label="Timeline"
       role="group"
       metadata={{
@@ -1178,6 +1202,7 @@ export function TimelinePanel({
         </>
       )}
     </div>
+    </TimelineFocused.Provider>
   );
 }
 

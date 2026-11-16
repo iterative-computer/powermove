@@ -67,13 +67,8 @@ fn run(s: &mut Stage, cx: &mut TestAppContext, command: &str, args: &[serde_json
             if let Some(call_) = transaction(&plan, Some(snapshot.revision())) {
                 call(&s.rig.kernel, call_);
             }
-            if plan.commands.is_empty()
-                && let Some(ids) = plan.select
-            {
-                call(
-                    &s.rig.kernel,
-                    SelectionCall::User(Box::new(SelectionCall::Layers { ids, add: false })),
-                );
+            if let Some(ids) = plan.select {
+                call(&s.rig.kernel, SelectionCall::Layers { ids, add: false });
             }
             delivered(s, cx);
         }

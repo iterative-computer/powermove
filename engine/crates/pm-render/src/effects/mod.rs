@@ -856,6 +856,10 @@ impl Effects {
             entry.program.is_some(),
         );
         let building = entry.program.is_none().then(std::time::Instant::now);
+        let _span = entry
+            .program
+            .is_none()
+            .then(|| pm_perf::Span::new(pm_perf::Counter::ProgramMicros));
         if entry.program.is_none() {
             // Built ahead (decision PROBE-1): taken if it finished, waited
             // for if it is being built now.

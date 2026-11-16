@@ -174,13 +174,6 @@ pub enum Call {
         /// Refuse with `Stale` unless the document is at this revision.
         expected_revision: Option<u64>,
     },
-    /// A document command and its resulting Interface selection, in one history step.
-    TransactWithSelection {
-        label: Option<String>,
-        body: WriteBody,
-        expected_revision: Option<u64>,
-        selection: SelectionCall,
-    },
     /// The write barrier's flush of direct `PM.proj` writes (per-path last
     /// writer wins plus validation). Never an undo step of its own; folds
     /// into an open entry, as today's snapshot diff picks it up.
@@ -224,18 +217,6 @@ impl ActorHistoryMark {
 
 #[derive(Clone, Debug)]
 pub enum SelectionCall {
-    /// Explicit user navigation. Command results belong in TransactWithSelection
-    /// or inside an open document gesture.
-    User(Box<SelectionCall>),
-    /// Changes layers, keys and channel together; user() records one navigation step.
-    Batch(Vec<SelectionCall>),
-    /// Live gesture feedback or document-driven selection, without history.
-    Preview(Vec<SelectionCall>),
-    /// Record the completed gesture against its original Interface selection.
-    FinishGesture {
-        document: u64,
-        before: Selection,
-    },
     Layers {
         ids: Vec<String>,
         add: bool,
@@ -247,11 +228,6 @@ pub enum SelectionCall {
     LayerKeys(Vec<(String, String)>),
     Channel(Option<String>),
     Clear,
-}
-impl SelectionCall {
-    pub fn user(self) -> Self {
-        Self::User(Box::new(self))
-    }
 }
 impl From<SelectionCall> for Call {
     fn from(value: SelectionCall) -> Self {
@@ -644,7 +620,6 @@ struct OpenEntry {
     /// `null`, as a scoped pending entry had no snapshot).
     scoped: bool,
     before: Arc<Document>,
-    before_selection: Selection,
     base_token: u64,
     ops: Vec<EntryOp>,
     leases: Vec<Lease>,
@@ -847,25 +822,7 @@ impl Project {
                 Handled::reply(self.ack(txid, None, None, reply))
             }
             Call::Selection(selection) => {
-                let before = match &selection {
-                    SelectionCall::FinishGesture { document, before }
-                        if *document == self.store.doc_id() =>
-                    {
-                        Some(before.clone())
-                    }
-                    SelectionCall::FinishGesture { .. } | SelectionCall::Preview(_) => None,
-                    SelectionCall::User(_) => Some(self.store.selection().clone()),
-                    _ => None,
-                };
                 let reply = self.select(selection);
-                if caller.origin == Origin::Interface
-                    && self.entry.is_none()
-                    && !matches!(reply, Reply::Throw(_))
-                    && let Some(before) = before
-                {
-                    self.store
-                        .kernel_selection(before, self.store.selection().clone());
-                }
                 Handled::reply(self.ack(txid, None, None, reply))
             }
             Call::Restore {
@@ -927,25 +884,6 @@ impl Project {
                 body,
                 expected_revision,
             } => Handled::reply(self.transact(caller, txid, label, body, expected_revision)),
-            Call::TransactWithSelection {
-                label,
-                body,
-                expected_revision,
-                selection,
-            } => {
-                let before = self.store.selection().clone();
-                let ack = self.transact(caller, txid, label, body, expected_revision);
-                if matches!(ack.reply, Reply::Applied { .. }) {
-                    self.select(selection);
-                    if caller.origin == Origin::Interface
-                        && self.entry.is_none()
-                        && matches!(ack.reply, Reply::Applied { changed: true, .. })
-                    {
-                        self.store.kernel_document_selection(before);
-                    }
-                }
-                Handled::reply(ack)
-            }
             Call::OpenComposition { comp_id, document } => {
                 let ack = self.open_composition(caller, txid, comp_id, document);
                 Handled::reply(ack)
@@ -1073,18 +1011,6 @@ impl Project {
             SelectionCall::LayerKeys(pairs) => self.store.select_layer_keys(pairs),
             SelectionCall::Channel(channel) => self.store.set_selected_channel(channel),
             SelectionCall::Clear => self.store.clear_selection(),
-            SelectionCall::Batch(calls) | SelectionCall::Preview(calls) => {
-                let before = self.store.selection().clone();
-                for call in calls {
-                    let reply = self.select(call);
-                    if matches!(reply, Reply::Throw(_)) {
-                        self.store.set_selection(before);
-                        return reply;
-                    }
-                }
-            }
-            SelectionCall::User(call) => return self.select(*call),
-            SelectionCall::FinishGesture { .. } => {}
         }
         Reply::Selection(self.store.selection().clone())
     }
@@ -1158,7 +1084,6 @@ impl Project {
     ) -> Result<(bool, Option<u64>), TransactionError> {
         let entry_id = self.entry.as_ref().map(|e| e.id);
         let before = self.store.current().clone();
-        let before_selection = self.store.selection().clone();
         crate::fault_injection::hit(crate::fault_injection::Stage::BeforeApply);
         let applied = self.store.kernel_apply(
             body,
@@ -1186,9 +1111,6 @@ impl Project {
                 &before,
                 applied.scopes,
             );
-            if origin == Origin::Interface {
-                self.store.kernel_document_selection(before_selection);
-            }
             crate::fault_injection::hit(crate::fault_injection::Stage::AfterRecord);
         } else {
             self.store.kernel_outside_write();
@@ -1231,7 +1153,6 @@ impl Project {
             holders: vec![owner],
             scoped,
             before: self.store.current().clone(),
-            before_selection: self.store.selection().clone(),
             base_token: self.store.kernel_state_token(),
             ops: Vec::new(),
             leases: Vec::new(),
@@ -1301,9 +1222,6 @@ impl Project {
         let label = label.unwrap_or(entry.label);
         let recorded =
             self.record_ops(label, entry.origin, &entry.before, entry.ops, entry.rebased);
-        if recorded && entry.origin == Origin::Interface {
-            self.store.kernel_document_selection(entry.before_selection);
-        }
         if !recorded
             && !has_navigation
             && crate::memory_metadata::same_composition(

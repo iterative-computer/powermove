@@ -855,6 +855,7 @@ impl TextContext {
         world: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
         self.sync_fonts();
         let raster = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
@@ -1050,6 +1051,7 @@ impl TextContext {
         m: Affine,
         target: (u32, u32),
     ) -> JsResult<Option<TextPlan>> {
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
         self.sync_fonts();
         let frame = {
             let fonts = self.fonts.as_deref_mut().expect("checked by the caller");

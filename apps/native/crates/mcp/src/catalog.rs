@@ -43,6 +43,14 @@ pub fn catalog() -> &'static Value {
                 .expect("existing media tool");
             *tool = replacement.clone();
         }
+        for tool in value["tools"].as_array_mut().unwrap() {
+            if COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap_or("")) {
+                tool["inputSchema"]["properties"]["compositionId"] = serde_json::json!({
+                    "type":"string", "minLength":1,
+                    "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
+                });
+            }
+        }
         value
     })
 }
@@ -383,3 +391,20 @@ mod panel_build_tools_tests {
         assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":-1})).is_err());
     }
 }
+/// Tools whose model and timeline are relative to a composition.
+pub const COMPOSITION_TOOLS: &[&str] = &[
+    "get_project_state",
+    "apply_commands",
+    "render_frames",
+    "check_project",
+    "select_layers",
+    "edit_layer_strips",
+    "edit_video",
+    "edit_3d",
+    "get_timeline",
+    "get_3d_scene",
+    "export_captions",
+    "export_video",
+    "generate_captions",
+    "import_media_to_timeline",
+];

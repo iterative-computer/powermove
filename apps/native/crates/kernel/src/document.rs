@@ -2169,12 +2169,6 @@ impl DocumentStore {
         record
     }
 
-    pub(crate) fn kernel_document_selection(&mut self, before: Selection) {
-        let revision = self.revision();
-        self.history
-            .document_selection(before, self.selection.clone(), revision);
-    }
-
     pub(crate) fn kernel_selection(&mut self, before: Selection, after: Selection) -> Option<u64> {
         let id = self.history.push_selection(before, after);
         if id.is_some() {
@@ -2218,7 +2212,7 @@ impl DocumentStore {
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
         if let Some(selection) = &record.selection {
-            self.restore_history_selection(selection.0.clone());
+            self.set_selection(selection.0.clone());
             self.history.mark_undone();
             self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
@@ -2242,9 +2236,6 @@ impl DocumentStore {
                 label: record.label.clone(),
             },
         )?;
-        if let Some(selection) = &record.document_selection {
-            self.restore_history_selection(selection.0.clone());
-        }
         self.history.mark_undone();
         self.history_owned = true;
         self.tap(|_| Tap::Undo { external: false });
@@ -2265,7 +2256,7 @@ impl DocumentStore {
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
         if let Some(selection) = &record.selection {
-            self.restore_history_selection(selection.1.clone());
+            self.set_selection(selection.1.clone());
             self.history.mark_redone();
             self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
@@ -2289,9 +2280,6 @@ impl DocumentStore {
                 label: record.label.clone(),
             },
         )?;
-        if let Some(selection) = &record.document_selection {
-            self.restore_history_selection(selection.1.clone());
-        }
         self.history.mark_redone();
         self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
@@ -2302,17 +2290,6 @@ impl DocumentStore {
             reverse,
             label: record.label,
         })
-    }
-
-    // Electron restores keys/channel verbatim and filters only missing layers.
-    fn restore_history_selection(&mut self, mut selection: Selection) {
-        let live = self
-            .root()
-            .map(|r| model::layer_ids(r, None))
-            .unwrap_or_default();
-        selection.restore_live_layers(&live);
-        self.selection = selection;
-        self.emit(StoreEvent::SelectionChanged);
     }
 
     /// Replaces the selection (a cancelled edit restores the one it began

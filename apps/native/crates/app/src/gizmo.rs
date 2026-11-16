@@ -204,6 +204,8 @@ pub trait Host: 'static {
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
+    /// A canvas press leaves field/control keyboard focus behind.
+    fn focus_canvas(&self, _: &mut Window, _: &mut App) {}
     /// Publish engine-drawn lines, normalized to the composition frame.
     /// The outline and handles, normalized to the composition, and where the
     /// composition sits in the viewer view (`None`: nothing to place them by).
@@ -1229,6 +1231,7 @@ impl GizmoSurface {
             self.finish_text(false, cx);
             tool = Tool::Select;
         }
+        self.host.focus_canvas(window, cx);
         // In a 3D composition the window's Hand and Zoom tools move the
         // editor view (orbit, ⇧ pan; dolly), as they navigate a 2D one.
         let view_tool = (self.studio.active() && matches!(tool, Tool::Hand | Tool::Zoom))
@@ -1415,7 +1418,7 @@ impl GizmoSurface {
                     if !p.selection.layers().contains(&hit) {
                         let ids = vec![hit.clone()];
                         let selection = SelectionCall::Layers { ids, add: false };
-                        let request = Request::new(Caller::native(), selection.user());
+                        let request = Request::new(Caller::native(), selection);
                         kernel.call(&project, request).await?.ok()?;
                     }
                     let p = kernel.published(&project)?;
@@ -1480,7 +1483,7 @@ impl GizmoSurface {
                     let add =
                         press.shift && target.is_some() && !selected.contains(target.as_ref()?);
                     let selection = SelectionCall::Layers { ids, add };
-                    let request = Request::new(Caller::native(), selection.user());
+                    let request = Request::new(Caller::native(), selection);
                     kernel.call(&project, request).await?.ok()?;
                     let p = kernel.published(&project)?;
                     let empty = target.is_none();
@@ -1570,6 +1573,8 @@ impl GizmoSurface {
             };
             let by = point(px(by.x as f32), px(by.y as f32));
             self.host.navigate(Navigate::Pan(by), cx);
+            // The outline is drawn over the picture: it moves with the view.
+            self.draw(cx);
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -1593,6 +1598,9 @@ impl GizmoSurface {
                 self.space_panned |= self.space_hand;
             }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
+            // The outline is drawn over the picture: it moves with the view
+            // while held, not on release.
+            self.draw(cx);
             return;
         }
         if self.sketch.is_some() || self.text_sketch.is_some() {
@@ -1790,15 +1798,29 @@ impl GizmoSurface {
             return;
         };
         if drag.active {
+            self.queue.push_back(Job::Finish(commit));
             if let (true, Some(copies)) = (commit, drag.copies) {
                 let ids = copies.into_iter().map(|(_, copy)| copy).collect();
                 self.queue.push_back(Job::SelectLayers(ids));
             }
-            self.queue.push_back(Job::Finish(commit));
             self.pump(cx);
         } else if let Some(press) = drag.click.filter(|_| commit) {
             self.pick(press, cx);
         }
+    }
+    /// The button came up in the window while a pointer gesture of this
+    /// surface still waits for it: its own listener never heard the release
+    /// (the viewer was drawn again or covered while held). It ends now, as a
+    /// release does, so no edit stays open.
+    pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let held = self.drag.is_some()
+            || self.pen_drag.is_some()
+            || self.panning.is_some()
+            || self.rulers.dragging.is_some();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {
@@ -1860,11 +1882,7 @@ impl GizmoSurface {
                     else {
                         return Ok(());
                     };
-                    let call = Call::TransactWithSelection {
-                        selection: plan.select.map_or_else(
-                            || SelectionCall::Batch(vec![]),
-                            |id| SelectionCall::Layers { ids: vec![id], add: false },
-                        ),
+                    let call = Call::Transact {
                         label: Some(plan.label.into()),
                         body: WriteBody::Commands(plan.commands),
                         expected_revision: Some(published.revision()),
@@ -1876,6 +1894,15 @@ impl GizmoSurface {
                         .map_err(|e| format!("{e:?}"))?;
                     if let Reply::Throw(error) = ack.reply {
                         return Err(error.to_string());
+                    }
+                    if let Some(id) = plan.select {
+                        let select = SelectionCall::Layers {
+                            ids: vec![id],
+                            add: false,
+                        };
+                        kernel
+                            .call(&project, Request::new(Caller::native(), select))
+                            .await;
                     }
                     Ok::<(), String>(())
                 })
@@ -1936,30 +1963,34 @@ impl GizmoSurface {
                             };
                             let select = SelectionCall::Layers { ids, add: false };
                             return kernel
-                                .call(&project, Request::new(Caller::native(), select.user()))
+                                .call(&project, Request::new(Caller::native(), select))
                                 .await
                                 .ok_or("Kernel closed")?
                                 .map_err(|e| format!("{e:?}"));
                         }
                         (Job::Transact(label, commands, select), _) => {
-                            let selection = select.map_or_else(
-                                || SelectionCall::Batch(vec![]),
-                                |id| SelectionCall::Layers {
-                                    ids: vec![id],
-                                    add: false,
-                                },
-                            );
-                            let call = Call::TransactWithSelection {
+                            let call = Call::Transact {
                                 label: Some(label.into()),
                                 body: WriteBody::Commands(commands),
                                 expected_revision: None,
-                                selection,
                             };
-                            return kernel
+                            let ack = kernel
                                 .call(&project, Request::new(Caller::native(), call))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"));
+                                .map_err(|e| format!("{e:?}"))?;
+                            if let (Some(id), false) =
+                                (select, matches!(ack.reply, Reply::Throw(_)))
+                            {
+                                let select = SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                };
+                                kernel
+                                    .call(&project, Request::new(Caller::native(), select))
+                                    .await;
+                            }
+                            return Ok(ack);
                         }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),

@@ -412,7 +412,6 @@ impl Controller {
                     ids: vec![layer.into()],
                     add: false,
                 }
-                .user()
                 .into(),
                 cx,
             );

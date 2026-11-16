@@ -115,6 +115,140 @@ fn child_export_cancel_does_not_publish_partial_output() {
     );
 }
 
+/// The app that asked for an export goes away (a forced quit): its export
+/// child stops within moments and leaves no output, finished or partial.
+/// The app is this test binary run again (`an_app_that_starts_an_export`),
+/// killed with SIGKILL as a forced quit kills it.
+#[test]
+fn an_export_stops_and_leaves_nothing_when_its_app_goes_away() {
+    if std::env::var_os("PM_TEST_EXPORT_APP").is_some() {
+        return;
+    }
+    // Whatever happens below, nothing this test started outlives it.
+    struct Reaped(
+        std::process::Child,
+        std::sync::Mutex<Option<String>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    );
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            self.2.store(true, std::sync::atomic::Ordering::Release);
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            if let Some(child) = self.1.lock().unwrap().take() {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &child])
+                    .status();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("orphaned");
+    let app = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "an_app_that_starts_an_export",
+            "--test-threads=1",
+        ])
+        .env("PM_TEST_EXPORT_APP", &destination)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut app = Reaped(app, Default::default(), Default::default());
+    // A hard limit: whatever hangs, the test ends within two minutes, and
+    // what it started goes with it (a stuck run held cargo for an hour).
+    {
+        let app_pid = app.0.id().to_string();
+        let ended = app.2.clone();
+        std::thread::spawn(move || {
+            let limit = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < limit {
+                if ended.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-P", &app_pid])
+                .status();
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &app_pid])
+                .status();
+            eprintln!("the orphaned-export test passed its two-minute limit");
+            std::process::abort();
+        });
+    }
+    // Its export child, once it has written something.
+    let start = Instant::now();
+    let child = loop {
+        let pids = std::process::Command::new("pgrep")
+            .args(["-P", &app.0.id().to_string(), "-f", "engine-job"])
+            .output()
+            .unwrap();
+        let pid = String::from_utf8_lossy(&pids.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_owned);
+        let written = std::fs::read_dir(dir.path()).is_ok_and(|mut d| d.next().is_some());
+        if let Some(pid) = &pid {
+            *app.1.lock().unwrap() = Some(pid.clone());
+        }
+        if let Some(pid) = pid
+            && written
+        {
+            break pid;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the export never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    app.0.kill().unwrap();
+    app.0.wait().unwrap();
+    let gone = Instant::now();
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &child])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    while alive() {
+        assert!(
+            gone.elapsed() < Duration::from_secs(5),
+            "the export child ran on {:?} after its app went away",
+            gone.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "the export child stopped {:?} after its app went away",
+        gone.elapsed()
+    );
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+/// Not a test on its own: the app of the test above (it starts an export and
+/// waits to be killed).
+#[test]
+fn an_app_that_starts_an_export() {
+    let Some(destination) = std::env::var_os("PM_TEST_EXPORT_APP") else {
+        return;
+    };
+    let _child = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request(destination.into(), 600),
+    )
+    .unwrap();
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 #[test]
 fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
     let dir = tempfile::tempdir().unwrap();

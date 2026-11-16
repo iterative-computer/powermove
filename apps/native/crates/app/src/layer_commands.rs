@@ -192,29 +192,12 @@ pub fn route(name: &str, args: &[serde_json::Value]) -> Option<Route> {
 }
 /// A plan's one Undo step; a selection-only plan writes nothing.
 pub fn transaction(plan: &Plan, expected_revision: Option<u64>) -> Option<pm_kernel::Call> {
-    if plan.commands.is_empty() {
-        return None;
-    }
-    let label = Some(plan.label.clone());
-    let body = pm_kernel::WriteBody::Commands(plan.commands.clone());
-    Some(match &plan.select {
-        Some(ids) => pm_kernel::Call::TransactWithSelection {
-            label,
-            body,
-            expected_revision,
-            selection: pm_kernel::SelectionCall::Layers {
-                ids: ids.clone(),
-                add: false,
-            },
-        },
-        None => pm_kernel::Call::Transact {
-            label,
-            body,
-            expected_revision,
-        },
+    (!plan.commands.is_empty()).then(|| pm_kernel::Call::Transact {
+        label: Some(plan.label.clone()),
+        expected_revision,
+        body: pm_kernel::WriteBody::Commands(plan.commands.clone()),
     })
 }
-
 /// Commands the Timeline model owns, with the same behaviour as its keyboard route.
 fn timeline_owned(name: &str) -> bool {
     matches!(
@@ -530,6 +513,7 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         rows.push(plain("Rename…", "renameLayer"));
     }
     rows.extend([
+        plain("Save Animation Preset…", "saveAnimationPreset"),
         plain("Duplicate", "duplicate"),
         plain("Group", "groupLayers"),
         plain("Simplify Keyframes", "simplifyKeyframes"),
