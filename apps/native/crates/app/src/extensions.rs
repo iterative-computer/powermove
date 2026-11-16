@@ -417,6 +417,7 @@ pub(crate) fn unavailable(
                 id: id.clone(),
                 name: name.clone(),
                 why: why.clone(),
+                provides: publication.provides.get(id).cloned().unwrap_or_default(),
             },
         )
         .collect()

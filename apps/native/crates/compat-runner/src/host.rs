@@ -268,6 +268,18 @@ impl Published {
             loading: self.starting.iter().cloned().chain(realm).collect(),
             contributions: self.contributions.clone(),
             unavailable: self.records.values().filter_map(unavailable).collect(),
+            provides: self
+                .records
+                .iter()
+                .filter_map(|(id, record)| {
+                    let ids: Vec<String> = record["provides"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect();
+                    (!ids.is_empty()).then(|| (id.clone(), ids))
+                })
+                .collect(),
         }
     }
 }
@@ -331,6 +343,11 @@ pub struct Publication {
     /// `why` reads after the name ("is turned off"). They are named beside
     /// the effects they would provide.
     pub unavailable: Vec<(String, String, String)>,
+    /// The definitions (effects, layer types, transitions) each installed
+    /// extension published when it last ran, by extension id: what an
+    /// unavailable one would provide, whatever its ids are named
+    /// (`macos-cursor` provides `macos.cursor`). Kept across launches.
+    pub provides: BTreeMap<String, Vec<String>>,
 }
 
 struct Shared {
@@ -1989,13 +2006,19 @@ impl Owner {
         if confined {
             self.sync_stores();
             self.publish_store();
-        } else {
+        } else if enabled {
             let records = self.realm_plan();
             self.shared.update(|p| {
                 p.activations += 1;
                 p.ready = false;
             });
             self.load(&records, "update", &format!(",{},\"enable\"", json!([id])));
+        } else if let Some(clock) = self.retire_for_rebuild() {
+            // Off ends everything it started (its timers, listeners and
+            // pending work), not only what it registered: the realm the
+            // trusted extensions share is rebuilt without it, as a Stop does,
+            // with nobody blamed (PM-435).
+            self.boot_realm(clock);
         }
         self.publish_records();
     }
@@ -2030,7 +2053,31 @@ impl Owner {
         });
     }
     /// Settings and MCP read extensions from kernel state, as they do built-ins.
+    /// The definition ids each extension's live registrations name now
+    /// (effects, layer types, transitions), by owner.
+    fn provided_now(&self) -> BTreeMap<String, Vec<String>> {
+        let mut provided: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let contributions = self.shared.published.lock().unwrap().contributions.clone();
+        for kind in ["effects", "layers", "transitions"] {
+            for entry in contributions
+                .as_ref()
+                .and_then(|c| c[kind].as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(owner), Some(id)) = (entry["owner"].as_str(), entry["id"].as_str()) {
+                    let ids = provided.entry(owner.to_owned()).or_default();
+                    if !ids.iter().any(|known| known == id) {
+                        ids.push(id.to_owned());
+                    }
+                }
+            }
+        }
+        provided
+    }
     fn publish_entries(&mut self) {
+        let provided = self.provided_now();
+        let mut kept: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let _ = update_state::<String>(&self.config.kernel, |state| {
             let ops: Vec<StateOp> = self
                 .records
@@ -2054,6 +2101,20 @@ impl Owner {
                     if let Some(folder) = self.folders.get(id) {
                         summary["folder"] = json!(folder.to_string_lossy());
                     }
+                    // What it provides: its live registrations, else what it
+                    // provided when it last ran (it is off, or failing).
+                    let provides: Vec<String> = provided.get(id).cloned().unwrap_or_else(|| {
+                        source
+                            .get("hostRecord")
+                            .and_then(|r| r.get("provides"))
+                            .and_then(pm_model::Value::as_array)
+                            .map(|ids| ids.iter().filter_map(|d| d.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default()
+                    });
+                    if !provides.is_empty() {
+                        summary["provides"] = json!(provides);
+                        kept.insert(id.to_owned(), provides);
+                    }
                     source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
                     let next = pm_kernel::state::ExtensionEntry {
                         id: id.to_owned(),
@@ -2067,6 +2128,28 @@ impl Owner {
                 .collect();
             Ok((!ops.is_empty()).then_some(ops))
         });
+        // The published rows carry it too (`Publication::provides`).
+        let mut changed = false;
+        for record in &mut self.records {
+            let id = record["id"].as_str().unwrap_or_default().to_owned();
+            let next = kept.get(&id).map(|ids| json!(ids)).unwrap_or(Value::Null);
+            if record["provides"] != next {
+                record["provides"] = next;
+                changed = true;
+            }
+        }
+        if changed {
+            let rows = self.records.clone();
+            self.shared.update(|p| {
+                for row in rows {
+                    if let Some(id) = row["id"].as_str()
+                        && let Some(published) = p.records.get_mut(id)
+                    {
+                        published["provides"] = row["provides"].clone();
+                    }
+                }
+            });
+        }
         FIRST_ENTRIES.store(false, Ordering::Release);
         self.forget_vanished();
     }
@@ -2630,14 +2713,9 @@ impl Owner {
     /// extension stays off until someone turns it back on, here and in every other
     /// window, and the next launch does not run into it again.
     fn restart(&mut self, culprit: Option<String>) {
-        let Some(live) = &self.realm else { return };
-        live.events.activating.lock().unwrap().take();
-        let transport = live.host.transport();
-        let clock = (transport.time(), transport.playing());
-        self.retire_realm();
-        // What the retired realm contributed went with it: nothing of it is
-        // settled until the realm that replaces it has loaded.
-        self.publish_without_realm(None);
+        let Some(clock) = self.retire_for_rebuild() else {
+            return;
+        };
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2669,6 +2747,23 @@ impl Owner {
             self.publish_records();
             return;
         }
+        self.boot_realm(clock);
+    }
+    /// The live realm retired for a rebuild, with the transport's clock to
+    /// carry over. `None` with no realm.
+    fn retire_for_rebuild(&mut self) -> Option<(f64, bool)> {
+        let live = self.realm.as_ref()?;
+        live.events.activating.lock().unwrap().take();
+        let transport = live.host.transport();
+        let clock = (transport.time(), transport.playing());
+        self.retire_realm();
+        // What the retired realm contributed went with it: nothing of it is
+        // settled until the realm that replaces it has loaded.
+        self.publish_without_realm(None);
+        Some(clock)
+    }
+    /// A new realm at `clock`, booting the enabled trusted extensions.
+    fn boot_realm(&mut self, clock: (f64, bool)) {
         match self.start_realm(Some(clock)) {
             Ok(()) => {
                 self.publish_records();
@@ -5988,6 +6083,12 @@ mod tests {
         fixture.kernel.state_transaction(off.unwrap()).wait().unwrap().unwrap();
         fixture.until("off: nothing of it is left", |host| toggled_gone(&host.publication()));
         assert!(!ticking(&fixture.kernel), "its timer stopped with it");
+        // What it would provide stays known, to name it beside a project's
+        // effect that needs it.
+        assert_eq!(
+            fixture.host.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()])
+        );
         assert!(!fixture.kernel.state().extensions["toggled"].enabled, "the saved choice");
         fixture.host.run_command("switcher.on", json!([]));
         fixture.until("on again, without a relaunch", |host| {
@@ -6046,6 +6147,11 @@ mod tests {
         drop(first);
         let again = start();
         wait(&again, "the next launch leaves it off", &toggled_gone);
+        assert_eq!(
+            again.publication().provides.get("toggled"),
+            Some(&vec!["toggled.tint".to_owned()]),
+            "what it provided is kept across the launch"
+        );
         assert!(!ticking(&kernel), "nothing of it runs");
         drop(again);
         drop(actor);

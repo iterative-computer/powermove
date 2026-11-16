@@ -528,7 +528,7 @@ impl ViewerStatus {
         let owner = self
             .unavailable
             .iter()
-            .find(|u| resources::provides(&u.id, &missing.effect));
+            .find(|u| u.would_provide(&missing.effect));
         if let (None, Some(owner)) = (&missing.revision, owner) {
             return Some(format!(
                 "{} {}: {} is bypassed on {}{}",
@@ -4737,12 +4737,28 @@ mod worker_tests {
                 id: "acme".into(),
                 name: "Acme Effects".into(),
                 why: "is turned off".into(),
+                provides: vec![],
             }],
             ..status.clone()
         };
         assert_eq!(
             off.notice().as_deref(),
             Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
+        );
+        // An id its extension's doesn't name (`glow-kit` provides
+        // `acme.glow`): named by what it provided when it last ran (PM-435).
+        let unnamed = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "glow-kit".into(),
+                name: "Glow Kit".into(),
+                why: "is turned off".into(),
+                provides: vec!["acme.glow".into()],
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            unnamed.notice().as_deref(),
+            Some("Glow Kit is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
         );
         let newer = ViewerStatus {
             missing_effects: vec![pm_render::effects::versions::MissingEffect {
