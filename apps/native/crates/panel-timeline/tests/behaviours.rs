@@ -2638,6 +2638,7 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     assert_eq!(keys[1].id, named(1));
     assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
     assert_eq!(c.model.selection.keys(), [named(1)]);
+}
 /// Tracks mode: a track row's lock and eye act on every clip on the lane,
 /// as v1's track view does, one undo step named for the track; the row
 /// shows the new state.
