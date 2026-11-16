@@ -4907,7 +4907,7 @@ impl Render for TimelineSurface {
                                 ruler_weak.update(cx, |s, cx| s.rows_frame(cx)).ok().flatten()
                             },
                             move |bounds, frame, window, cx| {
-                                let Some((frame, reach)) = frame else {
+                                let Some((frame, reach, _, _)) = frame else {
                                     return;
                                 };
                                 let v = frame.viewport;
