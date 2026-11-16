@@ -835,7 +835,7 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
 }
 /** A shortcut's keys as keycaps (the build note's custom piece): each
  * modifier its own cap, then the key. */
-function Keycaps({ keys }: { keys: string }) {
+function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
   const caps: string[] = [];
   let rest = keys;
   while (rest && "⌘⌥⇧⌃".includes(rest[0]!)) {
@@ -861,11 +861,14 @@ function Keycaps({ keys }: { keys: string }) {
             borderRadius: t("metrics.inner_radius"),
             borderWidth: t("metrics.border"),
             borderColor: t("colors.separator"),
-            // A keycap stands on the card as a button does.
-            background: t("colors.raised"),
+            // A keycap stands on the card as a button does; a key the menu
+            // bar keeps is drawn, not raised (System Settings dims it).
+            ...(fixed ? {} : { background: t("colors.raised") }),
           }}
         >
-          <text style={text}>{cap}</text>
+          <text style={fixed ? { ...text, color: t("colors.muted") } : text}>
+            {cap}
+          </text>
         </div>
       ))}
     </div>
@@ -880,21 +883,32 @@ function ShortcutKeys({
   row: import("./model").ShortcutRow;
   onRecord: () => void;
 }) {
+  // A menu bar command keeps its own key and takes none: dimmed, with
+  // nothing to press (no "None" that reads like an empty, recordable key).
+  if (row.fixed)
+    return (
+      <div
+        role="group"
+        label={
+          row.keys.length
+            ? `${row.label}: the menu bar's key, not assignable`
+            : `${row.label}: not assignable`
+        }
+        title="Menu bar commands keep their own keys"
+        style={trailing}
+      >
+        {row.keys.length ? (
+          row.keys.map((keys, i) => <Keycaps key={i} keys={keys} fixed />)
+        ) : (
+          <text style={{ ...help, color: t("colors.muted") }}>—</text>
+        )}
+      </div>
+    );
   const shown = row.keys.length ? (
     row.keys.map((keys, i) => <Keycaps key={i} keys={keys} />)
   ) : (
     <text style={help}>None</text>
   );
-  if (row.fixed)
-    return (
-      <div
-        role="group"
-        label={`${row.label}: the menu bar's key`}
-        style={trailing}
-      >
-        {shown}
-      </div>
-    );
   return (
     <button
       tabIndex={0}
@@ -1010,7 +1024,13 @@ function Shortcuts({
     >
       <div style={copyColumn}>
         <div style={titleLine}>
-          <text style={{ ...text, fontSize: t("typography.title") }}>
+          <text
+            style={{
+              ...text,
+              fontSize: t("typography.title"),
+              ...(row.fixed ? { color: t("colors.secondary") } : {}),
+            }}
+          >
             {row.label}
           </text>
         </div>
@@ -1186,7 +1206,9 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
             <div style={{ display: "flex" }}>
               <UI.PopUpButton
                 label="Project"
-                data-pm-variant="inline"
+                // The design's pull-down: the project's name, the menu of
+                // open projects dropping below it.
+                data-pm-variant="pulldown"
                 binding={bindings.project}
                 value={project.id}
                 options={projects.map((p) => ({ v: p.id, label: p.name }))}

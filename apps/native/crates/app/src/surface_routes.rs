@@ -421,6 +421,69 @@ impl Controller {
         })
         .detach();
     }
+    /// The viewer's picture as it stands, the playhead's frame of the open
+    /// project, stored as its last frame (`crate::poster::write_last_frame`)
+    /// unless it already is. Rendered off the main thread, only once the
+    /// project's effects are loaded. The channel hears once it is stored,
+    /// or at `deadline`: a close waits on it (`lifecycle::complete_close`).
+    pub(crate) fn store_last_frame(
+        &mut self,
+        deadline: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) -> Option<async_channel::Receiver<()>> {
+        if self.settling.is_some() || self.awaiting_extension_effects() {
+            crate::diag::line(serde_json::json!({"last_frame": "loading"}));
+            return None;
+        }
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            crate::diag::line(serde_json::json!({"last_frame": "no project"}));
+            return None;
+        };
+        let published = self.kernel.published(&project)?;
+        let time = self.time();
+        let mark = crate::poster::last_frame_mark(published.revision(), time);
+        if crate::poster::last_frame_current(&self.profile, &project, &mark) {
+            return None;
+        }
+        let renderer = match crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+            self.job_overrides.clone(),
+            crate::mcp_services::Capture::Poster,
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                crate::diag::line(serde_json::json!({"last_frame": "no renderer", "error": error.to_string()}));
+                return None;
+            }
+        };
+        let (size, _) = crate::poster::frame_of(&published);
+        let profile = self.profile.clone();
+        let (done, heard) = async_channel::bounded(1);
+        if let Some(deadline) = deadline {
+            let late = done.clone();
+            let timer = cx.background_executor().timer(deadline);
+            cx.background_executor()
+                .spawn(async move {
+                    timer.await;
+                    let _ = late.try_send(());
+                })
+                .detach();
+        }
+        cx.background_executor()
+            .spawn(async move {
+                let started = std::time::Instant::now();
+                let stored = crate::poster::write_last_frame(
+                    &renderer, published, &profile, &project, time, size, &mark,
+                );
+                crate::diag::line(serde_json::json!({"last_frame": if stored { "stored" } else { "failed" },
+                    "time": time, "ms": started.elapsed().as_secs_f64() * 1000.}));
+                let _ = done.try_send(());
+            })
+            .detach();
+        Some(heard)
+    }
     pub(crate) fn show_home(&mut self, cx: &mut Context<Self>) {
         self.home = true;
         if let Some(library) = self.library(cx) {
