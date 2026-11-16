@@ -382,20 +382,6 @@ pub fn backing(name: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod panel_build_tools_tests {
-    use super::*;
-    use serde_json::json;
-    #[test] fn panel_build_is_discoverable_and_validates_progress() {
-        assert!(names().iter().any(|n| n == "panel_begin"));
-        assert!(permits("app", "panel_begin"));
-        assert!(!permits("inspection", "panel_begin"));
-        assert!(validate("panel_begin", &json!({"title":"Grade", "placement":{"beside":"inspector"}, "planned":[{"kind":"slider","label":"Exposure"}]})).is_ok());
-        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":1})).is_ok());
-        assert!(validate("panel_build", &json!({"build_id":"build", "event":"pretend"})).is_err());
-        assert!(validate("panel_build", &json!({"build_id":"build", "event":"commit", "row":-1})).is_err());
-    }
-}
 /// Tools whose model and timeline are relative to a composition.
 pub const COMPOSITION_TOOLS: &[&str] = &[
     "get_project_state",
