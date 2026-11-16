@@ -1,5 +1,9 @@
 //! Anchored v2 colour editor. Pointer work stays native; no JS round trip.
 use crate::colour_model::Color;
+const NOTATION_STOP: usize = 21;
+const VALUE_STOP: usize = 22;
+const VALUE_COPY_STOP: usize = 23;
+const STOP_COUNT: usize = 24;
 thread_local! {static PREFERENCES: std::cell::Cell<(bool, &'static str, u8)> = const { std::cell::Cell::new((false,"Hex",0)) };}
 use gpui::{prelude::*, *};
 use pm_shell::{
@@ -79,8 +83,10 @@ impl Picker {
             sample_source,
             generation: 0,
             status: String::new(),
-            stops: (0..23).map(|_| cx.focus_handle().tab_stop(true)).collect(),
-            focus_index: 21,
+            stops: (0..STOP_COUNT)
+                .map(|_| cx.focus_handle().tab_stop(true))
+                .collect(),
+            focus_index: VALUE_STOP,
             draft: None,
             window: window.window_handle(),
             menu: None,
@@ -207,15 +213,17 @@ impl Picker {
         p
     }
     fn focus_value(&mut self, cx: &mut Context<Self>) {
-        self.focus_index = 21;
-        let handle = self.stops[21].clone();
+        self.focus_index = VALUE_STOP;
+        let handle = self.stops[VALUE_STOP].clone();
         let field = self.fields.get(9).cloned();
         let window = self.window;
         let generation = self.generation;
         let weak = cx.entity().downgrade();
         cx.defer(move |cx| {
             if !weak
-                .read_with(cx, |p, _| p.generation == generation && p.focus_index == 21)
+                .read_with(cx, |p, _| {
+                    p.generation == generation && p.focus_index == VALUE_STOP
+                })
                 .unwrap_or(false)
             {
                 return;
@@ -275,6 +283,15 @@ impl Picker {
         self.focus_value(cx);
         cx.notify();
     }
+    fn copy_value(&mut self, cx: &mut Context<Self>) {
+        self.apply_active(cx);
+        let text = match self.notation {
+            "Hex" => self.color.hex(),
+            "Display P3" => format!("color(display-p3 {})", self.color.draft("Display P3")),
+            mode => format!("{}({})", mode.to_lowercase(), self.color.draft(mode)),
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
     fn copy_row(&mut self, row: usize, cx: &mut Context<Self>) {
         self.apply_active(cx);
         let mode = if self.p3 {
@@ -328,10 +345,14 @@ impl Picker {
         cx.notify();
     }
     fn field_stop(i: usize) -> usize {
-        if i == 9 { 21 } else { 9 + (i / 3) * 4 + i % 3 }
+        if i == 9 {
+            VALUE_STOP
+        } else {
+            9 + (i / 3) * 4 + i % 3
+        }
     }
     fn navigate(&mut self, d: isize, cx: &mut Context<Self>) {
-        let index = (self.focus_index as isize + d).rem_euclid(23) as usize;
+        let index = (self.focus_index as isize + d).rem_euclid(STOP_COUNT as isize) as usize;
         self.focus_index = index;
         for f in &self.fields {
             f.update(cx, |f, cx| f.blur(cx));
@@ -900,60 +921,76 @@ impl Render for Picker {
         let swatch = |c: Color| {
             let ink = Rgba::new(c.0[0], c.0[1], c.0[2], c.0[3]);
             let t = t.clone();
-            div().relative().flex_1().h(px(t.metrics.control)).child(
-                canvas(
-                    |_, _, _| {},
-                    move |b, _, w, _| {
-                        let cell = t.space.xs.max(1.);
-                        for y in 0..(f32::from(b.size.height) / cell).ceil() as u32 {
-                            for x in 0..(f32::from(b.size.width) / cell).ceil() as u32 {
-                                let b2 = Bounds::new(
-                                    b.origin + point(px(x as f32 * cell), px(y as f32 * cell)),
-                                    size(
-                                        px(cell.min(f32::from(b.size.width) - x as f32 * cell)),
-                                        px(cell.min(f32::from(b.size.height) - y as f32 * cell)),
-                                    ),
-                                );
-                                w.paint_quad(fill(
-                                    b2,
-                                    rgb(if (x + y) % 2 == 0 {
-                                        t.colors.field
-                                    } else {
-                                        t.colors.muted
-                                    }),
-                                ));
+            div()
+                .relative()
+                .w_full()
+                .h(px(t.metrics.control))
+                .rounded(px(t.metrics.control_radius))
+                .overflow_hidden()
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |b, _, w, _| {
+                            let cell = t.space.xs.max(1.);
+                            for y in 0..(f32::from(b.size.height) / cell).ceil() as u32 {
+                                for x in 0..(f32::from(b.size.width) / cell).ceil() as u32 {
+                                    let b2 = Bounds::new(
+                                        b.origin + point(px(x as f32 * cell), px(y as f32 * cell)),
+                                        size(
+                                            px(cell.min(f32::from(b.size.width) - x as f32 * cell)),
+                                            px(cell
+                                                .min(f32::from(b.size.height) - y as f32 * cell)),
+                                        ),
+                                    );
+                                    w.paint_quad(fill(
+                                        b2,
+                                        rgb(if (x + y) % 2 == 0 {
+                                            t.colors.field
+                                        } else {
+                                            t.colors.muted
+                                        }),
+                                    ));
+                                }
                             }
-                        }
-                        w.paint_quad(fill(b, ink));
-                    },
-                )
-                .size_full(),
-            )
-        };
-        details = details
-            .child(
-                div()
-                    .flex()
-                    .child(
-                        swatch(self.previous)
-                            .track_focus(&self.stops[8])
-                            .focus_visible_style(move |s| {
-                                s.border(px(focus_width)).border_color(rgb(focus_color))
-                            })
-                            .id("previous")
-                            .role(Role::Button)
-                            .aria_label("Restore previous color")
-                            .on_click(cx.listener(|p, _, _, cx| p.set(p.previous, cx))),
+                            w.paint_quad(fill(b, ink));
+                        },
                     )
-                    .child(swatch(self.color)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child("Previous")
-                    .child("New"),
-            );
+                    .size_full(),
+                )
+        };
+        details = details.child(
+            div()
+                .flex()
+                .gap(px(t.space.xs))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(t.space.xs))
+                        .track_focus(&self.stops[8])
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
+                        .id("previous")
+                        .role(Role::Button)
+                        .aria_label("Restore previous color")
+                        .child(swatch(self.previous))
+                        .child(div().text_center().child("Previous"))
+                        .on_click(cx.listener(|p, _, _, cx| p.set(p.previous, cx))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(t.space.xs))
+                        .child(swatch(self.color))
+                        .child(div().text_center().child("New")),
+                ),
+        );
         for row in 0..3 {
             let mut channels = div().flex().gap(px(t.space.xs));
             for i in row * 3..row * 3 + 3 {
@@ -1009,33 +1046,69 @@ impl Render for Picker {
                     .child(channels),
             );
         }
-        if let Some(f) = self.fields.get(9) {
-            details = details.child(
-                div()
-                    .track_focus(&self.stops[21])
-                    .focus_visible_style(move |s| {
-                        s.border(px(focus_width)).border_color(rgb(focus_color))
-                    })
-                    .child(f.clone()),
-            );
-        } else {
-            details = details.child(self.color.draft(self.notation));
-        }
         details = details.child(
-            kit.button("color-notation", self.notation, Button::Quiet, None, None)
-                .track_focus(&self.stops[22])
-                .focus_visible_style(move |s| {
-                    s.border(px(focus_width)).border_color(rgb(focus_color))
-                })
-                .on_click(cx.listener(|p, _, _, cx| {
-                    p.apply_active(cx);
-                    p.menu = if p.menu == Some(false) {
-                        None
-                    } else {
-                        Some(false)
-                    };
-                    cx.notify();
-                })),
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    kit.button("color-notation", self.notation, Button::Quiet, None, None)
+                        .justify_start()
+                        .px(px(0.))
+                        .text_size(px(t.typography.body))
+                        .text_color(rgb(t.colors.text))
+                        .track_focus(&self.stops[NOTATION_STOP])
+                        .focus_visible_style(move |s| {
+                            s.border(px(focus_width)).border_color(rgb(focus_color))
+                        })
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.apply_active(cx);
+                            p.menu = if p.menu == Some(false) {
+                                None
+                            } else {
+                                Some(false)
+                            };
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(t.space.xs))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .track_focus(&self.stops[VALUE_STOP])
+                                .focus_visible_style(move |s| {
+                                    s.border(px(focus_width)).border_color(rgb(focus_color))
+                                })
+                                .child(if let Some(f) = self.fields.get(9) {
+                                    f.clone().into_any_element()
+                                } else {
+                                    div()
+                                        .h(px(t.metrics.field))
+                                        .px(px(t.space.sm))
+                                        .rounded(px(t.metrics.control_radius))
+                                        .bg(rgb(t.colors.field))
+                                        .child(self.color.draft(self.notation))
+                                        .into_any_element()
+                                }),
+                        )
+                        .child(
+                            kit.icon_button(
+                                "color-copy-value",
+                                "doc.on.doc",
+                                format!("Copy {}", self.notation),
+                                false,
+                            )
+                            .track_focus(&self.stops[VALUE_COPY_STOP])
+                            .focus_visible_style(move |s| {
+                                s.border(px(focus_width)).border_color(rgb(focus_color))
+                            })
+                            .on_click(cx.listener(|p, _, _, cx| p.copy_value(cx))),
+                        ),
+                ),
         );
         if self.color.outside() {
             details = details.child("Clipped to sRGB when saved");
@@ -1079,7 +1152,8 @@ impl Render for Picker {
                         cx.notify();
                     }
                     "enter" | "space" if p.menu.is_some() => p.choose_menu(p.menu_index, cx),
-                    "enter" if p.focus_index == 22 => {
+                    "enter" if p.focus_index == VALUE_COPY_STOP => p.copy_value(cx),
+                    "enter" if p.focus_index == NOTATION_STOP => {
                         p.menu = Some(false);
                         p.menu_index = 0;
                         cx.notify();
@@ -1337,11 +1411,13 @@ mod tests {
                 cx,
             )
         });
+        vcx.run_until_parked();
+        vcx.update(|w, _| w.activate());
         for result in [
             Ok([0.04, 0.52, 1., 1.]),
             Err("Native sampling failed".into()),
         ] {
-            vcx.update(|w, cx| {
+            vcx.update(|_, cx| {
                 picker.update(cx, |p, cx| {
                     p.edit_rgba([1., 0.4, 0.1, 0.5], cx);
                     p.sampling = true;
@@ -1350,11 +1426,16 @@ mod tests {
                     p.resolve_sample(generation, Ok(result), cx);
                     assert!(!p.sampling);
                     assert_eq!(p.color.0[3], 0.5, "sampling retains picker opacity");
-                    assert!(p.focus.contains_focused(w, cx));
                 })
             });
             vcx.run_until_parked();
-            assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
+            vcx.update(|w, cx| {
+                picker.read_with(cx, |p, cx| {
+                    assert_eq!(p.focus_index, VALUE_STOP);
+                    assert!(p.stops[VALUE_STOP].is_focused(w));
+                    assert!(p.focus.contains_focused(w, cx));
+                })
+            });
         }
         for source in [
             None,
@@ -1368,7 +1449,7 @@ mod tests {
                 assert!(!p.status.is_empty());
             });
             vcx.run_until_parked();
-            assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
+            assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), VALUE_STOP);
         }
         picker.update(vcx, |p, cx| {
             p.sampling = true;
@@ -1377,7 +1458,7 @@ mod tests {
             assert!(p.status.is_empty());
         });
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 21);
+        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), VALUE_STOP);
         vcx.update(|_, cx| {
             picker.update(cx, |p, cx| {
                 p.sampling = true;
@@ -1393,11 +1474,11 @@ mod tests {
                 p.resolve_sample(old, Ok(Ok([0., 1., 0., 1.])), cx);
                 assert_eq!(p.color, kept);
                 assert!(p.sampling);
-                p.focus_index = 22;
+                p.focus_index = VALUE_COPY_STOP;
                 p.navigate(1, cx);
                 assert_eq!(p.focus_index, 0);
                 p.navigate(-1, cx);
-                assert_eq!(p.focus_index, 22);
+                assert_eq!(p.focus_index, VALUE_COPY_STOP);
             })
         });
     }
@@ -1447,13 +1528,13 @@ mod tests {
         vcx.simulate_keystrokes("right");
         assert!((picker.read_with(vcx, |p, _| p.hue) - 2.).abs() < 0.0001);
         assert_eq!(picker.read_with(vcx, |p, _| p.color.hex()), "#FFFFFF");
-        vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[22].focus(w, cx)));
+        vcx.update(|w, cx| picker.update(cx, |p, cx| p.stops[VALUE_COPY_STOP].focus(w, cx)));
         vcx.simulate_keystrokes("tab");
         vcx.run_until_parked();
         assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 0);
         vcx.simulate_keystrokes("shift-tab");
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), 22);
+        assert_eq!(picker.read_with(vcx, |p, _| p.focus_index), VALUE_COPY_STOP);
     }
     struct CaptureRoot {
         picker: Entity<Picker>,
@@ -1505,6 +1586,7 @@ mod tests {
                                 None,
                                 cx,
                             );
+                            p.previous = Color::parse("#0A84FFCC").unwrap();
                             p.sampling = sampling;
                             p
                         });

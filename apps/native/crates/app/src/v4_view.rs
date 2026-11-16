@@ -5040,9 +5040,11 @@ mod tests {
         });
         let published = rig.kernel.published(PROJECT).unwrap();
         assert_eq!(published.history.entries, before + 1);
-        let doc = published.snapshot.root().unwrap().to_value();
-        let json: Value = serde_json::from_str(&pm_model::json::to_canonical_string(&doc)).unwrap();
-        let keys = json["layers"][0]["d"]["color"]["kf"]
+        let root = published.snapshot.root().unwrap();
+        let location = pm_kernel::model::find_layer(root, "l0").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &location).unwrap().to_value();
+        let json: Value = serde_json::from_str(&pm_model::json::to_canonical_string(&layer)).unwrap();
+        let keys = json["d"]["color"]["kf"]
             .as_array()
             .expect("animated color");
         assert!(
