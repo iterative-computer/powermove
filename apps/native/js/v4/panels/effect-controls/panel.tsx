@@ -9,6 +9,9 @@ import {
   type EffectHeader,
   type ParameterRow,
   type SummaryRow,
+  type RampRow,
+  type PointRow,
+  type MoreRow,
   type Intent,
 } from "./contract";
 const t = UI.token;
@@ -312,6 +315,22 @@ export function EffectControls(props: PanelProps) {
                       });
                     }}
                   />
+                ) : row.kind === "ramp" ? (
+                  <RampView key={row.id} row={row} locked={p.locked} />
+                ) : row.kind === "point" ? (
+                  <PointView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
+                  />
+                ) : row.kind === "more" ? (
+                  <MoreView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    send={send}
+                  />
                 ) : row.kind === "summary" ? (
                   <SummaryView
                     key={row.id}
@@ -568,6 +587,282 @@ export function EffectControls(props: PanelProps) {
 }
 /** Read-only text for a value without a registry control (design review T4). */
 /** A channel value as a colourist reads it: two places, a true minus. */
+/** A colour as red, green, blue and alpha (0 to 1), from `#rgb`, `#rrggbb` or
+ * `#rrggbbaa`; anything else is not blended. */
+function rgba(value: unknown): [number, number, number, number] | undefined {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(String(value));
+  if (!m) return undefined;
+  const h = m[1].length === 3 ? m[1].replace(/./g, (c) => c + c) : m[1];
+  const n = (i: number) => parseInt(h.slice(i, i + 2), 16) / 255;
+  return [n(0), n(2), n(4), h.length === 8 ? n(6) : 1];
+}
+/** The bar's slices: the colour at each slice's middle, start to end. */
+export function rampSlices(start: unknown, end: unknown, count = 24): string[] {
+  const a = rgba(start);
+  const b = rgba(end);
+  if (!a || !b)
+    return Array.from({ length: count }, (_, i) =>
+      String(i < count / 2 ? start : end),
+    );
+  const hex = (v: number) =>
+    Math.round(Math.min(1, Math.max(0, v)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return Array.from({ length: count }, (_, i) => {
+    const f = (i + 0.5) / count;
+    const c = a.map((v, k) => v + (b[k] - v) * f);
+    return `#${hex(c[0])}${hex(c[1])}${hex(c[2])}${c[3] < 1 ? hex(c[3]) : ""}`;
+  });
+}
+/** v1's gradient bar: the effect's start colour to its end colour, above
+ * their own rows. */
+function RampView({
+  row,
+  locked,
+}: {
+  key?: string;
+  row: RampRow;
+  locked: boolean;
+}) {
+  const [start, end] = row.parameters;
+  const muted = locked || !row.enabled;
+  return (
+    <div role="group" label={`${row.effectLabel}, ${row.label}`}>
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{ indentToken: "metrics.tree_indent", valueColumn: "panel" }}
+        style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
+        leading={<div role="presentation" style={hit} />}
+      >
+        <div
+          role="img"
+          label={`${row.label}, ${scalar(start.value) ?? "start"} to ${scalar(end.value) ?? "end"}`}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            flexGrow: 1,
+            height: t("metrics.control_small"),
+            borderRadius: t("metrics.control_radius"),
+            overflow: "hidden",
+            borderWidth: t("metrics.border"),
+            borderColor: t("colors.separator"),
+            opacity: muted ? 0.5 : 1,
+          }}
+        >
+          {rampSlices(start.value, end.value).map((colour, i) => (
+            <div key={i} style={{ flexGrow: 1, background: colour }} />
+          ))}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** v1's point: X and Y side by side in one row, one keyframe mark for both. */
+function PointView({
+  row,
+  locked,
+  controller: c,
+}: {
+  key?: string;
+  row: PointRow;
+  locked: boolean;
+  controller: EffectsController;
+}) {
+  const axes = row.parameters;
+  const disabled = locked || axes.some((p) => p.readonly);
+  const key = axes.some((p) => p.keyAtPlayhead);
+  const animated = axes.some((p) => p.animated);
+  const state = key
+    ? "keyframe at playhead"
+    : animated
+      ? "animated"
+      : "not animated";
+  return (
+    <div
+      role="group"
+      label={row.effectLabel}
+      onClick={stop}
+      onKeyDown={stop}
+      onPointerDown={(e) => {
+        if (e.button !== 2) return;
+        stop(e);
+        void c.parameterMenu(row.id).catch((error) => c.platform.report(error));
+      }}
+    >
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          parameter: axes[0].id,
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+        }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`Keyframe, ${row.label}`}
+            title={state}
+            disabled={disabled}
+            aria-pressed={key}
+            attr={{
+              symbol: key
+                ? "diamond.fill"
+                : animated
+                  ? "diamond.lefthalf.filled"
+                  : "diamond",
+              value: state,
+            }}
+            onClick={(e) => {
+              stop(e);
+              if (disabled) return;
+              for (const p of axes)
+                c.send({
+                  type: "parameter",
+                  id: p.id,
+                  action: e.altKey ? "stopwatch" : "diamond",
+                });
+            }}
+            style={{
+              ...hit,
+              color: t(animated ? "colors.accent" : "colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+            flexGrow: 1,
+          }}
+        >
+          {axes.map((p, i) => (
+            <div
+              key={p.id}
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "center",
+                gap: t("metrics.border"),
+                flexGrow: 1,
+                flexBasis: 0,
+              }}
+            >
+              <text
+                style={{
+                  color: t("colors.muted"),
+                  fontSize: t("typography.label"),
+                }}
+              >
+                {i ? "Y" : "X"}
+              </text>
+              <UI.NumberField
+                id={`${PANEL_ID}:field:${row.id}:${i}`}
+                label={p.label}
+                binding={p.binding}
+                disabled={disabled || p.readonly}
+                mixed={p.mixed}
+                value={p.value as number}
+                step={p.step}
+                min={p.min}
+                max={p.max}
+                precision={p.precision}
+                unit={p.unit}
+                onKeyDown={stop}
+                onClick={stop}
+              />
+            </div>
+          ))}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** An effect's More: its rarely used parameters, closed until opened, with
+ * a dot when one of them is not at its default (v1's disclosure). */
+function MoreView({
+  row,
+  locked,
+  send,
+}: {
+  key?: string;
+  row: MoreRow;
+  locked: boolean;
+  send: (intent: Intent) => void;
+}) {
+  const toggle = (e: SurfaceEvent) => {
+    stop(e);
+    send({ type: "disclose", id: row.id, open: !row.open });
+  };
+  return (
+    <div
+      role="group"
+      label={`${row.effectLabel}, More, ${row.count} ${row.count === 1 ? "parameter" : "parameters"}${row.changed ? ", changed" : ""}`}
+      onClick={toggle}
+    >
+      <UI.InspectorRow
+        label="More"
+        metadata={{ indentToken: "metrics.tree_indent", valueColumn: "panel" }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`${row.open ? "Hide" : "Show"} more ${row.effectLabel} parameters`}
+            aria-expanded={row.open}
+            attr={{
+              symbol: row.open ? "chevron.down" : "chevron.right",
+              expanded: row.open,
+            }}
+            onClick={toggle}
+            style={{
+              ...hit,
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+          }}
+        >
+          <text
+            style={{
+              color: t("colors.muted"),
+              fontSize: t("typography.label"),
+            }}
+          >
+            {String(row.count)}
+          </text>
+          {row.changed && !row.open ? (
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.status_dot"),
+                height: t("metrics.status_dot"),
+                borderRadius: t("metrics.status_dot"),
+                background: t("colors.accent"),
+              }}
+            />
+          ) : null}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
 function signed(v: unknown) {
   return typeof v === "number" && Number.isFinite(v)
     ? v.toFixed(2).replace("-", "\u2212")

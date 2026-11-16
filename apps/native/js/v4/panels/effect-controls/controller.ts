@@ -216,14 +216,26 @@ export class EffectsController {
         direction: choice === "up" ? -1 : 1,
       });
     else if (["copy", "duplicate", "reset", "remove"].includes(choice))
-      await this.drive({ type: choice as "copy" | "duplicate" | "reset" | "remove", id });
+      await this.drive({
+        type: choice as "copy" | "duplicate" | "reset" | "remove",
+        id,
+      });
     else if (choice === "paste") await this.drive({ type: "paste" });
   }
   /** A parameter row's menu; Reset clears keys and expression (v1 B367). */
   async parameterMenu(id: string) {
     const p = this.current;
-    const row = p.rows.find((r) => r.kind === "parameter" && r.id === id);
-    if (p.locked || row?.kind !== "parameter" || row.parameter.readonly) return;
+    const row = p.rows.find(
+      (r) => (r.kind === "parameter" || r.kind === "point") && r.id === id,
+    );
+    // A point resets both of its numbers.
+    const params =
+      row?.kind === "parameter"
+        ? [row.parameter]
+        : row?.kind === "point"
+          ? row.parameters
+          : [];
+    if (p.locked || !params.length || params.some((q) => q.readonly)) return;
     const choice = await this.platform.contextMenu([
       { id: "reset", label: "Reset" },
     ]);
@@ -232,11 +244,8 @@ export class EffectsController {
       this.current.layer === p.layer &&
       this.current.documentId === p.documentId
     )
-      await this.drive({
-        type: "parameter",
-        id: row.parameter.id,
-        action: "reset",
-      });
+      for (const q of params)
+        await this.drive({ type: "parameter", id: q.id, action: "reset" });
   }
   async dispose() {
     this.disposed = true;

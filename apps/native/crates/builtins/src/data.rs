@@ -322,7 +322,11 @@ impl Backend {
                 .remove_definition(&id);
         }
         self.panel.presentation.parameters.clear();
+        self.panel.presentation.ui.clear();
         for (id, d) in latest {
+            if let Some(ui) = d.get("ui").filter(|ui| ui.is_array()) {
+                self.panel.presentation.ui.insert(id.clone(), ui.clone());
+            }
             let mut params = vec![];
             for p in d["params"].as_array().into_iter().flatten() {
                 let Some(key) = p["k"].as_str() else {
@@ -359,6 +363,7 @@ impl Backend {
                                 .map(|a| a.iter().map(model).collect())
                                 .transpose()?
                                 .unwrap_or_default(),
+                            advanced: p["advanced"].as_bool(),
                         },
                     );
                 }

@@ -24,34 +24,8 @@ fn setup_project(edit: impl FnOnce(&mut Value)) -> (KernelActor, data::Backend) 
         .wait()
         .unwrap()
         .unwrap();
-    let catalog: Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../engine/crates/pm-fx-defs/src/main-effects.json"
-    )))
-    .unwrap();
     for id in ["gradient", "tint"] {
-        let definition = catalog["effects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == id)
-            .unwrap();
-        kernel
-            .state_transaction(pm_kernel::state::StateTransaction {
-                expected_revision: None,
-                ops: vec![pm_kernel::state::StateOp::Register {
-                    registry: "effects".into(),
-                    entry: pm_kernel::state::Registration {
-                        token: format!("test-effect-{id}"),
-                        owner: Caller::native().writer,
-                        id: id.into(),
-                        definition: data::model(definition).unwrap(),
-                    },
-                }],
-            })
-            .wait()
-            .unwrap()
-            .unwrap();
+        register_effect(&kernel, id);
     }
     select_layer(&kernel, "a");
     let mut backend = data::Backend::new(
@@ -67,6 +41,55 @@ fn setup_project(edit: impl FnOnce(&mut Value)) -> (KernelActor, data::Backend) 
     .unwrap();
     backend.sync().unwrap();
     (actor, backend)
+}
+/// Registers the shipped definition of main effect `id`.
+fn register_effect(kernel: &pm_kernel::KernelHandle, id: &str) {
+    let catalog: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../engine/crates/pm-fx-defs/src/main-effects.json"
+    )))
+    .unwrap();
+    let definition = catalog["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == id)
+        .unwrap();
+    kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Register {
+                registry: "effects".into(),
+                entry: pm_kernel::state::Registration {
+                    token: format!("test-effect-{id}"),
+                    owner: Caller::native().writer,
+                    id: id.into(),
+                    definition: data::model(definition).unwrap(),
+                },
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+}
+/// Layer `a`'s first effect of definition `kind`.
+fn effect_of(kernel: &pm_kernel::KernelHandle, kind: &str) -> Value {
+    let p = kernel.published("synthetic").unwrap();
+    let root = p.snapshot.root().unwrap();
+    let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+    let fx = data::wire(
+        &pm_kernel::model::layer_at(root, &loc)
+            .unwrap()
+            .get("fx")
+            .unwrap()
+            .to_value(),
+    );
+    fx.as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["type"] == kind)
+        .unwrap()
+        .clone()
 }
 fn effect(kernel: &pm_kernel::KernelHandle) -> Value {
     let p = kernel.published("synthetic").unwrap();
@@ -361,13 +384,41 @@ fn e07_application_saved_ramp_v1_keeps_legacy_controls_and_reset_defaults() {
             .unwrap()
             .projection()
             .unwrap();
+        // Its Center is an advanced point: one control, under More (v1).
+        let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":{"type":"disclose","id":"more:saved-ramp","open":true}});
+        finish(
+            panels
+                .realms
+                .lock()
+                .unwrap()
+                .get("layer-effects")
+                .unwrap()
+                .eval(format!(
+                    "__pmBuiltin.command('panel.effect-controls',{args})"
+                ))
+                .unwrap(),
+        );
+        let projection = panels
+            .broker
+            .entry("layer-effects")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone()
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap();
         let center = projection["rows"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["kind"] == "parameter" && r["parameter"]["label"] == "Center X")
+            .filter(|r| r["kind"] == "point")
+            .flat_map(|r| r["parameters"].as_array().unwrap())
+            .find(|p| p["label"] == "Center X")
             .expect("saved v1 must retain its own controls");
-        assert_eq!(center["parameter"]["readonly"], false);
+        assert_eq!(center["readonly"], false);
         let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":{"type":"reset","id":"saved-ramp"}});
         finish(
             panels
@@ -1000,6 +1051,143 @@ fn parity_duplicate_effect_is_one_undo_step() {
     let p = kernel.published("synthetic").unwrap();
     let root = p.snapshot.root().unwrap();
     let loc = pm_kernel::model::find_layer(root, "a").unwrap();
-    assert_eq!(pm_kernel::model::layer_at(root, &loc).unwrap().get("fx").unwrap().to_value().as_array().unwrap().len(), 1);
+    assert_eq!(
+        pm_kernel::model::layer_at(root, &loc)
+            .unwrap()
+            .get("fx")
+            .unwrap()
+            .to_value()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     actor.shutdown();
+}
+
+/// Effect Controls lays an effect out as v1 did: Gradient's two authored
+/// points and the bar over its colours come first, then its rows; Glow's
+/// rarely used Threshold waits under a closed More, which its disclosure
+/// opens, and a Threshold off its default marks the closed group.
+#[test]
+fn effect_controls_lays_out_points_the_gradient_bar_and_more_as_v1() {
+    let (actor, mut backend) = setup();
+    let kernel = actor.handle();
+    register_effect(&kernel, "glow");
+    for (slot, definition) in ["gradient", "glow"].into_iter().enumerate() {
+        backend.sync().unwrap();
+        let request = backend
+            .model
+            .as_mut()
+            .unwrap()
+            .add_effect_at(Caller::native(), "a", definition, slot as f64)
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+    }
+    // Glow's Threshold off its default: the closed More says so.
+    backend.sync().unwrap();
+    let glow = effect_of(&kernel, "glow");
+    let model = backend.model.as_mut().unwrap();
+    let request = model
+        .set(
+            Caller::native(),
+            pm_panel_inspector::Binding::Property(pm_panel_inspector::PropertyId::new(
+                "a",
+                format!("{}.threshold", glow["id"].as_str().unwrap()),
+            )),
+            pm_model::Value::Number(0.9),
+            0.,
+        )
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    let projection = |panels: &Builtins| {
+        panels
+            .broker
+            .entry("layer-effects")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone()
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap()
+    };
+    let shape = |p: &Value| -> Vec<String> {
+        p["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| match r["kind"].as_str().unwrap() {
+                "parameter" => r["parameter"]["key"].as_str().unwrap().to_owned(),
+                "effect" => format!("[{}]", r["label"].as_str().unwrap()),
+                "more" => format!("more {} {}", r["count"], r["changed"]),
+                "action" => format!("action {}", r["label"].as_str().unwrap()),
+                kind => {
+                    let keys: Vec<&str> = r["parameters"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p["key"].as_str().unwrap())
+                        .collect();
+                    format!("{kind} {} {}", r["label"].as_str().unwrap(), keys.join("+"))
+                }
+            })
+            .collect()
+    };
+    let first = projection(&panels);
+    assert_eq!(
+        shape(&first),
+        [
+            "[Gradient Ramp]",
+            "action Swap Colors",
+            "point Start Of Ramp startX+startY",
+            "point End Of Ramp endX+endY",
+            "ramp Gradient startColor+endColor",
+            "startColor",
+            "endColor",
+            "rampShape",
+            "rampScatter",
+            "blendWithOriginal",
+            "[Glow]",
+            "radius",
+            "intensity",
+            "more 1 true",
+        ]
+    );
+    let glow = first["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "more")
+        .unwrap()["id"]
+        .clone();
+    let send = |panels: &Builtins, p: &Value, intent: Value| {
+        let args = json!({"documentId":p["documentId"],"revision":p["revision"],"layer":"a","intent":intent});
+        finish(
+            panels
+                .realms
+                .lock()
+                .unwrap()
+                .get("layer-effects")
+                .unwrap()
+                .eval(format!(
+                    "__pmBuiltin.command('panel.effect-controls',{args})"
+                ))
+                .unwrap(),
+        );
+    };
+    send(
+        &panels,
+        &first,
+        json!({"type":"disclose","id":glow,"open":true}),
+    );
+    let opened = projection(&panels);
+    assert_eq!(
+        shape(&opened)[11..],
+        ["radius", "intensity", "more 1 true", "threshold"]
+    );
 }
