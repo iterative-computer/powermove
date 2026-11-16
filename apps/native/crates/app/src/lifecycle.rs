@@ -79,6 +79,13 @@ fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Dur
         _ => Some(None),
     }
 }
+/// Whether a quit has begun and was not cancelled: its questions may be up
+/// (the running-export one comes before the quit starts), or it may be
+/// waiting on a stage (Keep Waiting keeps it going).
+pub(crate) fn quitting(cx: &App) -> bool {
+    cx.try_global::<QuitCoordinator>()
+        .is_some_and(|q| q.quitting || q.asking_exports)
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     /// The viewers' last pictures still being written: a quit waits for
@@ -770,6 +777,21 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         })
         .detach();
     });
+    // A project's viewer draws only while its window can be seen: a tab
+    // behind another gives its drawing (and, idle, its memory) up and takes
+    // it back when selected, so any number of tabs can be open.
+    let watched = entity.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            if watched.update(cx, |v, cx| v.follow_shown(cx)).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
     let weak = entity.downgrade();
     window.on_window_should_close(cx, move |_, cx| {
         let _ = weak.update(cx, |v, cx| v.request_close(Intent::Window, cx));

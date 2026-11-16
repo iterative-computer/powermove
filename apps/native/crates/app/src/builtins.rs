@@ -839,6 +839,13 @@ impl Controller {
         if crate::first_run::take_workspace_request() {
             self.host.borrow().send_command("firstRunWorkspace", vec![]);
         }
+        // A restored tab behind the front one starts its panels, media probes
+        // and thumbnails with its project's open: its turn comes once the
+        // front tab shows its first frame and the person is idle, or when it
+        // is selected (`Controller::restore_waiting`).
+        if self.restore_waiting() {
+            return;
+        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         self.want_thumbnails(cx);
