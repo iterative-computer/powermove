@@ -2976,6 +2976,14 @@ impl Host {
                             .collect();
                         h.up_early.extend(pending);
                     }
+                    // Escape ends a Select part of the screen before anything
+                    // else hears it (the editor keeps the keyboard meanwhile).
+                    if e.r#type() == NSEventType::KeyDown
+                        && e.keyCode() == 53
+                        && crate::region_pick::cancel()
+                    {
+                        return std::ptr::null_mut();
+                    }
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
                         if let Some(sheet) = host.borrow().sheet.borrow().as_ref()

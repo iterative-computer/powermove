@@ -5,7 +5,7 @@
 //!
 //! The box is in the window's content, in top-left points.
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol};
+use objc2::runtime::NSObjectProtocol;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::*;
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
@@ -21,7 +21,6 @@ pub struct Pick {
     done: Cell<bool>,
     overlay: RefCell<Option<Retained<NSPanel>>>,
     parent: RefCell<Option<Retained<NSWindow>>>,
-    monitor: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -60,7 +59,8 @@ define_class!(
         }
         #[unsafe(method(drawRect:))]
         fn draw(&self, _: NSRect) {
-            NSColor::colorWithWhite_alpha(0., 0.18).setFill();
+            // Dim enough to read over a dark editor as well as a light one.
+            NSColor::colorWithWhite_alpha(0., 0.35).setFill();
             NSRectFill(self.bounds());
             if let Some(r) = self.rect().filter(|r| r.size.width > 0. && r.size.height > 0.) {
                 NSRectFillUsingOperation(r, NSCompositingOperation::Clear);
@@ -95,9 +95,6 @@ fn finish(view: &PickView, picked: Picked) {
     if state.done.replace(true) {
         return;
     }
-    if let Some(monitor) = state.monitor.borrow_mut().take() {
-        unsafe { NSEvent::removeMonitor(&monitor) };
-    }
     if let (Some(overlay), Some(parent)) = (state.overlay.borrow_mut().take(), state.parent.borrow_mut().take()) {
         parent.removeChildWindow(&overlay);
         overlay.orderOut(None);
@@ -109,6 +106,15 @@ fn finish(view: &PickView, picked: Picked) {
 thread_local! {
     /// The pick in progress (one at a time), kept until it answers.
     static PICKING: RefCell<Option<Retained<PickView>>> = const { RefCell::new(None) };
+}
+
+/// Cancels the pick in progress (Escape); whether there was one.
+pub fn cancel() -> bool {
+    let Some(view) = PICKING.with(|p| p.borrow().clone()) else {
+        return false;
+    };
+    finish(&view, None);
+    true
 }
 
 /// Starts a pick over `window`'s content; the receiver gets the box once.
@@ -142,28 +148,13 @@ pub fn pick(window: &NSWindow) -> async_channel::Receiver<Picked> {
         done: Cell::new(false),
         overlay: RefCell::new(Some(overlay.clone())),
         parent: RefCell::new(Some(window.retain())),
-        monitor: RefCell::new(None),
     });
     let view: Retained<PickView> = unsafe {
         msg_send![super(view), initWithFrame: NSRect::new(NSPoint::new(0., 0.), frame.size)]
     };
     overlay.setContentView(Some(&view));
-    // Escape cancels (the editor keeps the keyboard: the overlay never
-    // becomes key).
-    let weak = objc2::rc::Weak::from_retained(&view);
-    let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
-        let e = unsafe { event.as_ref() };
-        if e.keyCode() == 53
-            && let Some(view) = weak.load()
-        {
-            finish(&view, None);
-            return std::ptr::null_mut();
-        }
-        event.as_ptr()
-    });
-    let monitor =
-        unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
-    *view.ivars().monitor.borrow_mut() = monitor;
+    // Escape cancels through the shell's key monitor (`cancel`): the
+    // editor keeps the keyboard, the overlay never becomes key.
     unsafe { window.addChildWindow_ordered(&overlay, NSWindowOrderingMode::Above) };
     overlay.invalidateCursorRectsForView(&view);
     PICKING.with(|p| *p.borrow_mut() = Some(view));
