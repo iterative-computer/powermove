@@ -31,6 +31,16 @@ pub struct SearchWork {
     append: bool,
 }
 impl SearchWork {
+    /// Keep the request ticket when a client cannot be created, so failure
+    /// leaves Loading and stale failures cannot replace a newer search.
+    pub fn fail(self, error: crate::ServiceError) -> SearchReply {
+        SearchReply {
+            ticket: self.ticket,
+            append: self.append,
+            result: Err(error),
+        }
+    }
+
     /// Submit this method through ServiceWorker, never call it on main.
     pub fn run<T: StoreTransport>(self, client: &mut StoreClient<T>) -> SearchReply {
         let result = client.search(self.search);
@@ -45,6 +55,13 @@ pub struct SearchReply {
     ticket: Ticket,
     append: bool,
     result: Result<SearchPage>,
+}
+
+impl SearchReply {
+    /// Transport detail is for the local Error Log, never storefront copy.
+    pub fn error(&self) -> Option<&crate::ServiceError> {
+        self.result.as_ref().err()
+    }
 }
 
 #[derive(Debug)]
@@ -853,5 +870,31 @@ mod tests {
             "Install and Set Up"
         );
         assert!(!detail_action(None, None, false, false, Some(5)).enabled());
+    }
+}
+
+#[cfg(test)]
+mod utility_failure_tests {
+    use super::*;
+    #[test]
+    fn client_failure_finishes_loading_and_a_stale_failure_cannot_replace_new_results() {
+        let mut catalog = Catalog::default();
+        let old = catalog.search(CatalogQuery::default()).unwrap();
+        let current = catalog
+            .search(CatalogQuery {
+                text: Some("glow".into()),
+                category: None,
+            })
+            .unwrap();
+        let error = || crate::ServiceError::message(ServiceErrorCode::Offline, "synthetic offline");
+        catalog.receive(old.fail(error()));
+        assert_eq!(catalog.state, CatalogState::Loading);
+        let failed = current.fail(error());
+        assert!(failed.error().is_some());
+        catalog.receive(failed);
+        assert_eq!(
+            catalog.state,
+            CatalogState::Failed(ServiceErrorCode::Offline)
+        );
     }
 }

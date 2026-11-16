@@ -485,6 +485,7 @@ struct State {
     jobs: BTreeMap<TaskId, Job>,
     /// Why the running encode waits (low disk, playback or an export).
     waiting: Option<(TaskId, pm_proxy::PauseReason)>,
+    waiting_required: u64,
     /// Runtime facts, independent of the saved project and user proxy intent.
     preview_checked: HashSet<String>,
     preview_large: HashSet<String>,
@@ -585,7 +586,9 @@ fn load(profile: &Path, objects: &Path) -> Index {
 /// not know were R′G′B′), often left untagged by VideoToolbox, while the copy
 /// keeps its own matrix: retired. Attached files and sequences (retired at
 /// load) are never touched. Checked once per content per run; runs on the
-/// file worker.
+/// file worker. Version 5 also retires VP8/VP9 alpha renditions whose
+/// generator discarded the Matroska alpha stream, and portrait renditions
+/// fitted into the former landscape HD box.
 fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Rendition> {
     let stale = |state: &State| -> Vec<Rendition> {
         let Some(record) = state.index.contents.get(content) else {
@@ -609,11 +612,15 @@ fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Renditio
             return vec![];
         }
     }
-    let rgb = pm_media::probe::probe(original)
+    let affected = pm_media::probe::probe(original)
         .ok()
-        .and_then(|p| p.probe.video.map(|v| v.codec.is_rgb()))
-        == Some(true);
-    if !rgb {
+        .and_then(|p| p.probe.video)
+        .is_some_and(|v| {
+            v.codec.is_rgb()
+                || (v.alpha.is_some() && matches!(v.codec.codec.as_str(), "vp8" | "vp9"))
+                || (v.height > v.width && v.height > 1080)
+        });
+    if !affected {
         return vec![];
     }
     let mut state = inner.state.lock().unwrap();
@@ -658,6 +665,10 @@ fn failure(code: TaskFailureCode, diagnostic: impl Into<String>) -> TaskFailure 
 /// An original's picture: width, height, bit depth and frames. A sequence
 /// read in place answers from its first frame on disk and its numbering.
 fn picture(path: &Path) -> Option<(u32, u32, u8, u64)> {
+    picture_with_alpha(path).map(|(w, h, depth, frames, _)| (w, h, depth, frames))
+}
+
+fn picture_with_alpha(path: &Path) -> Option<(u32, u32, u8, u64, bool)> {
     if let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) {
         let first = (sequence.first..=sequence.last)
             .map(|n| sequence.file(n))
@@ -669,10 +680,17 @@ fn picture(path: &Path) -> Option<(u32, u32, u8, u64)> {
             format.height as u32,
             still.bit_depth,
             sequence.frames(),
+            still.color.alpha != pm_protocol::color::AlphaMode::Opaque,
         ));
     }
     let v = pm_media::probe::probe(path).ok()?.probe.video?;
-    Some((v.width, v.height, v.codec.bit_depth, v.frames as u64))
+    Some((
+        v.width,
+        v.height,
+        v.codec.bit_depth,
+        v.frames as u64,
+        v.alpha.is_some(),
+    ))
 }
 
 /// A failed generation in the task's words: a missing file names itself.
@@ -1297,7 +1315,8 @@ impl Inner {
         };
         let before_source = Source::of(&source)
             .ok_or_else(|| failure(TaskFailureCode::SourceOffline, "source offline"))?;
-        if let Some((_, _, _, frames)) = picture(&source) {
+        let facts = picture_with_alpha(&source);
+        if let Some((_, _, _, frames, _)) = facts {
             let _ = self.tasks.lock().unwrap().progress(ticket, 0, frames);
         }
         let (ffmpeg, ffprobe) = ffmpeg()
@@ -1336,7 +1355,7 @@ impl Inner {
             Rendition::Optimized => StorageClass::Optimized,
         };
         let root = storage.settings().locations[&class].directory.join("store");
-        let store = pm_proxy::ProxyStore::open(root)
+        let store = pm_proxy::ProxyStore::open(&root)
             .map_err(|e| failure(TaskFailureCode::Unknown, e.to_string()))?;
         let last = Mutex::new(std::time::Instant::now());
         let on_progress = |share: f64| {
@@ -1356,8 +1375,25 @@ impl Inner {
             }
         };
         let pause = || self.interactive.load(Ordering::Acquire);
+        let required = facts
+            .and_then(|(w, h, depth, frames, alpha)| {
+                pm_proxy::ProxyRecipe::new(format, size, w, h, depth, alpha)
+                    .ok()
+                    .zip(pm_proxy::free_bytes(&root).ok())
+                    .map(|(recipe, (_, capacity))| {
+                        pm_proxy::required_free_bytes(
+                            capacity,
+                            pm_proxy::estimated_output_bytes(&recipe, frames),
+                        )
+                    })
+            })
+            .unwrap_or(5 << 30);
         let on_pause = |reason: Option<pm_proxy::PauseReason>| {
-            self.state.lock().unwrap().waiting = reason.map(|r| (ticket.id, r));
+            {
+                let mut state = self.state.lock().unwrap();
+                state.waiting = reason.map(|r| (ticket.id, r));
+                state.waiting_required = required;
+            }
             let _ = self.events.try_send(Event::Changed);
         };
         let generated = pm_proxy::generate(pm_proxy::GenerationRequest {
@@ -1627,6 +1663,7 @@ impl ProMedia {
                     present: HashSet::new(),
                     jobs: BTreeMap::new(),
                     waiting: None,
+                    waiting_required: 0,
                     preview_checked: HashSet::new(),
                     recipe_checked: HashSet::new(),
                     preview_large: HashSet::new(),
@@ -1966,16 +2003,28 @@ impl ProMedia {
     }
 
     /// Why a running task's encode waits, in the task's words.
-    pub fn waiting(&self, id: TaskId) -> Option<&'static str> {
-        match self.inner.state.lock().unwrap().waiting {
-            Some((task, pm_proxy::PauseReason::LowDisk)) if task == id => {
-                Some("Waiting for free disk space (Powermove keeps 10% of the disk free)")
-            }
+    pub fn waiting(&self, id: TaskId) -> Option<String> {
+        let state = self.inner.state.lock().unwrap();
+        match state.waiting {
+            Some((task, pm_proxy::PauseReason::LowDisk)) if task == id => Some(media_pause_line(
+                state.jobs.get(&id).map_or(Rendition::Proxy, |j| j.kind),
+                state.waiting_required,
+            )),
             Some((task, pm_proxy::PauseReason::InteractiveWork)) if task == id => {
-                Some("Waiting while the viewer plays or an export runs")
+                Some("Waiting while the viewer plays or an export runs".into())
             }
             _ => None,
         }
+    }
+
+    pub fn preview_pause_message(&self, project: &str) -> Option<String> {
+        let state = self.inner.state.lock().unwrap();
+        let (id, reason) = state.waiting?;
+        let job = state.jobs.get(&id)?;
+        (reason == pm_proxy::PauseReason::LowDisk
+            && job.project == project
+            && job.kind == Rendition::Proxy)
+            .then(|| media_pause_line(Rendition::Proxy, state.waiting_required))
     }
 
     /// Every media task, in queue order.
@@ -2017,6 +2066,17 @@ pub fn bytes(n: u64) -> String {
     } else {
         format!("{n} bytes")
     }
+}
+
+fn media_pause_line(kind: Rendition, required: u64) -> String {
+    let label = match kind {
+        Rendition::Proxy => "Previews",
+        Rendition::Optimized => "Optimized media",
+    };
+    format!(
+        "{label} paused, need {:.1} GB free",
+        (required as f64 / 1e9 * 10.).ceil() / 10.
+    )
 }
 
 impl crate::session::Controller {
@@ -3545,6 +3605,83 @@ mod tests {
         }
         assert!(prefs.creates_on_import(3840, 2160, 8));
         assert!(!prefs.creates_on_import(1920, 1080, 10));
+    }
+    #[test]
+    fn low_disk_preview_message_states_required_space() {
+        let (_dir, media) = service();
+        let id = TaskId(1);
+        {
+            let mut state = media.inner.state.lock().unwrap();
+            state.jobs.insert(
+                id,
+                Job {
+                    kind: Rendition::Proxy,
+                    project: "p".into(),
+                    asset: "a".into(),
+                    source: PathBuf::from("source.mov"),
+                    size: ProxySize::P1080,
+                    format: ProxyFormat::ProResProxy,
+                },
+            );
+            state.waiting = Some((id, pm_proxy::PauseReason::LowDisk));
+            state.waiting_required = (5 << 30) + (1 << 29);
+        }
+        let expected = "Previews paused, need 6.0 GB free";
+        assert_eq!(media.preview_pause_message("p").as_deref(), Some(expected));
+        assert_eq!(media.waiting(id).as_deref(), Some(expected));
+        assert_eq!(media.preview_pause_message("another project"), None);
+        media.inner.state.lock().unwrap().waiting = None;
+        assert_eq!(media.preview_pause_message("p"), None);
+    }
+
+    #[test]
+    fn reopening_identified_media_creates_its_missing_hd_preview() {
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (_dir, media) = service();
+        std::fs::create_dir_all(media.objects()).unwrap();
+        let original = clip(
+            media.objects(),
+            "existing.mov",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=2000x1200:r=30:d=0.1",
+                "-c:v",
+                "prores_videotoolbox",
+                "-profile:v",
+                "proxy",
+            ],
+        );
+        let content = media
+            .inner
+            .content_of(&original, &AtomicBool::new(false))
+            .unwrap();
+        media.inner.note("existing", "a", &original, &content);
+        media.inner.save();
+        let reopened = ProMedia::new(
+            media.inner.profile.clone(),
+            media.inner.objects.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        {
+            let state = reopened.inner.state.lock().unwrap();
+            assert_eq!(
+                state.index.assets.get("existing").and_then(|a| a.get("a")),
+                Some(&content)
+            );
+            assert!(
+                state.index.contents.is_empty(),
+                "the persisted project has no preview yet"
+            );
+        }
+        identify(&reopened, "existing", &[("a", &original)]);
+        finish_tasks(&reopened);
+        let mut catalog = MediaCatalog::default();
+        catalog.originals.insert("a".into(), original);
+        reopened.decorate("existing", &mut catalog, &["a".into()]);
+        assert!(catalog.proxies.contains_key("a"));
+        assert!(catalog.automatic_proxies.contains("a"));
     }
 }
 

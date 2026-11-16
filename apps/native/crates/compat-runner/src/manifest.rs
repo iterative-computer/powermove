@@ -148,6 +148,9 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
             "apiVersion {api} is newer than this app ({API_VERSION})"
         ));
     }
+    if m.get("nativeStyle").is_some_and(|v| !matches!(v.as_str(), Some("full" | "tokens-only" | "none"))) {
+        return Err("invalid \"nativeStyle\"".into());
+    }
     let description =
         text("description", DESCRIPTION_CHARS, false).map_err(|_| "invalid \"description\"")?;
     let entry = text("entry", 200, false).map_err(|_| "invalid \"entry\"")?;
@@ -247,7 +250,7 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
     if let Some(v) = entry {
         out.insert("entry".into(), json!(v));
     }
-    for key in ["contributes", "vars", "permissions", "links", "author"] {
+    for key in ["contributes", "vars", "permissions", "links", "author", "nativeStyle"] {
         if let Some(v) = m.get(key) {
             out.insert(key.into(), v.clone());
         }
@@ -280,6 +283,17 @@ mod tests {
     use super::*;
     fn base() -> Value {
         json!({"id":"synthetic","name":"Synthetic","version":"1.0.0","apiVersion":1})
+    }
+    #[test]
+    fn native_style_modes_survive_normalization() {
+        for mode in ["full", "tokens-only", "none"] {
+            let mut value = base(); value["nativeStyle"] = json!(mode);
+            assert_eq!(parse(&value).unwrap()["nativeStyle"], mode);
+        }
+        for mode in [json!("invalid"), json!(false), json!(null)] {
+            let mut value = base(); value["nativeStyle"] = mode;
+            assert!(parse(&value).is_err());
+        }
     }
     #[test]
     fn defaults_and_refusals_match_the_frozen_parser() {

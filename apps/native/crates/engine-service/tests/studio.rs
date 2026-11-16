@@ -3248,6 +3248,7 @@ fn four_worker_views_keep_their_camera_tier_and_pick_state_independent() {
     assert!(
         viewers[0]
             .studio_view(Some(studio::FreeView {
+                ortho: false, roll: 0.,
                 eye: [f64::NAN, 0., 1.],
                 target: [0.; 3],
                 zoom: 1.
@@ -3269,6 +3270,7 @@ fn studio_view_override_does_not_change_a_supplying_compositions_camera() {
         "test",
         ViewCamera::Custom {
             view: FreeView {
+                ortho: false, roll: 0.,
                 eye: [5., 2., 1.],
                 target: [0.; 3],
                 zoom: 1.,
@@ -4202,4 +4204,63 @@ fn native_saved_project_transport_probe() {
         assert!(!renderer.read_rgba(&rendered).unwrap().is_empty());
     }
     assert_eq!(doc.to_value(),original);
+}
+
+#[test]
+fn custom_ortho_and_roll_reach_the_shared_renderer_view_without_document_edits() {
+    use studio::{FreeView, SceneSource, ViewCamera};
+    for shot_ortho in [false, true] {
+        let doc = document(false, 100.);
+        let doc = if shot_ortho {
+            camera_patch(doc, "orthographic", json!({}), 5.)
+        } else {
+            doc
+        };
+        let before = doc.to_value().unwrap();
+        let req = studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        };
+        let base = FreeView {
+            eye: [3., 2., 6.],
+            target: [0.; 3],
+            zoom: 1.5,
+            ortho: false,
+            roll: 0.,
+        };
+        let get = |view| {
+            studio::DocumentSource::new(doc.clone(), Default::default())
+                .with_camera_for("test", ViewCamera::Custom { view })
+                .scene(&req)
+                .unwrap()
+        };
+        let a = get(base);
+        assert!(a.view.orthographic_span.is_none());
+        let b = get(FreeView {
+            ortho: true,
+            roll: 15.,
+            ..base
+        });
+        let distance = (a.scene.camera.target - a.scene.camera.position).length();
+        let expected = distance * (a.scene.camera.fov.to_radians() / 2.).tan();
+        assert!((b.view.orthographic_span.unwrap() - expected).abs() < 1e-5);
+        let [f, right, up] = b.view.basis.unwrap();
+        assert!(f.dot(right).abs() < 1e-5 && f.dot(up).abs() < 1e-5 && right.dot(up).abs() < 1e-5);
+        assert_ne!(a.view.basis, b.view.basis);
+        assert_ne!(
+            FreeView::key(Some(base)),
+            FreeView::key(Some(FreeView {
+                ortho: true,
+                ..base
+            }))
+        );
+        assert_ne!(
+            FreeView::key(Some(base)),
+            FreeView::key(Some(FreeView { roll: 15., ..base }))
+        );
+        assert_eq!(doc.to_value().unwrap(), before);
+    }
 }

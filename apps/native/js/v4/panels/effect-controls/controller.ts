@@ -175,6 +175,7 @@ export class EffectsController {
     const multi = p.selectedCount > 1;
     const items: MenuItem[] = [
       { id: "copy", label: "Copy" },
+      { id: "duplicate", label: "Duplicate Effect" },
       {
         id: "paste",
         label: p.clipboardCount > 1 ? "Paste Effects" : "Paste Effect",
@@ -214,8 +215,8 @@ export class EffectsController {
         id,
         direction: choice === "up" ? -1 : 1,
       });
-    else if (["copy", "reset", "remove"].includes(choice))
-      await this.drive({ type: choice as "copy" | "reset" | "remove", id });
+    else if (["copy", "duplicate", "reset", "remove"].includes(choice))
+      await this.drive({ type: choice as "copy" | "duplicate" | "reset" | "remove", id });
     else if (choice === "paste") await this.drive({ type: "paste" });
   }
   /** A parameter row's menu; Reset clears keys and expression (v1 B367). */

@@ -156,6 +156,7 @@ pub enum CompCommand {
         name: Option<String>,
         mode: PrecomposeMode,
         adjust_duration: bool,
+        size_to_selection: bool,
         time: f64,
     },
 }
@@ -214,6 +215,7 @@ impl CompCommand {
                 name,
                 mode,
                 adjust_duration,
+                size_to_selection,
                 time,
             } => super::precompose::precompose(
                 cx,
@@ -224,6 +226,7 @@ impl CompCommand {
                     name: name.as_deref(),
                     mode: *mode,
                     adjust_duration: *adjust_duration,
+                    size_to_selection: *size_to_selection,
                     time: *time,
                 },
             ),

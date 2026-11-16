@@ -160,7 +160,20 @@ impl TimelineClient {
                 .published(&self.project)
                 .ok_or(ClientError::Closed)?;
             let mut mirror = pm_kernel::QueryMirror::new(&published);
+            let mut evaluated = targets.clone();
             for (layer, channel) in targets {
+                let paired = match channel.as_str() {
+                    "scale.x" => Some("scale.y"),
+                    "scale.y" => Some("scale.x"),
+                    _ => None,
+                };
+                if let Some(paired) = paired {
+                    if !evaluated.contains(&(layer.clone(), paired.into())) {
+                        evaluated.push((layer.clone(), paired.into()));
+                    }
+                }
+            }
+            for (layer, channel) in &evaluated {
                 let value = mirror
                     .queries()
                     .evaluate(self.model.index.comp_id.as_deref(), layer, channel, *time)

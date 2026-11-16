@@ -3215,6 +3215,14 @@ unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            // Powermove hotfix 9.1: the private/SF Symbol cursor path aborted the app
+            // inside resetCursorRects (panic across the Objective-C boundary). Use
+            // stock AppKit cursors only until that path is rebuilt and tested.
+            CursorStyle::Move => msg_send![class!(NSCursor), openHandCursor],
+            CursorStyle::Rotate => msg_send![class!(NSCursor), crosshairCursor],
+            CursorStyle::ZoomIn | CursorStyle::ZoomOut => {
+                msg_send![class!(NSCursor), arrowCursor]
+            }
         };
 
         let bounds: Objc2NSRect = msg_send![this as *const Objc2Object as ObjcId, bounds];
