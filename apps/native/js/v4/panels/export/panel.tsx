@@ -319,20 +319,39 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
           fontWeight: token("typography.display_weight"),
         }}
       >
-        {progressSheet ? `Exporting “${p.name}”` : "Export"}
+        {!progressSheet
+          ? "Export"
+          : s.run.phase === "failed"
+            ? "Export Failed"
+            : `Exporting “${p.name}”`}
       </text>
       {progressSheet ? (
         <>
           <div data-pm-slot="body" style={{ ...body, ...column }}>
-            {s.run.phase === "rendering" && s.run.preview ? (
-              <frame
-                resource={s.run.preview}
-                metadata={{ export: { aspect: [p.width, p.height] } }}
+            {s.run.phase !== "failed" ? (
+              // The frame last encoded, whole, on the viewer's ground: the
+              // ground stands from the start so the sheet never jumps.
+              <div
+                role="img"
+                label="Frame last exported"
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
+                  height: token("metrics.export_preview"),
                   background: token("colors.viewer"),
                   borderRadius: token("metrics.control_radius"),
                 }}
-              />
+              >
+                {(s.run.phase === "rendering" || s.run.phase === "checking") &&
+                s.run.preview ? (
+                  <img
+                    resource={s.run.preview}
+                    alt=""
+                    metadata={{ fit: "contain" }}
+                    style={{ position: "absolute", inset: "fill" }}
+                  />
+                ) : null}
+              </div>
             ) : null}
             {s.run.phase === "failed" ? (
               <text
@@ -344,7 +363,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   },
                 }}
                 style={{ ...text, color: token("colors.danger") }}
-              >{`Export failed: ${s.run.message}`}</text>
+              >
+                {s.run.message}
+              </text>
             ) : (
               <>
                 <UI.ProgressRow
@@ -484,6 +505,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 id="export.options"
                 role="group"
                 label="Export options"
+                // No scroller shows: the cards past the edge fade into the
+                // sheet, so Rendering and Presets are seen to follow.
+                metadata={{ scrollEdge: "colors.panel" }}
                 style={{
                   // A long option list scrolls; the sheet stays on screen.
                   ...stack,
