@@ -328,20 +328,6 @@ impl Render for ErrorLogWindow {
                     .flex()
                     .gap(px(t.space.md))
                     .py(px(t.space.md))
-                    .child(kit.symbol(
-                        match entry.level {
-                            Level::Warn => "exclamationmark.triangle.fill",
-                            Level::Info => "info.circle",
-                            _ => "xmark.octagon.fill",
-                        },
-                        t.metrics.symbol_panel,
-                        pm_shell::symbol::Weight::Regular,
-                        match entry.level {
-                            Level::Warn => t.colors.warning,
-                            Level::Info => t.colors.secondary,
-                            _ => t.colors.danger,
-                        },
-                    ))
                     .child(
                         div()
                             .flex_1()
