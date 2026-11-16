@@ -1020,6 +1020,18 @@ impl Kernel {
                 // writes keeps the row's edit time (PM-392).
                 let edited = self.project(&handle.project).unwrap().store().needs_save();
                 let recovery_copy = if unchanged {
+                    // A layout change is no edit: the project's own workspace
+                    // record, which the next open prefers, takes it too, and
+                    // both are flushed before the journal holding it goes.
+                    if let Destination::Library(slot) = &self.sessions[&handle.project].destination
+                        && let Some(writer) = &self.library
+                    {
+                        let workspace = self.project(&handle.project).unwrap().workspace().clone();
+                        writer
+                            .set(&format!("projectWorkspace.{slot}"), workspace)
+                            .and_then(|()| writer.flush())
+                            .map_err(failure)?;
+                    }
                     self.save_session_meta(&handle.project)?;
                     None
                 } else {
