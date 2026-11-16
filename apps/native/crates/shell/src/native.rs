@@ -76,6 +76,8 @@ pub struct MenuEntry {
     pub header: bool,
     /// An ease row's curve `[x1, y1, x2, y2]`, drawn beside its name.
     pub curve: Option<[f64; 4]>,
+    /// The key the menu bar shows for the row's command (`menu::chord_for`).
+    pub shortcut: Option<String>,
 }
 impl MenuEntry {
     pub fn item(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -87,6 +89,7 @@ impl MenuEntry {
             children: vec![],
             header: false,
             curve: None,
+            shortcut: None,
         }
     }
     /// A section's title row.
@@ -7773,6 +7776,11 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
         let item = named_item(mtm, &entry.label, &entry.command);
         if let Some(curve) = entry.curve {
             item.setImage(Some(&ease_curve_image(curve)));
+        }
+        if let Some(chord) = &entry.shortcut {
+            let (key, flags) = menu::accelerator(chord);
+            item.setKeyEquivalent(&NSString::from_str(&key));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
         }
         unsafe { item.setTarget(Some(target)) };
         item.setState(if entry.checked {

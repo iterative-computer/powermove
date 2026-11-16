@@ -154,6 +154,17 @@ fn append_menu(
         if let Some(tooltip) = option.get("tooltip").and_then(Value::as_str) {
             item.setToolTip(Some(&NSString::from_str(tooltip)));
         }
+        // The key the menu bar shows for the row's command.
+        if let Some((key, flags)) = option
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+            .and_then(pm_shell::menu::chord_for)
+            .map(|chord| pm_shell::menu::accelerator(&chord))
+        {
+            item.setKeyEquivalent(&NSString::from_str(&key));
+            item.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags(flags as _));
+        }
         // An ease row shows its curve beside its name (v1's ease menu).
         if let Some(curve) = option.get("curve").and_then(Value::as_array)
             && let [x1, y1, x2, y2] = curve.as_slice()

@@ -3178,3 +3178,55 @@ fn the_first_unfocused_word_reaches_the_rows(cx: &mut TestAppContext) {
     assert!(s.surface.update(&mut s.vcx, |t, cx| t.set_focused(true, cx)));
     assert_eq!(focused(&s), Some(true));
 }
+/// v1's ruler menu ends with what its extensions added: New Composition…,
+/// Import Captions…, Add 3D Layer; each runs its command.
+#[gpui::test]
+fn the_ruler_menu_offers_v1s_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("New Composition…".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["newComposition"]);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<&str> = menus[0].iter().filter_map(|r| r["label"].as_str()).collect();
+    assert!(labels.ends_with(&["New Composition…", "Import Captions…", "Add 3D Layer"]), "{labels:?}");
+}
+/// A clip's menu is headed by its layer's name (v1's layer menu) and ends
+/// with the creation items; the layer's own rows still run their commands.
+#[gpui::test]
+fn a_clips_menu_names_its_layer_and_offers_the_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    *s.recorder.choice.borrow_mut() = Some("Import Captions…".into());
+    let at = s.origin() + point(px(100.), s.at(1, 0.).y - s.origin().y);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions"]);
+    let menus = s.recorder.menus.borrow();
+    assert_eq!(menus[0][0]["header"], true);
+    assert!(!menus[0][0]["label"].as_str().unwrap_or_default().is_empty());
+    drop(menus);
+    *s.recorder.choice.borrow_mut() = Some("duplicate".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions", "duplicate"]);
+}
