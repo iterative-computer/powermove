@@ -1,7 +1,8 @@
 import { useLayoutEffect, useReducer } from "preact/hooks";
 import {
   EmptyState,
-  PopUpButton,
+  List,
+  ListItem,
   TextField,
   ToolbarItem,
   Tree,
@@ -37,7 +38,6 @@ export function EffectsPanel({
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   useLayoutEffect(() => model.subscribe(() => redraw(undefined)), [model]);
   const window = model.window();
-  const active = model.scopes().find((scope) => scope.value === model.scope)!;
   const focus = (row: Row) =>
     model.focus === "list" && model.focused === row.key;
   // Design review 2026-11-01: presets speak their kind like effects do.
@@ -106,31 +106,6 @@ export function EffectsPanel({
             void model.key(event.key ?? "", event);
           }}
         />
-        <PopUpButton
-          id={ids.scope}
-          label={`Category, ${active.label}`}
-          title="Show Category"
-          binding={bindings.scope}
-          value={model.scope}
-          disabled={model.installedCount() === 0}
-          options={model
-            .scopes()
-            .map((scope) => ({ v: scope.value, label: scope.label }))}
-          tabIndex={0}
-          style={{
-            color: token("colors.secondary"),
-            background: token("colors.panel"),
-            maxWidth: token("metrics.value_column"),
-          }}
-          onFocus={() => model.setFocus("scope")}
-          onChange={(event) => {
-            const value = event.value;
-            const option = model
-              .scopes()
-              .find((scope) => scope.value === value);
-            if (option) model.pickScope(option.value);
-          }}
-        />
       </div>
       {model.error ? (
         <text
@@ -145,230 +120,298 @@ export function EffectsPanel({
           {model.error}
         </text>
       ) : null}
-      {model.installedCount() === 0 ? (
-        <EmptyState
-          label="No Effects"
-          explanation="Installed effects and presets appear here."
-          attr={{ symbol: "wand.and.rays" }}
-          action={null}
-        />
-      ) : window.count === 0 && !model.searching ? (
-        <text
-          style={{
-            color: token("colors.secondary"),
-            fontSize: token("typography.reading"),
-            textAlign: "center",
-          }}
-        >
-          {model.query.trim()
-            ? `No effects match “${model.query}”`
-            : "Nothing here yet"}
-        </text>
-      ) : (
-        <Tree
-          id={ids.list}
-          label="Effects"
-          tabIndex={0}
-          style={hitStyle}
-          metadata={{
-            rowCount: window.count,
-            range: [window.from, window.to],
-            acceptsDrops: false,
-            selectionMode: "single",
-          }}
-          onFocus={() => model.setFocus("list")}
-          onPointerMove={(event) => {
-            if (event.target === event.currentTarget) model.hover(null);
-          }}
-          preventDefault={{
-            keydown: [
-              "ArrowUp",
-              "ArrowDown",
-              "ArrowLeft",
-              "ArrowRight",
-              "Home",
-              "End",
-              "Enter",
-              "Escape",
-            ],
-          }}
-          onKeyDown={(event) => {
-            void model.key(event.key ?? "", event);
-          }}
-        >
-          {window.rows.map((row) => {
-            const selected =
-              row.type === "item" && model.selected === row.item.id;
-            const hovered = model.hovered === row.key;
-            const focused = focus(row);
-            const style = {
-              ...textStyle,
-              borderRadius: token("metrics.control_radius"),
-              ...(selected
-                ? { background: token("colors.selected_fill") }
-                : hovered
-                  ? { background: token("colors.hover") }
-                  : {}),
-              ...(increaseContrast && selected
-                ? {
-                    borderWidth: token("metrics.border"),
-                    borderColor: token("colors.separator"),
-                  }
-                : {}),
-            };
-            if (row.type === "group")
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          flexGrow: 1,
+          minHeight: 0,
+        }}
+      >
+        {model.installedCount() === 0 ? null : (
+          // v1's category rail: every category one click away, the list beside
+          // it showing the chosen one (All, Recent, then each group).
+          <List
+            id={ids.scope}
+            label="Effect categories"
+            tabIndex={0}
+            style={{
+              ...hitStyle,
+              flexShrink: 0,
+              width: token("metrics.label_column"),
+              paddingLeft: token("metrics.gap"),
+              paddingRight: token("metrics.gap"),
+              borderRightWidth: token("metrics.border"),
+              borderColor: token("colors.separator"),
+            }}
+            onFocus={() => model.setFocus("scope")}
+          >
+            {model.scopes().map((scope) => {
+              const on = scope.value === model.scope;
               return (
-                <TreeItem
-                  key={row.key}
-                  id={ids.row(row.key)}
-                  label={`${row.name}, ${row.count} effects, ${row.expanded ? "expanded" : "collapsed"}`}
+                <ListItem
+                  key={scope.value}
+                  id={`${ids.scope}:${scope.value}`}
+                  label={scope.label}
+                  selected={on}
                   tabIndex={-1}
-                  expanded={row.expanded}
-                  onSelect={() => model.toggle(row.key)}
-                  onPointerMove={() => model.hover(row.key)}
-                  onFocus={() => {
-                    model.focused = row.key;
-                    model.setFocus("list");
-                  }}
+                  onSelect={() => model.pickScope(scope.value)}
                   style={{
-                    ...style,
-                    ...(increaseContrast &&
-                    window.from + window.rows.indexOf(row) > 0
-                      ? {
-                          borderTopWidth: token("metrics.border"),
-                          borderTopColor: token("colors.separator"),
-                        }
+                    ...hitStyle,
+                    height: token("metrics.row"),
+                    paddingLeft: token("metrics.gap"),
+                    borderRadius: token("metrics.control_radius"),
+                    fontSize: token("typography.body"),
+                    color: token(on ? "colors.text" : "colors.secondary"),
+                    ...(on
+                      ? { background: token("colors.selected_fill") }
                       : {}),
                   }}
-                >
-                  <text style={groupTextStyle}>{row.name}</text>
-                </TreeItem>
+                />
               );
-            const { item } = row;
-            const parts = labelParts(item.label, model.query);
-            const showAdd = selected || hovered || focused;
-            return (
-              <TreeItem
-                key={row.key}
-                id={ids.row(row.key)}
-                label={itemLabel(row)}
-                selected={selected}
-                title={
-                  item.failed
-                    ? "This effect couldn’t load."
-                    : "Drag onto a layer, or click Add."
-                }
-                tabIndex={-1}
-                onSelect={() => model.select(row.key)}
-                onDoubleClick={() => {
-                  void model.apply(item.id);
-                }}
-                // Lifts onto a layer's row or the viewer (the host starts the
-                // drag; `metadata.item` names the effect). A definition that
-                // failed to load doesn't lift.
-                onDragStart={item.failed ? undefined : () => {}}
-                onPointerMove={() => model.hover(row.key)}
-                onFocus={() => {
-                  model.focused = row.key;
-                  model.setFocus("list");
-                }}
-                style={{
-                  ...style,
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-                metadata={{
-                  item: item.id,
-                  kind: item.kind,
-                  parent: row.parent,
-                  focused,
-                  draggable: !item.failed,
-                  definitionFailed: !!item.failed,
-                }}
-              >
-                {/* Symbols, native drag capsules and focus rings need kit APIs; no glyph substitute. */}
-                <text
-                  title={item.label}
-                  style={{
-                    ...textStyle,
-                    ...(item.failed ? { color: token("colors.muted") } : {}),
-                    // The name's parts (before, match, after) run on one line.
-                    display: "flex",
-                    flexDirection: "row",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {parts.before}
-                  <text
-                    style={{ fontWeight: token("typography.semibold_weight") }}
-                  >
-                    {parts.match}
-                  </text>
-                  {parts.after}
-                </text>
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: token("metrics.gap"),
-                  }}
-                >
-                  {item.failed && (
-                    <text
-                      attr={{ symbol: "exclamationmark.triangle.fill" }}
-                      style={{
-                        color: token("colors.warning"),
-                        fontSize: token("typography.body"),
+            })}
+          </List>
+        )}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            flexGrow: 1,
+            minWidth: 0,
+          }}
+        >
+          {model.installedCount() === 0 ? (
+            <EmptyState
+              label="No Effects"
+              explanation="Installed effects and presets appear here."
+              attr={{ symbol: "wand.and.rays" }}
+              action={null}
+            />
+          ) : window.count === 0 && !model.searching ? (
+            <text
+              style={{
+                color: token("colors.secondary"),
+                fontSize: token("typography.reading"),
+                textAlign: "center",
+              }}
+            >
+              {model.query.trim()
+                ? `No effects match “${model.query}”`
+                : "Nothing here yet"}
+            </text>
+          ) : (
+            <Tree
+              id={ids.list}
+              label="Effects"
+              tabIndex={0}
+              style={hitStyle}
+              metadata={{
+                rowCount: window.count,
+                range: [window.from, window.to],
+                acceptsDrops: false,
+                selectionMode: "single",
+              }}
+              onFocus={() => model.setFocus("list")}
+              onPointerMove={(event) => {
+                if (event.target === event.currentTarget) model.hover(null);
+              }}
+              preventDefault={{
+                keydown: [
+                  "ArrowUp",
+                  "ArrowDown",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "Home",
+                  "End",
+                  "Enter",
+                  "Escape",
+                ],
+              }}
+              onKeyDown={(event) => {
+                void model.key(event.key ?? "", event);
+              }}
+            >
+              {window.rows.map((row) => {
+                const selected =
+                  row.type === "item" && model.selected === row.item.id;
+                const hovered = model.hovered === row.key;
+                const focused = focus(row);
+                const style = {
+                  ...textStyle,
+                  borderRadius: token("metrics.control_radius"),
+                  ...(selected
+                    ? { background: token("colors.selected_fill") }
+                    : hovered
+                      ? { background: token("colors.hover") }
+                      : {}),
+                  ...(increaseContrast && selected
+                    ? {
+                        borderWidth: token("metrics.border"),
+                        borderColor: token("colors.separator"),
+                      }
+                    : {}),
+                };
+                if (row.type === "group")
+                  return (
+                    <TreeItem
+                      key={row.key}
+                      id={ids.row(row.key)}
+                      label={`${row.name}, ${row.count} effects, ${row.expanded ? "expanded" : "collapsed"}`}
+                      tabIndex={-1}
+                      expanded={row.expanded}
+                      onSelect={() => model.toggle(row.key)}
+                      onPointerMove={() => model.hover(row.key)}
+                      onFocus={() => {
+                        model.focused = row.key;
+                        model.setFocus("list");
                       }}
-                    />
-                  )}
-                  {model.query.trim() && (
-                    <text
                       style={{
-                        fontSize: token("typography.minimum"),
-                        color: token("colors.muted"),
+                        ...style,
+                        ...(increaseContrast &&
+                        window.from + window.rows.indexOf(row) > 0
+                          ? {
+                              borderTopWidth: token("metrics.border"),
+                              borderTopColor: token("colors.separator"),
+                            }
+                          : {}),
                       }}
                     >
-                      {item.group}
-                    </text>
-                  )}
-                  {showAdd && !item.failed && (
-                    <ToolbarItem
-                      id={ids.add(row.key)}
-                      label={`Add ${item.label}`}
-                      title={
-                        model.target
-                          ? `Add ${item.label}`
-                          : "Select a layer first"
-                      }
-                      disabled={!model.target}
-                      tabIndex={-1}
+                      <text style={groupTextStyle}>{row.name}</text>
+                    </TreeItem>
+                  );
+                const { item } = row;
+                const parts = labelParts(item.label, model.query);
+                const showAdd = selected || hovered || focused;
+                return (
+                  <TreeItem
+                    key={row.key}
+                    id={ids.row(row.key)}
+                    label={itemLabel(row)}
+                    selected={selected}
+                    title={
+                      item.failed
+                        ? "This effect couldn’t load."
+                        : "Drag onto a layer, or click Add."
+                    }
+                    tabIndex={-1}
+                    onSelect={() => model.select(row.key)}
+                    onDoubleClick={() => {
+                      void model.apply(item.id);
+                    }}
+                    // Lifts onto a layer's row or the viewer (the host starts the
+                    // drag; `metadata.item` names the effect). A definition that
+                    // failed to load doesn't lift.
+                    onDragStart={item.failed ? undefined : () => {}}
+                    onPointerMove={() => model.hover(row.key)}
+                    onFocus={() => {
+                      model.focused = row.key;
+                      model.setFocus("list");
+                    }}
+                    style={{
+                      ...style,
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                    metadata={{
+                      item: item.id,
+                      kind: item.kind,
+                      parent: row.parent,
+                      focused,
+                      draggable: !item.failed,
+                      definitionFailed: !!item.failed,
+                    }}
+                  >
+                    {/* Symbols, native drag capsules and focus rings need kit APIs; no glyph substitute. */}
+                    <text
+                      title={item.label}
                       style={{
-                        width: token("metrics.hit"),
-                        height: token("metrics.hit"),
-                        color: token(
-                          model.target ? "colors.secondary" : "colors.muted",
-                        ),
+                        ...textStyle,
+                        ...(item.failed
+                          ? { color: token("colors.muted") }
+                          : {}),
+                        // The name's parts (before, match, after) run on one line.
+                        display: "flex",
+                        flexDirection: "row",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
                       }}
-                      onDoubleClick={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if ((event.clickCount ?? 1) <= 1)
-                          void model.apply(item.id);
+                    >
+                      {parts.before}
+                      <text
+                        style={{
+                          fontWeight: token("typography.semibold_weight"),
+                        }}
+                      >
+                        {parts.match}
+                      </text>
+                      {parts.after}
+                    </text>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: token("metrics.gap"),
                       }}
-                    />
-                  )}
-                </div>
-              </TreeItem>
-            );
-          })}
-        </Tree>
-      )}
+                    >
+                      {item.failed && (
+                        <text
+                          attr={{ symbol: "exclamationmark.triangle.fill" }}
+                          style={{
+                            color: token("colors.warning"),
+                            fontSize: token("typography.body"),
+                          }}
+                        />
+                      )}
+                      {model.query.trim() && (
+                        <text
+                          style={{
+                            fontSize: token("typography.minimum"),
+                            color: token("colors.muted"),
+                          }}
+                        >
+                          {item.group}
+                        </text>
+                      )}
+                      {showAdd && !item.failed && (
+                        <ToolbarItem
+                          id={ids.add(row.key)}
+                          label={`Add ${item.label}`}
+                          title={
+                            model.target
+                              ? `Add ${item.label}`
+                              : "Select a layer first"
+                          }
+                          disabled={!model.target}
+                          tabIndex={-1}
+                          style={{
+                            width: token("metrics.hit"),
+                            height: token("metrics.hit"),
+                            color: token(
+                              model.target
+                                ? "colors.secondary"
+                                : "colors.muted",
+                            ),
+                          }}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if ((event.clickCount ?? 1) <= 1)
+                              void model.apply(item.id);
+                          }}
+                        />
+                      )}
+                    </div>
+                  </TreeItem>
+                );
+              })}
+            </Tree>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

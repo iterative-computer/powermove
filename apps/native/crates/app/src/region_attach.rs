@@ -82,11 +82,16 @@ impl Controller {
             return None;
         }
         let doc = self.published.as_ref()?.snapshot.doc_id;
-        let frame = self.viewer.as_ref()?.status().frame?;
-        let at = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
-        (frame.settled && frame.stamp.doc_id == doc && (at - time).abs() < 1e-3)
-            .then_some(frame.picture)
-            .flatten()
+        // The viewer's settled picture, copied when it came to rest, if it
+        // is the frame shown now.
+        let status = self.viewer.as_ref()?.status();
+        let (frame, picture) = (status.frame?, status.settled_picture?);
+        let at = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        (picture.stamp.doc_id == doc
+            && picture.stamp.revision == frame.stamp.revision
+            && picture.time == frame.time
+            && (at - time).abs() < 1e-3)
+            .then_some(picture)
     }
     /// Where the composition is drawn in the window, at what scale (the
     /// viewer's frame; `None` while it shows nothing).

@@ -1184,7 +1184,7 @@ impl Controller {
             .scrolled_at
             .get(id)
             .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
-        let thumb = shown
+        let thumb = (shown || !cx.should_auto_hide_scrollbars())
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
@@ -1199,6 +1199,8 @@ impl Controller {
                 if surface.read(cx).culls() {
                     surface.update(cx, |_, cx| cx.notify());
                 }
+                // Its AppKit controls show as pictures until it rests.
+                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -1292,7 +1294,14 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        Some(div().w_full().child(header).into_any_element())
+        // Cached: drawn again only when its panel changes (it observes the
+        // panel), not with every frame the window draws.
+        Some(
+            div()
+                .w_full()
+                .child(header.cached(StyleRefinement::default().w_full()))
+                .into_any_element(),
+        )
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.

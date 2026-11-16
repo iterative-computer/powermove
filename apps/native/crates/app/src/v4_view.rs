@@ -179,6 +179,10 @@ fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> 
     ((next * scale).round() / scale).clamp(facts.min, facts.max)
 }
 
+/// How long a body's scroll rests before its controls are themselves again:
+/// the scroll layer's settle (P-SCROLL-LAYER).
+const PICTURE_REST: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -231,6 +235,11 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// While the body scrolls, the controls show as pictures of themselves
+    /// (P-SLOT-PICTURE); `pictures_at` counts the scroll's steps, so only
+    /// the last one's rest lets them go.
+    pictures: pm_shell::picture::PictureHold,
+    pictures_at: u64,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
@@ -319,6 +328,7 @@ pub struct SurfaceView {
     pub(crate) grows: bool,
     fit: Cell<f32>,
     natural: Rc<Cell<f32>>,
+    column_natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -347,6 +357,8 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            pictures: Default::default(),
+            pictures_at: 0,
             cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
@@ -393,6 +405,7 @@ impl SurfaceView {
             grows: false,
             fit: Cell::new(0.),
             natural: Rc::new(Cell::new(0.)),
+            column_natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -1012,6 +1025,11 @@ impl SurfaceView {
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
         }
+        // The header stays put while the body scrolls: its controls are
+        // never pictured.
+        if !self.in_header(id) {
+            control.update(cx, |v, _| v.picture_with(&self.pictures));
+        }
         self.controls.insert(id, control);
     }
     /// The ink a panel gave a field's value (the accent on a value an
@@ -1247,6 +1265,9 @@ impl SurfaceView {
                 f.set_escape_cancels(true);
                 f.begin_editing_selecting_all(cx);
             });
+        }
+        if !self.in_header(id) {
+            field.update(cx, |f, _| f.picture_with(&self.pictures));
         }
         self.fields.insert(id, field);
     }
@@ -1693,6 +1714,55 @@ impl SurfaceView {
             stack.extend(node.children.iter().copied());
         }
         false
+    }
+    /// A step of the body's scroll: its controls show as pictures of
+    /// themselves until the scroll has rested `PICTURE_REST` (the scroll
+    /// layer's settle), then as themselves again (P-SLOT-PICTURE).
+    pub fn scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controls.is_empty() && self.fields.is_empty() {
+            return;
+        }
+        self.pictures_at += 1;
+        if self.pictures.set(true) {
+            self.hold_changed(cx);
+        }
+        let at = self.pictures_at;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PICTURE_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.pictures_at == at && v.pictures.set(false) {
+                    v.hold_changed(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Whether a node is the panel's header or inside it.
+    fn in_header(&self, mut id: Id) -> bool {
+        let Some(header) = self.prepared.header else {
+            return false;
+        };
+        loop {
+            if id == header {
+                return true;
+            }
+            match self.prepared.node(id).and_then(|n| n.parent) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+    fn hold_changed(&self, cx: &mut Context<Self>) {
+        for control in self.controls.values() {
+            control.update(cx, |c, cx| c.hold_changed(cx));
+        }
+        for field in self.fields.values() {
+            field.update(cx, |f, cx| f.hold_changed(cx));
+        }
+    }
+    /// Whether the controls show as pictures (a scroll is moving).
+    pub fn pictures_held(&self) -> bool {
+        self.pictures.held()
     }
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
@@ -3850,10 +3920,20 @@ impl Render for SurfaceView {
         let root = if self.grows {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
+            let column_natural = self.column_natural.clone();
+            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let origin = self.origin.clone();
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
                     let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    if (natural.replace(height) - height).abs() > 0.5 {
+                    let demand = scrolls.iter().fold(height, |height, scroll| {
+                        height.max(f32::from(
+                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                        ))
+                    });
+                    let changed = (natural.replace(height) - height).abs() > 0.5;
+                    let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if changed || column_changed {
                         window.refresh();
                     }
                 })
@@ -4295,8 +4375,12 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
-    /// The style of a scrolling body's content (`panel_body`): the panel at
-    /// least `body` tall, and as tall as it last measured.
+    /// Natural content demand includes inner lists before they are clipped.
+    pub(crate) fn natural_body_height(&self) -> f32 {
+        self.natural.get().max(self.column_natural.get())
+    }
+
+    /// The panel fills its body and grows with longer content.
     pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
         gpui::StyleRefinement::default()
             .w_full()
