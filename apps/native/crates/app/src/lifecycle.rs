@@ -454,7 +454,22 @@ fn ask_session_failed(error: &str, cx: &mut App) {
     })
     .detach();
 }
-/// Compacts and releases the library, then quits.
+/// How a quit ends the library's work before releasing it. A quit someone
+/// chose compacts (`PrepareQuit` saves library sessions and folds journals
+/// in). A quit signal (logout, shutdown, a script) has nobody to choose: it
+/// only makes every journal durable (`DurabilityBarrier`), and the release
+/// that follows keeps each open session's journal, so a library project's
+/// saved version stays as it was and its unsaved work is offered at the next
+/// open (Sol's P1, PM-347).
+fn quit_call(signal: bool) -> ShellCall {
+    if signal {
+        ShellCall::DurabilityBarrier
+    } else {
+        ShellCall::PrepareQuit
+    }
+}
+/// Compacts (or, after a quit signal, only flushes) and releases the
+/// library, then quits.
 fn finish_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
     let host = cx.global::<QuitCoordinator>().host.clone();
@@ -466,7 +481,15 @@ fn finish_quit(cx: &mut App) {
         });
     }
     cx.spawn(async move |cx| {
-        let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
+        let mut result = match host.kernel.shell(quit_call(signal)).await {
+            // A signal quit compacts nothing: its sessions' journals were
+            // made durable, and the library's release keeps them.
+            Some(Ok(ShellReply::Durable)) => Some(Ok(ShellReply::Compacted {
+                projects: 0,
+                recovery_copies: vec![],
+            })),
+            other => other,
+        };
         if let Some(Ok(ShellReply::Compacted { .. })) = &result {
             // A clean quit leaves library.lock released, not to go stale.
             if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
@@ -1392,15 +1415,40 @@ mod tests {
         let saved = std::fs::read(&file).unwrap();
         edit(&k);
         assert!(k.published("test").unwrap().dirty);
-        // The quit's steps once the window let go without a Close.
-        assert!(matches!(
-            answer(&k, ShellCall::PrepareQuit),
-            ShellReply::Compacted { .. }
-        ));
+        // The signal quit's steps once the window let go without a Close.
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
         answer(&k, ShellCall::ReleaseLibrary);
         actor.shutdown();
         assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
         // The next launch: the work is there to offer.
+        match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
+            pm_kernel::journal::Recovery::Recovered(r)
+            | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
+                pm_model::json::to_canonical_string(&r.document.to_value().unwrap())
+                    .contains("Rejected edit"),
+                "the unsaved edit is what is offered"
+            ),
+            other => panic!("nothing to offer: {other:?}"),
+        }
+    }
+
+    /// Sol's P1: a library project (opened from Home, never saved to a
+    /// file) keeps its saved version through a quit signal: no compaction
+    /// saves it, and the next launch offers the unsaved edit. A quit the
+    /// person chose still compacts.
+    #[test]
+    fn a_signal_quit_never_saves_a_library_project_and_offers_its_work() {
+        assert!(matches!(quit_call(false), ShellCall::PrepareQuit));
+        let (dir, actor, _session) = fixture();
+        let k = actor.handle();
+        let slot = dir.path().join("store/project.test.json");
+        let saved = std::fs::read(&slot).expect("the library's saved version");
+        edit(&k);
+        assert!(k.published("test").unwrap().dirty);
+        assert!(matches!(answer(&k, quit_call(true)), ShellReply::Durable));
+        answer(&k, ShellCall::ReleaseLibrary);
+        actor.shutdown();
+        assert_eq!(std::fs::read(&slot).unwrap(), saved, "the saved version is as it was");
         match pm_kernel::journal::recover(&dir.path().join("journals/test"), None, None) {
             pm_kernel::journal::Recovery::Recovered(r)
             | pm_kernel::journal::Recovery::Copy { recovered: r, .. } => assert!(
