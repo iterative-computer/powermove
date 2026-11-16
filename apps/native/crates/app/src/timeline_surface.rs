@@ -391,6 +391,7 @@ struct LayerDrop {
 pub struct TimelineSurface {
     agent_ink: pm_panel_timeline::agent_ink::AgentInk,
     agent_dot_groups: Vec<pm_panel_timeline::agent_ink::DotGroup>,
+    agent_drag_touch: Option<String>,
     agent_ink_clock: std::time::Instant,
     agent_ink_task: Option<Task<()>>,
     agent_ink_frames: u64,
@@ -517,6 +518,7 @@ impl TimelineSurface {
         let mut this = Self {
             agent_ink: Default::default(),
             agent_dot_groups: Vec::new(),
+            agent_drag_touch: None,
             agent_ink_clock: std::time::Instant::now(),
             agent_ink_task: None,
             agent_ink_frames: 0,
@@ -1104,7 +1106,16 @@ impl TimelineSurface {
             .visible_range(self.view.scroll_y, height.max(0.));
         Some((range.start, range.end))
     }
+    #[cfg(test)]
+    pub(crate) fn agent_drag_holding(&self) -> bool {
+        self.agent_drag_touch.is_some()
+    }
     fn pump(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.gesture, Gesture::Idle) && !self.busy && self.queue.is_empty() {
+            if let Some(id) = self.agent_drag_touch.take() {
+                pm_mcp::coedit::touch_field(&self.project, &id, false);
+            }
+        }
         if self.sample_scheduled && matches!(self.queue.front(), Some(Job::Sample(_))) {
             return;
         }
@@ -2525,6 +2536,13 @@ impl TimelineSurface {
                             column: self.view.layer_column,
                         }
                     });
+                // Local bar previews intentionally have no kernel lease. Still
+                // keep bound agent writes outside this live user interaction.
+                if self.agent_drag_touch.is_none() {
+                    let id = pm_kernel::new_id("timeline-touch");
+                    pm_mcp::coedit::touch_field(&self.project, &id, true);
+                    self.agent_drag_touch = Some(id);
+                }
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
@@ -5580,4 +5598,12 @@ mod edge_scroll_regression {
 pub(crate) const EMPTY_CAMERA_COMMAND: &str = "newCamera";
 pub(crate) fn empty_new_menu() -> serde_json::Value {
     serde_json::json!({"label":"New","children":[{"label":"Camera","command":EMPTY_CAMERA_COMMAND}]})
+}
+
+impl Drop for TimelineSurface {
+    fn drop(&mut self) {
+        if let Some(id) = self.agent_drag_touch.take() {
+            pm_mcp::coedit::touch_field(&self.project, &id, false);
+        }
+    }
 }

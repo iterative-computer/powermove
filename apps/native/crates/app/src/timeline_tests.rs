@@ -2938,3 +2938,23 @@ fn work_area_cancel_restores_duration_without_refitting_ruler(cx: &mut TestAppCo
     });
     assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, 0);
 }
+
+/// GPUI mock platform only: exercise the real pointer/preview/release path.
+#[gpui::test]
+fn agent_coedit_preview_hold_releases_on_commit_and_escape(cx:&mut TestAppContext) {
+    let mut s=stage(cx,2);
+    for cancel in [true,false] {
+        let from=s.at(0,1.);
+        let to=from+point(px(60.),px(0.));
+        s.vcx.simulate_mouse_down(from,MouseButton::Left,Modifiers::none());s.idle(cx);
+        s.vcx.simulate_mouse_move(to,MouseButton::Left,Modifiers::none());s.idle(cx);
+        assert!(pm_mcp::coedit::typing(PROJECT),"local preview must hold bound writes even without a kernel lease");
+        assert!(s.surface.read_with(&s.vcx,|t,_|t.agent_drag_holding()));
+        assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+        if cancel {s.surface.update(&mut s.vcx,|s,cx|assert!(s.cancel(cx)));}
+        s.vcx.simulate_mouse_up(to,MouseButton::Left,Modifiers::none());s.idle(cx);
+        // Other mock projects share PROJECT; check this surface's own guard.
+        assert!(!s.surface.read_with(&s.vcx,|t,_|t.agent_drag_holding()));
+        if !cancel {s.undo(cx);}
+    }
+}
