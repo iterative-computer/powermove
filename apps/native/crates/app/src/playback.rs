@@ -145,6 +145,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         unsafe { Retained::from_raw(msg_send![objc2::class!(CATextLayer), new]).unwrap() };
     let host = entity.read(cx).host.clone();
     let mut playhead = None;
+    let mut skimmer = None;
     if let Some(parent) = host.borrow().gpui.layer() {
         unsafe {
             let _: () = msg_send![&*parent,addSublayer:&*layers.timecode];
@@ -165,6 +166,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 msg_send![&*viewer_time,setAlignmentMode:objc2_quartz_core::kCAAlignmentLeft];
             let _: () = msg_send![&*viewer_time,setFont:font_ref];
             let _: () = msg_send![&*viewer_time,setHidden:true];
+            skimmer = Some(crate::playhead::Skimmer::new(&parent, &t));
             playhead = Some(crate::playhead::Playhead::new(
                 &parent,
                 layers.playhead.clone(),
@@ -242,6 +244,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     link.set_paused(true); *current.borrow_mut()=None; binding=None;
                     // A closed project (Home stays in the window) leaves no playhead.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];let _:()=msg_send![&*viewer_time,setHidden:true];}
+                    if let Some(s)=&mut skimmer { s.hide(); }
                     return
                 };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
@@ -382,6 +385,15 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 else { p.hide(); }
                             }
                         }
+                        // The skimmer, as the head: outside GPUI, so a scroll under a
+                        // resting pointer moves the time under it with no panel draw.
+                        let skim=v.builtins.timeline.as_ref().and_then(|t|t.read(cx).skimmer_mark());
+                        if let Some(s)=&mut skimmer {
+                            match (geometry,skim) {
+                                (Some((r,y)),Some((x,code)))=>s.place(r.x as f64+x,(r.y+y) as f64,(r.y+r.h) as f64,&code,height,scale,&host.tokens),
+                                _=>s.hide(),
+                            }
+                        }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];
                     }
                 } else if v.builtins.timeline_place.is_none() {
@@ -389,10 +401,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // timeline that is not on screen.
                     unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];}
                     if let Some(p)=&mut playhead { p.hide(); }
+                    if let Some(s)=&mut skimmer { s.hide(); }
                 }
             }).is_err(){break;}
         }
         drop(playhead);
+        drop(skimmer);
         unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];let _:()=msg_send![&*viewer_time,removeFromSuperlayer];}
     }).detach();
 }
