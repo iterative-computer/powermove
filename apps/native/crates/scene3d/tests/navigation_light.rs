@@ -1,6 +1,8 @@
 use pm_scene3d::{light_tool::*, navigation::*, presentation::*};
 fn pose() -> Pose {
     Pose {
+        ortho: false,
+        roll: 0.,
         position: [3., 2., 6.],
         target: [0.; 3],
         zoom: 1.,

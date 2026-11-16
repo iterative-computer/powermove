@@ -68,6 +68,8 @@ impl ViewCamera {
                 };
                 let distance = (span * 2.).max(10.);
                 Some(FreeView {
+                    ortho: false,
+                    roll: 0.,
                     eye: std::array::from_fn(|i| center[i] + offset[i] * distance),
                     target: *center,
                     zoom: 1.,
@@ -253,6 +255,8 @@ mod tests {
                     pane: 0,
                     camera: ViewCamera::Custom {
                         view: FreeView {
+                            ortho: false,
+                            roll: 0.,
                             eye: [0.; 3],
                             target: [0.; 3],
                             zoom: 1.

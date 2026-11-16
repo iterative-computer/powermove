@@ -11,6 +11,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
+    ("colors.timeline_selected", "Accent tint for selected timeline layer rows"),
+    ("colors.timeline_selected_hover", "Stronger accent tint for hovered selected timeline layer rows"),
     (
         "colors.window",
         "Window ground behind panels, toolbar band and status bar",
@@ -260,6 +262,7 @@ const ROLES: &[(&str, &str)] = &[
         "Space between turns in the Agent conversation",
     ),
     ("metrics.tree_indent", "Indent per outline level"),
+    ("metrics.timeline_indent", "Timeline layer nesting indent per depth, capped at four levels"),
     (
         "metrics.kind_badge",
         "Layer-kind badge square in the timeline and Project list",
@@ -326,6 +329,44 @@ const ROLES: &[(&str, &str)] = &[
     (
         "metrics.media_badge_opacity",
         "Opacity of the media badge fill",
+    ),
+    (
+        "metrics.media_inset",
+        "Project tile badges and actions from the tile edge; badge padding; tile-to-name gap",
+    ),
+    (
+        "metrics.media_badge_height",
+        "Height of a Project tile's duration and status badges",
+    ),
+    ("metrics.media_ring", "Selection ring inside a Project tile"),
+    (
+        "metrics.media_glyph",
+        "Media kind glyph on a Project tile without a picture",
+    ),
+    ("metrics.media_folder_glyph", "Folder glyph on a Project folder tile"),
+    (
+        "metrics.media_row_thumb_width",
+        "Width of a Project list row's leading thumbnail",
+    ),
+    (
+        "metrics.media_row_thumb_height",
+        "Height of a Project list row's leading thumbnail",
+    ),
+    (
+        "metrics.media_comp_inset",
+        "A composition's frame inside its Project tile",
+    ),
+    (
+        "metrics.media_tint_opacity",
+        "Red or accent wash over a Project tile needing attention",
+    ),
+    (
+        "metrics.media_offline_opacity",
+        "A missing file's remembered picture under its badge",
+    ),
+    (
+        "metrics.media_loading_opacity",
+        "A Project tile's picture while its media loads",
     ),
     (
         "typography.minimum",

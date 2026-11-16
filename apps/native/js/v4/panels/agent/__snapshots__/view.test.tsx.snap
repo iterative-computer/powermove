@@ -276,27 +276,39 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -315,15 +327,12 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -391,8 +400,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -423,27 +433,39 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -462,15 +484,12 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -500,8 +519,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -532,27 +552,39 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -571,15 +603,12 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -609,8 +638,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -2084,27 +2114,39 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -2123,15 +2165,12 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -2199,8 +2238,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -2231,27 +2271,39 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -2270,15 +2322,12 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -2308,8 +2357,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -2340,27 +2390,39 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -2379,15 +2441,12 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -2417,8 +2476,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -3892,27 +3952,39 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -3931,15 +4003,12 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -4007,8 +4076,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -4039,27 +4109,39 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -4078,15 +4160,12 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -4116,8 +4195,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -4148,27 +4228,39 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -4187,15 +4279,12 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -4225,8 +4314,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -5698,27 +5788,39 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -5737,15 +5839,12 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -5813,8 +5912,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -5845,27 +5945,39 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -5884,15 +5996,12 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -5922,8 +6031,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -5954,27 +6064,39 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -5993,15 +6115,12 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -6031,8 +6150,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -20337,27 +20457,39 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -20376,15 +20508,12 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -20452,8 +20581,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -20484,27 +20614,39 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -20523,15 +20665,12 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -20561,8 +20700,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -20593,27 +20733,39 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -20632,15 +20784,12 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -20670,8 +20819,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -23993,27 +24143,39 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -24032,15 +24194,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -24108,8 +24267,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -24140,27 +24300,39 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -24179,15 +24351,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -24217,8 +24386,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -24249,27 +24419,39 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -24288,15 +24470,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -24326,8 +24505,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -31823,27 +32003,39 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -31862,15 +32054,12 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -31938,8 +32127,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -31970,27 +32160,39 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -32009,15 +32211,12 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -32047,8 +32246,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -32079,27 +32279,39 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -32118,15 +32330,12 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -32156,8 +32365,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -33631,27 +33841,39 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -33670,15 +33892,12 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -33746,8 +33965,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -33778,27 +33998,39 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -33817,15 +34049,12 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -33855,8 +34084,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -33887,27 +34117,39 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -33926,15 +34168,12 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -33964,8 +34203,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -35439,27 +35679,39 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -35478,15 +35730,12 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -35554,8 +35803,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -35586,27 +35836,39 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -35625,15 +35887,12 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -35663,8 +35922,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },
@@ -35695,27 +35955,39 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "style": {
           "alignItems": "center",
           "background": {
-            "token": "colors.fill",
+            "token": "colors.raised",
+          },
+          "borderColor": {
+            "token": "colors.hairline",
           },
           "borderRadius": {
             "token": "metrics.control_radius",
           },
+          "borderWidth": {
+            "token": "metrics.border",
+          },
           "display": "flex",
           "flexDirection": "row",
-          "height": {
-            "token": "metrics.control",
+          "gap": {
+            "token": "metrics.gap",
           },
           "minHeight": {
-            "token": "metrics.hit",
+            "token": "metrics.control",
           },
           "minWidth": {
             "token": "metrics.hit",
+          },
+          "paddingBottom": {
+            "token": "metrics.gap",
           },
           "paddingLeft": {
             "token": "metrics.text_padding",
           },
           "paddingRight": {
             "token": "metrics.text_padding",
+          },
+          "paddingTop": {
+            "token": "metrics.gap",
           },
         },
         "tabIndex": 0,
@@ -35734,15 +36006,12 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.text",
           },
           "flexGrow": 1,
           "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
           },
           "overflow": "hidden",
         },
@@ -35772,8 +36041,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         },
         "style": {
           "color": {
-            "token": "colors.muted",
+            "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "symbolSize": {
             "token": "metrics.symbol_inline",
           },

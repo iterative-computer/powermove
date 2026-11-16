@@ -44,6 +44,8 @@ export interface Asset {
   references: number;
 }
 export interface Folder {
+  link?: { path: string } | null;
+  sync?: "Synced" | "Syncing" | "NotFound" | null;
   id: string;
   name: string;
   parent: string | null;

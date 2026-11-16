@@ -250,6 +250,8 @@ export interface MenuOption {
   checked?: boolean;
   /** The section it is listed under. */
   category?: string;
+  /** Choosing it keeps the menu open (a provider: its models follow). */
+  stays?: boolean;
 }
 /** Opens the field menu under `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -257,6 +259,8 @@ export type Menu = (request: {
   anchor: number;
   placeholder: string;
   options: MenuOption[];
+  /** New rows for the menu still open after a row that stays was chosen. */
+  update?: boolean;
 }) => Promise<unknown>;
 /** A borderless trigger in a bar or header that opens the window's menu:
  * its value, then the pop-up chevron (as a bar NSPopUpButton). */
@@ -469,21 +473,40 @@ function Welcome({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
                   base: s.draft.text,
                 })
               }
+              // A raised neutral button with a hairline edge, legible on
+              // the popover's floating fill and on the docked panel alike;
+              // the label in body text, the chevron in secondary. Hover
+              // and press wash it (the host's control washes).
               style={{
                 ...target,
                 ...row,
-                height: t("metrics.control"),
+                gap: t("metrics.gap"),
+                minHeight: t("metrics.control"),
+                paddingTop: t("metrics.gap"),
+                paddingBottom: t("metrics.gap"),
                 paddingLeft: t("metrics.text_padding"),
                 paddingRight: t("metrics.text_padding"),
-                background: t("colors.fill"),
+                background: t("colors.raised"),
+                borderWidth: t("metrics.border"),
+                borderColor: t("colors.hairline"),
                 borderRadius: t("metrics.control_radius"),
               }}
             >
-              <text style={{ ...quiet, ...shrink, flexGrow: 1 }}>{label}</text>
+              <text
+                style={{
+                  ...shrink,
+                  flexGrow: 1,
+                  color: t("colors.text"),
+                  fontSize: t("typography.body"),
+                }}
+              >
+                {label}
+              </text>
               <div
                 metadata={{ symbol: "chevron.right" }}
                 style={{
-                  color: t("colors.muted"),
+                  flexShrink: 0,
+                  color: t("colors.secondary"),
                   symbolSize: t("metrics.symbol_inline"),
                 }}
               />
@@ -1771,6 +1794,66 @@ function Composer({
   const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
   const effortName = s.settings.effort ? effortLabel(s.settings.effort) : "";
   const choicesLocked = !menu || working || s.composerDisabled;
+  // Provider and model share one menu. A provider row keeps it open: the
+  // Model section follows that provider, its default ticked, in the same
+  // menu; it closes on a model, Escape or a click outside.
+  const latest = useRef(s);
+  latest.current = s;
+  const awaiting = useRef<{ anchor: number; provider: string } | null>(null);
+  const modelRows = (s: Snapshot): MenuOption[] => [
+    ...pairs(s.catalog.providers, s.settings.provider).map(({ v, label }) => ({
+      label,
+      value: `provider:${v}`,
+      checked: v === s.settings.provider,
+      category: "Provider",
+      stays: true,
+    })),
+    ...pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
+      label,
+      value: `model:${v}`,
+      checked: v === s.settings.model,
+      category: "Model",
+    })),
+  ];
+  const modelMenu = (anchor: number, update: boolean) =>
+    void menu?.({
+      anchor,
+      placeholder: "Search models",
+      options: modelRows(latest.current),
+      ...(update ? { update } : {}),
+    }).then((choice) => {
+      if (typeof choice !== "string") return;
+      const at = choice.indexOf(":");
+      const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
+      const now = latest.current;
+      if (kind === "provider") {
+        if (value === now.settings.provider) return modelMenu(anchor, true);
+        awaiting.current = { anchor, provider: value };
+        send({ type: "setProvider", provider: value });
+        // A switch the model refused: the open menu keeps working.
+        setTimeout(() => {
+          const pending = awaiting.current;
+          if (pending?.provider !== value) return;
+          awaiting.current = null;
+          modelMenu(pending.anchor, true);
+        }, 1000);
+      }
+      // The effort shown goes along: the new model keeps it when it
+      // takes it, else runs at its own default.
+      else if (kind === "model")
+        send({
+          type: "setModel",
+          model: value,
+          effort: now.settings.effort,
+        });
+    });
+  const openModels = (anchor: number) => modelMenu(anchor, false);
+  useLayoutEffect(() => {
+    const pending = awaiting.current;
+    if (!pending || s.settings.provider !== pending.provider) return;
+    awaiting.current = null;
+    modelMenu(pending.anchor, true);
+  }, [s.settings.provider, s.catalog.models]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
@@ -2076,44 +2159,7 @@ function Composer({
           label={`Model, ${modelName}`}
           text={modelName}
           disabled={choicesLocked}
-          open={(anchor) =>
-            void menu?.({
-              anchor,
-              placeholder: "Search models",
-              options: [
-                ...pairs(s.catalog.providers, s.settings.provider).map(
-                  ({ v, label }) => ({
-                    label,
-                    value: `provider:${v}`,
-                    checked: v === s.settings.provider,
-                    category: "Provider",
-                  }),
-                ),
-                ...pairs(s.catalog.models, s.settings.model).map(
-                  ({ v, label }) => ({
-                    label,
-                    value: `model:${v}`,
-                    checked: v === s.settings.model,
-                    category: "Model",
-                  }),
-                ),
-              ],
-            }).then((choice) => {
-              if (typeof choice !== "string") return;
-              const at = choice.indexOf(":");
-              const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
-              if (kind === "provider")
-                send({ type: "setProvider", provider: value });
-              // The effort shown goes along: the new model keeps it when it
-              // takes it, else runs at its own default.
-              else if (kind === "model")
-                send({
-                  type: "setModel",
-                  model: value,
-                  effort: s.settings.effort,
-                });
-            })
-          }
+          open={openModels}
         />
         {efforts.length > 0 && (
           <Trigger

@@ -20,6 +20,7 @@ pub(super) struct Request<'a> {
     pub name: Option<&'a str>,
     pub mode: PrecomposeMode,
     pub adjust_duration: bool,
+    pub size_to_selection: bool,
     pub time: f64,
 }
 
@@ -293,11 +294,113 @@ fn move_all(
     let picked_ids: HashSet<&str> = picked.iter().map(id_of).collect();
     let (shared_group, shared_groups) = shared_style(cx, host, picked, &picked_ids, 0.)?;
     let comp = cx.comp_node(None)?.to_value();
+    let crop = if r.size_to_selection {
+        for layer in picked {
+            let mut queue = vec![layer];
+            let mut seen = HashSet::new();
+            while let Some(item) = queue.pop() {
+                if !seen.insert(id_of(item)) {
+                    continue;
+                }
+                let studio = item
+                    .get("d")
+                    .and_then(|d| values::text(d, "definition"))
+                    .is_some_and(|id| id.starts_with("powermove.3d."));
+                if item.get("threeD").and_then(Value::as_bool) == Some(true) || studio {
+                    return Err(CommandError::Invalid(
+                        "Size to selection currently supports 2D layers.".into(),
+                    ));
+                }
+                for field in ["parent", "group"] {
+                    if let Some(id) = link(item, field) {
+                        if let Some(parent) = host.iter().find(|l| id_of(l) == id) {
+                            queue.push(parent);
+                        }
+                    }
+                }
+            }
+        }
+        let indices = picked
+            .iter()
+            .map(|l| cx.find(id_of(l)).map(|loc| loc.index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut measure = cx.measure(
+            picked
+                .iter()
+                .any(|l| values::text(l, "type") == Some("text")),
+        )?;
+        Some(cx.kernel(None, |edit| {
+            edit.read(|s| {
+                let mut bounds = [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ];
+                for index in &indices {
+                    let layer = &s.layers()[*index];
+                    let kind = layer
+                        .get("type")
+                        .and_then(crate::model::str_of)
+                        .unwrap_or("");
+                    if matches!(kind, "group" | "null" | "audio" | "camera") {
+                        continue;
+                    }
+                    if layer
+                        .get("threeD")
+                        .is_some_and(|n| matches!(n.kind(), NodeKind::Bool(true)))
+                    {
+                        return Err(pm_eval::js_sem::JsThrow::type_error(
+                            "Size to selection currently supports 2D layers.",
+                        ));
+                    }
+                    let b = s
+                        .bounds(layer, r.time, &mut *measure, &mut pm_eval::bounds::NoHost)?
+                        .ok_or_else(|| {
+                            pm_eval::js_sem::JsThrow::type_error(
+                                "Could not measure the selected layer.",
+                            )
+                        })?;
+                    let m = s.world_matrix(layer, r.time)?;
+                    for x in [b.x0, b.x1] {
+                        for y in [b.y0, b.y1] {
+                            let (px, py) = (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+                            if !px.is_finite() || !py.is_finite() {
+                                return Err(pm_eval::js_sem::JsThrow::type_error(
+                                    "The selection has invalid bounds.",
+                                ));
+                            }
+                            bounds[0] = bounds[0].min(px);
+                            bounds[1] = bounds[1].min(py);
+                            bounds[2] = bounds[2].max(px);
+                            bounds[3] = bounds[3].max(py);
+                        }
+                    }
+                }
+                if !bounds[0].is_finite() {
+                    return Err(pm_eval::js_sem::JsThrow::type_error(
+                        "Select a visual layer to size the pre-comp.",
+                    ));
+                }
+                Ok([
+                    bounds[0].floor(),
+                    bounds[1].floor(),
+                    bounds[2].ceil(),
+                    bounds[3].ceil(),
+                ])
+            })
+        })?)
+    } else {
+        None
+    };
     let (w, h, fps) = (
         values::num(&comp, "w").unwrap_or(1920.),
         values::num(&comp, "h").unwrap_or(1080.),
         values::num(&comp, "fps").unwrap_or(30.),
     );
+    let (w, h) = crop
+        .map(|b| ((b[2] - b[0]).max(2.), (b[3] - b[1]).max(2.)))
+        .unwrap_or((w, h));
     let host_duration = cx.duration(None);
     let (mut start, mut duration) = (0., host_duration);
     if r.adjust_duration {
@@ -350,11 +453,41 @@ fn move_all(
             m.insert("from", Value::Number(from - start));
         }
     }
+    if let Some(b) = crop {
+        let origin = new_id_for("L");
+        let mut space = layers::make_layer(
+            "group",
+            &origin,
+            Some("Pre-comp origin"),
+            (w, h, duration),
+            &Map::new(),
+            &Map::new(),
+        )?;
+        if let Some(p) = values::obj(&mut space)
+            .get_mut("p")
+            .and_then(Value::as_object_mut)
+        {
+            p.insert("position.x", values::property(Value::Number(-b[0])));
+            p.insert("position.y", values::property(Value::Number(-b[1])));
+        }
+        for layer in &mut moved {
+            if link(layer, "group").is_none() {
+                values::obj(layer).insert("group", values::s(&origin));
+            }
+        }
+        moved.insert(0, space);
+    }
     let mut path = cx.comp_path(Some(r.comp_id));
     path.push("layers".into());
     cx.set(path, Value::Array(moved))?;
     let mut layer = precomp_layer(r, &name, [w, h, duration], (w, h))?;
     let m = values::obj(&mut layer);
+    if let Some(b) = crop {
+        if let Some(p) = m.get_mut("p").and_then(Value::as_object_mut) {
+            p.insert("position.x", values::property(Value::Number(b[0] + w / 2.)));
+            p.insert("position.y", values::property(Value::Number(b[1] + h / 2.)));
+        }
+    }
     m.insert("from", Value::Number(start));
     if let Some(group) = shared_group {
         m.insert("group", values::s(&group));

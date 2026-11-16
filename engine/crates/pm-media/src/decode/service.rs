@@ -584,7 +584,17 @@ impl Drop for SessionGuard<'_> {
             // PM_FIX_KEEP_SESSION: over the share, a session gives back its
             // window but stays open as its key's one idle session; cold
             // sources and idle release close it.
-            let keep = (super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
+            // The renderer still holds this frame and the previous output
+            // while a display session returns. Give only the most recently
+            // requested display decoder one idle slot until the next lease
+            // fit, after those transient references can be released. Closing
+            // it here makes every frame reopen and seek the same clip.
+            // Zero shares and the next fit still enforce the normal lease.
+            let hot = !zero
+                && self.key.purpose == DecodePurpose::Display
+                && svc.displayed.lock().unwrap().front() == Some(&self.key);
+            let keep = (hot
+                || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
                 || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
                 || svc.scrubbing())
                 && svc
@@ -628,14 +638,14 @@ impl Drop for SessionGuard<'_> {
 impl DecodeService {
     /// A drag frame is asking for video now (PM_FIX_VIDEO2).
     pub fn note_scrub(&self) {
-        self.scrubbed_ms.store(scrub_clock_ms().max(1), Ordering::Relaxed);
+        self.scrubbed_ms
+            .store(scrub_clock_ms().max(1), Ordering::Relaxed);
     }
 
     /// Whether a drag asked for video in the last half second, with
     /// PM_FIX_VIDEO2 on: decoders and reorder windows are then kept.
     pub fn scrubbing(&self) -> bool {
-        (super::diag::video2()
-            || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
+        (super::diag::video2() || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
             && self.scrubbed_within(std::time::Duration::from_millis(500))
     }
 
@@ -890,7 +900,8 @@ impl DecodeService {
     /// Over their combined allowance, windows and free buffers go first,
     /// then idle sessions. A zero decoder share closes every idle session.
     /// Checked-out sessions return their windows at their next request and
-    /// close on return while still over. Live frames remain counted until
+    /// close on return while still over, except the current display decoder
+    /// gets one idle slot until the next fit. Live frames remain counted until
     /// their renderer lets them go.
     pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
@@ -935,7 +946,12 @@ impl DecodeService {
     fn fit_decoders_before(&self, before: Option<SessionKey>) {
         let mut idle = self.idle.lock().unwrap();
         let displayed = self.displayed.lock().unwrap().clone();
-        let rank = |key: &SessionKey| displayed.iter().position(|k| k == key).unwrap_or(usize::MAX);
+        let rank = |key: &SessionKey| {
+            displayed
+                .iter()
+                .position(|k| k == key)
+                .unwrap_or(usize::MAX)
+        };
         let before = before.map(|key| rank(&key));
         let eligible = |key: &SessionKey| before.is_none_or(|current| rank(key) > current);
         if self.decoders_over() {
@@ -1064,5 +1080,8 @@ pub fn read_ahead_order(source: &MediaSource, from: usize, plan: ReadAhead) -> V
 /// Milliseconds since this process first asked (PM_FIX_VIDEO2's clock).
 fn scrub_clock_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
 }

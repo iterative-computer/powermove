@@ -204,6 +204,12 @@ export function extensionAPI(
       perf: realm.PM.perf,
     },
     mount: (component: any, target: any, props: Data) => {
+      const mode =
+        settings.manifest?.nativeStyle ??
+        backends.manifest?.nativeStyle ??
+        "full";
+      if (mode !== "full")
+        target.parentNode?.setAttribute("data-pm-style", mode);
       if (backends.host?.mount)
         return backends.host.mount(component, target, props);
       const svelte = runtime.svelte;
@@ -246,6 +252,24 @@ export function extensionAPI(
     deps,
     settings.vars,
   );
+  const registerPanel = handle.api.panels.register;
+  const nativeStyle =
+    settings.manifest?.nativeStyle ?? backends.manifest?.nativeStyle ?? "full";
+  handle.api.panels.register = (definition: Data) => {
+    if (!definition) return registerPanel(definition);
+    return registerPanel({
+      ...definition,
+      build:
+        typeof definition.build === "function"
+          ? (body: any, instance: any) => {
+              if (nativeStyle !== "full")
+                body.parentNode?.setAttribute("data-pm-style", nativeStyle);
+              return definition.build(body, instance);
+            }
+          : definition.build,
+      component: definition.component,
+    });
+  };
   return {
     api: handle.api,
     setActivating: handle.setActivating,
