@@ -638,6 +638,17 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         None if target.locked => row("Unlock", "unlockSelectedLayers", json!([]), true),
         None => row("Lock", "lockSelectedLayers", json!([]), true),
     });
+    // v1's 3D Layer: the same switch as the timeline row's; audio and
+    // adjustment layers have no depth.
+    if every(&|l| !matches!(l.kind.as_str(), "audio" | "adjustment")) {
+        let on = facts.selected.iter().all(|l| {
+            layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                == Some(true)
+        });
+        let mut depth = row("3D Layer", "toggleThreeD", json!([!on]), editable);
+        depth["checked"] = json!(on);
+        rows.push(depth);
+    }
     if every(&|l| l.kind == "precomp") {
         let on = facts.selected.iter().all(|l| {
             layer(published, &l.id)
@@ -668,7 +679,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 52] = [
+pub const PLANNED: [&str; 53] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -719,6 +730,7 @@ pub const PLANNED: [&str; 52] = [
     "separateAudio",
     "toggleVisibility",
     "toggleSolo",
+    "toggleThreeD",
     "unlockSelectedLayers",
     "unlockGroup",
 ];
@@ -1185,6 +1197,7 @@ pub fn command_plan(
         | "separateAudio"
         | "toggleVisibility"
         | "toggleSolo"
+        | "toggleThreeD"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
         "rippleDelete" => ripple_delete(&layers, &selected),
@@ -1653,6 +1666,22 @@ fn layer_menu_plan(
                 "Solo Layers",
                 each(&|_| LayerPatch {
                     solo: Some(solo),
+                    time,
+                    ..Default::default()
+                }),
+            ))
+        }
+        "toggleThreeD" => {
+            // On for every selected layer unless all are 3D already.
+            let all = facts.selected.iter().all(|l| {
+                layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                    == Some(true)
+            });
+            let depth = asked.unwrap_or(!all);
+            Some(plain(
+                "3D Layer",
+                each(&|_| LayerPatch {
+                    three_d: Some(depth),
                     time,
                     ..Default::default()
                 }),
