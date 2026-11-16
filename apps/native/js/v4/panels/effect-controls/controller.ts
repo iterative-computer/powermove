@@ -52,7 +52,7 @@ export class EffectsController {
         const list =
           r.kind === "parameter"
             ? [r.parameter]
-            : r.kind === "summary"
+            : r.kind === "summary" || r.kind === "point"
               ? r.parameters
               : [];
         for (const parameter of list)

@@ -287,7 +287,9 @@ export function EffectControls(props: PanelProps) {
                 anchor: p.rows[0]?.id ?? null,
               }}
               onRangeChange={(e) => {
-                if (e.range) {
+                // A list laid out with no height shows no rows: it asks
+                // for none rather than emptying the window it has.
+                if (e.range && e.range[1] > e.range[0]) {
                   const [start, end] = e.range,
                     length = end - start;
                   c.send({
@@ -597,7 +599,7 @@ function rgba(value: unknown): [number, number, number, number] | undefined {
   return [n(0), n(2), n(4), h.length === 8 ? n(6) : 1];
 }
 /** The bar's slices: the colour at each slice's middle, start to end. */
-export function rampSlices(start: unknown, end: unknown, count = 24): string[] {
+export function rampSlices(start: unknown, end: unknown, count = 64): string[] {
   const a = rgba(start);
   const b = rgba(end);
   if (!a || !b)
@@ -641,7 +643,7 @@ function RampView({
             display: "flex",
             flexDirection: "row",
             flexGrow: 1,
-            height: t("metrics.control_small"),
+            height: t("metrics.control"),
             borderRadius: t("metrics.control_radius"),
             overflow: "hidden",
             borderWidth: t("metrics.border"),

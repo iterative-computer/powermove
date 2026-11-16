@@ -831,6 +831,12 @@ impl KernelData for Data {
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
                     plan = Some(next);
+                    // A plan the kernel need not run (a disclosure, a
+                    // selection, the rows' window) is answered at once with
+                    // the projection it changed: the panel adopts only that.
+                    if kernel.is_none() {
+                        return b.projection();
+                    }
                 }
                 HostOperation::Command { command, args } => {
                     match b.native_command(command, args)? {

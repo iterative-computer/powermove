@@ -1191,3 +1191,57 @@ fn effect_controls_lays_out_points_the_gradient_bar_and_more_as_v1() {
         ["radius", "intensity", "more 1 true", "threshold"]
     );
 }
+
+/// What the kernel need not run (collapsing an effect, opening its More) is
+/// answered with the projection it changed: the panel adopts only an
+/// acknowledged projection, so a bare reply left Effect Controls unchanged.
+#[test]
+fn a_ui_only_effect_controls_intent_is_answered_with_its_projection() {
+    use pm_surface::host_api::{HOST_API_VERSION, HostOperation, HostRequest};
+    use pm_surface::host_data::KernelData;
+    let (actor, mut backend) = setup();
+    let kernel = actor.handle();
+    let request = backend
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let id = effect(&kernel)["id"].as_str().unwrap().to_owned();
+    let first = backend.projection().unwrap();
+    let identity = backend.identity.clone();
+    let mut service = data::Data(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+    let mut send = |request_id: u64, intent: Value| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        service
+            .enqueue(
+                HostRequest {
+                    version: HOST_API_VERSION,
+                    realm: identity.realm.clone(),
+                    generation: identity.generation,
+                    project: identity.project.clone(),
+                    request_id,
+                    expected_revision: kernel.published("synthetic").unwrap().revision(),
+                    expected_state_revision: None,
+                    operation: HostOperation::Command {
+                        command: "panel.effect-controls".into(),
+                        args: json!({"documentId":first["documentId"],"revision":first["revision"],"layer":"a","intent":intent}),
+                    },
+                },
+                tx,
+            )
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    };
+    let ack = send(1, json!({"type":"disclose","id":id,"open":false}));
+    assert!(ack.accepted, "{:?}", ack.error);
+    let value = ack.value.expect("a projection");
+    let header = value["rows"]
+        .as_array()
+        .expect("a projection, not a bare reply")
+        .iter()
+        .find(|r| r["kind"] == "effect")
+        .unwrap();
+    assert_eq!(header["expanded"], false, "the reply shows it collapsed");
+}
