@@ -1,5 +1,6 @@
 //! Anchored v2 colour editor. Pointer work stays native; no JS round trip.
 use crate::colour_model::Color;
+thread_local! {static PREFERENCES: std::cell::Cell<(bool, &'static str, u8)> = const { std::cell::Cell::new((false,"Hex",0)) };}
 use gpui::{prelude::*, *};
 use pm_shell::{
     kit::{Button, Kit, Recipes},
@@ -62,6 +63,7 @@ impl Picker {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
+        let (p3, notation, hue_mode) = PREFERENCES.get();
         let mut p = Self {
             color,
             previous: color,
@@ -76,9 +78,9 @@ impl Picker {
             menu: None,
             menu_index: 0,
             active: false,
-            p3: false,
-            notation: "Hex",
-            hue_mode: 0,
+            p3,
+            notation,
+            hue_mode,
             drag: None,
             focus,
             fields: vec![],
@@ -241,6 +243,7 @@ impl Picker {
             self.sync_fields(cx);
         }
         self.menu = None;
+        PREFERENCES.set((self.p3, self.notation, self.hue_mode));
         cx.notify();
     }
     fn field_stop(i: usize) -> usize {
@@ -290,6 +293,8 @@ impl Picker {
             format!("{:.3}", row[i % 3])
         } else if self.p3 && i >= 3 {
             format!("{:.3}", row[i % 3])
+        } else if i >= 6 {
+            format!("{:.0}", row[i % 3])
         } else {
             format!("{:.1}", row[i % 3])
         }
@@ -321,6 +326,7 @@ impl Picker {
         }
     }
     fn sync_fields(&self, cx: &mut Context<Self>) {
+        PREFERENCES.set((self.p3, self.notation, self.hue_mode));
         for (i, f) in self.fields.iter().enumerate() {
             let text = self.channel_text(i);
             f.update(cx, |f, cx| {
@@ -902,6 +908,7 @@ impl Render for Picker {
         }
         div()
             .id("colour-picker")
+            .relative()
             .occlude()
             .track_focus(&self.focus)
             .key_context("ColorPicker")
@@ -1083,7 +1090,12 @@ impl Render for Picker {
                 } else {
                     &["OKLCH", "HSL", "RGB", "Hex"]
                 };
-                let mut menu = kit.menu();
+                let mut menu = kit.menu().absolute().right(px(t.space.md));
+                menu = if settings {
+                    menu.top(px(t.metrics.control + t.space.md))
+                } else {
+                    menu.bottom(px(t.metrics.control + t.space.md))
+                };
                 for (i, &name) in modes.iter().enumerate() {
                     menu = menu.child(
                         kit.menu_row(
