@@ -128,8 +128,12 @@ pub fn left_button_held() -> bool {
     unsafe extern "C" {
         fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     }
-    // kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft.
-    unsafe { CGEventSourceButtonState(1, 0) }
+    // Held only while both the hardware (kCGEventSourceStateHIDSystemState)
+    // and the session (kCGEventSourceStateCombinedSessionState, which also
+    // sees posted events) say so: a release over an extension's own window
+    // (a native panel body) never reaches the editor view, and a drag must
+    // still end there with its drop (PM-289).
+    unsafe { CGEventSourceButtonState(1, 0) && CGEventSourceButtonState(0, 0) }
 }
 pub fn tokens() -> Tokens {
     let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {

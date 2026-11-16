@@ -186,13 +186,17 @@ impl Editor {
         }
     }
     /// The panel or dock a drop is named after, in this layout.
-    fn near_name(&self, near: layout::Near, panels: &layout::Panels) -> (String, &'static str) {
+    fn near_name(
+        &self,
+        near: layout::Near,
+        drag: &PanelDrag,
+        panels: &layout::Panels,
+    ) -> (String, &'static str) {
+        // Named after the tab that will show there once the dragged one left.
         let title = |d: usize, g: usize| {
             self.layout
-                .docks
-                .get(d)
-                .and_then(|dock| dock.groups.get(g))
-                .map_or_else(String::new, |g| panels.title(g.active()).to_string())
+                .shown_after(d, g, &drag.id, drag.stack)
+                .map_or_else(String::new, |id| panels.title(&id).to_string())
         };
         match near {
             layout::Near::Tab(d, g) => (title(d, g), "tab"),
@@ -209,7 +213,7 @@ impl Editor {
     /// The drag card's second line: where the panel would go.
     fn destination(&self, drag: &PanelDrag, panels: &layout::Panels) -> String {
         if let Some(p) = drag.preview {
-            let (name, kind) = self.near_name(p.near, panels);
+            let (name, kind) = self.near_name(p.near, drag, panels);
             return match kind {
                 "tab" => format!("Tab with {name}"),
                 "above" => format!("Above {name}"),
@@ -1156,15 +1160,10 @@ impl Editor {
         let Some(Gesture::Panel(drag)) = self.gesture.take() else {
             return None;
         };
-        let target = drag.preview?.target;
-        if drag.stack {
-            self.layout.move_stack_to(&drag.id, target)
-        } else {
-            self.layout.move_panel_to(&drag.id, target)
-        }
-        .ok()?;
+        let preview = drag.preview?;
+        self.layout.apply_drop(&drag.id, &preview, drag.stack).ok()?;
         self.save();
-        Some(target)
+        Some(preview.target)
     }
     /// Ends the drag in progress as a release does: a panel moved lands
     /// where its preview showed, a resize keeps the sizes it reached.
@@ -1182,12 +1181,8 @@ impl Editor {
             let name = self.moving_name(&drag.id, drag.stack, &panels);
             let message = match drag.preview {
                 Some(p) => {
-                    let (near, kind) = self.near_name(p.near, &panels);
-                    let moved = if drag.stack {
-                        self.layout.move_stack_to(&drag.id, p.target)
-                    } else {
-                        self.layout.move_panel_to(&drag.id, p.target)
-                    };
+                    let (near, kind) = self.near_name(p.near, &drag, &panels);
+                    let moved = self.layout.apply_drop(&drag.id, &p, drag.stack);
                     match moved {
                         Ok(()) => match kind {
                             "tab" => format!("{name} tabbed with {near}"),
@@ -2654,10 +2649,14 @@ impl Render for Editor {
                                 h.borrow_mut().splitter_focus = true;
                             }
                             // A double-click puts a dock back at its size
-                            // (the original app); between panels it does nothing.
+                            // (the original app), and two panels back at
+                            // their heights.
                             if e.click_count >= 2 {
                                 this.gesture = None;
-                                if this.layout.reset_dock(&divd) {
+                                let (bounds, t) = (this.dock_bounds, this.tokens.clone());
+                                if this.layout.reset_dock(&divd)
+                                    || this.layout.reset_split(&divd, bounds, &t)
+                                {
                                     this.slides.armed = true;
                                     this.save();
                                 }
