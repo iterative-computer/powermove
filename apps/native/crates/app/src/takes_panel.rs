@@ -503,7 +503,7 @@ fn take_write_feedback(
 }
 #[cfg(test)]
 mod take_feedback_tests {
-    use super::*;
+    use super::take_write_feedback;
     #[test]
     fn completed_take_writes_report_success_and_failure_in_the_window() {
         for (result, expected) in [(Ok("Opening shot".into()), "Saved Opening shot"),
